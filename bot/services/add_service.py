@@ -1,0 +1,393 @@
+"""Service for adding content to Radarr/Sonarr."""
+
+from typing import Any, Optional
+
+import structlog
+
+from bot.clients.base import APIError
+from bot.clients.prowlarr import ProwlarrClient
+from bot.clients.radarr import RadarrClient
+from bot.clients.sonarr import SonarrClient
+from bot.models import (
+    ActionLog,
+    ActionType,
+    ContentType,
+    MovieInfo,
+    QualityProfile,
+    RootFolder,
+    SearchResult,
+    SeriesInfo,
+)
+
+logger = structlog.get_logger()
+
+
+class AddService:
+    """Service for adding content and grabbing releases."""
+
+    def __init__(
+        self,
+        prowlarr: ProwlarrClient,
+        radarr: RadarrClient,
+        sonarr: SonarrClient,
+    ):
+        self.prowlarr = prowlarr
+        self.radarr = radarr
+        self.sonarr = sonarr
+
+    async def get_radarr_profiles(self) -> list[QualityProfile]:
+        """Get Radarr quality profiles."""
+        return await self.radarr.get_quality_profiles()
+
+    async def get_radarr_root_folders(self) -> list[RootFolder]:
+        """Get Radarr root folders."""
+        return await self.radarr.get_root_folders()
+
+    async def get_sonarr_profiles(self) -> list[QualityProfile]:
+        """Get Sonarr quality profiles."""
+        return await self.sonarr.get_quality_profiles()
+
+    async def get_sonarr_root_folders(self) -> list[RootFolder]:
+        """Get Sonarr root folders."""
+        return await self.sonarr.get_root_folders()
+
+    async def add_movie(
+        self,
+        movie: MovieInfo,
+        quality_profile_id: int,
+        root_folder_path: str,
+        search_for_movie: bool = True,
+        tags: Optional[list[int]] = None,
+    ) -> tuple[MovieInfo, ActionLog]:
+        """
+        Add a movie to Radarr.
+
+        Args:
+            movie: MovieInfo object
+            quality_profile_id: Quality profile ID
+            root_folder_path: Root folder path
+            search_for_movie: Whether to trigger search after adding
+            tags: Optional tag IDs
+
+        Returns:
+            Tuple of (added MovieInfo, ActionLog)
+        """
+        log = logger.bind(title=movie.title, tmdb_id=movie.tmdb_id)
+        log.info("Adding movie to Radarr")
+
+        action = ActionLog(
+            user_id=0,  # Will be set by handler
+            action_type=ActionType.ADD,
+            content_type=ContentType.MOVIE,
+            content_title=movie.title,
+            content_id=str(movie.tmdb_id),
+        )
+
+        try:
+            # Check if already exists
+            existing = await self.radarr.get_movie_by_tmdb(movie.tmdb_id)
+            if existing and existing.radarr_id:
+                log.info("Movie already exists", radarr_id=existing.radarr_id)
+                action.success = True
+                return existing, action
+
+            added = await self.radarr.add_movie(
+                movie=movie,
+                quality_profile_id=quality_profile_id,
+                root_folder_path=root_folder_path,
+                search_for_movie=search_for_movie,
+                tags=tags,
+            )
+
+            action.success = True
+            log.info("Movie added successfully", radarr_id=added.radarr_id)
+            return added, action
+
+        except Exception as e:
+            log.error("Failed to add movie", error=str(e))
+            action.success = False
+            action.error_message = str(e)
+            raise
+
+    async def add_series(
+        self,
+        series: SeriesInfo,
+        quality_profile_id: int,
+        root_folder_path: str,
+        monitor_type: str = "all",
+        search_for_missing: bool = True,
+        tags: Optional[list[int]] = None,
+    ) -> tuple[SeriesInfo, ActionLog]:
+        """
+        Add a series to Sonarr.
+
+        Args:
+            series: SeriesInfo object
+            quality_profile_id: Quality profile ID
+            root_folder_path: Root folder path
+            monitor_type: What to monitor
+            search_for_missing: Whether to search for missing episodes
+            tags: Optional tag IDs
+
+        Returns:
+            Tuple of (added SeriesInfo, ActionLog)
+        """
+        log = logger.bind(title=series.title, tvdb_id=series.tvdb_id)
+        log.info("Adding series to Sonarr")
+
+        action = ActionLog(
+            user_id=0,  # Will be set by handler
+            action_type=ActionType.ADD,
+            content_type=ContentType.SERIES,
+            content_title=series.title,
+            content_id=str(series.tvdb_id),
+        )
+
+        try:
+            # Check if already exists
+            existing = await self.sonarr.get_series_by_tvdb(series.tvdb_id)
+            if existing and existing.sonarr_id:
+                log.info("Series already exists", sonarr_id=existing.sonarr_id)
+                action.success = True
+                return existing, action
+
+            added = await self.sonarr.add_series(
+                series=series,
+                quality_profile_id=quality_profile_id,
+                root_folder_path=root_folder_path,
+                monitor_type=monitor_type,
+                search_for_missing=search_for_missing,
+                tags=tags,
+            )
+
+            action.success = True
+            log.info("Series added successfully", sonarr_id=added.sonarr_id)
+            return added, action
+
+        except Exception as e:
+            log.error("Failed to add series", error=str(e))
+            action.success = False
+            action.error_message = str(e)
+            raise
+
+    async def grab_movie_release(
+        self,
+        movie: MovieInfo,
+        release: SearchResult,
+        quality_profile_id: int,
+        root_folder_path: str,
+    ) -> tuple[bool, ActionLog, str]:
+        """
+        Grab a specific release for a movie.
+
+        First adds the movie to Radarr (if not exists), then tries to grab the release.
+        Falls back to push release if direct grab fails.
+
+        Args:
+            movie: MovieInfo object
+            release: SearchResult to grab
+            quality_profile_id: Quality profile ID
+            root_folder_path: Root folder path
+
+        Returns:
+            Tuple of (success, ActionLog, message)
+        """
+        log = logger.bind(
+            title=movie.title,
+            release_title=release.title,
+            indexer=release.indexer,
+        )
+        log.info("Grabbing movie release")
+
+        action = ActionLog(
+            user_id=0,
+            action_type=ActionType.GRAB,
+            content_type=ContentType.MOVIE,
+            content_title=movie.title,
+            content_id=str(movie.tmdb_id),
+            release_title=release.title,
+        )
+
+        try:
+            # Ensure movie is in Radarr
+            existing = await self.radarr.get_movie_by_tmdb(movie.tmdb_id)
+            if not existing or not existing.radarr_id:
+                log.info("Movie not in library, adding first")
+                existing, _ = await self.add_movie(
+                    movie=movie,
+                    quality_profile_id=quality_profile_id,
+                    root_folder_path=root_folder_path,
+                    search_for_movie=False,  # We'll grab manually
+                )
+
+            # Try to push the release
+            if release.download_url:
+                try:
+                    await self.radarr.push_release(
+                        title=release.title,
+                        download_url=release.download_url,
+                        protocol=release.protocol,
+                        publish_date=release.publish_date.isoformat() if release.publish_date else None,
+                    )
+                    action.success = True
+                    log.info("Release pushed successfully")
+                    return True, action, "Release sent to download client"
+                except APIError as e:
+                    log.warning("Push release failed, trying direct grab", error=str(e))
+
+            # Try direct grab through indexer
+            if release.indexer_id > 0:
+                try:
+                    await self.radarr.grab_release(release.guid, release.indexer_id)
+                    action.success = True
+                    log.info("Release grabbed successfully")
+                    return True, action, "Release grabbed successfully"
+                except APIError as e:
+                    log.warning("Direct grab failed", error=str(e))
+
+            # Fallback: trigger search
+            if existing and existing.radarr_id:
+                await self.radarr.search_movie(existing.radarr_id)
+                action.success = True
+                log.info("Triggered automatic search as fallback")
+                return True, action, "Automatic search triggered"
+
+            action.success = False
+            action.error_message = "Could not grab release or trigger search"
+            return False, action, "Failed to grab release"
+
+        except Exception as e:
+            log.error("Failed to grab release", error=str(e))
+            action.success = False
+            action.error_message = str(e)
+            return False, action, f"Error: {str(e)}"
+
+    async def grab_series_release(
+        self,
+        series: SeriesInfo,
+        release: SearchResult,
+        quality_profile_id: int,
+        root_folder_path: str,
+        monitor_type: str = "all",
+    ) -> tuple[bool, ActionLog, str]:
+        """
+        Grab a specific release for a series.
+
+        Args:
+            series: SeriesInfo object
+            release: SearchResult to grab
+            quality_profile_id: Quality profile ID
+            root_folder_path: Root folder path
+            monitor_type: What to monitor
+
+        Returns:
+            Tuple of (success, ActionLog, message)
+        """
+        log = logger.bind(
+            title=series.title,
+            release_title=release.title,
+            indexer=release.indexer,
+        )
+        log.info("Grabbing series release")
+
+        action = ActionLog(
+            user_id=0,
+            action_type=ActionType.GRAB,
+            content_type=ContentType.SERIES,
+            content_title=series.title,
+            content_id=str(series.tvdb_id),
+            release_title=release.title,
+        )
+
+        try:
+            # Ensure series is in Sonarr
+            existing = await self.sonarr.get_series_by_tvdb(series.tvdb_id)
+            if not existing or not existing.sonarr_id:
+                log.info("Series not in library, adding first")
+                existing, _ = await self.add_series(
+                    series=series,
+                    quality_profile_id=quality_profile_id,
+                    root_folder_path=root_folder_path,
+                    monitor_type=monitor_type,
+                    search_for_missing=False,
+                )
+
+            # Try to push the release
+            if release.download_url:
+                try:
+                    await self.sonarr.push_release(
+                        title=release.title,
+                        download_url=release.download_url,
+                        protocol=release.protocol,
+                        publish_date=release.publish_date.isoformat() if release.publish_date else None,
+                    )
+                    action.success = True
+                    log.info("Release pushed successfully")
+                    return True, action, "Release sent to download client"
+                except APIError as e:
+                    log.warning("Push release failed, trying direct grab", error=str(e))
+
+            # Try direct grab
+            if release.indexer_id > 0:
+                try:
+                    await self.sonarr.grab_release(release.guid, release.indexer_id)
+                    action.success = True
+                    log.info("Release grabbed successfully")
+                    return True, action, "Release grabbed successfully"
+                except APIError as e:
+                    log.warning("Direct grab failed", error=str(e))
+
+            # Fallback: trigger appropriate search
+            if existing and existing.sonarr_id:
+                if release.is_season_pack and release.detected_season is not None:
+                    await self.sonarr.search_season(existing.sonarr_id, release.detected_season)
+                    msg = f"Season {release.detected_season} search triggered"
+                else:
+                    await self.sonarr.search_series(existing.sonarr_id)
+                    msg = "Full series search triggered"
+
+                action.success = True
+                log.info("Triggered automatic search as fallback")
+                return True, action, msg
+
+            action.success = False
+            action.error_message = "Could not grab release or trigger search"
+            return False, action, "Failed to grab release"
+
+        except Exception as e:
+            log.error("Failed to grab release", error=str(e))
+            action.success = False
+            action.error_message = str(e)
+            return False, action, f"Error: {str(e)}"
+
+    async def search_and_grab_best(
+        self,
+        content_type: ContentType,
+        content_id: int,  # Radarr movie ID or Sonarr series ID
+        season_number: Optional[int] = None,
+    ) -> tuple[bool, str]:
+        """
+        Trigger a search for the best available release.
+
+        Args:
+            content_type: Movie or Series
+            content_id: Radarr movie ID or Sonarr series ID
+            season_number: Optional season number for series
+
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            if content_type == ContentType.MOVIE:
+                await self.radarr.search_movie(content_id)
+                return True, "Movie search triggered"
+            else:
+                if season_number is not None:
+                    await self.sonarr.search_season(content_id, season_number)
+                    return True, f"Season {season_number} search triggered"
+                else:
+                    await self.sonarr.search_series(content_id)
+                    return True, "Series search triggered"
+        except Exception as e:
+            logger.error("Search failed", error=str(e))
+            return False, f"Search failed: {str(e)}"
