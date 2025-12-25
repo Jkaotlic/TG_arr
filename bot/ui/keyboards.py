@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from bot.models import (
     ContentType,
@@ -73,6 +73,21 @@ class CallbackData:
 
 class Keyboards:
     """Inline keyboard builders."""
+
+    @staticmethod
+    def main_menu() -> ReplyKeyboardMarkup:
+        """Create main (reply) menu keyboard with the most used commands."""
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="/search"), KeyboardButton(text="/movie"), KeyboardButton(text="/series")],
+                [KeyboardButton(text="/downloads"), KeyboardButton(text="/qstatus"), KeyboardButton(text="/status")],
+                [KeyboardButton(text="/pause"), KeyboardButton(text="/resume")],
+                [KeyboardButton(text="/settings"), KeyboardButton(text="/history")],
+                [KeyboardButton(text="/help")],
+            ],
+            resize_keyboard=True,
+            input_field_placeholder="Send a title to search, or pick a command",
+        )
 
     @staticmethod
     def content_type_selection() -> InlineKeyboardMarkup:
