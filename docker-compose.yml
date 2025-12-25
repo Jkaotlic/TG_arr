@@ -8,28 +8,33 @@ services:
     container_name: tg-arr-bot
     restart: unless-stopped
     environment:
+      # Telegram (required)
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - ALLOWED_TG_IDS=${ALLOWED_TG_IDS}
       - ADMIN_TG_IDS=${ADMIN_TG_IDS:-}
+      # Prowlarr (required)
       - PROWLARR_URL=${PROWLARR_URL}
       - PROWLARR_API_KEY=${PROWLARR_API_KEY}
+      # Radarr (required)
       - RADARR_URL=${RADARR_URL}
       - RADARR_API_KEY=${RADARR_API_KEY}
+      # Sonarr (required)
       - SONARR_URL=${SONARR_URL}
       - SONARR_API_KEY=${SONARR_API_KEY}
+      # qBittorrent (optional)
+      - QBITTORRENT_URL=${QBITTORRENT_URL:-}
+      - QBITTORRENT_USERNAME=${QBITTORRENT_USERNAME:-admin}
+      - QBITTORRENT_PASSWORD=${QBITTORRENT_PASSWORD:-}
+      # Notifications
+      - NOTIFY_DOWNLOAD_COMPLETE=${NOTIFY_DOWNLOAD_COMPLETE:-true}
+      - NOTIFY_CHECK_INTERVAL=${NOTIFY_CHECK_INTERVAL:-60}
+      # Other
       - TIMEZONE=${TIMEZONE:-UTC}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DATABASE_PATH=data/bot.db
       - AUTO_GRAB_SCORE_THRESHOLD=${AUTO_GRAB_SCORE_THRESHOLD:-80}
     volumes:
       - bot-data:/app/data
-    networks:
-      - arr-network
-
-networks:
-  arr-network:
-    external: true
-    name: ${ARR_NETWORK:-arr-network}
 
 volumes:
   bot-data:
