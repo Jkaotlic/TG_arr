@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 from datetime import datetime
 from typing import Optional
@@ -122,7 +123,11 @@ async def main() -> None:
 
     # Validate settings
     if not settings.allowed_tg_ids and not settings.admin_tg_ids:
-        logger.error("No allowed users configured. Set ALLOWED_TG_IDS or ADMIN_TG_IDS environment variable.")
+        logger.error(
+            "No allowed users configured. Set ALLOWED_TG_IDS or ADMIN_TG_IDS environment variable.",
+            allowed_tg_ids_raw=os.getenv("ALLOWED_TG_IDS"),
+            admin_tg_ids_raw=os.getenv("ADMIN_TG_IDS"),
+        )
         sys.exit(1)
 
     # Initialize database
