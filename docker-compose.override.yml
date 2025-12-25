@@ -1,0 +1,19 @@
+# Development overrides
+# This file is automatically loaded by docker compose
+# Use for local development settings
+
+version: "3.9"
+
+services:
+  tg-arr-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Mount source code for hot reload (requires restart)
+    volumes:
+      - ./bot:/app/bot:ro
+      - bot-data:/app/data
+    environment:
+      - LOG_LEVEL=DEBUG
+    # For development, you might want to use host network
+    # network_mode: host

@@ -1,0 +1,122 @@
+"""Authentication middleware for Telegram bot."""
+
+from typing import Any, Awaitable, Callable, Dict
+
+import structlog
+from aiogram import BaseMiddleware
+from aiogram.types import Message, CallbackQuery, TelegramObject
+
+from bot.config import get_settings
+from bot.db import Database
+
+logger = structlog.get_logger()
+
+
+class AuthMiddleware(BaseMiddleware):
+    """Middleware to check if user is allowed to use the bot."""
+
+    def __init__(self, db: Database):
+        self.settings = get_settings()
+        self.db = db
+        super().__init__()
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        """Check user authorization before processing."""
+        user_id = None
+        user = None
+
+        # Extract user from different event types
+        if isinstance(event, Message):
+            user = event.from_user
+        elif isinstance(event, CallbackQuery):
+            user = event.from_user
+
+        if user:
+            user_id = user.id
+
+        if user_id is None:
+            logger.warning("Could not extract user ID from event")
+            return None
+
+        # Check if user is allowed
+        if not self.settings.is_user_allowed(user_id):
+            logger.warning(
+                "Unauthorized access attempt",
+                user_id=user_id,
+                username=user.username if user else None,
+            )
+
+            # Send rejection message
+            if isinstance(event, Message):
+                await event.answer(
+                    "⛔ Access denied. You are not authorized to use this bot.\n"
+                    "Contact the administrator to get access."
+                )
+            elif isinstance(event, CallbackQuery):
+                await event.answer("Access denied", show_alert=True)
+
+            return None
+
+        # Ensure user exists in database
+        db_user = await self.db.get_user(user_id)
+        if db_user is None:
+            # Create user
+            from bot.models import User, UserRole
+
+            is_admin = self.settings.is_admin(user_id)
+            db_user = User(
+                tg_id=user_id,
+                username=user.username,
+                first_name=user.first_name,
+                role=UserRole.ADMIN if is_admin else UserRole.USER,
+            )
+            await self.db.create_user(db_user)
+            logger.info("Created new user", user_id=user_id, role=db_user.role.value)
+
+        # Add user info to handler data
+        data["db_user"] = db_user
+        data["is_admin"] = self.settings.is_admin(user_id)
+
+        return await handler(event, data)
+
+
+class LoggingMiddleware(BaseMiddleware):
+    """Middleware for logging all incoming events."""
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        """Log incoming events."""
+        log = logger.bind()
+
+        if isinstance(event, Message):
+            log = log.bind(
+                event_type="message",
+                user_id=event.from_user.id if event.from_user else None,
+                chat_id=event.chat.id,
+                text=event.text[:50] if event.text else None,
+            )
+        elif isinstance(event, CallbackQuery):
+            log = log.bind(
+                event_type="callback",
+                user_id=event.from_user.id if event.from_user else None,
+                data=event.data,
+            )
+
+        log.debug("Incoming event")
+
+        try:
+            result = await handler(event, data)
+            log.debug("Event processed successfully")
+            return result
+        except Exception as e:
+            log.error("Error processing event", error=str(e), exc_info=True)
+            raise
