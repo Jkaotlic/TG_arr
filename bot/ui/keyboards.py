@@ -79,14 +79,13 @@ class Keyboards:
         """Create main (reply) menu keyboard with the most used commands."""
         return ReplyKeyboardMarkup(
             keyboard=[
-                [KeyboardButton(text="/search"), KeyboardButton(text="/movie"), KeyboardButton(text="/series")],
-                [KeyboardButton(text="/downloads"), KeyboardButton(text="/qstatus"), KeyboardButton(text="/status")],
-                [KeyboardButton(text="/pause"), KeyboardButton(text="/resume")],
-                [KeyboardButton(text="/settings"), KeyboardButton(text="/history")],
-                [KeyboardButton(text="/help")],
+                [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="🎬 Фильм"), KeyboardButton(text="📺 Сериал")],
+                [KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit"), KeyboardButton(text="🔌 Статус")],
+                [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 История")],
+                [KeyboardButton(text="❓ Помощь")],
             ],
             resize_keyboard=True,
-            input_field_placeholder="Send a title to search, or pick a command",
+            input_field_placeholder="Введите название для поиска...",
         )
 
     @staticmethod
@@ -95,11 +94,11 @@ class Keyboards:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="🎬 Movie", callback_data=CallbackData.TYPE_MOVIE),
-                    InlineKeyboardButton(text="📺 Series", callback_data=CallbackData.TYPE_SERIES),
+                    InlineKeyboardButton(text="🎬 Фильм", callback_data=CallbackData.TYPE_MOVIE),
+                    InlineKeyboardButton(text="📺 Сериал", callback_data=CallbackData.TYPE_SERIES),
                 ],
                 [
-                    InlineKeyboardButton(text="❌ Cancel", callback_data=CallbackData.CANCEL),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
                 ],
             ]
         )
@@ -150,7 +149,7 @@ class Keyboards:
         if show_grab_best and results:
             keyboard.append([
                 InlineKeyboardButton(
-                    text=f"⚡ Grab Best (Score: {best_score})",
+                    text=f"⚡ Лучший (оценка: {best_score})",
                     callback_data=CallbackData.GRAB_BEST,
                 )
             ])
@@ -159,7 +158,7 @@ class Keyboards:
         nav_buttons = []
         if current_page > 0:
             nav_buttons.append(
-                InlineKeyboardButton(text="◀️ Prev", callback_data=f"{CallbackData.PAGE}{current_page - 1}")
+                InlineKeyboardButton(text="◀️", callback_data=f"{CallbackData.PAGE}{current_page - 1}")
             )
 
         nav_buttons.append(
@@ -168,7 +167,7 @@ class Keyboards:
 
         if current_page < total_pages - 1:
             nav_buttons.append(
-                InlineKeyboardButton(text="Next ▶️", callback_data=f"{CallbackData.PAGE}{current_page + 1}")
+                InlineKeyboardButton(text="▶️", callback_data=f"{CallbackData.PAGE}{current_page + 1}")
             )
 
         if nav_buttons:
@@ -176,7 +175,7 @@ class Keyboards:
 
         # Cancel button
         keyboard.append([
-            InlineKeyboardButton(text="❌ Cancel", callback_data=CallbackData.CANCEL),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -192,15 +191,15 @@ class Keyboards:
 
         if can_grab:
             keyboard.append([
-                InlineKeyboardButton(text="✅ Grab This Release", callback_data=CallbackData.CONFIRM_GRAB),
+                InlineKeyboardButton(text="✅ Скачать этот релиз", callback_data=CallbackData.CONFIRM_GRAB),
             ])
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Back to Results", callback_data=CallbackData.BACK),
+            InlineKeyboardButton(text="◀️ Назад к результатам", callback_data=CallbackData.BACK),
         ])
 
         keyboard.append([
-            InlineKeyboardButton(text="❌ Cancel", callback_data=CallbackData.CANCEL),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -247,7 +246,7 @@ class Keyboards:
             keyboard.append(nav_buttons)
 
         keyboard.append([
-            InlineKeyboardButton(text="❌ Cancel", callback_data=CallbackData.CANCEL),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -295,7 +294,7 @@ class Keyboards:
             keyboard.append(nav_buttons)
 
         keyboard.append([
-            InlineKeyboardButton(text="❌ Cancel", callback_data=CallbackData.CANCEL),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -307,16 +306,16 @@ class Keyboards:
 
         if has_release:
             keyboard.append([
-                InlineKeyboardButton(text="✅ Add & Grab Release", callback_data=CallbackData.CONFIRM_GRAB),
+                InlineKeyboardButton(text="✅ Добавить и скачать", callback_data=CallbackData.CONFIRM_GRAB),
             ])
         else:
             keyboard.append([
-                InlineKeyboardButton(text="✅ Add & Search", callback_data=CallbackData.CONFIRM_ADD),
+                InlineKeyboardButton(text="✅ Добавить", callback_data=CallbackData.CONFIRM_ADD),
             ])
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Back", callback_data=CallbackData.BACK),
-            InlineKeyboardButton(text="❌ Cancel", callback_data=CallbackData.CANCEL),
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -327,22 +326,22 @@ class Keyboards:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="All Episodes", callback_data=f"{CallbackData.MONITOR}all"),
-                    InlineKeyboardButton(text="Future Only", callback_data=f"{CallbackData.MONITOR}future"),
+                    InlineKeyboardButton(text="Все серии", callback_data=f"{CallbackData.MONITOR}all"),
+                    InlineKeyboardButton(text="Только будущие", callback_data=f"{CallbackData.MONITOR}future"),
                 ],
                 [
-                    InlineKeyboardButton(text="Missing Only", callback_data=f"{CallbackData.MONITOR}missing"),
-                    InlineKeyboardButton(text="First Season", callback_data=f"{CallbackData.MONITOR}firstSeason"),
+                    InlineKeyboardButton(text="Пропущенные", callback_data=f"{CallbackData.MONITOR}missing"),
+                    InlineKeyboardButton(text="Первый сезон", callback_data=f"{CallbackData.MONITOR}firstSeason"),
                 ],
                 [
-                    InlineKeyboardButton(text="Latest Season", callback_data=f"{CallbackData.MONITOR}latestSeason"),
-                    InlineKeyboardButton(text="Pilot Only", callback_data=f"{CallbackData.MONITOR}pilot"),
+                    InlineKeyboardButton(text="Последний сезон", callback_data=f"{CallbackData.MONITOR}latestSeason"),
+                    InlineKeyboardButton(text="Только пилот", callback_data=f"{CallbackData.MONITOR}pilot"),
                 ],
                 [
-                    InlineKeyboardButton(text="None", callback_data=f"{CallbackData.MONITOR}none"),
+                    InlineKeyboardButton(text="Ничего", callback_data=f"{CallbackData.MONITOR}none"),
                 ],
                 [
-                    InlineKeyboardButton(text="❌ Cancel", callback_data=CallbackData.CANCEL),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
                 ],
             ]
         )
@@ -354,7 +353,7 @@ class Keyboards:
 
         if include_all:
             keyboard.append([
-                InlineKeyboardButton(text="📦 All Seasons", callback_data=f"{CallbackData.SEASON}all"),
+                InlineKeyboardButton(text="📦 Все сезоны", callback_data=f"{CallbackData.SEASON}all"),
             ])
 
         # Group seasons in rows of 4
@@ -375,7 +374,7 @@ class Keyboards:
             keyboard.append(season_buttons[i:i + 4])
 
         keyboard.append([
-            InlineKeyboardButton(text="❌ Cancel", callback_data=CallbackData.CANCEL),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -394,7 +393,7 @@ class Keyboards:
             ])
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Back", callback_data=CallbackData.SETTINGS),
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.SETTINGS),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -417,7 +416,7 @@ class Keyboards:
             ])
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Back", callback_data=CallbackData.SETTINGS),
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.SETTINGS),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -428,21 +427,21 @@ class Keyboards:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="🎬 Radarr Profile", callback_data="settings:radarr_profile"),
-                    InlineKeyboardButton(text="📁 Radarr Folder", callback_data="settings:radarr_folder"),
+                    InlineKeyboardButton(text="🎬 Профиль Radarr", callback_data="settings:radarr_profile"),
+                    InlineKeyboardButton(text="📁 Папка Radarr", callback_data="settings:radarr_folder"),
                 ],
                 [
-                    InlineKeyboardButton(text="📺 Sonarr Profile", callback_data="settings:sonarr_profile"),
-                    InlineKeyboardButton(text="📁 Sonarr Folder", callback_data="settings:sonarr_folder"),
+                    InlineKeyboardButton(text="📺 Профиль Sonarr", callback_data="settings:sonarr_profile"),
+                    InlineKeyboardButton(text="📁 Папка Sonarr", callback_data="settings:sonarr_folder"),
                 ],
                 [
-                    InlineKeyboardButton(text="🎯 Preferred Quality", callback_data="settings:resolution"),
+                    InlineKeyboardButton(text="🎯 Качество", callback_data="settings:resolution"),
                 ],
                 [
-                    InlineKeyboardButton(text="⚡ Auto-Grab", callback_data="settings:auto_grab"),
+                    InlineKeyboardButton(text="⚡ Авто-граб", callback_data="settings:auto_grab"),
                 ],
                 [
-                    InlineKeyboardButton(text="❌ Close", callback_data=CallbackData.CANCEL),
+                    InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.CANCEL),
                 ],
             ]
         )
@@ -450,18 +449,18 @@ class Keyboards:
     @staticmethod
     def resolution_selection() -> InlineKeyboardMarkup:
         """Create keyboard for selecting preferred resolution."""
-        resolutions = ["2160p", "1080p", "720p", "Any"]
+        resolutions = [("2160p", "2160p"), ("1080p", "1080p"), ("720p", "720p"), ("Любое", "any")]
         keyboard = []
 
         for i in range(0, len(resolutions), 2):
             row = []
-            for res in resolutions[i:i + 2]:
-                callback = f"{CallbackData.SET_RESOLUTION}{res.lower()}"
-                row.append(InlineKeyboardButton(text=res, callback_data=callback))
+            for label, value in resolutions[i:i + 2]:
+                callback = f"{CallbackData.SET_RESOLUTION}{value}"
+                row.append(InlineKeyboardButton(text=label, callback_data=callback))
             keyboard.append(row)
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Back", callback_data=CallbackData.SETTINGS),
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.SETTINGS),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -469,19 +468,19 @@ class Keyboards:
     @staticmethod
     def auto_grab_toggle(current: bool) -> InlineKeyboardMarkup:
         """Create keyboard for toggling auto-grab."""
-        current_text = "ON ✓" if current else "OFF"
+        current_text = "ВКЛ ✓" if current else "ВЫКЛ"
         new_value = 0 if current else 1
 
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text=f"Auto-Grab: {current_text}",
+                        text=f"Авто-граб: {current_text}",
                         callback_data=f"{CallbackData.SET_AUTO_GRAB}{new_value}",
                     ),
                 ],
                 [
-                    InlineKeyboardButton(text="◀️ Back", callback_data=CallbackData.SETTINGS),
+                    InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.SETTINGS),
                 ],
             ]
         )
@@ -492,8 +491,8 @@ class Keyboards:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="◀️ Back", callback_data=CallbackData.BACK),
-                    InlineKeyboardButton(text="❌ Cancel", callback_data=CallbackData.CANCEL),
+                    InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
                 ],
             ]
         )
@@ -504,7 +503,7 @@ class Keyboards:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="❌ Cancel", callback_data=CallbackData.CANCEL),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
                 ],
             ]
         )
@@ -567,21 +566,21 @@ class Keyboards:
 
         # Filter and action buttons
         keyboard.append([
-            InlineKeyboardButton(text="🔄 Refresh", callback_data=CallbackData.TORRENT_REFRESH),
-            InlineKeyboardButton(text="🔍 Filter", callback_data=f"{CallbackData.TORRENT_FILTER}menu"),
+            InlineKeyboardButton(text="🔄 Обновить", callback_data=CallbackData.TORRENT_REFRESH),
+            InlineKeyboardButton(text="🔍 Фильтр", callback_data=f"{CallbackData.TORRENT_FILTER}menu"),
         ])
 
         keyboard.append([
-            InlineKeyboardButton(text="⏸ Pause All", callback_data=CallbackData.TORRENT_PAUSE_ALL),
-            InlineKeyboardButton(text="▶️ Resume All", callback_data=CallbackData.TORRENT_RESUME_ALL),
+            InlineKeyboardButton(text="⏸ Пауза всех", callback_data=CallbackData.TORRENT_PAUSE_ALL),
+            InlineKeyboardButton(text="▶️ Возобновить", callback_data=CallbackData.TORRENT_RESUME_ALL),
         ])
 
         keyboard.append([
-            InlineKeyboardButton(text="🚀 Speed Limits", callback_data=CallbackData.SPEED_MENU),
+            InlineKeyboardButton(text="🚀 Лимиты скорости", callback_data=CallbackData.SPEED_MENU),
         ])
 
         keyboard.append([
-            InlineKeyboardButton(text="❌ Close", callback_data=CallbackData.CANCEL),
+            InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.CANCEL),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -596,22 +595,22 @@ class Keyboards:
         from bot.models import TorrentState
         if torrent.state in (TorrentState.PAUSED, TorrentState.QUEUED):
             keyboard.append([
-                InlineKeyboardButton(text="▶️ Resume", callback_data=f"{CallbackData.TORRENT_RESUME}{hash_short}"),
+                InlineKeyboardButton(text="▶️ Возобновить", callback_data=f"{CallbackData.TORRENT_RESUME}{hash_short}"),
             ])
         else:
             keyboard.append([
-                InlineKeyboardButton(text="⏸ Pause", callback_data=f"{CallbackData.TORRENT_PAUSE}{hash_short}"),
+                InlineKeyboardButton(text="⏸ Пауза", callback_data=f"{CallbackData.TORRENT_PAUSE}{hash_short}"),
             ])
 
         # Delete options
         keyboard.append([
-            InlineKeyboardButton(text="🗑 Remove", callback_data=f"{CallbackData.TORRENT_DELETE}{hash_short}"),
-            InlineKeyboardButton(text="🗑 + Files", callback_data=f"{CallbackData.TORRENT_DELETE_FILES}{hash_short}"),
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"{CallbackData.TORRENT_DELETE}{hash_short}"),
+            InlineKeyboardButton(text="🗑 + Файлы", callback_data=f"{CallbackData.TORRENT_DELETE_FILES}{hash_short}"),
         ])
 
         # Back button
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Back to List", callback_data=CallbackData.TORRENT_BACK),
+            InlineKeyboardButton(text="◀️ К списку", callback_data=CallbackData.TORRENT_BACK),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -620,14 +619,14 @@ class Keyboards:
     def torrent_filters(current_filter: TorrentFilter = TorrentFilter.ALL) -> InlineKeyboardMarkup:
         """Create keyboard for selecting torrent filter."""
         filters = [
-            (TorrentFilter.ALL, "📋 All"),
-            (TorrentFilter.DOWNLOADING, "⬇️ Downloading"),
-            (TorrentFilter.SEEDING, "⬆️ Seeding"),
-            (TorrentFilter.COMPLETED, "✅ Completed"),
-            (TorrentFilter.PAUSED, "⏸ Paused"),
-            (TorrentFilter.ACTIVE, "🔥 Active"),
-            (TorrentFilter.STALLED, "⚠️ Stalled"),
-            (TorrentFilter.ERRORED, "❌ Errored"),
+            (TorrentFilter.ALL, "📋 Все"),
+            (TorrentFilter.DOWNLOADING, "⬇️ Загрузка"),
+            (TorrentFilter.SEEDING, "⬆️ Раздача"),
+            (TorrentFilter.COMPLETED, "✅ Готово"),
+            (TorrentFilter.PAUSED, "⏸ Пауза"),
+            (TorrentFilter.ACTIVE, "🔥 Активные"),
+            (TorrentFilter.STALLED, "⚠️ Застряли"),
+            (TorrentFilter.ERRORED, "❌ Ошибки"),
         ]
 
         keyboard = []
@@ -650,7 +649,7 @@ class Keyboards:
             keyboard.append(row)
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Back", callback_data=CallbackData.TORRENT_BACK),
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TORRENT_BACK),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -663,19 +662,19 @@ class Keyboards:
         """Create keyboard for speed limit presets."""
         # Presets in KB/s (0 = unlimited)
         presets = [
-            (0, "♾ Unlimited"),
-            (512, "512 KB/s"),
-            (1024, "1 MB/s"),
-            (2048, "2 MB/s"),
-            (5120, "5 MB/s"),
-            (10240, "10 MB/s"),
+            (0, "∞ Без лимита"),
+            (512, "512 КБ/с"),
+            (1024, "1 МБ/с"),
+            (2048, "2 МБ/с"),
+            (5120, "5 МБ/с"),
+            (10240, "10 МБ/с"),
         ]
 
         keyboard = []
 
         # Download limits
         keyboard.append([
-            InlineKeyboardButton(text="⬇️ Download Limit:", callback_data="noop"),
+            InlineKeyboardButton(text="⬇️ Лимит загрузки:", callback_data="noop"),
         ])
 
         dl_row = []
@@ -702,7 +701,7 @@ class Keyboards:
 
         # Upload limits
         keyboard.append([
-            InlineKeyboardButton(text="⬆️ Upload Limit:", callback_data="noop"),
+            InlineKeyboardButton(text="⬆️ Лимит отдачи:", callback_data="noop"),
         ])
 
         ul_row = []
@@ -728,7 +727,7 @@ class Keyboards:
         keyboard.append(ul_row2)
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Back", callback_data=CallbackData.TORRENT_BACK),
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TORRENT_BACK),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -739,10 +738,10 @@ class Keyboards:
         hash_short = torrent_hash[:16]
         if with_files:
             confirm_callback = f"{CallbackData.TORRENT_DELETE_FILES}confirm:{hash_short}"
-            text = "⚠️ Yes, delete torrent and files"
+            text = "⚠️ Да, удалить с файлами"
         else:
             confirm_callback = f"{CallbackData.TORRENT_DELETE}confirm:{hash_short}"
-            text = "Yes, remove torrent"
+            text = "Да, удалить торрент"
 
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -750,7 +749,7 @@ class Keyboards:
                     InlineKeyboardButton(text=text, callback_data=confirm_callback),
                 ],
                 [
-                    InlineKeyboardButton(text="❌ Cancel", callback_data=CallbackData.TORRENT_BACK),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.TORRENT_BACK),
                 ],
             ]
         )

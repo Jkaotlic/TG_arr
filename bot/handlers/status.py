@@ -3,7 +3,7 @@
 import asyncio
 
 import structlog
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -15,13 +15,17 @@ from bot.ui.formatters import Formatters
 logger = structlog.get_logger()
 router = Router()
 
+# Russian menu button text
+MENU_STATUS = "🔌 Статус"
 
+
+@router.message(F.text == MENU_STATUS)
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
     """Handle /status command - check all services status."""
     settings = get_settings()
 
-    status_msg = await message.answer("🔍 Checking services status...")
+    status_msg = await message.answer("🔍 Проверяю статус сервисов...")
 
     # Create clients
     prowlarr = ProwlarrClient(settings.prowlarr_url, settings.prowlarr_api_key)

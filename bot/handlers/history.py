@@ -1,7 +1,7 @@
 """History command handler."""
 
 import structlog
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -13,6 +13,9 @@ from bot.ui.formatters import Formatters
 logger = structlog.get_logger()
 router = Router()
 
+# Russian menu button text
+MENU_HISTORY = "📋 История"
+
 
 async def get_db() -> Database:
     """Get database instance."""
@@ -22,6 +25,7 @@ async def get_db() -> Database:
     return db
 
 
+@router.message(F.text == MENU_HISTORY)
 @router.message(Command("history"))
 async def cmd_history(message: Message, db_user: User, is_admin: bool = False) -> None:
     """Handle /history command - show recent actions."""
@@ -33,13 +37,13 @@ async def cmd_history(message: Message, db_user: User, is_admin: bool = False) -
         # Admins see all actions, users see only their own
         if is_admin:
             actions = await db.get_all_actions(limit=20)
-            header = "**All Users History**\n\n"
+            header = "**📋 История всех пользователей**\n\n"
         else:
             actions = await db.get_user_actions(user_id, limit=20)
-            header = "**Your Recent Actions**\n\n"
+            header = "**📋 Ваши действия**\n\n"
 
         if not actions:
-            await message.answer("No actions recorded yet.")
+            await message.answer("📭 История пуста.")
             return
 
         text = header + Formatters.format_action_log(actions)
@@ -47,7 +51,7 @@ async def cmd_history(message: Message, db_user: User, is_admin: bool = False) -
 
     except Exception as e:
         logger.error("Failed to load history", error=str(e))
-        await message.answer(Formatters.format_error(f"Failed to load history: {str(e)}"))
+        await message.answer(Formatters.format_error(f"Не удалось загрузить историю: {str(e)}"))
 
     finally:
         await db.close()

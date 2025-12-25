@@ -17,6 +17,10 @@ router = Router()
 # Per-page limit for torrent list
 TORRENTS_PER_PAGE = 5
 
+# Russian menu button texts
+MENU_DOWNLOADS = "📥 Загрузки"
+MENU_QSTATUS = "📊 qBit"
+
 
 def get_qbt_client() -> Optional[QBittorrentClient]:
     """Get qBittorrent client if configured."""
@@ -34,11 +38,11 @@ async def check_qbt_enabled(message_or_callback) -> bool:
     """Check if qBittorrent is enabled and send message if not."""
     settings = get_settings()
     if not settings.qbittorrent_enabled:
-        text = "⚠️ qBittorrent integration is not configured.\n\nSet `QBITTORRENT_URL` and `QBITTORRENT_PASSWORD` in environment variables."
+        text = "⚠️ Интеграция с qBittorrent не настроена.\n\nУстановите `QBITTORRENT_URL` и `QBITTORRENT_PASSWORD` в переменных окружения."
         if isinstance(message_or_callback, Message):
             await message_or_callback.answer(text)
         elif isinstance(message_or_callback, CallbackQuery):
-            await message_or_callback.answer("qBittorrent not configured", show_alert=True)
+            await message_or_callback.answer("qBittorrent не настроен", show_alert=True)
         return False
     return True
 
@@ -48,6 +52,7 @@ async def check_qbt_enabled(message_or_callback) -> bool:
 # ============================================================================
 
 
+@router.message(F.text == MENU_DOWNLOADS)
 @router.message(Command("downloads", "dl"))
 async def cmd_downloads(message: Message, db_user: User) -> None:
     """Handle /downloads command - show active downloads."""
@@ -59,7 +64,7 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
         return
 
     try:
-        status_msg = await message.answer("🔄 Loading downloads...")
+        status_msg = await message.answer("🔄 Загружаю список...")
 
         torrents = await qbt.get_torrents(
             filter_type=TorrentFilter.ALL,
@@ -67,7 +72,7 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
         )
 
         if not torrents:
-            await status_msg.edit_text("📭 No torrents found.")
+            await status_msg.edit_text("📭 Торренты не найдены.")
             return
 
         # Get total count for pagination
@@ -78,7 +83,7 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
         from bot.ui.formatters import Formatters
         from bot.ui.keyboards import Keyboards
 
-        text = Formatters.format_torrent_list(torrents, 0, total_pages, total)
+        text = Formatters.format_torrent_list(torrents, 0, total_pages, TorrentFilter.ALL, total)
 
         await status_msg.edit_text(
             text,
@@ -97,6 +102,7 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
             await qbt.close()
 
 
+@router.message(F.text == MENU_QSTATUS)
 @router.message(Command("qstatus"))
 async def cmd_qstatus(message: Message, db_user: User) -> None:
     """Handle /qstatus command - show qBittorrent status."""
@@ -108,7 +114,7 @@ async def cmd_qstatus(message: Message, db_user: User) -> None:
         return
 
     try:
-        status_msg = await message.answer("🔄 Getting qBittorrent status...")
+        status_msg = await message.answer("🔄 Загружаю статус qBittorrent...")
 
         status = await qbt.get_status()
 
@@ -144,15 +150,15 @@ async def cmd_pause(message: Message, db_user: User) -> None:
 
         if args.lower() == "all" or not args:
             await qbt.pause("all")
-            await message.answer("⏸️ All torrents paused.")
+            await message.answer("⏸️ Все торренты приостановлены.")
         else:
             # Try to find torrent by partial hash
             torrent = await qbt.get_torrent_by_short_hash(args)
             if torrent:
                 await qbt.pause([torrent.hash])
-                await message.answer(f"⏸️ Paused: {torrent.name}")
+                await message.answer(f"⏸️ Приостановлен: {torrent.name}")
             else:
-                await message.answer(f"❌ Torrent not found: {args}")
+                await message.answer(f"❌ Торрент не найден: {args}")
 
     except QBittorrentError as e:
         await message.answer(f"❌ Error: {e.message}")
@@ -176,14 +182,14 @@ async def cmd_resume(message: Message, db_user: User) -> None:
 
         if args.lower() == "all" or not args:
             await qbt.resume("all")
-            await message.answer("▶️ All torrents resumed.")
+            await message.answer("▶️ Все торренты возобновлены.")
         else:
             torrent = await qbt.get_torrent_by_short_hash(args)
             if torrent:
                 await qbt.resume([torrent.hash])
-                await message.answer(f"▶️ Resumed: {torrent.name}")
+                await message.answer(f"▶️ Возобновлён: {torrent.name}")
             else:
-                await message.answer(f"❌ Torrent not found: {args}")
+                await message.answer(f"❌ Торрент не найден: {args}")
 
     except QBittorrentError as e:
         await message.answer(f"❌ Error: {e.message}")
@@ -205,11 +211,11 @@ async def handle_refresh(callback: CallbackQuery) -> None:
 
     qbt = get_qbt_client()
     if not qbt:
-        await callback.answer("qBittorrent not configured", show_alert=True)
+        await callback.answer("qBittorrent не настроен", show_alert=True)
         return
 
     try:
-        await callback.answer("Refreshing...")
+        await callback.answer("Обновляю...")
 
         torrents = await qbt.get_torrents(limit=TORRENTS_PER_PAGE)
         all_torrents = await qbt.get_torrents()
@@ -219,7 +225,7 @@ async def handle_refresh(callback: CallbackQuery) -> None:
         from bot.ui.formatters import Formatters
         from bot.ui.keyboards import Keyboards
 
-        text = Formatters.format_torrent_list(torrents, 0, total_pages, total)
+        text = Formatters.format_torrent_list(torrents, 0, total_pages, TorrentFilter.ALL, total)
 
         await callback.message.edit_text(
             text,
@@ -253,7 +259,7 @@ async def handle_page(callback: CallbackQuery) -> None:
         total_pages = max(1, (total + TORRENTS_PER_PAGE - 1) // TORRENTS_PER_PAGE)
 
         if page < 0 or page >= total_pages:
-            await callback.answer("Invalid page", show_alert=True)
+            await callback.answer("Неверная страница", show_alert=True)
             return
 
         offset = page * TORRENTS_PER_PAGE
@@ -262,7 +268,7 @@ async def handle_page(callback: CallbackQuery) -> None:
         from bot.ui.formatters import Formatters
         from bot.ui.keyboards import Keyboards
 
-        text = Formatters.format_torrent_list(torrents, page, total_pages, total)
+        text = Formatters.format_torrent_list(torrents, page, total_pages, TorrentFilter.ALL, total)
 
         await callback.message.edit_text(
             text,
@@ -279,7 +285,7 @@ async def handle_page(callback: CallbackQuery) -> None:
             await qbt.close()
 
 
-@router.callback_query(F.data.startswith("torrent:"))
+@router.callback_query(F.data.startswith("t:"))
 async def handle_torrent_details(callback: CallbackQuery) -> None:
     """Show torrent details."""
     if not callback.message or not callback.data:
@@ -290,11 +296,11 @@ async def handle_torrent_details(callback: CallbackQuery) -> None:
         return
 
     try:
-        short_hash = callback.data.replace("torrent:", "")
+        short_hash = callback.data.replace("t:", "")
         torrent = await qbt.get_torrent_by_short_hash(short_hash)
 
         if not torrent:
-            await callback.answer("Torrent not found", show_alert=True)
+            await callback.answer("Торрент не найден", show_alert=True)
             return
 
         from bot.ui.formatters import Formatters
@@ -332,11 +338,11 @@ async def handle_pause_torrent(callback: CallbackQuery) -> None:
         torrent = await qbt.get_torrent_by_short_hash(short_hash)
 
         if not torrent:
-            await callback.answer("Torrent not found", show_alert=True)
+            await callback.answer("Торрент не найден", show_alert=True)
             return
 
         await qbt.pause([torrent.hash])
-        await callback.answer(f"⏸️ Paused: {torrent.name[:30]}")
+        await callback.answer(f"⏸️ Приостановлен: {torrent.name[:30]}")
 
         # Refresh the view
         await handle_torrent_details(callback)
@@ -364,11 +370,11 @@ async def handle_resume_torrent(callback: CallbackQuery) -> None:
         torrent = await qbt.get_torrent_by_short_hash(short_hash)
 
         if not torrent:
-            await callback.answer("Torrent not found", show_alert=True)
+            await callback.answer("Торрент не найден", show_alert=True)
             return
 
         await qbt.resume([torrent.hash])
-        await callback.answer(f"▶️ Resumed: {torrent.name[:30]}")
+        await callback.answer(f"▶️ Возобновлён: {torrent.name[:30]}")
 
         # Refresh the view
         await handle_torrent_details(callback)
@@ -396,11 +402,11 @@ async def handle_delete_torrent(callback: CallbackQuery) -> None:
         torrent = await qbt.get_torrent_by_short_hash(short_hash)
 
         if not torrent:
-            await callback.answer("Torrent not found", show_alert=True)
+            await callback.answer("Торрент не найден", show_alert=True)
             return
 
         await qbt.delete([torrent.hash], delete_files=False)
-        await callback.answer(f"🗑️ Deleted: {torrent.name[:30]}")
+        await callback.answer(f"🗑️ Удалён: {torrent.name[:30]}")
 
         # Go back to list
         await handle_refresh(callback)
@@ -428,11 +434,11 @@ async def handle_delete_with_files(callback: CallbackQuery) -> None:
         torrent = await qbt.get_torrent_by_short_hash(short_hash)
 
         if not torrent:
-            await callback.answer("Torrent not found", show_alert=True)
+            await callback.answer("Торрент не найден", show_alert=True)
             return
 
         await qbt.delete([torrent.hash], delete_files=True)
-        await callback.answer(f"🗑️💾 Deleted with files: {torrent.name[:25]}")
+        await callback.answer(f"🗑️💾 Удалён с файлами: {torrent.name[:25]}")
 
         # Go back to list
         await handle_refresh(callback)
@@ -460,11 +466,11 @@ async def handle_recheck(callback: CallbackQuery) -> None:
         torrent = await qbt.get_torrent_by_short_hash(short_hash)
 
         if not torrent:
-            await callback.answer("Torrent not found", show_alert=True)
+            await callback.answer("Торрент не найден", show_alert=True)
             return
 
         await qbt.recheck([torrent.hash])
-        await callback.answer(f"🔍 Rechecking: {torrent.name[:30]}")
+        await callback.answer(f"🔍 Перепроверка: {torrent.name[:30]}")
 
     except Exception as e:
         logger.error("Failed to recheck", error=str(e))
@@ -493,15 +499,15 @@ async def handle_priority(callback: CallbackQuery) -> None:
         torrent = await qbt.get_torrent_by_short_hash(short_hash)
 
         if not torrent:
-            await callback.answer("Torrent not found", show_alert=True)
+            await callback.answer("Торрент не найден", show_alert=True)
             return
 
         if priority == "max":
             await qbt.set_priority_top([torrent.hash])
-            await callback.answer(f"⬆️ Max priority: {torrent.name[:25]}")
+            await callback.answer(f"⬆️ Макс. приоритет: {torrent.name[:25]}")
         elif priority == "min":
             await qbt.set_priority_bottom([torrent.hash])
-            await callback.answer(f"⬇️ Min priority: {torrent.name[:25]}")
+            await callback.answer(f"⬇️ Мин. приоритет: {torrent.name[:25]}")
 
     except Exception as e:
         logger.error("Failed to set priority", error=str(e))
@@ -520,7 +526,7 @@ async def handle_pause_all(callback: CallbackQuery) -> None:
 
     try:
         await qbt.pause("all")
-        await callback.answer("⏸️ All torrents paused")
+        await callback.answer("⏸️ Все торренты приостановлены")
         await handle_refresh(callback)
 
     except Exception as e:
@@ -540,7 +546,7 @@ async def handle_resume_all(callback: CallbackQuery) -> None:
 
     try:
         await qbt.resume("all")
-        await callback.answer("▶️ All torrents resumed")
+        await callback.answer("▶️ Все торренты возобновлены")
         await handle_refresh(callback)
 
     except Exception as e:
@@ -549,6 +555,12 @@ async def handle_resume_all(callback: CallbackQuery) -> None:
     finally:
         if qbt:
             await qbt.close()
+
+
+@router.callback_query(F.data == "t_back")
+async def handle_back_to_list(callback: CallbackQuery) -> None:
+    """Go back to torrent list."""
+    await handle_refresh(callback)
 
 
 @router.callback_query(F.data == "t_filter:menu")
@@ -560,7 +572,7 @@ async def handle_filter_menu(callback: CallbackQuery) -> None:
     from bot.ui.keyboards import Keyboards
 
     await callback.message.edit_text(
-        "**Select filter:**",
+        "**Выберите фильтр:**",
         reply_markup=Keyboards.torrent_filters(),
         parse_mode="Markdown",
     )
@@ -595,7 +607,7 @@ async def handle_filter_select(callback: CallbackQuery) -> None:
         from bot.ui.formatters import Formatters
         from bot.ui.keyboards import Keyboards
 
-        text = Formatters.format_torrent_list(torrents, 0, total_pages, total, filter_type)
+        text = Formatters.format_torrent_list(torrents, 0, total_pages, filter_type, total)
 
         await callback.message.edit_text(
             text,
@@ -612,7 +624,7 @@ async def handle_filter_select(callback: CallbackQuery) -> None:
             await qbt.close()
 
 
-@router.callback_query(F.data == "t_speed")
+@router.callback_query(F.data == "speed_menu")
 async def handle_speed_menu(callback: CallbackQuery) -> None:
     """Show speed limits menu."""
     if not callback.message:
@@ -628,15 +640,15 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
         from bot.ui.keyboards import Keyboards
         from bot.models import format_speed
 
-        current_dl = "Unlimited" if status.download_limit == 0 else format_speed(status.download_limit)
-        current_ul = "Unlimited" if status.upload_limit == 0 else format_speed(status.upload_limit)
+        current_dl = "Без лимита" if status.download_limit == 0 else format_speed(status.download_limit)
+        current_ul = "Без лимита" if status.upload_limit == 0 else format_speed(status.upload_limit)
 
         text = (
-            f"**Speed Limits**\n\n"
-            f"Current:\n"
-            f"⬇️ Download: {current_dl}\n"
-            f"⬆️ Upload: {current_ul}\n\n"
-            f"Select new limit:"
+            f"**Лимиты скорости**\n\n"
+            f"Текущие:\n"
+            f"⬇️ Загрузка: {current_dl}\n"
+            f"⬆️ Отдача: {current_ul}\n\n"
+            f"Выберите новый лимит:"
         )
 
         await callback.message.edit_text(
@@ -654,9 +666,9 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
             await qbt.close()
 
 
-@router.callback_query(F.data.startswith("t_speed_set:"))
+@router.callback_query(F.data.startswith("speed:"))
 async def handle_speed_set(callback: CallbackQuery) -> None:
-    """Set speed limits."""
+    """Set speed limits (download or upload)."""
     if not callback.data:
         return
 
@@ -665,19 +677,25 @@ async def handle_speed_set(callback: CallbackQuery) -> None:
         return
 
     try:
-        parts = callback.data.replace("t_speed_set:", "").split(":")
+        # Format: speed:dl:1024 or speed:ul:1024
+        parts = callback.data.replace("speed:", "").split(":")
         if len(parts) != 2:
             return
 
-        dl_limit = int(parts[0])
-        ul_limit = int(parts[1])
+        limit_type = parts[0]  # "dl" or "ul"
+        speed_kb = int(parts[1])
+        speed_bytes = speed_kb * 1024  # Convert KB/s to B/s
 
-        await qbt.set_speed_limits(dl_limit, ul_limit)
+        if limit_type == "dl":
+            await qbt.set_download_limit(speed_bytes)
+        else:
+            await qbt.set_upload_limit(speed_bytes)
 
-        limit_text = "Unlimited" if dl_limit == 0 else f"{dl_limit // (1024*1024)} MB/s"
-        await callback.answer(f"⚡ Speed set to {limit_text}")
+        from bot.ui.formatters import Formatters
+        await callback.answer(Formatters.format_speed_limit_changed(limit_type, speed_kb))
 
-        await handle_refresh(callback)
+        # Refresh speed menu
+        await handle_speed_menu(callback)
 
     except Exception as e:
         logger.error("Speed set error", error=str(e))

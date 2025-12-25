@@ -54,11 +54,11 @@ class AuthMiddleware(BaseMiddleware):
             # Send rejection message
             if isinstance(event, Message):
                 await event.answer(
-                    "⛔ Access denied. You are not authorized to use this bot.\n"
-                    "Contact the administrator to get access."
+                    "⛔ Доступ запрещён. Вы не авторизованы для использования бота.\n"
+                    "Свяжитесь с администратором для получения доступа."
                 )
             elif isinstance(event, CallbackQuery):
-                await event.answer("Access denied", show_alert=True)
+                await event.answer("Доступ запрещён", show_alert=True)
 
             return None
 

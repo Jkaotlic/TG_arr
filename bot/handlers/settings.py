@@ -15,6 +15,9 @@ from bot.ui.keyboards import CallbackData, Keyboards
 logger = structlog.get_logger()
 router = Router()
 
+# Russian menu button text
+MENU_SETTINGS = "⚙️ Настройки"
+
 
 async def get_db() -> Database:
     """Get database instance."""
@@ -37,6 +40,7 @@ async def get_add_service() -> AddService:
     return AddService(prowlarr, radarr, sonarr)
 
 
+@router.message(F.text == MENU_SETTINGS)
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, db_user: User) -> None:
     """Handle /settings command."""
@@ -65,7 +69,7 @@ async def cmd_settings(message: Message, db_user: User) -> None:
 
     except Exception as e:
         logger.error("Failed to load settings", error=str(e))
-        await message.answer(Formatters.format_error(f"Failed to load settings: {str(e)}"))
+        await message.answer(Formatters.format_error(f"Ошибка загрузки настроек: {str(e)}"))
     finally:
         await add_service.radarr.close()
         await add_service.sonarr.close()
@@ -103,7 +107,7 @@ async def handle_settings_back(callback: CallbackQuery, db_user: User) -> None:
 
     except Exception as e:
         logger.error("Failed to load settings", error=str(e))
-        await callback.answer("Failed to load settings", show_alert=True)
+        await callback.answer("Ошибка загрузки настроек", show_alert=True)
     finally:
         await add_service.radarr.close()
         await add_service.sonarr.close()
@@ -122,11 +126,11 @@ async def handle_radarr_profile_menu(callback: CallbackQuery) -> None:
         profiles = await add_service.get_radarr_profiles()
 
         if not profiles:
-            await callback.answer("No quality profiles found in Radarr", show_alert=True)
+            await callback.answer("Профили качества в Radarr не найдены", show_alert=True)
             return
 
         await callback.message.edit_text(
-            "**Select Radarr Quality Profile:**",
+            "**Выберите профиль качества Radarr:**",
             reply_markup=Keyboards.quality_profiles(profiles, CallbackData.SET_RADARR_PROFILE),
             parse_mode="Markdown",
         )
@@ -134,7 +138,7 @@ async def handle_radarr_profile_menu(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to load Radarr profiles", error=str(e))
-        await callback.answer("Failed to load profiles", show_alert=True)
+        await callback.answer("Ошибка загрузки профилей", show_alert=True)
     finally:
         await add_service.radarr.close()
         await add_service.sonarr.close()
@@ -155,16 +159,16 @@ async def handle_set_radarr_profile(callback: CallbackQuery, db_user: User) -> N
         db_user.preferences.radarr_quality_profile_id = profile_id
         await db.update_user_preferences(db_user.tg_id, db_user.preferences)
 
-        await callback.answer("Radarr profile updated!")
+        await callback.answer("Профиль Radarr обновлён!")
 
         # Return to settings
         await handle_settings_back(callback, db_user)
 
     except ValueError:
-        await callback.answer("Invalid profile", show_alert=True)
+        await callback.answer("Неверный профиль", show_alert=True)
     except Exception as e:
         logger.error("Failed to update profile", error=str(e))
-        await callback.answer("Failed to update", show_alert=True)
+        await callback.answer("Ошибка обновления", show_alert=True)
     finally:
         await db.close()
 
@@ -181,11 +185,11 @@ async def handle_radarr_folder_menu(callback: CallbackQuery) -> None:
         folders = await add_service.get_radarr_root_folders()
 
         if not folders:
-            await callback.answer("No root folders found in Radarr", show_alert=True)
+            await callback.answer("Корневые папки в Radarr не найдены", show_alert=True)
             return
 
         await callback.message.edit_text(
-            "**Select Radarr Root Folder:**",
+            "**Выберите корневую папку Radarr:**",
             reply_markup=Keyboards.root_folders(folders, CallbackData.SET_RADARR_FOLDER),
             parse_mode="Markdown",
         )
@@ -193,7 +197,7 @@ async def handle_radarr_folder_menu(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to load Radarr folders", error=str(e))
-        await callback.answer("Failed to load folders", show_alert=True)
+        await callback.answer("Ошибка загрузки папок", show_alert=True)
     finally:
         await add_service.radarr.close()
         await add_service.sonarr.close()
@@ -214,15 +218,15 @@ async def handle_set_radarr_folder(callback: CallbackQuery, db_user: User) -> No
         db_user.preferences.radarr_root_folder_id = folder_id
         await db.update_user_preferences(db_user.tg_id, db_user.preferences)
 
-        await callback.answer("Radarr folder updated!")
+        await callback.answer("Папка Radarr обновлена!")
 
         await handle_settings_back(callback, db_user)
 
     except ValueError:
-        await callback.answer("Invalid folder", show_alert=True)
+        await callback.answer("Неверная папка", show_alert=True)
     except Exception as e:
         logger.error("Failed to update folder", error=str(e))
-        await callback.answer("Failed to update", show_alert=True)
+        await callback.answer("Ошибка обновления", show_alert=True)
     finally:
         await db.close()
 
@@ -239,11 +243,11 @@ async def handle_sonarr_profile_menu(callback: CallbackQuery) -> None:
         profiles = await add_service.get_sonarr_profiles()
 
         if not profiles:
-            await callback.answer("No quality profiles found in Sonarr", show_alert=True)
+            await callback.answer("Профили качества в Sonarr не найдены", show_alert=True)
             return
 
         await callback.message.edit_text(
-            "**Select Sonarr Quality Profile:**",
+            "**Выберите профиль качества Sonarr:**",
             reply_markup=Keyboards.quality_profiles(profiles, CallbackData.SET_SONARR_PROFILE),
             parse_mode="Markdown",
         )
@@ -251,7 +255,7 @@ async def handle_sonarr_profile_menu(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to load Sonarr profiles", error=str(e))
-        await callback.answer("Failed to load profiles", show_alert=True)
+        await callback.answer("Ошибка загрузки профилей", show_alert=True)
     finally:
         await add_service.radarr.close()
         await add_service.sonarr.close()
@@ -272,15 +276,15 @@ async def handle_set_sonarr_profile(callback: CallbackQuery, db_user: User) -> N
         db_user.preferences.sonarr_quality_profile_id = profile_id
         await db.update_user_preferences(db_user.tg_id, db_user.preferences)
 
-        await callback.answer("Sonarr profile updated!")
+        await callback.answer("Профиль Sonarr обновлён!")
 
         await handle_settings_back(callback, db_user)
 
     except ValueError:
-        await callback.answer("Invalid profile", show_alert=True)
+        await callback.answer("Неверный профиль", show_alert=True)
     except Exception as e:
         logger.error("Failed to update profile", error=str(e))
-        await callback.answer("Failed to update", show_alert=True)
+        await callback.answer("Ошибка обновления", show_alert=True)
     finally:
         await db.close()
 
@@ -297,11 +301,11 @@ async def handle_sonarr_folder_menu(callback: CallbackQuery) -> None:
         folders = await add_service.get_sonarr_root_folders()
 
         if not folders:
-            await callback.answer("No root folders found in Sonarr", show_alert=True)
+            await callback.answer("Корневые папки в Sonarr не найдены", show_alert=True)
             return
 
         await callback.message.edit_text(
-            "**Select Sonarr Root Folder:**",
+            "**Выберите корневую папку Sonarr:**",
             reply_markup=Keyboards.root_folders(folders, CallbackData.SET_SONARR_FOLDER),
             parse_mode="Markdown",
         )
@@ -309,7 +313,7 @@ async def handle_sonarr_folder_menu(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to load Sonarr folders", error=str(e))
-        await callback.answer("Failed to load folders", show_alert=True)
+        await callback.answer("Ошибка загрузки папок", show_alert=True)
     finally:
         await add_service.radarr.close()
         await add_service.sonarr.close()
@@ -330,15 +334,15 @@ async def handle_set_sonarr_folder(callback: CallbackQuery, db_user: User) -> No
         db_user.preferences.sonarr_root_folder_id = folder_id
         await db.update_user_preferences(db_user.tg_id, db_user.preferences)
 
-        await callback.answer("Sonarr folder updated!")
+        await callback.answer("Папка Sonarr обновлена!")
 
         await handle_settings_back(callback, db_user)
 
     except ValueError:
-        await callback.answer("Invalid folder", show_alert=True)
+        await callback.answer("Неверная папка", show_alert=True)
     except Exception as e:
         logger.error("Failed to update folder", error=str(e))
-        await callback.answer("Failed to update", show_alert=True)
+        await callback.answer("Ошибка обновления", show_alert=True)
     finally:
         await db.close()
 
@@ -350,7 +354,7 @@ async def handle_resolution_menu(callback: CallbackQuery) -> None:
         return
 
     await callback.message.edit_text(
-        "**Select Preferred Resolution:**",
+        "**Выберите предпочитаемое разрешение:**",
         reply_markup=Keyboards.resolution_selection(),
         parse_mode="Markdown",
     )
@@ -373,13 +377,13 @@ async def handle_set_resolution(callback: CallbackQuery, db_user: User) -> None:
         db_user.preferences.preferred_resolution = resolution
         await db.update_user_preferences(db_user.tg_id, db_user.preferences)
 
-        await callback.answer("Resolution preference updated!")
+        await callback.answer("Разрешение обновлено!")
 
         await handle_settings_back(callback, db_user)
 
     except Exception as e:
         logger.error("Failed to update resolution", error=str(e))
-        await callback.answer("Failed to update", show_alert=True)
+        await callback.answer("Ошибка обновления", show_alert=True)
     finally:
         await db.close()
 
@@ -393,9 +397,9 @@ async def handle_auto_grab_menu(callback: CallbackQuery, db_user: User) -> None:
     settings = get_settings()
 
     await callback.message.edit_text(
-        f"**Auto-Grab Setting**\n\n"
-        f"When enabled, high-scored releases (score ≥ {settings.auto_grab_score_threshold}) "
-        f"will show a 'Grab Best' button for quick downloads.",
+        f"**Авто-загрузка**\n\n"
+        f"При включении релизы с высоким рейтингом (≥ {settings.auto_grab_score_threshold}) "
+        f"покажут кнопку «Скачать лучшее» для быстрой загрузки.",
         reply_markup=Keyboards.auto_grab_toggle(db_user.preferences.auto_grab_enabled),
         parse_mode="Markdown",
     )
@@ -417,12 +421,12 @@ async def handle_set_auto_grab(callback: CallbackQuery, db_user: User) -> None:
         db_user.preferences.auto_grab_enabled = enabled
         await db.update_user_preferences(db_user.tg_id, db_user.preferences)
 
-        await callback.answer(f"Auto-grab {'enabled' if enabled else 'disabled'}!")
+        await callback.answer(f"Авто-загрузка {'включена' if enabled else 'выключена'}!")
 
         await handle_settings_back(callback, db_user)
 
     except Exception as e:
         logger.error("Failed to update auto-grab", error=str(e))
-        await callback.answer("Failed to update", show_alert=True)
+        await callback.answer("Ошибка обновления", show_alert=True)
     finally:
         await db.close()
