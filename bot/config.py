@@ -67,6 +67,12 @@ class Settings(BaseSettings):
         """Parse comma-separated string of IDs into list of integers."""
         if v is None or v == "":
             return []
+        # pydantic-settings may JSON-decode env values; "123" becomes int(123).
+        # Also avoid treating booleans as integers.
+        if isinstance(v, bool):
+            return []
+        if isinstance(v, int):
+            return [v]
         if isinstance(v, list):
             return v
         if isinstance(v, str):
