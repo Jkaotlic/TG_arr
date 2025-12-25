@@ -32,6 +32,9 @@ class Database:
 
     async def connect(self) -> None:
         """Connect to the database and initialize tables."""
+        if self._connection is not None:
+            return
+
         # Ensure directory exists
         db_dir = os.path.dirname(self.db_path)
         if db_dir:
