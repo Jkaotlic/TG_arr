@@ -132,6 +132,7 @@ async def main() -> None:
 
     # Initialize database
     db = Database(settings.database_path)
+    await db.connect()
 
     # Initialize bot
     bot = Bot(
@@ -180,10 +181,10 @@ async def main() -> None:
     dp.include_router(main_router)
 
     # Register startup/shutdown handlers
-    async def _on_startup() -> None:
+    async def _on_startup(*_: object, **__: object) -> None:
         await on_startup(bot, db, notification_service)
 
-    async def _on_shutdown() -> None:
+    async def _on_shutdown(*_: object, **__: object) -> None:
         await on_shutdown(bot, db, notification_service, qbittorrent)
 
     dp.startup.register(_on_startup)
