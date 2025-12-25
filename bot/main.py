@@ -180,8 +180,14 @@ async def main() -> None:
     dp.include_router(main_router)
 
     # Register startup/shutdown handlers
-    dp.startup.register(lambda: on_startup(bot, db, notification_service))
-    dp.shutdown.register(lambda: on_shutdown(bot, db, notification_service, qbittorrent))
+    async def _on_startup() -> None:
+        await on_startup(bot, db, notification_service)
+
+    async def _on_shutdown() -> None:
+        await on_shutdown(bot, db, notification_service, qbittorrent)
+
+    dp.startup.register(_on_startup)
+    dp.shutdown.register(_on_shutdown)
 
     # Start polling
     try:
