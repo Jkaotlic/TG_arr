@@ -82,6 +82,7 @@ Thumbs.db
 
 # Project specific
 data/bot.db
+stack.env
 
 # Claude Code
 .claude/
