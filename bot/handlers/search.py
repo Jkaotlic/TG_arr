@@ -28,6 +28,11 @@ from bot.ui.keyboards import CallbackData, Keyboards
 logger = structlog.get_logger()
 router = Router()
 
+# Russian menu button texts
+MENU_SEARCH = "🔍 Поиск"
+MENU_MOVIE = "🎬 Фильм"
+MENU_SERIES = "📺 Сериал"
+
 
 def get_services() -> tuple[SearchService, AddService, ScoringService]:
     """Get service instances."""
@@ -58,12 +63,12 @@ async def get_db() -> Database:
 async def cmd_search(message: Message, db_user: User) -> None:
     """Handle /search <query> command - auto-detect content type."""
     if not message.text:
-        await message.answer("Please provide a search query: `/search Dune 2021`", parse_mode="Markdown")
+        await message.answer("Укажите запрос: `/search Дюна 2021`", parse_mode="Markdown")
         return
 
     query = message.text.replace("/search", "").strip()
     if not query:
-        await message.answer("Please provide a search query: `/search Dune 2021`", parse_mode="Markdown")
+        await message.answer("Укажите запрос: `/search Дюна 2021`", parse_mode="Markdown")
         return
 
     await process_search(message, query, ContentType.UNKNOWN, db_user)
@@ -73,12 +78,12 @@ async def cmd_search(message: Message, db_user: User) -> None:
 async def cmd_movie(message: Message, db_user: User) -> None:
     """Handle /movie <query> command."""
     if not message.text:
-        await message.answer("Please provide a movie title: `/movie Dune 2021`", parse_mode="Markdown")
+        await message.answer("Укажите название фильма: `/movie Дюна 2021`", parse_mode="Markdown")
         return
 
     query = message.text.replace("/movie", "").strip()
     if not query:
-        await message.answer("Please provide a movie title: `/movie Dune 2021`", parse_mode="Markdown")
+        await message.answer("Укажите название фильма: `/movie Дюна 2021`", parse_mode="Markdown")
         return
 
     await process_search(message, query, ContentType.MOVIE, db_user)
@@ -88,15 +93,33 @@ async def cmd_movie(message: Message, db_user: User) -> None:
 async def cmd_series(message: Message, db_user: User) -> None:
     """Handle /series <query> command."""
     if not message.text:
-        await message.answer("Please provide a series title: `/series Breaking Bad`", parse_mode="Markdown")
+        await message.answer("Укажите название сериала: `/series Breaking Bad`", parse_mode="Markdown")
         return
 
     query = message.text.replace("/series", "").strip()
     if not query:
-        await message.answer("Please provide a series title: `/series Breaking Bad`", parse_mode="Markdown")
+        await message.answer("Укажите название сериала: `/series Breaking Bad`", parse_mode="Markdown")
         return
 
     await process_search(message, query, ContentType.SERIES, db_user)
+
+
+@router.message(F.text == MENU_SEARCH)
+async def handle_menu_search(message: Message) -> None:
+    """Handle search menu button."""
+    await message.answer("🔍 Введите название для поиска:")
+
+
+@router.message(F.text == MENU_MOVIE)
+async def handle_menu_movie(message: Message) -> None:
+    """Handle movie menu button."""
+    await message.answer("🎬 Введите название фильма:")
+
+
+@router.message(F.text == MENU_SERIES)
+async def handle_menu_series(message: Message) -> None:
+    """Handle series menu button."""
+    await message.answer("📺 Введите название сериала:")
 
 
 @router.message(F.text & ~F.text.startswith("/"))
@@ -105,8 +128,12 @@ async def handle_text_search(message: Message, db_user: User) -> None:
     if not message.text:
         return
 
-    query = message.text.strip()
-    await process_search(message, query, ContentType.UNKNOWN, db_user)
+    # Skip menu button texts
+    text = message.text.strip()
+    if text in (MENU_SEARCH, MENU_MOVIE, MENU_SERIES, "📥 Загрузки", "📊 qBit", "🔌 Статус", "⚙️ Настройки", "📋 История", "❓ Помощь"):
+        return
+
+    await process_search(message, text, ContentType.UNKNOWN, db_user)
 
 
 async def process_search(
@@ -130,7 +157,7 @@ async def process_search(
 
         # Detect content type if unknown
         if content_type == ContentType.UNKNOWN:
-            status_msg = await message.answer("🔍 Detecting content type...")
+            status_msg = await message.answer("🔍 Определяю тип контента...")
 
             # If season info in query, it's likely a series
             if parsed["season"] is not None:
@@ -141,7 +168,7 @@ async def process_search(
             if content_type == ContentType.UNKNOWN:
                 # Ask user to choose
                 await status_msg.edit_text(
-                    f"🤔 Is **{query}** a movie or a series?",
+                    f"🤔 **{query}** — это фильм или сериал?",
                     reply_markup=Keyboards.content_type_selection(),
                     parse_mode="Markdown",
                 )
@@ -158,13 +185,13 @@ async def process_search(
             await status_msg.delete()
 
         # Search for releases
-        status_msg = await message.answer(f"🔍 Searching for releases...")
+        status_msg = await message.answer("🔍 Ищу релизы...")
 
         results = await search_service.search_releases(query, content_type)
 
         if not results:
             await status_msg.edit_text(
-                Formatters.format_warning(f"No releases found for **{query}**"),
+                Formatters.format_warning(f"Ничего не найдено для **{query}**"),
                 parse_mode="Markdown",
             )
             return
@@ -249,7 +276,7 @@ async def handle_type_selection(callback: CallbackQuery, db_user: User) -> None:
         session = await db.get_session(user_id)
 
         if not session:
-            await callback.answer("Session expired. Please start a new search.", show_alert=True)
+            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
             return
 
         content_type = ContentType.MOVIE if callback.data == CallbackData.TYPE_MOVIE else ContentType.SERIES
@@ -286,21 +313,21 @@ async def handle_pagination(callback: CallbackQuery, db_user: User) -> None:
         session = await db.get_session(user_id)
 
         if not session or not session.results:
-            await callback.answer("Session expired. Please start a new search.", show_alert=True)
+            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
             return
 
         # Parse page number
         try:
             page = int(callback.data.replace(CallbackData.PAGE, ""))
         except ValueError:
-            await callback.answer("Invalid page", show_alert=True)
+            await callback.answer("Неверная страница", show_alert=True)
             return
 
         per_page = settings.results_per_page
         total_pages = (len(session.results) + per_page - 1) // per_page
 
         if page < 0 or page >= total_pages:
-            await callback.answer("Invalid page", show_alert=True)
+            await callback.answer("Неверная страница", show_alert=True)
             return
 
         # Update session
@@ -359,18 +386,18 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User) -> No
         session = await db.get_session(user_id)
 
         if not session or not session.results:
-            await callback.answer("Session expired. Please start a new search.", show_alert=True)
+            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
             return
 
         # Parse release index
         try:
             idx = int(callback.data.replace(CallbackData.RELEASE, ""))
         except ValueError:
-            await callback.answer("Invalid selection", show_alert=True)
+            await callback.answer("Неверный выбор", show_alert=True)
             return
 
         if idx < 0 or idx >= len(session.results):
-            await callback.answer("Invalid selection", show_alert=True)
+            await callback.answer("Неверный выбор", show_alert=True)
             return
 
         result = session.results[idx]
@@ -382,7 +409,7 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User) -> No
 
         # Now need to look up the actual content in Radarr/Sonarr
         await callback.message.edit_text(
-            text + "\n\n🔍 Looking up content info...",
+            text + "\n\n🔍 Загружаю информацию...",
             parse_mode="Markdown",
         )
 
@@ -403,7 +430,7 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User) -> No
                     )
                 else:
                     await callback.message.edit_text(
-                        f"{text}\n\n⚠️ Could not find movie info. Proceed anyway?",
+                        f"{text}\n\n⚠️ Не удалось найти информацию о фильме. Продолжить?",
                         reply_markup=Keyboards.release_details(result, session.content_type),
                         parse_mode="Markdown",
                     )
@@ -422,14 +449,14 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User) -> No
                     )
                 else:
                     await callback.message.edit_text(
-                        f"{text}\n\n⚠️ Could not find series info. Proceed anyway?",
+                        f"{text}\n\n⚠️ Не удалось найти информацию о сериале. Продолжить?",
                         reply_markup=Keyboards.release_details(result, session.content_type),
                         parse_mode="Markdown",
                     )
         except Exception as e:
             logger.warning("Failed to lookup content", error=str(e))
             await callback.message.edit_text(
-                f"{text}\n\n⚠️ Could not load content info: {str(e)}",
+                f"{text}\n\n⚠️ Ошибка загрузки информации: {str(e)}",
                 reply_markup=Keyboards.release_details(result, session.content_type),
                 parse_mode="Markdown",
             )
@@ -456,15 +483,15 @@ async def handle_grab_best(callback: CallbackQuery, db_user: User) -> None:
         session = await db.get_session(user_id)
 
         if not session or not session.results:
-            await callback.answer("Session expired. Please start a new search.", show_alert=True)
+            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
             return
 
         result = session.results[0]  # Best result
         session.selected_result = result
         await db.save_session(user_id, session)
 
-        await callback.answer("Grabbing best release...")
-        await callback.message.edit_text("⏳ Grabbing best release...")
+        await callback.answer("Скачиваю лучший релиз...")
+        await callback.message.edit_text("⏳ Скачиваю лучший релиз...")
 
         # Lookup and grab
         await grab_release(callback.message, session, db_user, db, search_service, add_service)
@@ -490,11 +517,11 @@ async def handle_confirm_grab(callback: CallbackQuery, db_user: User) -> None:
         session = await db.get_session(user_id)
 
         if not session or not session.selected_result:
-            await callback.answer("Session expired. Please start a new search.", show_alert=True)
+            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
             return
 
-        await callback.answer("Processing...")
-        await callback.message.edit_text("⏳ Processing grab request...")
+        await callback.answer("Обработка...")
+        await callback.message.edit_text("⏳ Обрабатываю запрос...")
 
         await grab_release(callback.message, session, db_user, db, search_service, add_service)
 
@@ -519,7 +546,7 @@ async def grab_release(
     prefs = db_user.preferences
 
     if not result:
-        await message.edit_text(Formatters.format_error("No release selected"))
+        await message.edit_text(Formatters.format_error("Релиз не выбран"))
         return
 
     try:
@@ -529,7 +556,7 @@ async def grab_release(
             if not isinstance(movie, MovieInfo):
                 movies = await search_service.lookup_movie(session.query)
                 if not movies:
-                    await message.edit_text(Formatters.format_error("Could not find movie in Radarr"))
+                    await message.edit_text(Formatters.format_error("Не удалось найти фильм в Radarr"))
                     return
                 movie = movies[0]
 
@@ -538,7 +565,7 @@ async def grab_release(
             folders = await add_service.get_radarr_root_folders()
 
             if not profiles or not folders:
-                await message.edit_text(Formatters.format_error("No quality profiles or root folders configured in Radarr"))
+                await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Radarr"))
                 return
 
             profile_id = prefs.radarr_quality_profile_id or profiles[0].id
@@ -562,7 +589,7 @@ async def grab_release(
 
             if success:
                 await message.edit_text(
-                    Formatters.format_success(f"**{movie.title}** ({movie.year})\n\n{msg}\n\nRelease: _{result.title}_"),
+                    Formatters.format_success(f"**{movie.title}** ({movie.year})\n\n{msg}\n\nРелиз: _{result.title}_"),
                     parse_mode="Markdown",
                 )
             else:
@@ -574,7 +601,7 @@ async def grab_release(
             if not isinstance(series, SeriesInfo):
                 series_list = await search_service.lookup_series(session.query)
                 if not series_list:
-                    await message.edit_text(Formatters.format_error("Could not find series in Sonarr"))
+                    await message.edit_text(Formatters.format_error("Не удалось найти сериал в Sonarr"))
                     return
                 series = series_list[0]
 
@@ -583,7 +610,7 @@ async def grab_release(
             folders = await add_service.get_sonarr_root_folders()
 
             if not profiles or not folders:
-                await message.edit_text(Formatters.format_error("No quality profiles or root folders configured in Sonarr"))
+                await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Sonarr"))
                 return
 
             profile_id = prefs.sonarr_quality_profile_id or profiles[0].id
@@ -617,7 +644,7 @@ async def grab_release(
             if success:
                 year_str = f" ({series.year})" if series.year else ""
                 await message.edit_text(
-                    Formatters.format_success(f"**{series.title}**{year_str}\n\n{msg}\n\nRelease: _{result.title}_"),
+                    Formatters.format_success(f"**{series.title}**{year_str}\n\n{msg}\n\nРелиз: _{result.title}_"),
                     parse_mode="Markdown",
                 )
             else:
@@ -645,7 +672,7 @@ async def handle_back(callback: CallbackQuery, db_user: User) -> None:
         session = await db.get_session(user_id)
 
         if not session or not session.results:
-            await callback.answer("Session expired", show_alert=True)
+            await callback.answer("Сессия истекла", show_alert=True)
             return
 
         # Clear selection and go back to results
@@ -706,7 +733,7 @@ async def handle_cancel(callback: CallbackQuery) -> None:
         user_id = callback.from_user.id
         await db.delete_session(user_id)
 
-        await callback.message.edit_text("Operation cancelled. Send a new search query to start over.")
+        await callback.message.edit_text("Операция отменена. Отправьте новый запрос для поиска.")
         await callback.answer()
     finally:
         await db.close()

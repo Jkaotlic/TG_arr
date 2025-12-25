@@ -78,8 +78,8 @@ class Formatters:
     ) -> str:
         """Format a page of search results."""
         type_emoji = "🎬" if content_type == ContentType.MOVIE else "📺"
-        header = f"{type_emoji} **Search results for:** `{query}`\n"
-        header += f"Page {page + 1}/{total_pages} | {len(results)} results shown\n\n"
+        header = f"{type_emoji} **Результаты поиска:** `{query}`\n"
+        header += f"Стр. {page + 1}/{total_pages} | Показано: {len(results)}\n\n"
 
         result_texts = []
         for i, result in enumerate(results):
@@ -93,17 +93,17 @@ class Formatters:
         lines = [f"**{result.title}**\n"]
 
         # Quality
-        lines.append("**Quality:**")
+        lines.append("**📊 Качество:**")
         if result.quality.resolution:
-            lines.append(f"  • Resolution: {result.quality.resolution}")
+            lines.append(f"  • Разрешение: {result.quality.resolution}")
         if result.quality.source:
-            lines.append(f"  • Source: {result.quality.source}")
+            lines.append(f"  • Источник: {result.quality.source}")
         if result.quality.codec:
-            lines.append(f"  • Codec: {result.quality.codec}")
+            lines.append(f"  • Кодек: {result.quality.codec}")
         if result.quality.hdr:
             lines.append(f"  • HDR: {result.quality.hdr}")
         if result.quality.audio:
-            lines.append(f"  • Audio: {result.quality.audio}")
+            lines.append(f"  • Аудио: {result.quality.audio}")
         if result.quality.is_remux:
             lines.append("  • 📀 REMUX")
         if result.quality.is_repack:
@@ -112,35 +112,35 @@ class Formatters:
         lines.append("")
 
         # Size and protocol
-        lines.append(f"💾 **Size:** {result.size_formatted}")
-        lines.append(f"📡 **Protocol:** {result.protocol.upper()}")
+        lines.append(f"💾 **Размер:** {result.size_formatted}")
+        lines.append(f"📡 **Протокол:** {result.protocol.upper()}")
 
         # Torrent info
         if result.protocol == "torrent":
             if result.seeders is not None:
-                lines.append(f"🌱 **Seeders:** {result.seeders}")
+                lines.append(f"🌱 **Сиды:** {result.seeders}")
             if result.leechers is not None:
-                lines.append(f"📥 **Leechers:** {result.leechers}")
+                lines.append(f"📥 **Личи:** {result.leechers}")
 
         # Indexer
-        lines.append(f"🔍 **Indexer:** {result.indexer}")
+        lines.append(f"🔍 **Индексатор:** {result.indexer}")
 
         # Score
-        lines.append(f"\n**Score:** {result.calculated_score}/100")
+        lines.append(f"\n**Оценка:** {result.calculated_score}/100")
 
         # Season/episode info
         if result.detected_season is not None:
-            season_info = f"Season {result.detected_season}"
+            season_info = f"Сезон {result.detected_season}"
             if result.detected_episode is not None:
-                season_info += f" Episode {result.detected_episode}"
+                season_info += f" Серия {result.detected_episode}"
             if result.is_season_pack:
-                season_info += " (Season Pack)"
+                season_info += " (сезон целиком)"
             lines.append(f"📅 {season_info}")
 
         # Publish date
         if result.publish_date:
-            date_str = result.publish_date.strftime("%Y-%m-%d %H:%M")
-            lines.append(f"📆 **Published:** {date_str}")
+            date_str = result.publish_date.strftime("%d.%m.%Y %H:%M")
+            lines.append(f"📆 **Опубликовано:** {date_str}")
 
         return "\n".join(lines)
 
@@ -153,16 +153,16 @@ class Formatters:
         lines = [f"🎬 **{movie.title}** ({movie.year})"]
 
         if movie.original_title and movie.original_title != movie.title:
-            lines.append(f"_Original: {movie.original_title}_")
+            lines.append(f"_Оригинал: {movie.original_title}_")
 
         if movie.runtime:
-            lines.append(f"⏱ Runtime: {movie.runtime} min")
+            lines.append(f"⏱ Длительность: {movie.runtime} мин")
 
         if movie.genres:
-            lines.append(f"🎭 Genres: {', '.join(movie.genres[:5])}")
+            lines.append(f"🎭 Жанры: {', '.join(movie.genres[:5])}")
 
         if movie.studio:
-            lines.append(f"🏢 Studio: {movie.studio}")
+            lines.append(f"🏢 Студия: {movie.studio}")
 
         if movie.overview:
             overview = movie.overview[:300]
@@ -172,9 +172,9 @@ class Formatters:
 
         # Status in Radarr
         if movie.radarr_id:
-            status = "✅ In library"
+            status = "✅ В библиотеке"
             if movie.has_file:
-                status += " (Downloaded)"
+                status += " (скачан)"
             lines.append(f"\n{status}")
 
         return "\n".join(lines)
@@ -192,22 +192,23 @@ class Formatters:
             lines[0] += f" ({series.year})"
 
         if series.original_title and series.original_title != series.title:
-            lines.append(f"_Original: {series.original_title}_")
+            lines.append(f"_Оригинал: {series.original_title}_")
 
         if series.network:
-            lines.append(f"📡 Network: {series.network}")
+            lines.append(f"📡 Канал: {series.network}")
 
         if series.status:
             status_emoji = "🟢" if series.status.lower() == "continuing" else "🔴"
-            lines.append(f"{status_emoji} Status: {series.status.capitalize()}")
+            status_text = "Выходит" if series.status.lower() == "continuing" else "Завершён"
+            lines.append(f"{status_emoji} Статус: {status_text}")
 
-        lines.append(f"📊 Seasons: {series.season_count} | Episodes: {series.total_episode_count}")
+        lines.append(f"📊 Сезонов: {series.season_count} | Серий: {series.total_episode_count}")
 
         if series.runtime:
-            lines.append(f"⏱ Runtime: ~{series.runtime} min/episode")
+            lines.append(f"⏱ Длительность: ~{series.runtime} мин/серия")
 
         if series.genres:
-            lines.append(f"🎭 Genres: {', '.join(series.genres[:5])}")
+            lines.append(f"🎭 Жанры: {', '.join(series.genres[:5])}")
 
         if series.overview:
             overview = series.overview[:300]
@@ -217,20 +218,20 @@ class Formatters:
 
         # Status in Sonarr
         if series.sonarr_id:
-            lines.append("\n✅ In library")
+            lines.append("\n✅ В библиотеке")
 
         return "\n".join(lines)
 
     @staticmethod
     def format_system_status(statuses: list[SystemStatus]) -> str:
         """Format system status information."""
-        lines = ["**System Status**\n"]
+        lines = ["**🔌 Статус сервисов**\n"]
 
         for status in statuses:
             if status.available:
                 emoji = "✅"
                 version_str = f" v{status.version}" if status.version else ""
-                time_str = f" ({status.response_time_ms}ms)" if status.response_time_ms else ""
+                time_str = f" ({status.response_time_ms}мс)" if status.response_time_ms else ""
                 lines.append(f"{emoji} **{status.service}**{version_str}{time_str}")
             else:
                 emoji = "❌"
@@ -248,26 +249,26 @@ class Formatters:
         sonarr_folders: list[RootFolder],
     ) -> str:
         """Format user preferences for settings display."""
-        lines = ["**Your Settings**\n"]
+        lines = ["**⚙️ Ваши настройки**\n"]
 
         # Radarr settings
-        lines.append("**🎬 Radarr:**")
+        lines.append("**🎬 Radarr (фильмы):**")
         rp = next((p for p in radarr_profiles if p.id == prefs.radarr_quality_profile_id), None)
-        lines.append(f"  Profile: {rp.name if rp else 'Not set'}")
+        lines.append(f"  Профиль: {rp.name if rp else 'Не выбран'}")
         rf = next((f for f in radarr_folders if f.id == prefs.radarr_root_folder_id), None)
-        lines.append(f"  Folder: {rf.path if rf else 'Not set'}")
+        lines.append(f"  Папка: {rf.path if rf else 'Не выбрана'}")
 
         # Sonarr settings
-        lines.append("\n**📺 Sonarr:**")
+        lines.append("\n**📺 Sonarr (сериалы):**")
         sp = next((p for p in sonarr_profiles if p.id == prefs.sonarr_quality_profile_id), None)
-        lines.append(f"  Profile: {sp.name if sp else 'Not set'}")
+        lines.append(f"  Профиль: {sp.name if sp else 'Не выбран'}")
         sf = next((f for f in sonarr_folders if f.id == prefs.sonarr_root_folder_id), None)
-        lines.append(f"  Folder: {sf.path if sf else 'Not set'}")
+        lines.append(f"  Папка: {sf.path if sf else 'Не выбрана'}")
 
         # General preferences
-        lines.append("\n**⚙️ General:**")
-        lines.append(f"  Preferred Quality: {prefs.preferred_resolution or 'Any'}")
-        lines.append(f"  Auto-Grab: {'ON' if prefs.auto_grab_enabled else 'OFF'}")
+        lines.append("\n**🎯 Общие:**")
+        lines.append(f"  Качество: {prefs.preferred_resolution or 'Любое'}")
+        lines.append(f"  Авто-граб: {'ВКЛ ✓' if prefs.auto_grab_enabled else 'ВЫКЛ'}")
 
         return "\n".join(lines)
 
@@ -275,74 +276,62 @@ class Formatters:
     def format_action_log(actions: list[ActionLog], limit: int = 10) -> str:
         """Format action history."""
         if not actions:
-            return "No actions recorded yet."
+            return "📭 История пуста."
 
-        lines = ["**Recent Actions**\n"]
+        lines = ["**📋 Последние действия**\n"]
 
         for action in actions[:limit]:
             emoji = "✅" if action.success else "❌"
             type_emoji = "🎬" if action.content_type == ContentType.MOVIE else "📺"
 
             action_str = action.action_type.value.upper()
-            title = action.content_title or action.query or "Unknown"
+            title = action.content_title or action.query or "Неизвестно"
 
             if len(title) > 30:
                 title = title[:27] + "..."
 
-            date_str = action.created_at.strftime("%m/%d %H:%M")
+            date_str = action.created_at.strftime("%d.%m %H:%M")
 
             lines.append(f"{emoji} {type_emoji} {action_str}: {title} ({date_str})")
 
             if not action.success and action.error_message:
                 error = action.error_message[:50]
-                lines.append(f"   ↳ Error: {error}")
+                lines.append(f"   ↳ Ошибка: {error}")
 
         return "\n".join(lines)
 
     @staticmethod
     def format_help() -> str:
         """Format help message."""
-        return """**TG_arr Bot Help**
+        return """**🤖 TG\_arr — Справка**
 
-**Commands:**
-• `/start` - Start the bot
-• `/help` - Show this help message
-• `/search <query>` - Search for movies or series (auto-detect)
-• `/movie <query>` - Search for a movie
-• `/series <query>` - Search for a series
-• `/settings` - Configure your preferences
-• `/status` - Check Prowlarr/Radarr/Sonarr status
-• `/history` - View your recent actions
-• `/cancel` - Cancel current operation
+**📌 Команды:**
+• `/search` — поиск фильмов и сериалов
+• `/movie` — поиск только фильмов
+• `/series` — поиск только сериалов
+• `/downloads` — активные загрузки
+• `/qstatus` — статус qBittorrent
+• `/settings` — настройки
+• `/status` — статус сервисов
+• `/history` — история действий
 
-**Download Management:**
-• `/downloads` or `/dl` - View active downloads
-• `/qstatus` - qBittorrent status overview
+**💡 Примеры поиска:**
+• `Дюна 2021` — поиск фильма
+• `Breaking Bad S02` — 2 сезон сериала
+• `1080p remux` — в названии
 
-**Search Examples:**
-• `Dune 2021` - Search for Dune (2021)
-• `Breaking Bad S02` - Search Breaking Bad Season 2
-• `The Office 1080p` - Search The Office in 1080p
-
-**How it works:**
-1. Send a search query
-2. Select movie or series (if not auto-detected)
-3. Choose from available releases
-4. Confirm to add and download
-
-**Tips:**
-• Use `/settings` to set default quality profiles and folders
-• Enable auto-grab to quickly download high-scored releases
-• Results are sorted by quality score
-• Use `/downloads` to manage active torrents
+**⚡ Советы:**
+• Просто напишите название для поиска
+• Используйте `/settings` для качества по умолчанию
+• Включите авто-граб для быстрой загрузки лучших релизов
 """
 
     @staticmethod
     def format_error(error: str, include_retry: bool = True) -> str:
         """Format error message."""
-        msg = f"❌ **Error:** {error}"
+        msg = f"❌ **Ошибка:** {error}"
         if include_retry:
-            msg += "\n\nPlease try again or use /cancel to start over."
+            msg += "\n\nПопробуйте ещё раз или /cancel для отмены."
         return msg
 
     @staticmethod
@@ -367,44 +356,45 @@ class Formatters:
     @staticmethod
     def format_qbittorrent_status(status: QBittorrentStatus) -> str:
         """Format qBittorrent global status."""
-        lines = ["**qBittorrent Status**\n"]
+        lines = ["**📊 Статус qBittorrent**\n"]
 
         # Version and connection
-        lines.append(f"🖥 **Version:** {status.version}")
+        lines.append(f"🖥 **Версия:** {status.version}")
         conn_emoji = "🟢" if status.connection_status == "connected" else "🔴"
-        lines.append(f"{conn_emoji} **Connection:** {status.connection_status}")
+        conn_text = "подключён" if status.connection_status == "connected" else status.connection_status
+        lines.append(f"{conn_emoji} **Соединение:** {conn_text}")
 
         lines.append("")
 
         # Transfer speeds
-        lines.append("**📊 Transfer:**")
-        lines.append(f"  ⬇️ Download: {status.download_speed_formatted}")
-        lines.append(f"  ⬆️ Upload: {status.upload_speed_formatted}")
+        lines.append("**📡 Скорость:**")
+        lines.append(f"  ⬇️ Загрузка: {status.download_speed_formatted}")
+        lines.append(f"  ⬆️ Отдача: {status.upload_speed_formatted}")
 
         # Limits
         if status.download_limit > 0 or status.upload_limit > 0:
             from bot.models import format_speed
-            dl_limit = format_speed(status.download_limit) if status.download_limit > 0 else "♾"
-            ul_limit = format_speed(status.upload_limit) if status.upload_limit > 0 else "♾"
-            lines.append(f"  📉 Limits: ⬇️ {dl_limit} | ⬆️ {ul_limit}")
+            dl_limit = format_speed(status.download_limit) if status.download_limit > 0 else "∞"
+            ul_limit = format_speed(status.upload_limit) if status.upload_limit > 0 else "∞"
+            lines.append(f"  📉 Лимиты: ⬇️ {dl_limit} | ⬆️ {ul_limit}")
 
         lines.append("")
 
         # Torrents
-        lines.append("**📋 Torrents:**")
-        lines.append(f"  Total: {status.total_torrents}")
-        lines.append(f"  Active: ⬇️ {status.active_downloads} | ⬆️ {status.active_uploads}")
+        lines.append("**📋 Торренты:**")
+        lines.append(f"  Всего: {status.total_torrents}")
+        lines.append(f"  Активных: ⬇️ {status.active_downloads} | ⬆️ {status.active_uploads}")
         if status.paused_torrents > 0:
-            lines.append(f"  Paused: {status.paused_torrents}")
+            lines.append(f"  На паузе: {status.paused_torrents}")
 
         lines.append("")
 
         # Disk
-        lines.append(f"💾 **Free space:** {status.free_space_formatted}")
+        lines.append(f"💾 **Свободно:** {status.free_space_formatted}")
 
         # DHT
         if status.dht_nodes > 0:
-            lines.append(f"🌐 **DHT nodes:** {status.dht_nodes}")
+            lines.append(f"🌐 **DHT узлов:** {status.dht_nodes}")
 
         return "\n".join(lines)
 
@@ -418,23 +408,23 @@ class Formatters:
     ) -> str:
         """Format torrent list header."""
         filter_names = {
-            TorrentFilter.ALL: "All",
-            TorrentFilter.DOWNLOADING: "Downloading",
-            TorrentFilter.SEEDING: "Seeding",
-            TorrentFilter.COMPLETED: "Completed",
-            TorrentFilter.PAUSED: "Paused",
-            TorrentFilter.ACTIVE: "Active",
-            TorrentFilter.INACTIVE: "Inactive",
-            TorrentFilter.STALLED: "Stalled",
-            TorrentFilter.ERRORED: "Errored",
+            TorrentFilter.ALL: "Все",
+            TorrentFilter.DOWNLOADING: "Загружаются",
+            TorrentFilter.SEEDING: "Раздаются",
+            TorrentFilter.COMPLETED: "Завершены",
+            TorrentFilter.PAUSED: "На паузе",
+            TorrentFilter.ACTIVE: "Активные",
+            TorrentFilter.INACTIVE: "Неактивные",
+            TorrentFilter.STALLED: "Застряли",
+            TorrentFilter.ERRORED: "С ошибками",
         }
 
-        filter_name = filter_names.get(current_filter, "All")
-        header = f"**📥 Downloads** — {filter_name}\n"
-        header += f"Showing {len(torrents)} of {total_count} torrents"
+        filter_name = filter_names.get(current_filter, "Все")
+        header = f"**📥 Загрузки** — {filter_name}\n"
+        header += f"Показано {len(torrents)} из {total_count}"
 
         if total_pages > 1:
-            header += f" (Page {page + 1}/{total_pages})"
+            header += f" (стр. {page + 1}/{total_pages})"
 
         return header
 
@@ -444,8 +434,21 @@ class Formatters:
         lines = [f"**{torrent.name}**\n"]
 
         # State and progress
-        lines.append(f"{torrent.state_emoji} **State:** {torrent.state.value.capitalize()}")
-        lines.append(f"📊 **Progress:** {torrent.progress_percent}%")
+        state_names = {
+            "downloading": "Загрузка",
+            "seeding": "Раздача",
+            "completed": "Завершён",
+            "paused": "Пауза",
+            "queued": "В очереди",
+            "checking": "Проверка",
+            "stalled": "Застрял",
+            "error": "Ошибка",
+            "moving": "Перемещение",
+            "unknown": "Неизвестно",
+        }
+        state_text = state_names.get(torrent.state.value, torrent.state.value)
+        lines.append(f"{torrent.state_emoji} **Статус:** {state_text}")
+        lines.append(f"📊 **Прогресс:** {torrent.progress_percent}%")
 
         # Progress bar
         progress_bar = Formatters._progress_bar(torrent.progress)
@@ -456,41 +459,41 @@ class Formatters:
         # Size info
         from bot.models import format_bytes
         downloaded = format_bytes(torrent.downloaded)
-        lines.append(f"💾 **Size:** {downloaded} / {torrent.size_formatted}")
+        lines.append(f"💾 **Размер:** {downloaded} / {torrent.size_formatted}")
 
         # Speeds
         if torrent.download_speed > 0 or torrent.upload_speed > 0:
-            lines.append(f"⬇️ **Download:** {torrent.download_speed_formatted}")
-            lines.append(f"⬆️ **Upload:** {torrent.upload_speed_formatted}")
+            lines.append(f"⬇️ **Загрузка:** {torrent.download_speed_formatted}")
+            lines.append(f"⬆️ **Отдача:** {torrent.upload_speed_formatted}")
 
         # ETA
         if torrent.eta is not None and torrent.eta > 0 and torrent.progress < 1.0:
-            lines.append(f"⏱ **ETA:** {torrent.eta_formatted}")
+            lines.append(f"⏱ **Осталось:** {torrent.eta_formatted}")
 
         lines.append("")
 
         # Peers
-        lines.append("**🌐 Peers:**")
-        lines.append(f"  Seeds: {torrent.seeds} ({torrent.seeds_total} total)")
-        lines.append(f"  Peers: {torrent.peers} ({torrent.peers_total} total)")
+        lines.append("**🌐 Пиры:**")
+        lines.append(f"  Сиды: {torrent.seeds} (всего {torrent.seeds_total})")
+        lines.append(f"  Личи: {torrent.peers} (всего {torrent.peers_total})")
 
         # Ratio
-        lines.append(f"\n📈 **Ratio:** {torrent.ratio:.2f}")
+        lines.append(f"\n📈 **Рейтинг:** {torrent.ratio:.2f}")
 
         # Category and tags
         if torrent.category:
-            lines.append(f"📁 **Category:** {torrent.category}")
+            lines.append(f"📁 **Категория:** {torrent.category}")
         if torrent.tags:
-            lines.append(f"🏷 **Tags:** {', '.join(torrent.tags)}")
+            lines.append(f"🏷 **Теги:** {', '.join(torrent.tags)}")
 
         # Save path
-        lines.append(f"\n📂 **Path:** `{torrent.save_path}`")
+        lines.append(f"\n📂 **Путь:** `{torrent.save_path}`")
 
         # Dates
         if torrent.added_on:
-            lines.append(f"📅 **Added:** {torrent.added_on.strftime('%Y-%m-%d %H:%M')}")
+            lines.append(f"📅 **Добавлен:** {torrent.added_on.strftime('%d.%m.%Y %H:%M')}")
         if torrent.completion_on and torrent.progress >= 1.0:
-            lines.append(f"✅ **Completed:** {torrent.completion_on.strftime('%Y-%m-%d %H:%M')}")
+            lines.append(f"✅ **Завершён:** {torrent.completion_on.strftime('%d.%m.%Y %H:%M')}")
 
         return "\n".join(lines)
 
@@ -510,13 +513,13 @@ class Formatters:
     @staticmethod
     def format_download_complete_notification(torrent: TorrentInfo) -> str:
         """Format notification message for completed download."""
-        lines = ["✅ **Download Complete!**\n"]
+        lines = ["✅ **Загрузка завершена!**\n"]
         lines.append(f"📥 **{torrent.name}**")
-        lines.append(f"💾 Size: {torrent.size_formatted}")
-        lines.append(f"📂 Path: `{torrent.save_path}`")
+        lines.append(f"💾 Размер: {torrent.size_formatted}")
+        lines.append(f"📂 Путь: `{torrent.save_path}`")
 
         if torrent.completion_on:
-            lines.append(f"⏱ Completed: {torrent.completion_on.strftime('%Y-%m-%d %H:%M')}")
+            lines.append(f"⏱ Завершено: {torrent.completion_on.strftime('%d.%m.%Y %H:%M')}")
 
         return "\n".join(lines)
 
@@ -524,32 +527,32 @@ class Formatters:
     def format_no_torrents(current_filter: TorrentFilter) -> str:
         """Format message when no torrents match the filter."""
         if current_filter == TorrentFilter.ALL:
-            return "📭 No torrents found.\n\nAdd content using /search or /movie commands."
+            return "📭 Торрентов нет.\n\nИспользуйте /search для поиска контента."
 
         filter_names = {
-            TorrentFilter.DOWNLOADING: "downloading",
-            TorrentFilter.SEEDING: "seeding",
-            TorrentFilter.COMPLETED: "completed",
-            TorrentFilter.PAUSED: "paused",
-            TorrentFilter.ACTIVE: "active",
-            TorrentFilter.STALLED: "stalled",
-            TorrentFilter.ERRORED: "errored",
+            TorrentFilter.DOWNLOADING: "загружаемых",
+            TorrentFilter.SEEDING: "раздаваемых",
+            TorrentFilter.COMPLETED: "завершённых",
+            TorrentFilter.PAUSED: "приостановленных",
+            TorrentFilter.ACTIVE: "активных",
+            TorrentFilter.STALLED: "застрявших",
+            TorrentFilter.ERRORED: "с ошибками",
         }
 
-        filter_name = filter_names.get(current_filter, "matching")
-        return f"📭 No {filter_name} torrents found.\n\nTry a different filter or check /downloads."
+        filter_name = filter_names.get(current_filter, "подходящих")
+        return f"📭 Нет {filter_name} торрентов.\n\nПопробуйте другой фильтр."
 
     @staticmethod
     def format_speed_limit_changed(limit_type: str, speed_kb: int) -> str:
         """Format message for speed limit change."""
         if speed_kb == 0:
-            speed_str = "unlimited"
+            speed_str = "без ограничений"
         else:
             from bot.models import format_speed
             speed_str = format_speed(speed_kb * 1024)
 
-        direction = "Download" if limit_type == "dl" else "Upload"
-        return f"✅ {direction} limit set to {speed_str}"
+        direction = "Загрузка" if limit_type == "dl" else "Отдача"
+        return f"✅ {direction}: {speed_str}"
 
     @staticmethod
     def format_torrent_action(action: str, torrent_name: str, success: bool = True) -> str:
@@ -558,20 +561,20 @@ class Formatters:
 
         if success:
             action_messages = {
-                "pause": f"⏸ Paused: {name}",
-                "resume": f"▶️ Resumed: {name}",
-                "delete": f"🗑 Removed: {name}",
-                "delete_files": f"🗑 Removed with files: {name}",
+                "pause": f"⏸ Пауза: {name}",
+                "resume": f"▶️ Возобновлён: {name}",
+                "delete": f"🗑 Удалён: {name}",
+                "delete_files": f"🗑 Удалён с файлами: {name}",
             }
             return action_messages.get(action, f"✅ {action}: {name}")
         else:
-            return f"❌ Failed to {action}: {name}"
+            return f"❌ Ошибка {action}: {name}"
 
     @staticmethod
     def format_bulk_action(action: str, count: int) -> str:
         """Format message for bulk torrent action."""
         action_messages = {
-            "pause": f"⏸ Paused {count} torrents",
-            "resume": f"▶️ Resumed {count} torrents",
+            "pause": f"⏸ Приостановлено: {count} торрентов",
+            "resume": f"▶️ Возобновлено: {count} торрентов",
         }
-        return action_messages.get(action, f"✅ {action} {count} torrents")
+        return action_messages.get(action, f"✅ {action}: {count} торрентов")
