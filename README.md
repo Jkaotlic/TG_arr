@@ -107,6 +107,13 @@ Check logs:
 docker compose logs -f tg-arr-bot
 ```
 
+### Deploy via Portainer (Stacks)
+
+Для Portainer не нужно “загружать `.env` файл”: важны именно переменные окружения контейнера.
+
+- В Stack добавь переменные `TELEGRAM_BOT_TOKEN`, `ALLOWED_TG_IDS` (и/или `ADMIN_TG_IDS`), плюс `PROWLARR_*`, `RADARR_*`, `SONARR_*`, затем **Redeploy**.
+- Быстрая проверка: открой консоль контейнера и выполни `printenv | grep -E "ALLOWED_TG_IDS|ADMIN_TG_IDS|TELEGRAM_BOT_TOKEN"`.
+
 ## Commands
 
 | Command | Description |
