@@ -308,7 +308,14 @@ class QBittorrentClient:
         if isinstance(hashes, list):
             hashes = "|".join(hashes)
 
-        await self._request("POST", "/api/v2/torrents/pause", data={"hashes": hashes})
+        # Try new API (v5.0+) first, fall back to old API
+        try:
+            await self._request("POST", "/api/v2/torrents/stop", data={"hashes": hashes})
+        except QBittorrentError as e:
+            if e.status_code == 404:
+                await self._request("POST", "/api/v2/torrents/pause", data={"hashes": hashes})
+            else:
+                raise
         logger.info("Paused torrents", hashes=hashes)
 
     async def resume(self, hashes: list[str] | str = "all") -> None:
@@ -316,7 +323,14 @@ class QBittorrentClient:
         if isinstance(hashes, list):
             hashes = "|".join(hashes)
 
-        await self._request("POST", "/api/v2/torrents/resume", data={"hashes": hashes})
+        # Try new API (v5.0+) first, fall back to old API
+        try:
+            await self._request("POST", "/api/v2/torrents/start", data={"hashes": hashes})
+        except QBittorrentError as e:
+            if e.status_code == 404:
+                await self._request("POST", "/api/v2/torrents/resume", data={"hashes": hashes})
+            else:
+                raise
         logger.info("Resumed torrents", hashes=hashes)
 
     async def delete(self, hashes: list[str] | str, delete_files: bool = False) -> None:

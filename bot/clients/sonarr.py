@@ -362,3 +362,17 @@ class SonarrClient(BaseAPIClient):
             root_folder_path=item.get("rootFolderPath") or item.get("path"),
             seasons=seasons,
         )
+
+    async def check_connection(self) -> tuple[bool, str | None, float | None]:
+        """Check if Sonarr is available. Uses v3 API."""
+        import time
+        start_time = time.monotonic()
+        try:
+            result = await self.get("/api/v3/system/status")
+            elapsed = (time.monotonic() - start_time) * 1000
+            version = result.get("version") if isinstance(result, dict) else None
+            return True, version, round(elapsed, 2)
+        except Exception as e:
+            elapsed = (time.monotonic() - start_time) * 1000
+            logger.warning("Sonarr health check failed", error=str(e))
+            return False, None, round(elapsed, 2)

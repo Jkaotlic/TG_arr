@@ -303,7 +303,7 @@ class Formatters:
     @staticmethod
     def format_help() -> str:
         """Format help message."""
-        return """**🤖 TG\_arr — Справка**
+        return """**🤖 TG\\_arr — Справка**
 
 **📌 Команды:**
 • `/search` — поиск фильмов и сериалов
