@@ -5,7 +5,7 @@ from typing import Any, Optional
 import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, Message
 
 from bot.config import get_settings
 from bot.db import Database
@@ -407,6 +407,9 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
             parse_mode="Markdown",
         )
 
+        # Check if force grab is available
+        has_qbittorrent = add_service.qbittorrent is not None
+
         # Look up content
         try:
             if session.content_type == ContentType.MOVIE:
@@ -419,13 +422,13 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
                     movie_text = Formatters.format_movie_info(movie)
                     await callback.message.edit_text(
                         f"{text}\n\n---\n{movie_text}",
-                        reply_markup=Keyboards.release_details(result, session.content_type),
+                        reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
                         parse_mode="Markdown",
                     )
                 else:
                     await callback.message.edit_text(
                         f"{text}\n\n⚠️ Не удалось найти информацию о фильме. Продолжить?",
-                        reply_markup=Keyboards.release_details(result, session.content_type),
+                        reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
                         parse_mode="Markdown",
                     )
             else:
@@ -438,20 +441,20 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
                     series_text = Formatters.format_series_info(series)
                     await callback.message.edit_text(
                         f"{text}\n\n---\n{series_text}",
-                        reply_markup=Keyboards.release_details(result, session.content_type),
+                        reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
                         parse_mode="Markdown",
                     )
                 else:
                     await callback.message.edit_text(
                         f"{text}\n\n⚠️ Не удалось найти информацию о сериале. Продолжить?",
-                        reply_markup=Keyboards.release_details(result, session.content_type),
+                        reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
                         parse_mode="Markdown",
                     )
         except Exception as e:
             logger.warning("Failed to lookup content", error=str(e))
             await callback.message.edit_text(
                 f"{text}\n\n⚠️ Ошибка загрузки информации: {str(e)}",
-                reply_markup=Keyboards.release_details(result, session.content_type),
+                reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
                 parse_mode="Markdown",
             )
 
@@ -581,24 +584,11 @@ async def grab_release(
                     Formatters.format_success(f"**{movie.title}** ({movie.year})\n\n{msg}\n\nРелиз: _{result.title}_"),
                     parse_mode="Markdown",
                 )
-                # Clean up session on success
-                await db.delete_session(user_id)
             else:
-                # Check if rejected - offer force grab
-                if "отклонён" in msg.lower() and add_service.qbittorrent:
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="⚡ Принудительная загрузка", callback_data=CallbackData.FORCE_GRAB)],
-                        [InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)],
-                    ])
-                    await message.edit_text(
-                        Formatters.format_error(f"{msg}\n\nМожно загрузить напрямую через qBittorrent:"),
-                        reply_markup=keyboard,
-                    )
-                    # Keep session for force grab
-                else:
-                    await message.edit_text(Formatters.format_error(msg))
-                    await db.delete_session(user_id)
-            return  # Don't clean up session twice
+                await message.edit_text(Formatters.format_error(msg))
+
+            await db.delete_session(user_id)
+            return
 
         else:
             # Series
@@ -652,23 +642,10 @@ async def grab_release(
                     Formatters.format_success(f"**{series.title}**{year_str}\n\n{msg}\n\nРелиз: _{result.title}_"),
                     parse_mode="Markdown",
                 )
-                # Clean up session on success
-                await db.delete_session(user_id)
             else:
-                # Check if rejected - offer force grab
-                if "отклонён" in msg.lower() and add_service.qbittorrent:
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="⚡ Принудительная загрузка", callback_data=CallbackData.FORCE_GRAB)],
-                        [InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)],
-                    ])
-                    await message.edit_text(
-                        Formatters.format_error(f"{msg}\n\nМожно загрузить напрямую через qBittorrent:"),
-                        reply_markup=keyboard,
-                    )
-                    # Keep session for force grab
-                else:
-                    await message.edit_text(Formatters.format_error(msg))
-                    await db.delete_session(user_id)
+                await message.edit_text(Formatters.format_error(msg))
+
+            await db.delete_session(user_id)
 
     except Exception as e:
         logger.error("Grab failed", error=str(e))
