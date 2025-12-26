@@ -78,9 +78,10 @@ class AuthMiddleware(BaseMiddleware):
             await self.db.create_user(db_user)
             logger.info("Created new user", user_id=user_id, role=db_user.role.value)
 
-        # Add user info to handler data
+        # Add user info and database to handler data
         data["db_user"] = db_user
         data["is_admin"] = self.settings.is_admin(user_id)
+        data["db"] = self.db
 
         return await handler(event, data)
 

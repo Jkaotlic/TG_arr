@@ -93,10 +93,10 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
 
     except QBittorrentError as e:
         logger.error("qBittorrent error", error=str(e))
-        await message.answer(f"❌ qBittorrent error: {e.message}")
+        await message.answer(f"❌ Ошибка qBittorrent: {e.message}")
     except Exception as e:
         logger.error("Failed to get downloads", error=str(e))
-        await message.answer(f"❌ Error: {str(e)}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
     finally:
         if qbt:
             await qbt.close()
@@ -126,10 +126,10 @@ async def cmd_qstatus(message: Message, db_user: User) -> None:
 
     except QBittorrentError as e:
         logger.error("qBittorrent error", error=str(e))
-        await message.answer(f"❌ qBittorrent error: {e.message}")
+        await message.answer(f"❌ Ошибка qBittorrent: {e.message}")
     except Exception as e:
         logger.error("Failed to get qBittorrent status", error=str(e))
-        await message.answer(f"❌ Error: {str(e)}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
     finally:
         if qbt:
             await qbt.close()
@@ -161,7 +161,7 @@ async def cmd_pause(message: Message, db_user: User) -> None:
                 await message.answer(f"❌ Торрент не найден: {args}")
 
     except QBittorrentError as e:
-        await message.answer(f"❌ Error: {e.message}")
+        await message.answer(f"❌ Ошибка: {e.message}")
     finally:
         if qbt:
             await qbt.close()
@@ -192,7 +192,7 @@ async def cmd_resume(message: Message, db_user: User) -> None:
                 await message.answer(f"❌ Торрент не найден: {args}")
 
     except QBittorrentError as e:
-        await message.answer(f"❌ Error: {e.message}")
+        await message.answer(f"❌ Ошибка: {e.message}")
     finally:
         if qbt:
             await qbt.close()
@@ -235,7 +235,7 @@ async def handle_refresh(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to refresh", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -279,7 +279,7 @@ async def handle_page(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Pagination error", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -317,7 +317,7 @@ async def handle_torrent_details(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to get torrent details", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -349,7 +349,7 @@ async def handle_pause_torrent(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to pause", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -381,7 +381,7 @@ async def handle_resume_torrent(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to resume", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -413,7 +413,7 @@ async def handle_delete_torrent(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to delete", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -445,7 +445,7 @@ async def handle_delete_with_files(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to delete", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -474,7 +474,7 @@ async def handle_recheck(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to recheck", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -511,7 +511,7 @@ async def handle_priority(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to set priority", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -531,7 +531,7 @@ async def handle_pause_all(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to pause all", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -551,7 +551,7 @@ async def handle_resume_all(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to resume all", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -618,7 +618,7 @@ async def handle_filter_select(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Filter error", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -660,7 +660,7 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Speed menu error", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
@@ -699,7 +699,7 @@ async def handle_speed_set(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Speed set error", error=str(e))
-        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
     finally:
         if qbt:
             await qbt.close()
