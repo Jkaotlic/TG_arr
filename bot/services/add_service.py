@@ -6,6 +6,7 @@ import structlog
 
 from bot.clients.base import APIError
 from bot.clients.prowlarr import ProwlarrClient
+from bot.clients.qbittorrent import QBittorrentClient
 from bot.clients.radarr import RadarrClient
 from bot.clients.sonarr import SonarrClient
 from bot.models import (
@@ -30,10 +31,12 @@ class AddService:
         prowlarr: ProwlarrClient,
         radarr: RadarrClient,
         sonarr: SonarrClient,
+        qbittorrent: Optional[QBittorrentClient] = None,
     ):
         self.prowlarr = prowlarr
         self.radarr = radarr
         self.sonarr = sonarr
+        self.qbittorrent = qbittorrent
 
     async def get_radarr_profiles(self) -> list[QualityProfile]:
         """Get Radarr quality profiles."""
@@ -176,18 +179,21 @@ class AddService:
         release: SearchResult,
         quality_profile_id: int,
         root_folder_path: str,
+        force_download: bool = False,
     ) -> tuple[bool, ActionLog, str]:
         """
         Grab a specific release for a movie.
 
         First adds the movie to Radarr (if not exists), then tries to grab the release.
         Falls back to push release if direct grab fails.
+        If force_download=True and release is rejected, downloads directly via qBittorrent.
 
         Args:
             movie: MovieInfo object
             release: SearchResult to grab
             quality_profile_id: Quality profile ID
             root_folder_path: Root folder path
+            force_download: Force download even if rejected by Radarr
 
         Returns:
             Tuple of (success, ActionLog, message)
@@ -221,6 +227,8 @@ class AddService:
                 )
 
             # Try to push the release
+            release_rejected = False
+            rejections = []
             if release.download_url:
                 try:
                     log.info("Attempting push_release", download_url=release.download_url[:100])
@@ -237,30 +245,53 @@ class AddService:
                         return True, action, "Релиз отправлен на скачивание"
                     else:
                         rejections = result.get("rejections", [])
+                        release_rejected = True
                         log.warning("Release was rejected", rejections=rejections)
                 except APIError as e:
                     log.warning("Push release failed, trying direct grab", error=str(e))
 
             # Try direct grab through indexer
-            if release.indexer_id > 0:
+            if release.indexer_id > 0 and not release_rejected:
                 try:
                     await self.radarr.grab_release(release.guid, release.indexer_id)
                     action.success = True
                     log.info("Release grabbed successfully")
-                    return True, action, "Release grabbed successfully"
+                    return True, action, "Релиз захвачен"
                 except APIError as e:
                     log.warning("Direct grab failed", error=str(e))
+
+            # Force download via qBittorrent if rejected and force_download enabled
+            if release_rejected and force_download and self.qbittorrent:
+                download_url = release.download_url or release.magnet_url
+                if download_url:
+                    try:
+                        await self.qbittorrent.add_torrent_url(
+                            download_url,
+                            category="radarr",  # Tag for Radarr/movies
+                        )
+                        action.success = True
+                        log.info("Force downloaded via qBittorrent with radarr category")
+                        return True, action, "Принудительно загружено через qBittorrent"
+                    except Exception as e:
+                        log.error("Force download failed", error=str(e))
+
+            # If rejected, return rejection info without fallback
+            if release_rejected:
+                action.success = False
+                rejection_msg = ", ".join(rejections) if rejections else "Отклонено"
+                action.error_message = rejection_msg
+                return False, action, f"Релиз отклонён: {rejection_msg}"
 
             # Fallback: trigger search
             if existing and existing.radarr_id:
                 await self.radarr.search_movie(existing.radarr_id)
                 action.success = True
                 log.info("Triggered automatic search as fallback")
-                return True, action, "Automatic search triggered"
+                return True, action, "Запущен автопоиск"
 
             action.success = False
             action.error_message = "Could not grab release or trigger search"
-            return False, action, "Failed to grab release"
+            return False, action, "Не удалось захватить релиз"
 
         except Exception as e:
             log.error("Failed to grab release", error=str(e))
@@ -275,6 +306,7 @@ class AddService:
         quality_profile_id: int,
         root_folder_path: str,
         monitor_type: str = "all",
+        force_download: bool = False,
     ) -> tuple[bool, ActionLog, str]:
         """
         Grab a specific release for a series.
@@ -285,6 +317,7 @@ class AddService:
             quality_profile_id: Quality profile ID
             root_folder_path: Root folder path
             monitor_type: What to monitor
+            force_download: Force download even if rejected by Sonarr
 
         Returns:
             Tuple of (success, ActionLog, message)
@@ -319,6 +352,8 @@ class AddService:
                 )
 
             # Try to push the release
+            release_rejected = False
+            rejections = []
             if release.download_url:
                 try:
                     log.info("Attempting push_release", download_url=release.download_url[:100])
@@ -335,28 +370,51 @@ class AddService:
                         return True, action, "Релиз отправлен на скачивание"
                     else:
                         rejections = result.get("rejections", [])
+                        release_rejected = True
                         log.warning("Release was rejected", rejections=rejections)
                 except APIError as e:
                     log.warning("Push release failed, trying direct grab", error=str(e))
 
             # Try direct grab
-            if release.indexer_id > 0:
+            if release.indexer_id > 0 and not release_rejected:
                 try:
                     await self.sonarr.grab_release(release.guid, release.indexer_id)
                     action.success = True
                     log.info("Release grabbed successfully")
-                    return True, action, "Release grabbed successfully"
+                    return True, action, "Релиз захвачен"
                 except APIError as e:
                     log.warning("Direct grab failed", error=str(e))
+
+            # Force download via qBittorrent if rejected and force_download enabled
+            if release_rejected and force_download and self.qbittorrent:
+                download_url = release.download_url or release.magnet_url
+                if download_url:
+                    try:
+                        await self.qbittorrent.add_torrent_url(
+                            download_url,
+                            category="tv-sonarr",  # Tag for Sonarr/series
+                        )
+                        action.success = True
+                        log.info("Force downloaded via qBittorrent with sonarr category")
+                        return True, action, "Принудительно загружено через qBittorrent"
+                    except Exception as e:
+                        log.error("Force download failed", error=str(e))
+
+            # If rejected, return rejection info without fallback
+            if release_rejected:
+                action.success = False
+                rejection_msg = ", ".join(rejections) if rejections else "Отклонено"
+                action.error_message = rejection_msg
+                return False, action, f"Релиз отклонён: {rejection_msg}"
 
             # Fallback: trigger appropriate search
             if existing and existing.sonarr_id:
                 if release.is_season_pack and release.detected_season is not None:
                     await self.sonarr.search_season(existing.sonarr_id, release.detected_season)
-                    msg = f"Season {release.detected_season} search triggered"
+                    msg = f"Запущен поиск сезона {release.detected_season}"
                 else:
                     await self.sonarr.search_series(existing.sonarr_id)
-                    msg = "Full series search triggered"
+                    msg = "Запущен полный поиск сериала"
 
                 action.success = True
                 log.info("Triggered automatic search as fallback")
@@ -364,7 +422,7 @@ class AddService:
 
             action.success = False
             action.error_message = "Could not grab release or trigger search"
-            return False, action, "Failed to grab release"
+            return False, action, "Не удалось захватить релиз"
 
         except Exception as e:
             log.error("Failed to grab release", error=str(e))
