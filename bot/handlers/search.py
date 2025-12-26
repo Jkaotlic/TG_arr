@@ -37,7 +37,7 @@ MENU_SERIES = "📺 Сериал"
 # These are handled by their respective routers
 MENU_BUTTONS = {
     MENU_SEARCH, MENU_MOVIE, MENU_SERIES,
-    "📥 Загрузки", "📊 qBit", "🔌 Статус", "⚙️ Настройки", "📋 История", "❓ Помощь",
+    "📥 Загрузки", "📊 qBit", "📺 Emby", "🔌 Статус", "⚙️ Настройки", "📋 История", "❓ Помощь",
 }
 
 

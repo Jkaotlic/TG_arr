@@ -578,3 +578,60 @@ class Formatters:
             "resume": f"▶️ Возобновлено: {count} торрентов",
         }
         return action_messages.get(action, f"✅ {action}: {count} торрентов")
+
+    # =========================================================================
+    # Emby Formatters
+    # =========================================================================
+
+    @staticmethod
+    def format_emby_status(
+        server_name: str,
+        version: str,
+        operating_system: str,
+        has_pending_restart: bool,
+        has_update_available: bool,
+        active_sessions: int = 0,
+        libraries: list = None,
+    ) -> str:
+        """Format Emby server status."""
+        lines = ["**📺 Emby Media Server**\n"]
+
+        lines.append(f"🏷 **Сервер:** {server_name}")
+        lines.append(f"🖥 **Версия:** {version}")
+        lines.append(f"💻 **ОС:** {operating_system}")
+
+        lines.append("")
+
+        # Status indicators
+        if has_update_available:
+            lines.append("⬆️ **Доступно обновление!**")
+
+        if has_pending_restart:
+            lines.append("🔄 **Требуется перезагрузка**")
+
+        if active_sessions > 0:
+            lines.append(f"👥 **Активных сессий:** {active_sessions}")
+
+        if libraries:
+            lines.append("")
+            lines.append("**📚 Библиотеки:**")
+            for lib in libraries:
+                lib_emoji = "🎬" if lib.collection_type == "movies" else "📺" if lib.collection_type == "tvshows" else "📁"
+                lines.append(f"  {lib_emoji} {lib.name}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_emby_action(action: str, success: bool = True, error: str = None) -> str:
+        """Format Emby action result."""
+        if success:
+            messages = {
+                "scan_all": "✅ Сканирование всех библиотек запущено",
+                "scan_movies": "✅ Сканирование фильмов запущено",
+                "scan_series": "✅ Сканирование сериалов запущено",
+                "restart": "🔁 Сервер перезагружается...",
+                "update": "⬆️ Обновление устанавливается...",
+            }
+            return messages.get(action, f"✅ {action}")
+        else:
+            return f"❌ Ошибка: {error or action}"

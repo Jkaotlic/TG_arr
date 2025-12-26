@@ -7,7 +7,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from bot.clients import ProwlarrClient, QBittorrentClient, RadarrClient, SonarrClient
+from bot.clients import EmbyClient, ProwlarrClient, QBittorrentClient, RadarrClient, SonarrClient
 from bot.config import get_settings
 from bot.models import SystemStatus
 from bot.ui.formatters import Formatters
@@ -41,6 +41,11 @@ async def cmd_status(message: Message) -> None:
             settings.qbittorrent_password,
         )
 
+    # Create Emby client if configured
+    emby = None
+    if settings.emby_enabled:
+        emby = EmbyClient(settings.emby_url, settings.emby_api_key)
+
     try:
         # Build list of service checks
         service_checks = [
@@ -51,6 +56,9 @@ async def cmd_status(message: Message) -> None:
 
         if qbittorrent:
             service_checks.append(check_qbittorrent(qbittorrent))
+
+        if emby:
+            service_checks.append(check_service(emby, "Emby"))
 
         # Check all services in parallel
         results = await asyncio.gather(*service_checks, return_exceptions=True)
@@ -79,6 +87,8 @@ async def cmd_status(message: Message) -> None:
         await sonarr.close()
         if qbittorrent:
             await qbittorrent.close()
+        if emby:
+            await emby.close()
 
 
 async def check_service(client, name: str) -> SystemStatus:

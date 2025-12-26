@@ -71,6 +71,17 @@ class CallbackData:
     SPEED_LIMIT = "speed:"  # speed:1024 (KB/s)
     SPEED_MENU = "speed_menu"
 
+    # Emby
+    EMBY_REFRESH = "emby_refresh"  # Refresh status
+    EMBY_SCAN_ALL = "emby_scan_all"  # Scan all libraries
+    EMBY_SCAN_MOVIES = "emby_scan_movies"  # Scan movies library
+    EMBY_SCAN_SERIES = "emby_scan_series"  # Scan series library
+    EMBY_RESTART = "emby_restart"  # Restart server
+    EMBY_RESTART_CONFIRM = "emby_restart_confirm"  # Confirm restart
+    EMBY_UPDATE = "emby_update"  # Check/install update
+    EMBY_UPDATE_CONFIRM = "emby_update_confirm"  # Confirm update
+    EMBY_CLOSE = "emby_close"  # Close Emby message
+
 
 class Keyboards:
     """Inline keyboard builders."""
@@ -81,8 +92,8 @@ class Keyboards:
         return ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="🎬 Фильм"), KeyboardButton(text="📺 Сериал")],
-                [KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit"), KeyboardButton(text="🔌 Статус")],
-                [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 История")],
+                [KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit"), KeyboardButton(text="📺 Emby")],
+                [KeyboardButton(text="🔌 Статус"), KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 История")],
                 [KeyboardButton(text="❓ Помощь")],
             ],
             resize_keyboard=True,
@@ -750,6 +761,84 @@ class Keyboards:
                 ],
                 [
                     InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.TORRENT_BACK),
+                ],
+            ]
+        )
+
+    # =========================================================================
+    # Emby Keyboards
+    # =========================================================================
+
+    @staticmethod
+    def emby_main(
+        has_update: bool = False,
+        can_restart: bool = True,
+        can_update: bool = True,
+    ) -> InlineKeyboardMarkup:
+        """Create main Emby control keyboard."""
+        keyboard = []
+
+        # Library scan buttons
+        keyboard.append([
+            InlineKeyboardButton(text="🔄 Обновить статус", callback_data=CallbackData.EMBY_REFRESH),
+        ])
+
+        keyboard.append([
+            InlineKeyboardButton(text="📚 Сканировать всё", callback_data=CallbackData.EMBY_SCAN_ALL),
+        ])
+
+        keyboard.append([
+            InlineKeyboardButton(text="🎬 Фильмы", callback_data=CallbackData.EMBY_SCAN_MOVIES),
+            InlineKeyboardButton(text="📺 Сериалы", callback_data=CallbackData.EMBY_SCAN_SERIES),
+        ])
+
+        # Server control buttons
+        if can_restart:
+            keyboard.append([
+                InlineKeyboardButton(text="🔁 Перезагрузить", callback_data=CallbackData.EMBY_RESTART),
+            ])
+
+        if can_update and has_update:
+            keyboard.append([
+                InlineKeyboardButton(text="⬆️ Установить обновление", callback_data=CallbackData.EMBY_UPDATE),
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.EMBY_CLOSE),
+        ])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def emby_confirm_restart() -> InlineKeyboardMarkup:
+        """Create confirmation keyboard for server restart."""
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="⚠️ Да, перезагрузить",
+                        callback_data=CallbackData.EMBY_RESTART_CONFIRM,
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.EMBY_REFRESH),
+                ],
+            ]
+        )
+
+    @staticmethod
+    def emby_confirm_update() -> InlineKeyboardMarkup:
+        """Create confirmation keyboard for server update."""
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="⚠️ Да, обновить",
+                        callback_data=CallbackData.EMBY_UPDATE_CONFIRM,
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.EMBY_REFRESH),
                 ],
             ]
         )

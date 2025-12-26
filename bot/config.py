@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     qbittorrent_username: str = Field(default="admin", description="qBittorrent username")
     qbittorrent_password: Optional[str] = Field(default=None, description="qBittorrent password")
 
+    # Emby (optional)
+    emby_url: Optional[str] = Field(default=None, description="Emby server URL")
+    emby_api_key: Optional[str] = Field(default=None, description="Emby API key")
+
     # Notifications
     notify_download_complete: bool = Field(default=True, description="Notify when download completes")
     notify_check_interval: int = Field(default=60, ge=10, description="Check interval for notifications (seconds)")
@@ -85,7 +89,7 @@ class Settings(BaseSettings):
         """Remove trailing slash from URLs."""
         return v.rstrip("/")
 
-    @field_validator("qbittorrent_url", mode="after")
+    @field_validator("qbittorrent_url", "emby_url", mode="after")
     @classmethod
     def strip_trailing_slash_optional(cls, v: Optional[str]) -> Optional[str]:
         """Remove trailing slash from optional URLs."""
@@ -97,6 +101,11 @@ class Settings(BaseSettings):
     def qbittorrent_enabled(self) -> bool:
         """Check if qBittorrent integration is configured."""
         return self.qbittorrent_url is not None and self.qbittorrent_password is not None
+
+    @property
+    def emby_enabled(self) -> bool:
+        """Check if Emby integration is configured."""
+        return self.emby_url is not None and self.emby_api_key is not None
 
     def is_user_allowed(self, user_id: int) -> bool:
         """Check if user is in the allowlist."""
