@@ -32,7 +32,7 @@ async def cmd_history(message: Message, db_user: User, is_admin: bool = False) -
     db = await get_db()
 
     try:
-        user_id = message.from_user.id if message.from_user else 0
+        user_id = db_user.tg_id
 
         # Admins see all actions, users see only their own
         if is_admin:

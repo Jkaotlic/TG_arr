@@ -142,7 +142,8 @@ async def process_search(
     search_service, add_service, scoring = get_services()
 
     try:
-        user_id = message.from_user.id if message.from_user else 0
+        # Always use db_user.tg_id - message.from_user can be bot when called from callback
+        user_id = db_user.tg_id
         log = logger.bind(user_id=user_id, query=query)
 
         # Parse query for metadata
