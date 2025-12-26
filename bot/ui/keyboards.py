@@ -198,20 +198,23 @@ class Keyboards:
         result: SearchResult,
         content_type: ContentType,
         can_grab: bool = True,
+        show_force_grab: bool = False,
     ) -> InlineKeyboardMarkup:
         """Create keyboard for release details view."""
         keyboard = []
 
         if can_grab:
             keyboard.append([
-                InlineKeyboardButton(text="✅ Скачать этот релиз", callback_data=CallbackData.CONFIRM_GRAB),
+                InlineKeyboardButton(text="✅ Скачать", callback_data=CallbackData.CONFIRM_GRAB),
+            ])
+
+        if show_force_grab:
+            keyboard.append([
+                InlineKeyboardButton(text="⚡ Принудительно (qBit)", callback_data=CallbackData.FORCE_GRAB),
             ])
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Назад к результатам", callback_data=CallbackData.BACK),
-        ])
-
-        keyboard.append([
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
             InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
 
