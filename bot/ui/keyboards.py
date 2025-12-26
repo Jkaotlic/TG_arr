@@ -67,6 +67,7 @@ class CallbackData:
     TORRENT_BACK = "t_back"  # Back to torrent list
     TORRENT_PAUSE_ALL = "t_pause_all"
     TORRENT_RESUME_ALL = "t_resume_all"
+    TORRENT_CLOSE = "t_close"  # Close torrent list message
     SPEED_LIMIT = "speed:"  # speed:1024 (KB/s)
     SPEED_MENU = "speed_menu"
 
@@ -516,13 +517,12 @@ class Keyboards:
     def torrent_list(
         torrents: list[TorrentInfo],
         current_page: int = 0,
-        per_page: int = 5,
+        total_pages: int = 1,
         current_filter: TorrentFilter = TorrentFilter.ALL,
     ) -> InlineKeyboardMarkup:
         """Create keyboard for torrent list with pagination."""
-        total_pages = max(1, (len(torrents) + per_page - 1) // per_page)
-        start_idx = current_page * per_page
-        page_torrents = torrents[start_idx:start_idx + per_page]
+        # torrents is already a page slice, use passed total_pages
+        page_torrents = torrents
 
         keyboard = []
 
@@ -580,7 +580,7 @@ class Keyboards:
         ])
 
         keyboard.append([
-            InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.CANCEL),
+            InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.TORRENT_CLOSE),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)

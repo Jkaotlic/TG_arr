@@ -563,6 +563,14 @@ async def handle_back_to_list(callback: CallbackQuery) -> None:
     await handle_refresh(callback)
 
 
+@router.callback_query(F.data == "t_close")
+async def handle_close(callback: CallbackQuery) -> None:
+    """Close torrent list message."""
+    if callback.message:
+        await callback.message.delete()
+    await callback.answer()
+
+
 @router.callback_query(F.data == "t_filter:menu")
 async def handle_filter_menu(callback: CallbackQuery) -> None:
     """Show filter selection menu."""
