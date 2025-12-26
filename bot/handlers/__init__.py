@@ -3,6 +3,7 @@
 from aiogram import Router
 
 from bot.handlers.downloads import router as downloads_router
+from bot.handlers.emby import router as emby_router
 from bot.handlers.history import router as history_router
 from bot.handlers.search import router as search_router
 from bot.handlers.settings import router as settings_router
@@ -21,5 +22,6 @@ def setup_routers() -> Router:
     main_router.include_router(status_router)
     main_router.include_router(history_router)
     main_router.include_router(downloads_router)
+    main_router.include_router(emby_router)
 
     return main_router
