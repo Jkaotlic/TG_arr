@@ -223,15 +223,21 @@ class AddService:
             # Try to push the release
             if release.download_url:
                 try:
-                    await self.radarr.push_release(
+                    log.info("Attempting push_release", download_url=release.download_url[:100])
+                    result = await self.radarr.push_release(
                         title=release.title,
                         download_url=release.download_url,
                         protocol=release.protocol,
                         publish_date=release.publish_date.isoformat() if release.publish_date else None,
                     )
-                    action.success = True
-                    log.info("Release pushed successfully")
-                    return True, action, "Release sent to download client"
+                    log.info("Push release result", result=result)
+                    if result.get("approved", True) and not result.get("rejected", False):
+                        action.success = True
+                        log.info("Release pushed successfully")
+                        return True, action, "Релиз отправлен на скачивание"
+                    else:
+                        rejections = result.get("rejections", [])
+                        log.warning("Release was rejected", rejections=rejections)
                 except APIError as e:
                     log.warning("Push release failed, trying direct grab", error=str(e))
 
@@ -315,15 +321,21 @@ class AddService:
             # Try to push the release
             if release.download_url:
                 try:
-                    await self.sonarr.push_release(
+                    log.info("Attempting push_release", download_url=release.download_url[:100])
+                    result = await self.sonarr.push_release(
                         title=release.title,
                         download_url=release.download_url,
                         protocol=release.protocol,
                         publish_date=release.publish_date.isoformat() if release.publish_date else None,
                     )
-                    action.success = True
-                    log.info("Release pushed successfully")
-                    return True, action, "Release sent to download client"
+                    log.info("Push release result", result=result)
+                    if result.get("approved", True) and not result.get("rejected", False):
+                        action.success = True
+                        log.info("Release pushed successfully")
+                        return True, action, "Релиз отправлен на скачивание"
+                    else:
+                        rejections = result.get("rejections", [])
+                        log.warning("Release was rejected", rejections=rejections)
                 except APIError as e:
                     log.warning("Push release failed, trying direct grab", error=str(e))
 
