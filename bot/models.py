@@ -2,9 +2,9 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Discriminator, Field, Tag, field_validator
 
 
 class ContentType(str, Enum):
@@ -101,6 +101,7 @@ class SearchResult(BaseModel):
 class MovieInfo(BaseModel):
     """Movie information from Radarr lookup."""
 
+    content_model_type: Literal["movie"] = "movie"
     tmdb_id: int = Field(..., description="TMDB ID")
     imdb_id: Optional[str] = Field(default=None, description="IMDB ID")
     title: str = Field(..., description="Movie title")
@@ -125,6 +126,7 @@ class MovieInfo(BaseModel):
 class SeriesInfo(BaseModel):
     """Series information from Sonarr lookup."""
 
+    content_model_type: Literal["series"] = "series"
     tvdb_id: int = Field(..., description="TVDB ID")
     imdb_id: Optional[str] = Field(default=None, description="IMDB ID")
     title: str = Field(..., description="Series title")
@@ -199,6 +201,16 @@ class User(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+# Union type with discriminator for content info
+ContentInfo = Annotated[
+    Union[
+        Annotated[MovieInfo, Tag("movie")],
+        Annotated[SeriesInfo, Tag("series")],
+    ],
+    Discriminator("content_model_type"),
+]
+
+
 class SearchSession(BaseModel):
     """Active search session for a user."""
 
@@ -208,7 +220,7 @@ class SearchSession(BaseModel):
     results: list[SearchResult] = Field(default_factory=list)
     current_page: int = 0
     selected_result: Optional[SearchResult] = None
-    selected_content: Optional[MovieInfo | SeriesInfo] = None
+    selected_content: Optional[ContentInfo] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     # For series - season/episode selection
