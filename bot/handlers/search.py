@@ -33,6 +33,13 @@ MENU_SEARCH = "🔍 Поиск"
 MENU_MOVIE = "🎬 Фильм"
 MENU_SERIES = "📺 Сериал"
 
+# All menu button texts that should NOT trigger text search
+# These are handled by their respective routers
+MENU_BUTTONS = {
+    MENU_SEARCH, MENU_MOVIE, MENU_SERIES,
+    "📥 Загрузки", "📊 qBit", "🔌 Статус", "⚙️ Настройки", "📋 История", "❓ Помощь",
+}
+
 
 def get_services() -> tuple[SearchService, AddService, ScoringService]:
     """Get service instances."""
@@ -51,16 +58,8 @@ def get_services() -> tuple[SearchService, AddService, ScoringService]:
     return search_service, add_service, scoring
 
 
-async def get_db() -> Database:
-    """Get database instance."""
-    settings = get_settings()
-    db = Database(settings.database_path)
-    await db.connect()
-    return db
-
-
 @router.message(Command("search"))
-async def cmd_search(message: Message, db_user: User) -> None:
+async def cmd_search(message: Message, db_user: User, db: Database) -> None:
     """Handle /search <query> command - auto-detect content type."""
     if not message.text:
         await message.answer("Укажите запрос: `/search Дюна 2021`", parse_mode="Markdown")
@@ -71,11 +70,11 @@ async def cmd_search(message: Message, db_user: User) -> None:
         await message.answer("Укажите запрос: `/search Дюна 2021`", parse_mode="Markdown")
         return
 
-    await process_search(message, query, ContentType.UNKNOWN, db_user)
+    await process_search(message, query, ContentType.UNKNOWN, db_user, db)
 
 
 @router.message(Command("movie"))
-async def cmd_movie(message: Message, db_user: User) -> None:
+async def cmd_movie(message: Message, db_user: User, db: Database) -> None:
     """Handle /movie <query> command."""
     if not message.text:
         await message.answer("Укажите название фильма: `/movie Дюна 2021`", parse_mode="Markdown")
@@ -86,11 +85,11 @@ async def cmd_movie(message: Message, db_user: User) -> None:
         await message.answer("Укажите название фильма: `/movie Дюна 2021`", parse_mode="Markdown")
         return
 
-    await process_search(message, query, ContentType.MOVIE, db_user)
+    await process_search(message, query, ContentType.MOVIE, db_user, db)
 
 
 @router.message(Command("series"))
-async def cmd_series(message: Message, db_user: User) -> None:
+async def cmd_series(message: Message, db_user: User, db: Database) -> None:
     """Handle /series <query> command."""
     if not message.text:
         await message.answer("Укажите название сериала: `/series Breaking Bad`", parse_mode="Markdown")
@@ -101,7 +100,7 @@ async def cmd_series(message: Message, db_user: User) -> None:
         await message.answer("Укажите название сериала: `/series Breaking Bad`", parse_mode="Markdown")
         return
 
-    await process_search(message, query, ContentType.SERIES, db_user)
+    await process_search(message, query, ContentType.SERIES, db_user, db)
 
 
 @router.message(F.text == MENU_SEARCH)
@@ -122,18 +121,13 @@ async def handle_menu_series(message: Message) -> None:
     await message.answer("📺 Введите название сериала:")
 
 
-@router.message(F.text & ~F.text.startswith("/"))
-async def handle_text_search(message: Message, db_user: User) -> None:
+@router.message(F.text & ~F.text.startswith("/") & ~F.text.in_(MENU_BUTTONS))
+async def handle_text_search(message: Message, db_user: User, db: Database) -> None:
     """Handle plain text as search query."""
     if not message.text:
         return
 
-    # Skip menu button texts
-    text = message.text.strip()
-    if text in (MENU_SEARCH, MENU_MOVIE, MENU_SERIES, "📥 Загрузки", "📊 qBit", "🔌 Статус", "⚙️ Настройки", "📋 История", "❓ Помощь"):
-        return
-
-    await process_search(message, text, ContentType.UNKNOWN, db_user)
+    await process_search(message, message.text.strip(), ContentType.UNKNOWN, db_user, db)
 
 
 async def process_search(
@@ -141,11 +135,11 @@ async def process_search(
     query: str,
     content_type: ContentType,
     db_user: User,
+    db: Database,
 ) -> None:
     """Process a search query."""
     settings = get_settings()
     search_service, add_service, scoring = get_services()
-    db = await get_db()
 
     try:
         user_id = message.from_user.id if message.from_user else 0
@@ -256,7 +250,6 @@ async def process_search(
         log.error("Search failed", error=str(e))
         await message.answer(Formatters.format_error(str(e)))
     finally:
-        await db.close()
         # Close service clients
         await search_service.prowlarr.close()
         await search_service.radarr.close()
@@ -264,121 +257,111 @@ async def process_search(
 
 
 @router.callback_query(F.data.startswith(CallbackData.TYPE_MOVIE) | F.data.startswith(CallbackData.TYPE_SERIES))
-async def handle_type_selection(callback: CallbackQuery, db_user: User) -> None:
+async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle content type selection."""
     if not callback.data or not callback.message:
         return
 
-    db = await get_db()
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
 
-    try:
-        user_id = callback.from_user.id
-        session = await db.get_session(user_id)
+    if not session:
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
 
-        if not session:
-            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-            return
+    content_type = ContentType.MOVIE if callback.data == CallbackData.TYPE_MOVIE else ContentType.SERIES
 
-        content_type = ContentType.MOVIE if callback.data == CallbackData.TYPE_MOVIE else ContentType.SERIES
+    # Update session and continue search
+    session.content_type = content_type
+    await db.save_session(user_id, session)
 
-        # Update session and continue search
-        session.content_type = content_type
-        await db.save_session(user_id, session)
+    await callback.answer()
 
-        await callback.answer()
-
-        # Create a fake message object to reuse process_search
-        await callback.message.delete()
-        await process_search(
-            callback.message,
-            session.query,
-            content_type,
-            db_user,
-        )
-    finally:
-        await db.close()
+    # Create a fake message object to reuse process_search
+    await callback.message.delete()
+    await process_search(
+        callback.message,
+        session.query,
+        content_type,
+        db_user,
+        db,
+    )
 
 
 @router.callback_query(F.data.startswith(CallbackData.PAGE))
-async def handle_pagination(callback: CallbackQuery, db_user: User) -> None:
+async def handle_pagination(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle pagination buttons."""
     if not callback.data or not callback.message:
         return
 
     settings = get_settings()
-    db = await get_db()
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
 
+    if not session or not session.results:
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+
+    # Parse page number
     try:
-        user_id = callback.from_user.id
-        session = await db.get_session(user_id)
+        page = int(callback.data.replace(CallbackData.PAGE, ""))
+    except ValueError:
+        await callback.answer("Неверная страница", show_alert=True)
+        return
 
-        if not session or not session.results:
-            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-            return
+    per_page = settings.results_per_page
+    total_pages = (len(session.results) + per_page - 1) // per_page
 
-        # Parse page number
-        try:
-            page = int(callback.data.replace(CallbackData.PAGE, ""))
-        except ValueError:
-            await callback.answer("Неверная страница", show_alert=True)
-            return
+    if page < 0 or page >= total_pages:
+        await callback.answer("Неверная страница", show_alert=True)
+        return
 
-        per_page = settings.results_per_page
-        total_pages = (len(session.results) + per_page - 1) // per_page
+    # Update session
+    session.current_page = page
+    await db.save_session(user_id, session)
 
-        if page < 0 or page >= total_pages:
-            await callback.answer("Неверная страница", show_alert=True)
-            return
+    # Get page results
+    start_idx = page * per_page
+    page_results = session.results[start_idx:start_idx + per_page]
 
-        # Update session
-        session.current_page = page
-        await db.save_session(user_id, session)
+    # Check grab best
+    best_result = session.results[0] if session.results else None
+    show_grab_best = (
+        best_result
+        and best_result.calculated_score >= settings.auto_grab_score_threshold
+        and db_user.preferences.auto_grab_enabled
+    )
 
-        # Get page results
-        start_idx = page * per_page
-        page_results = session.results[start_idx:start_idx + per_page]
+    text = Formatters.format_search_results_page(
+        page_results,
+        page,
+        total_pages,
+        session.query,
+        session.content_type,
+    )
 
-        # Check grab best
-        best_result = session.results[0] if session.results else None
-        show_grab_best = (
-            best_result
-            and best_result.calculated_score >= settings.auto_grab_score_threshold
-            and db_user.preferences.auto_grab_enabled
-        )
-
-        text = Formatters.format_search_results_page(
+    await callback.message.edit_text(
+        text,
+        reply_markup=Keyboards.search_results(
             page_results,
             page,
             total_pages,
-            session.query,
-            session.content_type,
-        )
+            per_page,
+            show_grab_best,
+            best_result.calculated_score if best_result else 0,
+        ),
+        parse_mode="Markdown",
+    )
 
-        await callback.message.edit_text(
-            text,
-            reply_markup=Keyboards.search_results(
-                page_results,
-                page,
-                total_pages,
-                per_page,
-                show_grab_best,
-                best_result.calculated_score if best_result else 0,
-            ),
-            parse_mode="Markdown",
-        )
-
-        await callback.answer()
-    finally:
-        await db.close()
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith(CallbackData.RELEASE))
-async def handle_release_selection(callback: CallbackQuery, db_user: User) -> None:
+async def handle_release_selection(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle release selection."""
     if not callback.data or not callback.message:
         return
 
-    db = await get_db()
     search_service, add_service, _ = get_services()
 
     try:
@@ -463,19 +446,17 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User) -> No
 
         await callback.answer()
     finally:
-        await db.close()
         await search_service.prowlarr.close()
         await search_service.radarr.close()
         await search_service.sonarr.close()
 
 
 @router.callback_query(F.data == CallbackData.GRAB_BEST)
-async def handle_grab_best(callback: CallbackQuery, db_user: User) -> None:
+async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle 'Grab Best' button - grab the highest scored release."""
     if not callback.message:
         return
 
-    db = await get_db()
     search_service, add_service, _ = get_services()
 
     try:
@@ -497,19 +478,17 @@ async def handle_grab_best(callback: CallbackQuery, db_user: User) -> None:
         await grab_release(callback.message, session, db_user, db, search_service, add_service)
 
     finally:
-        await db.close()
         await search_service.prowlarr.close()
         await search_service.radarr.close()
         await search_service.sonarr.close()
 
 
 @router.callback_query(F.data == CallbackData.CONFIRM_GRAB)
-async def handle_confirm_grab(callback: CallbackQuery, db_user: User) -> None:
+async def handle_confirm_grab(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle grab confirmation."""
     if not callback.message:
         return
 
-    db = await get_db()
     search_service, add_service, _ = get_services()
 
     try:
@@ -526,7 +505,6 @@ async def handle_confirm_grab(callback: CallbackQuery, db_user: User) -> None:
         await grab_release(callback.message, session, db_user, db, search_service, add_service)
 
     finally:
-        await db.close()
         await search_service.prowlarr.close()
         await search_service.radarr.close()
         await search_service.sonarr.close()
@@ -659,84 +637,74 @@ async def grab_release(
 
 
 @router.callback_query(F.data == CallbackData.BACK)
-async def handle_back(callback: CallbackQuery, db_user: User) -> None:
+async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle back button."""
     if not callback.message:
         return
 
     settings = get_settings()
-    db = await get_db()
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
 
-    try:
-        user_id = callback.from_user.id
-        session = await db.get_session(user_id)
+    if not session or not session.results:
+        await callback.answer("Сессия истекла", show_alert=True)
+        return
 
-        if not session or not session.results:
-            await callback.answer("Сессия истекла", show_alert=True)
-            return
+    # Clear selection and go back to results
+    session.selected_result = None
+    session.selected_content = None
+    await db.save_session(user_id, session)
 
-        # Clear selection and go back to results
-        session.selected_result = None
-        session.selected_content = None
-        await db.save_session(user_id, session)
+    # Show results page
+    per_page = settings.results_per_page
+    total_pages = (len(session.results) + per_page - 1) // per_page
+    page = session.current_page
 
-        # Show results page
-        per_page = settings.results_per_page
-        total_pages = (len(session.results) + per_page - 1) // per_page
-        page = session.current_page
+    start_idx = page * per_page
+    page_results = session.results[start_idx:start_idx + per_page]
 
-        start_idx = page * per_page
-        page_results = session.results[start_idx:start_idx + per_page]
+    best_result = session.results[0] if session.results else None
+    show_grab_best = (
+        best_result
+        and best_result.calculated_score >= settings.auto_grab_score_threshold
+        and db_user.preferences.auto_grab_enabled
+    )
 
-        best_result = session.results[0] if session.results else None
-        show_grab_best = (
-            best_result
-            and best_result.calculated_score >= settings.auto_grab_score_threshold
-            and db_user.preferences.auto_grab_enabled
-        )
+    text = Formatters.format_search_results_page(
+        page_results,
+        page,
+        total_pages,
+        session.query,
+        session.content_type,
+    )
 
-        text = Formatters.format_search_results_page(
+    await callback.message.edit_text(
+        text,
+        reply_markup=Keyboards.search_results(
             page_results,
             page,
             total_pages,
-            session.query,
-            session.content_type,
-        )
+            per_page,
+            show_grab_best,
+            best_result.calculated_score if best_result else 0,
+        ),
+        parse_mode="Markdown",
+    )
 
-        await callback.message.edit_text(
-            text,
-            reply_markup=Keyboards.search_results(
-                page_results,
-                page,
-                total_pages,
-                per_page,
-                show_grab_best,
-                best_result.calculated_score if best_result else 0,
-            ),
-            parse_mode="Markdown",
-        )
-
-        await callback.answer()
-    finally:
-        await db.close()
+    await callback.answer()
 
 
 @router.callback_query(F.data == CallbackData.CANCEL)
-async def handle_cancel(callback: CallbackQuery) -> None:
+async def handle_cancel(callback: CallbackQuery, db: Database) -> None:
     """Handle cancel button."""
     if not callback.message:
         return
 
-    db = await get_db()
+    user_id = callback.from_user.id
+    await db.delete_session(user_id)
 
-    try:
-        user_id = callback.from_user.id
-        await db.delete_session(user_id)
-
-        await callback.message.edit_text("Операция отменена. Отправьте новый запрос для поиска.")
-        await callback.answer()
-    finally:
-        await db.close()
+    await callback.message.edit_text("Операция отменена. Отправьте новый запрос для поиска.")
+    await callback.answer()
 
 
 @router.callback_query(F.data == "noop")
