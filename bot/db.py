@@ -217,7 +217,11 @@ class Database:
     async def save_session(self, user_id: int, session: SearchSession) -> None:
         """Save or update user session."""
         now = datetime.utcnow().isoformat()
-        session_json = session.model_dump_json()
+        try:
+            session_json = session.model_dump_json()
+        except Exception as e:
+            logger.error("Failed to serialize session", user_id=user_id, error=str(e))
+            raise
 
         await self.conn.execute(
             """
@@ -230,16 +234,40 @@ class Database:
             (user_id, session_json, now, now),
         )
         await self.conn.commit()
+        logger.debug("Session saved", user_id=user_id, results_count=len(session.results))
 
     async def get_session(self, user_id: int) -> Optional[SearchSession]:
         """Get user session."""
+        row_data = None
         async with self.conn.execute(
             "SELECT session_data FROM sessions WHERE user_id = ?", (user_id,)
         ) as cursor:
             row = await cursor.fetchone()
             if row:
-                session_data = json.loads(row["session_data"])
-                return SearchSession(**session_data)
+                row_data = row["session_data"]
+
+        if row_data:
+            try:
+                session_data = json.loads(row_data)
+                # Use model_validate for proper nested model deserialization
+                session = SearchSession.model_validate(session_data)
+                logger.debug(
+                    "Session loaded",
+                    user_id=user_id,
+                    results_count=len(session.results),
+                    has_selected=session.selected_result is not None,
+                )
+                return session
+            except Exception as e:
+                logger.error(
+                    "Failed to deserialize session",
+                    user_id=user_id,
+                    error=str(e),
+                    session_preview=row_data[:200] if row_data else None,
+                )
+                # Delete corrupted session
+                await self.delete_session(user_id)
+                return None
         return None
 
     async def delete_session(self, user_id: int) -> None:
