@@ -39,6 +39,7 @@ class CallbackData:
     # Confirmation
     CONFIRM_ADD = "confirm_add"
     CONFIRM_GRAB = "confirm_grab"
+    FORCE_GRAB = "force_grab"  # Force download via qBittorrent
 
     # Settings
     SETTINGS = "settings"

@@ -30,6 +30,7 @@ async def get_db() -> Database:
 async def get_add_service() -> AddService:
     """Get add service instance."""
     from bot.clients import ProwlarrClient, RadarrClient, SonarrClient
+    from bot.clients.qbittorrent import QBittorrentClient
 
     settings = get_settings()
 
@@ -37,7 +38,16 @@ async def get_add_service() -> AddService:
     radarr = RadarrClient(settings.radarr_url, settings.radarr_api_key)
     sonarr = SonarrClient(settings.sonarr_url, settings.sonarr_api_key)
 
-    return AddService(prowlarr, radarr, sonarr)
+    # qBittorrent for force downloads
+    qbittorrent = None
+    if settings.qbittorrent_url:
+        qbittorrent = QBittorrentClient(
+            settings.qbittorrent_url,
+            settings.qbittorrent_username,
+            settings.qbittorrent_password,
+        )
+
+    return AddService(prowlarr, radarr, sonarr, qbittorrent)
 
 
 @router.message(F.text == MENU_SETTINGS)

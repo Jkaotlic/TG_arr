@@ -5,7 +5,7 @@ from typing import Any, Optional
 import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from bot.config import get_settings
 from bot.db import Database
@@ -44,6 +44,7 @@ MENU_BUTTONS = {
 def get_services() -> tuple[SearchService, AddService, ScoringService]:
     """Get service instances."""
     from bot.clients import ProwlarrClient, RadarrClient, SonarrClient
+    from bot.clients.qbittorrent import QBittorrentClient
 
     settings = get_settings()
 
@@ -51,9 +52,18 @@ def get_services() -> tuple[SearchService, AddService, ScoringService]:
     radarr = RadarrClient(settings.radarr_url, settings.radarr_api_key)
     sonarr = SonarrClient(settings.sonarr_url, settings.sonarr_api_key)
 
+    # qBittorrent for force downloads
+    qbittorrent = None
+    if settings.qbittorrent_url:
+        qbittorrent = QBittorrentClient(
+            settings.qbittorrent_url,
+            settings.qbittorrent_username,
+            settings.qbittorrent_password,
+        )
+
     scoring = ScoringService()
     search_service = SearchService(prowlarr, radarr, sonarr, scoring)
-    add_service = AddService(prowlarr, radarr, sonarr)
+    add_service = AddService(prowlarr, radarr, sonarr, qbittorrent)
 
     return search_service, add_service, scoring
 
@@ -571,8 +581,24 @@ async def grab_release(
                     Formatters.format_success(f"**{movie.title}** ({movie.year})\n\n{msg}\n\nРелиз: _{result.title}_"),
                     parse_mode="Markdown",
                 )
+                # Clean up session on success
+                await db.delete_session(user_id)
             else:
-                await message.edit_text(Formatters.format_error(msg))
+                # Check if rejected - offer force grab
+                if "отклонён" in msg.lower() and add_service.qbittorrent:
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="⚡ Принудительная загрузка", callback_data=CallbackData.FORCE_GRAB)],
+                        [InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)],
+                    ])
+                    await message.edit_text(
+                        Formatters.format_error(f"{msg}\n\nМожно загрузить напрямую через qBittorrent:"),
+                        reply_markup=keyboard,
+                    )
+                    # Keep session for force grab
+                else:
+                    await message.edit_text(Formatters.format_error(msg))
+                    await db.delete_session(user_id)
+            return  # Don't clean up session twice
 
         else:
             # Series
@@ -626,11 +652,23 @@ async def grab_release(
                     Formatters.format_success(f"**{series.title}**{year_str}\n\n{msg}\n\nРелиз: _{result.title}_"),
                     parse_mode="Markdown",
                 )
+                # Clean up session on success
+                await db.delete_session(user_id)
             else:
-                await message.edit_text(Formatters.format_error(msg))
-
-        # Clean up session
-        await db.delete_session(user_id)
+                # Check if rejected - offer force grab
+                if "отклонён" in msg.lower() and add_service.qbittorrent:
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="⚡ Принудительная загрузка", callback_data=CallbackData.FORCE_GRAB)],
+                        [InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)],
+                    ])
+                    await message.edit_text(
+                        Formatters.format_error(f"{msg}\n\nМожно загрузить напрямую через qBittorrent:"),
+                        reply_markup=keyboard,
+                    )
+                    # Keep session for force grab
+                else:
+                    await message.edit_text(Formatters.format_error(msg))
+                    await db.delete_session(user_id)
 
     except Exception as e:
         logger.error("Grab failed", error=str(e))
@@ -706,6 +744,138 @@ async def handle_cancel(callback: CallbackQuery, db: Database) -> None:
 
     await callback.message.edit_text("Операция отменена. Отправьте новый запрос для поиска.")
     await callback.answer()
+
+
+@router.callback_query(F.data == CallbackData.FORCE_GRAB)
+async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database) -> None:
+    """Handle force grab button - downloads directly via qBittorrent."""
+    if not callback.message:
+        return
+
+    await callback.answer("Загружаю напрямую...")
+
+    message = callback.message
+    user_id = db_user.tg_id
+
+    session = await db.get_session(user_id)
+    if not session or not session.selected_result:
+        await message.edit_text(Formatters.format_error("Сессия истекла. Повторите поиск."))
+        return
+
+    result = session.selected_result
+    _, add_service, _ = get_services()
+
+    if not add_service.qbittorrent:
+        await message.edit_text(Formatters.format_error("qBittorrent не настроен"))
+        await db.delete_session(user_id)
+        return
+
+    prefs = db_user.preferences
+
+    try:
+        if session.content_type == ContentType.MOVIE:
+            # Movie
+            movie = session.selected_content
+            if not isinstance(movie, MovieInfo):
+                search_service, _, _ = get_services()
+                movie_list = await search_service.lookup_movie(session.query)
+                if not movie_list:
+                    await message.edit_text(Formatters.format_error("Не удалось найти фильм в Radarr"))
+                    return
+                movie = movie_list[0]
+
+            # Get quality profile and root folder
+            profiles = await add_service.get_radarr_profiles()
+            folders = await add_service.get_radarr_root_folders()
+
+            if not profiles or not folders:
+                await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Radarr"))
+                return
+
+            profile_id = prefs.radarr_quality_profile_id or profiles[0].id
+            folder_path = None
+            if prefs.radarr_root_folder_id:
+                folder = next((f for f in folders if f.id == prefs.radarr_root_folder_id), None)
+                folder_path = folder.path if folder else folders[0].path
+            else:
+                folder_path = folders[0].path
+
+            # Force grab
+            success, action, msg = await add_service.grab_movie_release(
+                movie=movie,
+                release=result,
+                quality_profile_id=profile_id,
+                root_folder_path=folder_path,
+                force_download=True,
+            )
+
+            action.user_id = user_id
+            await db.log_action(action)
+
+            if success:
+                await message.edit_text(
+                    Formatters.format_success(f"**{movie.title}** ({movie.year})\n\n{msg}\n\nРелиз: _{result.title}_"),
+                    parse_mode="Markdown",
+                )
+            else:
+                await message.edit_text(Formatters.format_error(msg))
+
+        else:
+            # Series
+            series = session.selected_content
+            if not isinstance(series, SeriesInfo):
+                search_service, _, _ = get_services()
+                series_list = await search_service.lookup_series(session.query)
+                if not series_list:
+                    await message.edit_text(Formatters.format_error("Не удалось найти сериал в Sonarr"))
+                    return
+                series = series_list[0]
+
+            # Get quality profile and root folder
+            profiles = await add_service.get_sonarr_profiles()
+            folders = await add_service.get_sonarr_root_folders()
+
+            if not profiles or not folders:
+                await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Sonarr"))
+                return
+
+            profile_id = prefs.sonarr_quality_profile_id or profiles[0].id
+            folder_path = None
+            if prefs.sonarr_root_folder_id:
+                folder = next((f for f in folders if f.id == prefs.sonarr_root_folder_id), None)
+                folder_path = folder.path if folder else folders[0].path
+            else:
+                folder_path = folders[0].path
+
+            # Force grab
+            success, action, msg = await add_service.grab_series_release(
+                series=series,
+                release=result,
+                quality_profile_id=profile_id,
+                root_folder_path=folder_path,
+                monitor_type="all",
+                force_download=True,
+            )
+
+            action.user_id = user_id
+            await db.log_action(action)
+
+            if success:
+                year_str = f" ({series.year})" if series.year else ""
+                await message.edit_text(
+                    Formatters.format_success(f"**{series.title}**{year_str}\n\n{msg}\n\nРелиз: _{result.title}_"),
+                    parse_mode="Markdown",
+                )
+            else:
+                await message.edit_text(Formatters.format_error(msg))
+
+        # Clean up session
+        await db.delete_session(user_id)
+
+    except Exception as e:
+        logger.error("Force grab failed", error=str(e))
+        await message.edit_text(Formatters.format_error(str(e)))
+        await db.delete_session(user_id)
 
 
 @router.callback_query(F.data == "noop")
