@@ -4,6 +4,7 @@ from typing import Optional
 
 import structlog
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
@@ -60,11 +61,16 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
         )
 
         if edit and hasattr(message_or_callback, "message"):
-            await message_or_callback.message.edit_text(
-                text,
-                reply_markup=keyboard,
-                parse_mode="Markdown",
-            )
+            try:
+                await message_or_callback.message.edit_text(
+                    text,
+                    reply_markup=keyboard,
+                    parse_mode="Markdown",
+                )
+            except TelegramBadRequest as e:
+                if "message is not modified" not in str(e):
+                    raise
+                # Message content unchanged - ignore
             await message_or_callback.answer()
         else:
             await message_or_callback.answer(
@@ -76,7 +82,11 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
     except EmbyError as e:
         error_text = f"❌ Ошибка Emby: {e.message}"
         if edit and hasattr(message_or_callback, "message"):
-            await message_or_callback.message.edit_text(error_text)
+            try:
+                await message_or_callback.message.edit_text(error_text)
+            except TelegramBadRequest:
+                pass
+            await message_or_callback.answer()
         else:
             await message_or_callback.answer(error_text)
 
@@ -84,7 +94,11 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
         logger.error("Failed to get Emby status", error=str(e))
         error_text = f"❌ Ошибка: {str(e)}"
         if edit and hasattr(message_or_callback, "message"):
-            await message_or_callback.message.edit_text(error_text)
+            try:
+                await message_or_callback.message.edit_text(error_text)
+            except TelegramBadRequest:
+                pass
+            await message_or_callback.answer()
         else:
             await message_or_callback.answer(error_text)
 
