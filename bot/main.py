@@ -13,10 +13,11 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from bot.clients.qbittorrent import QBittorrentClient
+from bot.clients.registry import close_all as close_all_clients
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers import setup_routers
-from bot.middleware.auth import AuthMiddleware, LoggingMiddleware
+from bot.middleware.auth import AuthMiddleware, LoggingMiddleware, RateLimitMiddleware
 from bot.services.notification_service import NotificationService
 
 
@@ -103,9 +104,12 @@ async def on_shutdown(
         await notification_service.stop()
         logger.info("Notification service stopped")
 
-    # Close qBittorrent client
+    # Close qBittorrent client (for notification service)
     if qbittorrent:
         await qbittorrent.close()
+
+    # Close all singleton clients from registry
+    await close_all_clients()
 
     await db.close()
 
@@ -170,9 +174,11 @@ async def main() -> None:
     # Initialize dispatcher
     dp = Dispatcher()
 
-    # Setup middleware
+    # Setup middleware (order matters: logging -> rate limit -> auth)
     dp.message.middleware(LoggingMiddleware())
     dp.callback_query.middleware(LoggingMiddleware())
+    dp.message.middleware(RateLimitMiddleware())
+    dp.callback_query.middleware(RateLimitMiddleware())
     dp.message.middleware(AuthMiddleware(db))
     dp.callback_query.middleware(AuthMiddleware(db))
 

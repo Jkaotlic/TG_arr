@@ -9,6 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from bot.clients.emby import EmbyClient, EmbyError, EmbyLibrary
+from bot.clients.registry import get_emby
 from bot.config import get_settings
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -20,17 +21,9 @@ router = Router()
 MENU_EMBY = "📺 Emby"
 
 
-def get_emby_client() -> Optional[EmbyClient]:
-    """Get Emby client if configured."""
-    settings = get_settings()
-    if not settings.emby_enabled:
-        return None
-    return EmbyClient(settings.emby_url, settings.emby_api_key)
-
-
 async def show_emby_status(message_or_callback, edit: bool = False) -> None:
     """Show Emby server status."""
-    emby = get_emby_client()
+    emby = get_emby()
     if not emby:
         text = "❌ Emby не настроен. Добавьте EMBY\\_URL и EMBY\\_API\\_KEY в конфигурацию."
         if edit and hasattr(message_or_callback, "message"):
@@ -102,10 +95,6 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
         else:
             await message_or_callback.answer(error_text)
 
-    finally:
-        if emby:
-            await emby.close()
-
 
 @router.message(F.text == MENU_EMBY)
 @router.message(Command("emby"))
@@ -131,7 +120,7 @@ async def handle_close(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == CallbackData.EMBY_SCAN_ALL)
 async def handle_scan_all(callback: CallbackQuery) -> None:
     """Scan all libraries."""
-    emby = get_emby_client()
+    emby = get_emby()
     if not emby:
         await callback.answer("Emby не настроен", show_alert=True)
         return
@@ -148,15 +137,11 @@ async def handle_scan_all(callback: CallbackQuery) -> None:
         logger.error("Failed to scan all libraries", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
 
-    finally:
-        if emby:
-            await emby.close()
-
 
 @router.callback_query(F.data == CallbackData.EMBY_SCAN_MOVIES)
 async def handle_scan_movies(callback: CallbackQuery) -> None:
     """Scan movies library."""
-    emby = get_emby_client()
+    emby = get_emby()
     if not emby:
         await callback.answer("Emby не настроен", show_alert=True)
         return
@@ -180,15 +165,11 @@ async def handle_scan_movies(callback: CallbackQuery) -> None:
         logger.error("Failed to scan movies library", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
 
-    finally:
-        if emby:
-            await emby.close()
-
 
 @router.callback_query(F.data == CallbackData.EMBY_SCAN_SERIES)
 async def handle_scan_series(callback: CallbackQuery) -> None:
     """Scan series library."""
-    emby = get_emby_client()
+    emby = get_emby()
     if not emby:
         await callback.answer("Emby не настроен", show_alert=True)
         return
@@ -212,10 +193,6 @@ async def handle_scan_series(callback: CallbackQuery) -> None:
         logger.error("Failed to scan series library", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
 
-    finally:
-        if emby:
-            await emby.close()
-
 
 @router.callback_query(F.data == CallbackData.EMBY_RESTART)
 async def handle_restart_prompt(callback: CallbackQuery) -> None:
@@ -235,7 +212,7 @@ async def handle_restart_prompt(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == CallbackData.EMBY_RESTART_CONFIRM)
 async def handle_restart_confirm(callback: CallbackQuery) -> None:
     """Confirm and restart server."""
-    emby = get_emby_client()
+    emby = get_emby()
     if not emby:
         await callback.answer("Emby не настроен", show_alert=True)
         return
@@ -261,10 +238,6 @@ async def handle_restart_confirm(callback: CallbackQuery) -> None:
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
         await show_emby_status(callback, edit=True)
 
-    finally:
-        if emby:
-            await emby.close()
-
 
 @router.callback_query(F.data == CallbackData.EMBY_UPDATE)
 async def handle_update_prompt(callback: CallbackQuery) -> None:
@@ -284,7 +257,7 @@ async def handle_update_prompt(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == CallbackData.EMBY_UPDATE_CONFIRM)
 async def handle_update_confirm(callback: CallbackQuery) -> None:
     """Confirm and install update."""
-    emby = get_emby_client()
+    emby = get_emby()
     if not emby:
         await callback.answer("Emby не настроен", show_alert=True)
         return
@@ -310,7 +283,3 @@ async def handle_update_confirm(callback: CallbackQuery) -> None:
         logger.error("Failed to install update", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
         await show_emby_status(callback, edit=True)
-
-    finally:
-        if emby:
-            await emby.close()
