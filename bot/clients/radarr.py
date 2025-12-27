@@ -132,7 +132,7 @@ class RadarrClient(BaseAPIClient):
                 log.info("Movie added successfully", radarr_id=added_movie.radarr_id)
                 return added_movie
 
-        raise ValueError("Failed to add movie to Radarr")
+        raise ValueError("Не удалось добавить фильм в Radarr")
 
     async def get_releases(self, movie_id: int) -> list[dict[str, Any]]:
         """Get available releases for a movie."""

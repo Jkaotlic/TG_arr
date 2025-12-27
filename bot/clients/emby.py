@@ -64,9 +64,10 @@ class EmbyAuthError(EmbyError):
 class EmbyClient:
     """Client for Emby Media Server API."""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str, timeout: float = 30.0):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.timeout = timeout
         self._client: Optional[httpx.AsyncClient] = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -74,7 +75,7 @@ class EmbyClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
-                timeout=httpx.Timeout(30.0),
+                timeout=httpx.Timeout(self.timeout),
                 follow_redirects=True,
             )
         return self._client
@@ -119,11 +120,11 @@ class EmbyClient:
             )
 
             if response.status_code == 401:
-                raise EmbyAuthError("Invalid API key", status_code=401)
+                raise EmbyAuthError("Неверный API ключ", status_code=401)
 
             if response.status_code >= 400:
                 raise EmbyError(
-                    f"API error: {response.status_code} - {response.text[:200]}",
+                    f"Ошибка API: {response.status_code}",
                     status_code=response.status_code,
                 )
 
@@ -136,17 +137,17 @@ class EmbyClient:
             except Exception:
                 return response.text
 
-        except httpx.TimeoutException as e:
-            raise EmbyError(f"Request timeout: {e}")
-        except httpx.ConnectError as e:
-            raise EmbyError(f"Connection error: {e}")
+        except httpx.TimeoutException:
+            raise EmbyError("Таймаут соединения с Emby")
+        except httpx.ConnectError:
+            raise EmbyError(f"Не удалось подключиться к Emby ({self.base_url})")
 
     async def get_server_info(self) -> EmbyServerInfo:
         """Get server information."""
         result = await self._request("GET", "/System/Info")
 
         if not isinstance(result, dict):
-            raise EmbyError("Invalid server info response")
+            raise EmbyError("Неверный ответ сервера")
 
         return EmbyServerInfo(
             server_name=result.get("ServerName", "Unknown"),
@@ -239,10 +240,10 @@ class EmbyClient:
         info = await self.get_server_info()
 
         if not info.can_self_update:
-            raise EmbyError("Server does not support self-update")
+            raise EmbyError("Сервер не поддерживает автообновление")
 
         if not info.has_update_available:
-            raise EmbyError("No update available")
+            raise EmbyError("Обновление недоступно")
 
         await self._request("POST", "/System/Update")
         logger.info("Update installation started")
@@ -252,7 +253,7 @@ class EmbyClient:
         info = await self.get_server_info()
 
         if not info.can_self_restart:
-            raise EmbyError("Server does not support self-restart")
+            raise EmbyError("Сервер не поддерживает перезагрузку")
 
         await self._request("POST", "/System/Restart")
         logger.info("Server restart initiated")

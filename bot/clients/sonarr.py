@@ -150,7 +150,7 @@ class SonarrClient(BaseAPIClient):
                 log.info("Series added successfully", sonarr_id=added_series.sonarr_id)
                 return added_series
 
-        raise ValueError("Failed to add series to Sonarr")
+        raise ValueError("Не удалось добавить сериал в Sonarr")
 
     def _should_monitor_season(self, season_num: int, monitor_type: str, total_seasons: int) -> bool:
         """Determine if a season should be monitored based on monitor type."""

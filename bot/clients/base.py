@@ -124,20 +124,20 @@ class BaseAPIClient:
 
             if response.status_code == 401:
                 raise AuthenticationError(
-                    f"Authentication failed for {self.service_name}. Check API key.",
+                    f"Ошибка авторизации в {self.service_name}. Проверьте API ключ.",
                     status_code=401,
                 )
 
             if response.status_code == 404:
                 raise NotFoundError(
-                    f"Resource not found: {endpoint}",
+                    f"Ресурс не найден: {endpoint}",
                     status_code=404,
                 )
 
             if response.status_code >= 400:
-                response_text = response.text[:500] if response.text else "No response body"
+                response_text = response.text[:500] if response.text else ""
                 raise APIError(
-                    f"{self.service_name} API error: {response.status_code}",
+                    f"Ошибка {self.service_name}: {response.status_code}",
                     status_code=response.status_code,
                     response_body=response_text,
                 )
@@ -149,11 +149,11 @@ class BaseAPIClient:
 
         except httpx.TimeoutException as e:
             log.error("Request timeout", error=str(e))
-            raise ConnectionError(f"Timeout connecting to {self.service_name}") from e
+            raise ConnectionError(f"Таймаут соединения с {self.service_name}") from e
 
         except httpx.ConnectError as e:
             log.error("Connection error", error=str(e))
-            raise ConnectionError(f"Cannot connect to {self.service_name} at {self.base_url}") from e
+            raise ConnectionError(f"Не удалось подключиться к {self.service_name} ({self.base_url})") from e
 
     async def get(
         self,

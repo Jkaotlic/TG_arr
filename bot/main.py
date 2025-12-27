@@ -154,6 +154,7 @@ async def main() -> None:
             settings.qbittorrent_url,
             settings.qbittorrent_username,
             settings.qbittorrent_password,
+            timeout=settings.qbittorrent_timeout,
         )
 
         # Create notification sender function
