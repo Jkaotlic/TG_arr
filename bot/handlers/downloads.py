@@ -9,6 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from bot.clients.qbittorrent import QBittorrentClient, QBittorrentError
+from bot.clients.registry import get_qbittorrent
 from bot.config import get_settings
 from bot.models import TorrentFilter, User, format_speed
 from bot.ui.formatters import Formatters
@@ -25,22 +26,9 @@ MENU_DOWNLOADS = "📥 Загрузки"
 MENU_QSTATUS = "📊 qBit"
 
 
-def get_qbt_client() -> Optional[QBittorrentClient]:
-    """Get qBittorrent client if configured."""
-    settings = get_settings()
-    if not settings.qbittorrent_enabled:
-        return None
-    return QBittorrentClient(
-        settings.qbittorrent_url,
-        settings.qbittorrent_username,
-        settings.qbittorrent_password,
-    )
-
-
 async def check_qbt_enabled(message_or_callback) -> bool:
     """Check if qBittorrent is enabled and send message if not."""
-    settings = get_settings()
-    if not settings.qbittorrent_enabled:
+    if get_qbittorrent() is None:
         text = "⚠️ Интеграция с qBittorrent не настроена.\n\nУстановите `QBITTORRENT_URL` и `QBITTORRENT_PASSWORD` в переменных окружения."
         if isinstance(message_or_callback, Message):
             await message_or_callback.answer(text)
@@ -62,7 +50,7 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
     if not await check_qbt_enabled(message):
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -94,9 +82,6 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
     except Exception as e:
         logger.error("Failed to get downloads", error=str(e))
         await message.answer(f"❌ Ошибка: {str(e)}")
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.message(F.text == MENU_QSTATUS)
@@ -106,7 +91,7 @@ async def cmd_qstatus(message: Message, db_user: User) -> None:
     if not await check_qbt_enabled(message):
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -124,9 +109,6 @@ async def cmd_qstatus(message: Message, db_user: User) -> None:
     except Exception as e:
         logger.error("Failed to get qBittorrent status", error=str(e))
         await message.answer(f"❌ Ошибка: {str(e)}")
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.message(Command("pause"))
@@ -135,7 +117,7 @@ async def cmd_pause(message: Message, db_user: User) -> None:
     if not await check_qbt_enabled(message):
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -156,9 +138,6 @@ async def cmd_pause(message: Message, db_user: User) -> None:
 
     except QBittorrentError as e:
         await message.answer(f"❌ Ошибка: {e.message}")
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.message(Command("resume"))
@@ -167,7 +146,7 @@ async def cmd_resume(message: Message, db_user: User) -> None:
     if not await check_qbt_enabled(message):
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -187,9 +166,6 @@ async def cmd_resume(message: Message, db_user: User) -> None:
 
     except QBittorrentError as e:
         await message.answer(f"❌ Ошибка: {e.message}")
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 # ============================================================================
@@ -203,7 +179,7 @@ async def handle_refresh(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         await callback.answer("qBittorrent не настроен", show_alert=True)
         return
@@ -232,9 +208,6 @@ async def handle_refresh(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to refresh", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data.startswith("t_page:"))
@@ -243,7 +216,7 @@ async def handle_page(callback: CallbackQuery) -> None:
     if not callback.message or not callback.data:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -277,9 +250,6 @@ async def handle_page(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Pagination error", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data.startswith("t:"))
@@ -288,7 +258,7 @@ async def handle_torrent_details(callback: CallbackQuery) -> None:
     if not callback.message or not callback.data:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -316,9 +286,6 @@ async def handle_torrent_details(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to get torrent details", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data.startswith("t_pause:"))
@@ -327,7 +294,7 @@ async def handle_pause_torrent(callback: CallbackQuery) -> None:
     if not callback.data:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -348,9 +315,6 @@ async def handle_pause_torrent(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to pause", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data.startswith("t_resume:"))
@@ -359,7 +323,7 @@ async def handle_resume_torrent(callback: CallbackQuery) -> None:
     if not callback.data:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -380,9 +344,6 @@ async def handle_resume_torrent(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to resume", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data.startswith("t_delete:"))
@@ -391,7 +352,7 @@ async def handle_delete_torrent(callback: CallbackQuery) -> None:
     if not callback.data or not callback.message:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -412,9 +373,6 @@ async def handle_delete_torrent(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to delete", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data.startswith("t_delf:"))
@@ -423,7 +381,7 @@ async def handle_delete_with_files(callback: CallbackQuery) -> None:
     if not callback.data or not callback.message:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -444,9 +402,6 @@ async def handle_delete_with_files(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to delete", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data.startswith("t_recheck:"))
@@ -455,7 +410,7 @@ async def handle_recheck(callback: CallbackQuery) -> None:
     if not callback.data:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -473,9 +428,6 @@ async def handle_recheck(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to recheck", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data.startswith("t_prio:"))
@@ -484,7 +436,7 @@ async def handle_priority(callback: CallbackQuery) -> None:
     if not callback.data:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -510,15 +462,12 @@ async def handle_priority(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to set priority", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data == "t_pause_all")
 async def handle_pause_all(callback: CallbackQuery) -> None:
     """Pause all torrents."""
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -530,15 +479,12 @@ async def handle_pause_all(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to pause all", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data == "t_resume_all")
 async def handle_resume_all(callback: CallbackQuery) -> None:
     """Resume all torrents."""
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -550,9 +496,6 @@ async def handle_resume_all(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to resume all", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data == "t_back")
@@ -593,7 +536,7 @@ async def handle_filter_select(callback: CallbackQuery) -> None:
     if not callback.message or not callback.data:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -629,9 +572,6 @@ async def handle_filter_select(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Filter error", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data == "speed_menu")
@@ -640,7 +580,7 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -672,9 +612,6 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Speed menu error", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()
 
 
 @router.callback_query(F.data.startswith("speed:"))
@@ -683,7 +620,7 @@ async def handle_speed_set(callback: CallbackQuery) -> None:
     if not callback.data:
         return
 
-    qbt = get_qbt_client()
+    qbt = get_qbittorrent()
     if not qbt:
         return
 
@@ -710,6 +647,3 @@ async def handle_speed_set(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Speed set error", error=str(e))
         await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
-    finally:
-        if qbt:
-            await qbt.close()

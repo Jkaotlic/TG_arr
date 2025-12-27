@@ -17,6 +17,7 @@ from bot.models import (
     SeriesInfo,
     User,
 )
+from bot.clients.registry import get_prowlarr, get_radarr, get_sonarr, get_qbittorrent
 from bot.services.add_service import AddService
 from bot.services.scoring import ScoringService
 from bot.services.search_service import SearchService
@@ -40,24 +41,11 @@ MENU_BUTTONS = {
 
 
 def get_services() -> tuple[SearchService, AddService, ScoringService]:
-    """Get service instances."""
-    from bot.clients import ProwlarrClient, RadarrClient, SonarrClient
-    from bot.clients.qbittorrent import QBittorrentClient
-
-    settings = get_settings()
-
-    prowlarr = ProwlarrClient(settings.prowlarr_url, settings.prowlarr_api_key)
-    radarr = RadarrClient(settings.radarr_url, settings.radarr_api_key)
-    sonarr = SonarrClient(settings.sonarr_url, settings.sonarr_api_key)
-
-    # qBittorrent for force downloads
-    qbittorrent = None
-    if settings.qbittorrent_url:
-        qbittorrent = QBittorrentClient(
-            settings.qbittorrent_url,
-            settings.qbittorrent_username,
-            settings.qbittorrent_password,
-        )
+    """Get service instances using singleton clients from registry."""
+    prowlarr = get_prowlarr()
+    radarr = get_radarr()
+    sonarr = get_sonarr()
+    qbittorrent = get_qbittorrent()  # Returns None if not configured
 
     scoring = ScoringService()
     search_service = SearchService(prowlarr, radarr, sonarr, scoring)
@@ -268,11 +256,6 @@ async def process_search(
     except Exception as e:
         log.error("Search failed", error=str(e))
         await message.answer(Formatters.format_error(str(e)))
-    finally:
-        # Close service clients
-        await search_service.prowlarr.close()
-        await search_service.radarr.close()
-        await search_service.sonarr.close()
 
 
 @router.callback_query(F.data.startswith(CallbackData.TYPE_MOVIE) | F.data.startswith(CallbackData.TYPE_SERIES))
@@ -383,94 +366,89 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
 
     search_service, add_service, _ = get_services()
 
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+
+    if not session or not session.results:
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+
+    # Parse release index
     try:
-        user_id = callback.from_user.id
-        session = await db.get_session(user_id)
+        idx = int(callback.data.replace(CallbackData.RELEASE, ""))
+    except ValueError:
+        await callback.answer("Неверный выбор", show_alert=True)
+        return
 
-        if not session or not session.results:
-            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-            return
+    if idx < 0 or idx >= len(session.results):
+        await callback.answer("Неверный выбор", show_alert=True)
+        return
 
-        # Parse release index
-        try:
-            idx = int(callback.data.replace(CallbackData.RELEASE, ""))
-        except ValueError:
-            await callback.answer("Неверный выбор", show_alert=True)
-            return
+    result = session.results[idx]
+    session.selected_result = result
+    await db.save_session(user_id, session)
 
-        if idx < 0 or idx >= len(session.results):
-            await callback.answer("Неверный выбор", show_alert=True)
-            return
+    # Show release details
+    text = Formatters.format_release_details(result)
 
-        result = session.results[idx]
-        session.selected_result = result
-        await db.save_session(user_id, session)
+    # Now need to look up the actual content in Radarr/Sonarr
+    await callback.message.edit_text(
+        text + "\n\n🔍 Загружаю информацию...",
+        parse_mode="Markdown",
+    )
 
-        # Show release details
-        text = Formatters.format_release_details(result)
+    # Check if force grab is available
+    has_qbittorrent = add_service.qbittorrent is not None
 
-        # Now need to look up the actual content in Radarr/Sonarr
+    # Look up content
+    try:
+        if session.content_type == ContentType.MOVIE:
+            movies = await search_service.lookup_movie(session.query)
+            if movies:
+                movie = movies[0]
+                session.selected_content = movie
+                await db.save_session(user_id, session)
+
+                movie_text = Formatters.format_movie_info(movie)
+                await callback.message.edit_text(
+                    f"{text}\n\n---\n{movie_text}",
+                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
+                    parse_mode="Markdown",
+                )
+            else:
+                await callback.message.edit_text(
+                    f"{text}\n\n⚠️ Не удалось найти информацию о фильме. Продолжить?",
+                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
+                    parse_mode="Markdown",
+                )
+        else:
+            series_list = await search_service.lookup_series(session.query)
+            if series_list:
+                series = series_list[0]
+                session.selected_content = series
+                await db.save_session(user_id, session)
+
+                series_text = Formatters.format_series_info(series)
+                await callback.message.edit_text(
+                    f"{text}\n\n---\n{series_text}",
+                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
+                    parse_mode="Markdown",
+                )
+            else:
+                await callback.message.edit_text(
+                    f"{text}\n\n⚠️ Не удалось найти информацию о сериале. Продолжить?",
+                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
+                    parse_mode="Markdown",
+                )
+    except Exception as e:
+        logger.warning("Failed to lookup content", error=str(e))
         await callback.message.edit_text(
-            text + "\n\n🔍 Загружаю информацию...",
+            f"{text}\n\n⚠️ Ошибка загрузки информации: {str(e)}",
+            reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
             parse_mode="Markdown",
         )
 
-        # Check if force grab is available
-        has_qbittorrent = add_service.qbittorrent is not None
-
-        # Look up content
-        try:
-            if session.content_type == ContentType.MOVIE:
-                movies = await search_service.lookup_movie(session.query)
-                if movies:
-                    movie = movies[0]
-                    session.selected_content = movie
-                    await db.save_session(user_id, session)
-
-                    movie_text = Formatters.format_movie_info(movie)
-                    await callback.message.edit_text(
-                        f"{text}\n\n---\n{movie_text}",
-                        reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-                        parse_mode="Markdown",
-                    )
-                else:
-                    await callback.message.edit_text(
-                        f"{text}\n\n⚠️ Не удалось найти информацию о фильме. Продолжить?",
-                        reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-                        parse_mode="Markdown",
-                    )
-            else:
-                series_list = await search_service.lookup_series(session.query)
-                if series_list:
-                    series = series_list[0]
-                    session.selected_content = series
-                    await db.save_session(user_id, session)
-
-                    series_text = Formatters.format_series_info(series)
-                    await callback.message.edit_text(
-                        f"{text}\n\n---\n{series_text}",
-                        reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-                        parse_mode="Markdown",
-                    )
-                else:
-                    await callback.message.edit_text(
-                        f"{text}\n\n⚠️ Не удалось найти информацию о сериале. Продолжить?",
-                        reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-                        parse_mode="Markdown",
-                    )
-        except Exception as e:
-            logger.warning("Failed to lookup content", error=str(e))
-            await callback.message.edit_text(
-                f"{text}\n\n⚠️ Ошибка загрузки информации: {str(e)}",
-                reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-                parse_mode="Markdown",
-            )
-
-        await callback.answer()
-    finally:
-        await search_service.prowlarr.close()
-        await search_service.radarr.close()
-        await search_service.sonarr.close()
+    await callback.answer()
 
 
 @router.callback_query(F.data == CallbackData.GRAB_BEST)
@@ -481,28 +459,22 @@ async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database)
 
     search_service, add_service, _ = get_services()
 
-    try:
-        user_id = callback.from_user.id
-        session = await db.get_session(user_id)
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
 
-        if not session or not session.results:
-            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-            return
+    if not session or not session.results:
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
 
-        result = session.results[0]  # Best result
-        session.selected_result = result
-        await db.save_session(user_id, session)
+    result = session.results[0]  # Best result
+    session.selected_result = result
+    await db.save_session(user_id, session)
 
-        await callback.answer("Скачиваю лучший релиз...")
-        await callback.message.edit_text("⏳ Скачиваю лучший релиз...")
+    await callback.answer("Скачиваю лучший релиз...")
+    await callback.message.edit_text("⏳ Скачиваю лучший релиз...")
 
-        # Lookup and grab
-        await grab_release(callback.message, session, db_user, db, search_service, add_service)
-
-    finally:
-        await search_service.prowlarr.close()
-        await search_service.radarr.close()
-        await search_service.sonarr.close()
+    # Lookup and grab
+    await grab_release(callback.message, session, db_user, db, search_service, add_service)
 
 
 @router.callback_query(F.data == CallbackData.CONFIRM_GRAB)
@@ -513,23 +485,17 @@ async def handle_confirm_grab(callback: CallbackQuery, db_user: User, db: Databa
 
     search_service, add_service, _ = get_services()
 
-    try:
-        user_id = callback.from_user.id
-        session = await db.get_session(user_id)
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
 
-        if not session or not session.selected_result:
-            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-            return
+    if not session or not session.selected_result:
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
 
-        await callback.answer("Обработка...")
-        await callback.message.edit_text("⏳ Обрабатываю запрос...")
+    await callback.answer("Обработка...")
+    await callback.message.edit_text("⏳ Обрабатываю запрос...")
 
-        await grab_release(callback.message, session, db_user, db, search_service, add_service)
-
-    finally:
-        await search_service.prowlarr.close()
-        await search_service.radarr.close()
-        await search_service.sonarr.close()
+    await grab_release(callback.message, session, db_user, db, search_service, add_service)
 
 
 async def grab_release(

@@ -1,5 +1,7 @@
 """Authentication middleware for Telegram bot."""
 
+import time
+from collections import defaultdict
 from typing import Any, Awaitable, Callable, Dict
 
 import structlog
@@ -10,6 +12,10 @@ from bot.config import get_settings
 from bot.db import Database
 
 logger = structlog.get_logger()
+
+# Simple in-memory rate limiting
+_user_requests: Dict[int, list] = defaultdict(list)
+MAX_REQUESTS_PER_MINUTE = 30  # Max requests per user per minute
 
 
 class AuthMiddleware(BaseMiddleware):
@@ -121,3 +127,49 @@ class LoggingMiddleware(BaseMiddleware):
         except Exception as e:
             log.error("Error processing event", error=str(e), exc_info=True)
             raise
+
+
+class RateLimitMiddleware(BaseMiddleware):
+    """Simple in-memory rate limiting middleware."""
+
+    def __init__(self, max_requests: int = MAX_REQUESTS_PER_MINUTE, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        super().__init__()
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        """Check rate limit before processing."""
+        user_id = None
+
+        if isinstance(event, Message):
+            user_id = event.from_user.id if event.from_user else None
+        elif isinstance(event, CallbackQuery):
+            user_id = event.from_user.id if event.from_user else None
+
+        if user_id is None:
+            return await handler(event, data)
+
+        now = time.time()
+        window_start = now - self.window_seconds
+
+        # Clean old requests
+        _user_requests[user_id] = [t for t in _user_requests[user_id] if t > window_start]
+
+        # Check rate limit
+        if len(_user_requests[user_id]) >= self.max_requests:
+            logger.warning("Rate limit exceeded", user_id=user_id)
+            if isinstance(event, Message):
+                await event.answer("⏳ Слишком много запросов. Подождите минуту.")
+            elif isinstance(event, CallbackQuery):
+                await event.answer("Слишком много запросов", show_alert=True)
+            return None
+
+        # Record request
+        _user_requests[user_id].append(now)
+
+        return await handler(event, data)

@@ -71,6 +71,7 @@ class BaseAPIClient:
             "X-Api-Key": self.api_key,
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "User-Agent": "TG_arr-bot/1.0",
         }
 
     async def close(self) -> None:
