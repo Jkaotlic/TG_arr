@@ -1,7 +1,5 @@
 """Search and content management handlers."""
 
-from typing import Any, Optional
-
 import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -148,6 +146,16 @@ async def process_search(
     db: Database,
 ) -> None:
     """Process a search query."""
+    # Query length validation
+    MAX_QUERY_LENGTH = 200
+    if len(query) > MAX_QUERY_LENGTH:
+        await message.answer(f"❌ Запрос слишком длинный (макс. {MAX_QUERY_LENGTH} символов)")
+        return
+
+    if len(query) < 2:
+        await message.answer("❌ Запрос слишком короткий (мин. 2 символа)")
+        return
+
     settings = get_settings()
     search_service, add_service, scoring = get_services()
 
