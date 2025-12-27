@@ -58,6 +58,7 @@ def get_qbittorrent() -> Optional["QBittorrentClient"]:
             settings.qbittorrent_url,
             settings.qbittorrent_username,
             settings.qbittorrent_password,
+            timeout=settings.qbittorrent_timeout,
         )
     return _qbittorrent
 
@@ -71,7 +72,11 @@ def get_emby() -> Optional["EmbyClient"]:
     if not settings.emby_enabled:
         return None
     if _emby is None:
-        _emby = EmbyClient(settings.emby_url, settings.emby_api_key)
+        _emby = EmbyClient(
+            settings.emby_url,
+            settings.emby_api_key,
+            timeout=settings.emby_timeout,
+        )
     return _emby
 
 

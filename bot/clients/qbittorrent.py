@@ -60,10 +60,11 @@ class QBittorrentAuthError(QBittorrentError):
 class QBittorrentClient:
     """Client for qBittorrent Web API v2."""
 
-    def __init__(self, base_url: str, username: str, password: str):
+    def __init__(self, base_url: str, username: str, password: str, timeout: float = 30.0):
         self.base_url = base_url.rstrip("/")
         self.username = username
         self.password = password
+        self.timeout = timeout
         self._client: Optional[httpx.AsyncClient] = None
         self._authenticated = False
 
@@ -72,7 +73,7 @@ class QBittorrentClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
-                timeout=httpx.Timeout(30.0),
+                timeout=httpx.Timeout(self.timeout),
                 follow_redirects=True,
             )
             self._authenticated = False
@@ -119,18 +120,18 @@ class QBittorrentClient:
 
             if response.status_code == 403 or "Fails" in response.text:
                 raise QBittorrentAuthError(
-                    "Invalid username or password",
+                    "Неверный логин или пароль",
                     status_code=response.status_code,
                 )
 
             raise QBittorrentError(
-                f"Login failed: {response.text}",
+                "Ошибка авторизации в qBittorrent",
                 status_code=response.status_code,
             )
 
         except httpx.ConnectError as e:
             log.error("Cannot connect to qBittorrent", error=str(e))
-            raise QBittorrentError(f"Cannot connect to qBittorrent: {e}")
+            raise QBittorrentError(f"Не удалось подключиться к qBittorrent ({self.base_url})")
 
     async def _request(
         self,
@@ -165,7 +166,7 @@ class QBittorrentClient:
 
             if response.status_code >= 400:
                 raise QBittorrentError(
-                    f"API error: {response.status_code} - {response.text[:200]}",
+                    f"Ошибка API: {response.status_code}",
                     status_code=response.status_code,
                 )
 
@@ -179,10 +180,10 @@ class QBittorrentClient:
             except Exception:
                 return response.text
 
-        except httpx.TimeoutException as e:
-            raise QBittorrentError(f"Request timeout: {e}")
-        except httpx.ConnectError as e:
-            raise QBittorrentError(f"Connection error: {e}")
+        except httpx.TimeoutException:
+            raise QBittorrentError("Таймаут соединения с qBittorrent")
+        except httpx.ConnectError:
+            raise QBittorrentError(f"Не удалось подключиться к qBittorrent ({self.base_url})")
 
     async def get_version(self) -> str:
         """Get qBittorrent version."""

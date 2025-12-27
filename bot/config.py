@@ -41,10 +41,12 @@ class Settings(BaseSettings):
     qbittorrent_url: Optional[str] = Field(default=None, description="qBittorrent Web UI URL")
     qbittorrent_username: str = Field(default="admin", description="qBittorrent username")
     qbittorrent_password: Optional[str] = Field(default=None, description="qBittorrent password")
+    qbittorrent_timeout: float = Field(default=30.0, ge=5.0, description="qBittorrent request timeout in seconds")
 
     # Emby (optional)
     emby_url: Optional[str] = Field(default=None, description="Emby server URL")
     emby_api_key: Optional[str] = Field(default=None, description="Emby API key")
+    emby_timeout: float = Field(default=30.0, ge=5.0, description="Emby request timeout in seconds")
 
     # Notifications
     notify_download_complete: bool = Field(default=True, description="Notify when download completes")
