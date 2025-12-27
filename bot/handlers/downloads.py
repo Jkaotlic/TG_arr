@@ -4,12 +4,15 @@ from typing import Optional
 
 import structlog
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from bot.clients.qbittorrent import QBittorrentClient, QBittorrentError
 from bot.config import get_settings
-from bot.models import TorrentFilter, TorrentInfo, User
+from bot.models import TorrentFilter, User, format_speed
+from bot.ui.formatters import Formatters
+from bot.ui.keyboards import Keyboards
 
 logger = structlog.get_logger()
 router = Router()
@@ -66,22 +69,16 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
     try:
         status_msg = await message.answer("🔄 Загружаю список...")
 
-        torrents = await qbt.get_torrents(
-            filter_type=TorrentFilter.ALL,
-            limit=TORRENTS_PER_PAGE,
-        )
+        # Single API call - get all and slice locally
+        all_torrents = await qbt.get_torrents(filter_type=TorrentFilter.ALL)
+        total = len(all_torrents)
 
-        if not torrents:
+        if not all_torrents:
             await status_msg.edit_text("📭 Торренты не найдены.")
             return
 
-        # Get total count for pagination
-        all_torrents = await qbt.get_torrents()
-        total = len(all_torrents)
         total_pages = max(1, (total + TORRENTS_PER_PAGE - 1) // TORRENTS_PER_PAGE)
-
-        from bot.ui.formatters import Formatters
-        from bot.ui.keyboards import Keyboards
+        torrents = all_torrents[:TORRENTS_PER_PAGE]
 
         text = Formatters.format_torrent_list(torrents, 0, total_pages, TorrentFilter.ALL, total)
 
@@ -117,9 +114,6 @@ async def cmd_qstatus(message: Message, db_user: User) -> None:
         status_msg = await message.answer("🔄 Загружаю статус qBittorrent...")
 
         status = await qbt.get_status()
-
-        from bot.ui.formatters import Formatters
-
         text = Formatters.format_qbittorrent_status(status)
 
         await status_msg.edit_text(text, parse_mode="Markdown")
@@ -217,21 +211,23 @@ async def handle_refresh(callback: CallbackQuery) -> None:
     try:
         await callback.answer("Обновляю...")
 
-        torrents = await qbt.get_torrents(limit=TORRENTS_PER_PAGE)
+        # Single API call
         all_torrents = await qbt.get_torrents()
         total = len(all_torrents)
         total_pages = max(1, (total + TORRENTS_PER_PAGE - 1) // TORRENTS_PER_PAGE)
-
-        from bot.ui.formatters import Formatters
-        from bot.ui.keyboards import Keyboards
+        torrents = all_torrents[:TORRENTS_PER_PAGE]
 
         text = Formatters.format_torrent_list(torrents, 0, total_pages, TorrentFilter.ALL, total)
 
-        await callback.message.edit_text(
-            text,
-            reply_markup=Keyboards.torrent_list(torrents, 0, total_pages, TorrentFilter.ALL),
-            parse_mode="Markdown",
-        )
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=Keyboards.torrent_list(torrents, 0, total_pages, TorrentFilter.ALL),
+                parse_mode="Markdown",
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
 
     except Exception as e:
         logger.error("Failed to refresh", error=str(e))
@@ -265,16 +261,17 @@ async def handle_page(callback: CallbackQuery) -> None:
         offset = page * TORRENTS_PER_PAGE
         torrents = all_torrents[offset:offset + TORRENTS_PER_PAGE]
 
-        from bot.ui.formatters import Formatters
-        from bot.ui.keyboards import Keyboards
-
         text = Formatters.format_torrent_list(torrents, page, total_pages, TorrentFilter.ALL, total)
 
-        await callback.message.edit_text(
-            text,
-            reply_markup=Keyboards.torrent_list(torrents, page, total_pages, TorrentFilter.ALL),
-            parse_mode="Markdown",
-        )
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=Keyboards.torrent_list(torrents, page, total_pages, TorrentFilter.ALL),
+                parse_mode="Markdown",
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
         await callback.answer()
 
     except Exception as e:
@@ -303,16 +300,17 @@ async def handle_torrent_details(callback: CallbackQuery) -> None:
             await callback.answer("Торрент не найден", show_alert=True)
             return
 
-        from bot.ui.formatters import Formatters
-        from bot.ui.keyboards import Keyboards
-
         text = Formatters.format_torrent_details(torrent)
 
-        await callback.message.edit_text(
-            text,
-            reply_markup=Keyboards.torrent_details(torrent),
-            parse_mode="Markdown",
-        )
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=Keyboards.torrent_details(torrent),
+                parse_mode="Markdown",
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
         await callback.answer()
 
     except Exception as e:
@@ -577,13 +575,15 @@ async def handle_filter_menu(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    from bot.ui.keyboards import Keyboards
-
-    await callback.message.edit_text(
-        "**Выберите фильтр:**",
-        reply_markup=Keyboards.torrent_filters(),
-        parse_mode="Markdown",
-    )
+    try:
+        await callback.message.edit_text(
+            "**Выберите фильтр:**",
+            reply_markup=Keyboards.torrent_filters(),
+            parse_mode="Markdown",
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
     await callback.answer()
 
 
@@ -607,21 +607,23 @@ async def handle_filter_select(callback: CallbackQuery) -> None:
         except ValueError:
             filter_type = TorrentFilter.ALL
 
-        torrents = await qbt.get_torrents(filter_type=filter_type, limit=TORRENTS_PER_PAGE)
+        # Single API call
         all_filtered = await qbt.get_torrents(filter_type=filter_type)
         total = len(all_filtered)
         total_pages = max(1, (total + TORRENTS_PER_PAGE - 1) // TORRENTS_PER_PAGE)
-
-        from bot.ui.formatters import Formatters
-        from bot.ui.keyboards import Keyboards
+        torrents = all_filtered[:TORRENTS_PER_PAGE]
 
         text = Formatters.format_torrent_list(torrents, 0, total_pages, filter_type, total)
 
-        await callback.message.edit_text(
-            text,
-            reply_markup=Keyboards.torrent_list(torrents, 0, total_pages, filter_type),
-            parse_mode="Markdown",
-        )
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=Keyboards.torrent_list(torrents, 0, total_pages, filter_type),
+                parse_mode="Markdown",
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
         await callback.answer()
 
     except Exception as e:
@@ -645,9 +647,6 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
     try:
         status = await qbt.get_status()
 
-        from bot.ui.keyboards import Keyboards
-        from bot.models import format_speed
-
         current_dl = "Без лимита" if status.download_limit == 0 else format_speed(status.download_limit)
         current_ul = "Без лимита" if status.upload_limit == 0 else format_speed(status.upload_limit)
 
@@ -659,11 +658,15 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
             f"Выберите новый лимит:"
         )
 
-        await callback.message.edit_text(
-            text,
-            reply_markup=Keyboards.speed_limits_menu(),
-            parse_mode="Markdown",
-        )
+        try:
+            await callback.message.edit_text(
+                text,
+                reply_markup=Keyboards.speed_limits_menu(),
+                parse_mode="Markdown",
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
         await callback.answer()
 
     except Exception as e:
@@ -699,7 +702,6 @@ async def handle_speed_set(callback: CallbackQuery) -> None:
         else:
             await qbt.set_upload_limit(speed_bytes)
 
-        from bot.ui.formatters import Formatters
         await callback.answer(Formatters.format_speed_limit_changed(limit_type, speed_kb))
 
         # Refresh speed menu
