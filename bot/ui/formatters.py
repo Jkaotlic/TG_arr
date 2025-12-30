@@ -1,5 +1,6 @@
 """Message formatters for Telegram bot."""
 
+import html
 from datetime import datetime
 from typing import Optional
 
@@ -659,13 +660,15 @@ class Formatters:
             rating_value = Formatters._get_rating(movie.ratings)
             rating = f"⭐ {rating_value:.1f}" if rating_value else ""
             year = f" ({movie.year})" if movie.year else ""
+            title = html.escape(movie.title)
 
-            lines.append(f"{i}. <b>{movie.title}</b>{year}")
+            lines.append(f"{i}. <b>{title}</b>{year}")
             if rating:
                 lines.append(f"   {rating}")
             if movie.overview:
                 # Truncate overview to 100 chars
                 overview = movie.overview[:100] + "..." if len(movie.overview) > 100 else movie.overview
+                overview = html.escape(overview)
                 lines.append(f"   <i>{overview}</i>")
             lines.append("")
 
@@ -684,13 +687,15 @@ class Formatters:
             rating_value = Formatters._get_rating(series.ratings)
             rating = f"⭐ {rating_value:.1f}" if rating_value else ""
             year = f" ({series.year})" if series.year else ""
+            title = html.escape(series.title)
 
-            lines.append(f"{i}. <b>{series.title}</b>{year}")
+            lines.append(f"{i}. <b>{title}</b>{year}")
             if rating:
                 lines.append(f"   {rating}")
             if series.overview:
                 # Truncate overview to 100 chars
                 overview = series.overview[:100] + "..." if len(series.overview) > 100 else series.overview
+                overview = html.escape(overview)
                 lines.append(f"   <i>{overview}</i>")
             lines.append("")
 
@@ -703,14 +708,15 @@ class Formatters:
         rating_value = Formatters._get_rating(movie.ratings)
         rating = f"⭐ {rating_value:.1f}/10" if rating_value else "Нет рейтинга"
         year = f" ({movie.year})" if movie.year else ""
+        title = html.escape(movie.title)
 
         lines = [
-            f"🎬 <b>{movie.title}</b>{year}\n",
+            f"🎬 <b>{title}</b>{year}\n",
             f"{rating}",
         ]
 
         if movie.overview:
-            lines.append(f"\n{movie.overview}")
+            lines.append(f"\n{html.escape(movie.overview)}")
 
         lines.append("\n💡 Нажмите кнопку ниже для добавления в Radarr")
         return "\n".join(lines)
@@ -721,17 +727,18 @@ class Formatters:
         rating_value = Formatters._get_rating(series.ratings)
         rating = f"⭐ {rating_value:.1f}/10" if rating_value else "Нет рейтинга"
         year = f" ({series.year})" if series.year else ""
+        title = html.escape(series.title)
 
         lines = [
-            f"📺 <b>{series.title}</b>{year}\n",
+            f"📺 <b>{title}</b>{year}\n",
             f"{rating}",
         ]
 
         if series.network:
-            lines.append(f"📡 {series.network}")
+            lines.append(f"📡 {html.escape(series.network)}")
 
         if series.overview:
-            lines.append(f"\n{series.overview}")
+            lines.append(f"\n{html.escape(series.overview)}")
 
         lines.append("\n💡 Нажмите кнопку ниже для добавления в Sonarr")
         return "\n".join(lines)

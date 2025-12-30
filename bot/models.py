@@ -128,6 +128,7 @@ class SeriesInfo(BaseModel):
 
     content_model_type: Literal["series"] = "series"
     tvdb_id: int = Field(..., description="TVDB ID")
+    tmdb_id: Optional[int] = Field(default=None, description="TMDB ID")
     imdb_id: Optional[str] = Field(default=None, description="IMDB ID")
     title: str = Field(..., description="Series title")
     original_title: Optional[str] = Field(default=None)
