@@ -239,14 +239,15 @@ class AddService:
                         publish_date=release.publish_date.isoformat() if release.publish_date else None,
                     )
                     log.info("Push release result", result=result)
-                    if result.get("approved", True) and not result.get("rejected", False):
+                    if result and result.get("approved") is True:
                         action.success = True
                         log.info("Release pushed successfully")
                         return True, action, "Релиз отправлен на скачивание"
                     else:
-                        rejections = result.get("rejections", [])
+                        rejections = result.get("rejections", []) if result else []
                         release_rejected = True
-                        log.warning("Release was rejected", rejections=rejections)
+                        rejection_msg = f"rejections: {rejections}" if rejections else "no explicit approval from Radarr/Sonarr"
+                        log.warning("Release was not approved", reason=rejection_msg)
                 except APIError as e:
                     log.warning("Push release failed, trying direct grab", error=str(e))
 
@@ -368,14 +369,15 @@ class AddService:
                         publish_date=release.publish_date.isoformat() if release.publish_date else None,
                     )
                     log.info("Push release result", result=result)
-                    if result.get("approved", True) and not result.get("rejected", False):
+                    if result and result.get("approved") is True:
                         action.success = True
                         log.info("Release pushed successfully")
                         return True, action, "Релиз отправлен на скачивание"
                     else:
-                        rejections = result.get("rejections", [])
+                        rejections = result.get("rejections", []) if result else []
                         release_rejected = True
-                        log.warning("Release was rejected", rejections=rejections)
+                        rejection_msg = f"rejections: {rejections}" if rejections else "no explicit approval from Radarr/Sonarr"
+                        log.warning("Release was not approved", reason=rejection_msg)
                 except APIError as e:
                     log.warning("Push release failed, trying direct grab", error=str(e))
 
