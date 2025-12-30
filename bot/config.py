@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     emby_api_key: Optional[str] = Field(default=None, description="Emby API key")
     emby_timeout: float = Field(default=30.0, ge=5.0, description="Emby request timeout in seconds")
 
+    # TMDb (optional, for trending/popular content)
+    tmdb_api_key: Optional[str] = Field(default=None, description="TMDb API key (v3) for trending/popular content")
+
     # Notifications
     notify_download_complete: bool = Field(default=True, description="Notify when download completes")
     notify_check_interval: int = Field(default=60, ge=10, description="Check interval for notifications (seconds)")
@@ -108,6 +111,11 @@ class Settings(BaseSettings):
     def emby_enabled(self) -> bool:
         """Check if Emby integration is configured."""
         return self.emby_url is not None and self.emby_api_key is not None
+
+    @property
+    def tmdb_enabled(self) -> bool:
+        """Check if TMDb integration is configured."""
+        return self.tmdb_api_key is not None
 
     def is_user_allowed(self, user_id: int) -> bool:
         """Check if user is in the allowlist."""

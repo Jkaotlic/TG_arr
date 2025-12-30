@@ -10,6 +10,7 @@ _radarr: Optional["RadarrClient"] = None
 _sonarr: Optional["SonarrClient"] = None
 _qbittorrent: Optional["QBittorrentClient"] = None
 _emby: Optional["EmbyClient"] = None
+_tmdb: Optional["TMDbClient"] = None
 
 
 def get_prowlarr() -> "ProwlarrClient":
@@ -80,9 +81,22 @@ def get_emby() -> Optional["EmbyClient"]:
     return _emby
 
 
+def get_tmdb() -> Optional["TMDbClient"]:
+    """Get or create TMDb client singleton (if configured)."""
+    global _tmdb
+    from bot.clients.tmdb import TMDbClient
+
+    settings = get_settings()
+    if not settings.tmdb_enabled:
+        return None
+    if _tmdb is None:
+        _tmdb = TMDbClient(settings.tmdb_api_key)
+    return _tmdb
+
+
 async def close_all() -> None:
     """Close all client connections. Call on shutdown."""
-    global _prowlarr, _radarr, _sonarr, _qbittorrent, _emby
+    global _prowlarr, _radarr, _sonarr, _qbittorrent, _emby, _tmdb
 
     if _prowlarr:
         await _prowlarr.close()
@@ -99,3 +113,6 @@ async def close_all() -> None:
     if _emby:
         await _emby.close()
         _emby = None
+    if _tmdb:
+        await _tmdb.close()
+        _tmdb = None
