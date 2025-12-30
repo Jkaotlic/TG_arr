@@ -35,6 +35,8 @@ class CallbackData:
     # Content selection (for add)
     MOVIE = "movie:"  # movie:tmdb_id
     SERIES = "series:"  # series:tvdb_id
+    ADD_MOVIE = "add_movie:"  # add_movie:tmdb_id
+    ADD_SERIES = "add_series:"  # add_series:tmdb_id
 
     # Confirmation
     CONFIRM_ADD = "confirm_add"
@@ -909,4 +911,22 @@ class Keyboards:
             InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
         ])
 
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def movie_details(movie: MovieInfo) -> InlineKeyboardMarkup:
+        """Create keyboard for movie details from trending."""
+        keyboard = [
+            [InlineKeyboardButton(text="➕ Добавить в Radarr", callback_data=f"{CallbackData.ADD_MOVIE}{movie.tmdb_id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_MOVIES)],
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def series_details(series: SeriesInfo) -> InlineKeyboardMarkup:
+        """Create keyboard for series details from trending."""
+        keyboard = [
+            [InlineKeyboardButton(text="➕ Добавить в Sonarr", callback_data=f"{CallbackData.ADD_SERIES}{series.tmdb_id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_SERIES)],
+        ]
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
