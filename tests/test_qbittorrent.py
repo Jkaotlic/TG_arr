@@ -65,6 +65,37 @@ class TestQBittorrentClient:
 
             assert result is False
 
+    @pytest.mark.asyncio
+    async def test_add_torrent_url_success(self, client):
+        """Test successful torrent addition."""
+        with patch.object(client, '_request', new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = "Ok."
+
+            result = await client.add_torrent_url(
+                "http://example.com/torrent.torrent",
+                category="test",
+            )
+
+            assert result is True
+            mock_request.assert_called_once()
+            call_args = mock_request.call_args
+            assert call_args[0][0] == "POST"
+            assert call_args[0][1] == "/api/v2/torrents/add"
+            assert call_args[1]["data"]["category"] == "test"
+
+    @pytest.mark.asyncio
+    async def test_add_torrent_url_failure(self, client):
+        """Test failed torrent addition."""
+        with patch.object(client, '_request', new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = "Fails."
+
+            result = await client.add_torrent_url(
+                "http://example.com/invalid.torrent",
+            )
+
+            assert result is False
+            mock_request.assert_called_once()
+
     def test_parse_torrent_state(self, client):
         """Test parsing torrent states."""
         assert client._parse_state("downloading") == TorrentState.DOWNLOADING
