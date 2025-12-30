@@ -13,13 +13,15 @@ logger = structlog.get_logger()
 class TMDbClient(BaseAPIClient):
     """Client for TMDb API to fetch trending/popular content."""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, language: str = "en-US"):
         """Initialize TMDb client.
 
         Args:
             api_key: TMDb API key (v3)
+            language: Language for TMDb content (e.g., ru-RU, en-US)
         """
         super().__init__("https://api.themoviedb.org/3", api_key, "TMDb")
+        self.language = language
 
     def _get_headers(self) -> dict[str, str]:
         """Override to not include X-Api-Key header (TMDb uses query param)."""
@@ -42,7 +44,7 @@ class TMDbClient(BaseAPIClient):
         log = logger.bind(time_window=time_window, page=page)
         log.info("Fetching trending movies from TMDb")
 
-        params = {"api_key": self.api_key, "page": page}
+        params = {"api_key": self.api_key, "page": page, "language": self.language}
         result = await self.get(f"/trending/movie/{time_window}", params=params)
 
         if not isinstance(result, dict) or "results" not in result:
@@ -72,7 +74,7 @@ class TMDbClient(BaseAPIClient):
         log = logger.bind(page=page)
         log.info("Fetching popular movies from TMDb")
 
-        params = {"api_key": self.api_key, "page": page}
+        params = {"api_key": self.api_key, "page": page, "language": self.language}
         result = await self.get("/movie/popular", params=params)
 
         if not isinstance(result, dict) or "results" not in result:
@@ -103,7 +105,7 @@ class TMDbClient(BaseAPIClient):
         log = logger.bind(time_window=time_window, page=page)
         log.info("Fetching trending series from TMDb")
 
-        params = {"api_key": self.api_key, "page": page}
+        params = {"api_key": self.api_key, "page": page, "language": self.language}
         result = await self.get(f"/trending/tv/{time_window}", params=params)
 
         if not isinstance(result, dict) or "results" not in result:
@@ -133,7 +135,7 @@ class TMDbClient(BaseAPIClient):
         log = logger.bind(page=page)
         log.info("Fetching popular series from TMDb")
 
-        params = {"api_key": self.api_key, "page": page}
+        params = {"api_key": self.api_key, "page": page, "language": self.language}
         result = await self.get("/tv/popular", params=params)
 
         if not isinstance(result, dict) or "results" not in result:
