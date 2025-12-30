@@ -635,3 +635,103 @@ class Formatters:
             return messages.get(action, f"✅ {action}")
         else:
             return f"❌ Ошибка: {error or action}"
+
+    @staticmethod
+    def _get_rating(ratings: dict) -> Optional[float]:
+        """Extract rating value from ratings dict."""
+        if not ratings:
+            return None
+        # Try TMDb first, then other sources
+        for source in ["tmdb", "imdb", "rottenTomatoes"]:
+            if source in ratings and "value" in ratings[source]:
+                return ratings[source]["value"]
+        return None
+
+    @staticmethod
+    def format_trending_movies(movies: list) -> str:
+        """Format trending movies list."""
+        lines = [
+            "🔥 <b>Топ популярных фильмов</b>\n",
+            "<i>По данным TMDb (The Movie Database)</i>\n",
+        ]
+
+        for i, movie in enumerate(movies[:10], 1):
+            rating_value = Formatters._get_rating(movie.ratings)
+            rating = f"⭐ {rating_value:.1f}" if rating_value else ""
+            year = f" ({movie.year})" if movie.year else ""
+
+            lines.append(f"{i}. <b>{movie.title}</b>{year}")
+            if rating:
+                lines.append(f"   {rating}")
+            if movie.overview:
+                # Truncate overview to 100 chars
+                overview = movie.overview[:100] + "..." if len(movie.overview) > 100 else movie.overview
+                lines.append(f"   <i>{overview}</i>")
+            lines.append("")
+
+        lines.append("\n💡 Нажмите на фильм чтобы увидеть постер")
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_trending_series(series_list: list) -> str:
+        """Format trending series list."""
+        lines = [
+            "🔥 <b>Топ популярных сериалов</b>\n",
+            "<i>По данным TMDb (The Movie Database)</i>\n",
+        ]
+
+        for i, series in enumerate(series_list[:10], 1):
+            rating_value = Formatters._get_rating(series.ratings)
+            rating = f"⭐ {rating_value:.1f}" if rating_value else ""
+            year = f" ({series.year})" if series.year else ""
+
+            lines.append(f"{i}. <b>{series.title}</b>{year}")
+            if rating:
+                lines.append(f"   {rating}")
+            if series.overview:
+                # Truncate overview to 100 chars
+                overview = series.overview[:100] + "..." if len(series.overview) > 100 else series.overview
+                lines.append(f"   <i>{overview}</i>")
+            lines.append("")
+
+        lines.append("\n💡 Нажмите на сериал чтобы увидеть постер")
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_movie_with_poster(movie) -> str:
+        """Format movie details for display with poster."""
+        rating_value = Formatters._get_rating(movie.ratings)
+        rating = f"⭐ {rating_value:.1f}/10" if rating_value else "Нет рейтинга"
+        year = f" ({movie.year})" if movie.year else ""
+
+        lines = [
+            f"🎬 <b>{movie.title}</b>{year}\n",
+            f"{rating}",
+        ]
+
+        if movie.overview:
+            lines.append(f"\n{movie.overview}")
+
+        lines.append("\n💡 Нажмите кнопку ниже для добавления в Radarr")
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_series_with_poster(series) -> str:
+        """Format series details for display with poster."""
+        rating_value = Formatters._get_rating(series.ratings)
+        rating = f"⭐ {rating_value:.1f}/10" if rating_value else "Нет рейтинга"
+        year = f" ({series.year})" if series.year else ""
+
+        lines = [
+            f"📺 <b>{series.title}</b>{year}\n",
+            f"{rating}",
+        ]
+
+        if series.network:
+            lines.append(f"📡 {series.network}")
+
+        if series.overview:
+            lines.append(f"\n{series.overview}")
+
+        lines.append("\n💡 Нажмите кнопку ниже для добавления в Sonarr")
+        return "\n".join(lines)

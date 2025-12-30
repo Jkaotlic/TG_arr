@@ -83,6 +83,12 @@ class CallbackData:
     EMBY_UPDATE_CONFIRM = "emby_update_confirm"  # Confirm update
     EMBY_CLOSE = "emby_close"  # Close Emby message
 
+    # Trending/Popular
+    TRENDING_MOVIES = "trending_movies"  # Show trending movies
+    TRENDING_SERIES = "trending_series"  # Show trending series
+    TRENDING_MOVIE = "trend_m:"  # trend_m:tmdb_id - view movie details
+    TRENDING_SERIES_ITEM = "trend_s:"  # trend_s:tmdb_id - view series details
+
 
 class Keyboards:
     """Inline keyboard builders."""
@@ -93,9 +99,9 @@ class Keyboards:
         return ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="🎬 Фильм"), KeyboardButton(text="📺 Сериал")],
-                [KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit"), KeyboardButton(text="📺 Emby")],
-                [KeyboardButton(text="🔌 Статус"), KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 История")],
-                [KeyboardButton(text="❓ Помощь")],
+                [KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit"), KeyboardButton(text="🔥 Топ")],
+                [KeyboardButton(text="📺 Emby"), KeyboardButton(text="🔌 Статус"), KeyboardButton(text="⚙️ Настройки")],
+                [KeyboardButton(text="📋 История"), KeyboardButton(text="❓ Помощь")],
             ],
             resize_keyboard=True,
             input_field_placeholder="Введите название для поиска...",
@@ -846,3 +852,61 @@ class Keyboards:
                 ],
             ]
         )
+
+    @staticmethod
+    def trending_menu() -> InlineKeyboardMarkup:
+        """Create trending/popular content selection menu."""
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🎬 Популярные фильмы", callback_data=CallbackData.TRENDING_MOVIES),
+                ],
+                [
+                    InlineKeyboardButton(text="📺 Популярные сериалы", callback_data=CallbackData.TRENDING_SERIES),
+                ],
+            ]
+        )
+
+    @staticmethod
+    def trending_movies(movies: list[MovieInfo]) -> InlineKeyboardMarkup:
+        """Create keyboard for trending movies list."""
+        keyboard = []
+
+        for i, movie in enumerate(movies[:10], 1):
+            title = f"{i}. {movie.title}"
+            if movie.year:
+                title += f" ({movie.year})"
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=title,
+                    callback_data=f"{CallbackData.MOVIE}{movie.tmdb_id}",
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
+        ])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def trending_series(series_list: list[SeriesInfo]) -> InlineKeyboardMarkup:
+        """Create keyboard for trending series list."""
+        keyboard = []
+
+        for i, series in enumerate(series_list[:10], 1):
+            title = f"{i}. {series.title}"
+            if series.year:
+                title += f" ({series.year})"
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=title,
+                    callback_data=f"{CallbackData.SERIES}{series.tmdb_id}",
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
+        ])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
