@@ -90,7 +90,7 @@ def get_tmdb() -> Optional["TMDbClient"]:
     if not settings.tmdb_enabled:
         return None
     if _tmdb is None:
-        _tmdb = TMDbClient(settings.tmdb_api_key)
+        _tmdb = TMDbClient(settings.tmdb_api_key, language=settings.tmdb_language)
     return _tmdb
 
 
