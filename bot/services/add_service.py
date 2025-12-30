@@ -6,7 +6,7 @@ import structlog
 
 from bot.clients.base import APIError
 from bot.clients.prowlarr import ProwlarrClient
-from bot.clients.qbittorrent import QBittorrentClient
+from bot.clients.qbittorrent import QBittorrentClient, QBittorrentError
 from bot.clients.radarr import RadarrClient
 from bot.clients.sonarr import SonarrClient
 from bot.models import (
@@ -265,13 +265,17 @@ class AddService:
                 download_url = release.download_url or release.magnet_url
                 if download_url:
                     try:
-                        await self.qbittorrent.add_torrent_url(
+                        success = await self.qbittorrent.add_torrent_url(
                             download_url,
                             category="radarr",  # Tag for Radarr/movies
                         )
-                        action.success = True
-                        log.info("Force downloaded via qBittorrent with radarr category")
-                        return True, action, "Принудительно загружено через qBittorrent"
+                        if success:
+                            action.success = True
+                            log.info("Force downloaded via qBittorrent with radarr category")
+                            return True, action, "Принудительно загружено через qBittorrent"
+                        else:
+                            log.error("qBittorrent rejected torrent", download_url=download_url[:100])
+                            raise QBittorrentError("Failed to add torrent to qBittorrent")
                     except Exception as e:
                         log.error("Force download failed", error=str(e))
 
@@ -390,13 +394,17 @@ class AddService:
                 download_url = release.download_url or release.magnet_url
                 if download_url:
                     try:
-                        await self.qbittorrent.add_torrent_url(
+                        success = await self.qbittorrent.add_torrent_url(
                             download_url,
                             category="tv-sonarr",  # Tag for Sonarr/series
                         )
-                        action.success = True
-                        log.info("Force downloaded via qBittorrent with sonarr category")
-                        return True, action, "Принудительно загружено через qBittorrent"
+                        if success:
+                            action.success = True
+                            log.info("Force downloaded via qBittorrent with sonarr category")
+                            return True, action, "Принудительно загружено через qBittorrent"
+                        else:
+                            log.error("qBittorrent rejected torrent", download_url=download_url[:100])
+                            raise QBittorrentError("Failed to add torrent to qBittorrent")
                     except Exception as e:
                         log.error("Force download failed", error=str(e))
 

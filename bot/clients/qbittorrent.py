@@ -446,8 +446,12 @@ class QBittorrentClient:
         urls: list[str] | str,
         category: Optional[str] = None,
         paused: bool = False,
-    ) -> None:
-        """Add torrent by URL(s) or magnet link(s)."""
+    ) -> bool:
+        """Add torrent by URL(s) or magnet link(s).
+
+        Returns:
+            True if torrent was added successfully, False otherwise.
+        """
         if isinstance(urls, list):
             urls = "\n".join(urls)
 
@@ -457,8 +461,16 @@ class QBittorrentClient:
         if paused:
             data["paused"] = "true"
 
-        await self._request("POST", "/api/v2/torrents/add", data=data)
-        logger.info("Added torrent from URL")
+        result = await self._request("POST", "/api/v2/torrents/add", data=data)
+
+        # Check if torrent was added successfully
+        # qBittorrent API returns "Ok." on success or "Fails." on failure
+        if result and "Ok." in str(result):
+            logger.info("Added torrent from URL", category=category)
+            return True
+        else:
+            logger.error("Failed to add torrent", result=result, category=category)
+            return False
 
     def _parse_torrent(self, item: dict) -> TorrentInfo:
         """Parse qBittorrent torrent response to TorrentInfo."""
