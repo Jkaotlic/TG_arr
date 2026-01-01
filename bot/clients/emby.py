@@ -134,7 +134,7 @@ class EmbyClient:
 
             try:
                 return response.json()
-            except Exception:
+            except (ValueError, TypeError):
                 return response.text
 
         except httpx.TimeoutException:
@@ -163,9 +163,14 @@ class EmbyClient:
 
     async def get_public_info(self) -> dict:
         """Get public server info (no auth required)."""
-        client = await self._get_client()
-        response = await client.get("/System/Info/Public")
-        return response.json() if response.status_code == 200 else {}
+        try:
+            client = await self._get_client()
+            response = await client.get("/System/Info/Public")
+            if response.status_code == 200:
+                return response.json()
+            return {}
+        except (httpx.TimeoutException, httpx.ConnectError, ValueError):
+            return {}
 
     async def get_libraries(self) -> list[EmbyLibrary]:
         """Get all media libraries."""

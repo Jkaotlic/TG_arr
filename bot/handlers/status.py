@@ -39,12 +39,13 @@ async def cmd_status(message: Message) -> None:
             settings.qbittorrent_url,
             settings.qbittorrent_username,
             settings.qbittorrent_password,
+            timeout=settings.qbittorrent_timeout,
         )
 
     # Create Emby client if configured
     emby = None
     if settings.emby_enabled:
-        emby = EmbyClient(settings.emby_url, settings.emby_api_key)
+        emby = EmbyClient(settings.emby_url, settings.emby_api_key, timeout=settings.emby_timeout)
 
     try:
         # Build list of service checks
@@ -112,29 +113,15 @@ async def check_service(client, name: str) -> SystemStatus:
 
 async def check_qbittorrent(client: QBittorrentClient) -> SystemStatus:
     """Check qBittorrent status."""
-    import time
-
     try:
-        start = time.monotonic()
-        logged_in = await client.login()
-
-        if not logged_in:
-            return SystemStatus(
-                service="qBittorrent",
-                available=False,
-                error="Login failed",
-            )
-
-        status = await client.get_status()
-        response_time = (time.monotonic() - start) * 1000
-
+        available, version, response_time = await client.check_connection()
         return SystemStatus(
             service="qBittorrent",
-            available=True,
-            version=status.version,
-            response_time_ms=round(response_time, 1),
+            available=available,
+            version=version,
+            response_time_ms=response_time,
+            error="Login failed" if not available else None,
         )
-
     except Exception as e:
         logger.warning("qBittorrent health check failed", error=str(e))
         return SystemStatus(
