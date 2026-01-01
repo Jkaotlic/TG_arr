@@ -113,10 +113,6 @@ class NotificationService:
     async def _initial_sync(self) -> None:
         """Perform initial sync of current torrents."""
         try:
-            if not await self.qbittorrent.login():
-                logger.warning("Could not login to qBittorrent for initial sync")
-                return
-
             torrents = await self.qbittorrent.get_torrents()
 
             for torrent in torrents:
@@ -140,9 +136,6 @@ class NotificationService:
     async def _check_for_completions(self) -> None:
         """Check for newly completed downloads and send notifications."""
         try:
-            if not await self.qbittorrent.login():
-                return
-
             torrents = await self.qbittorrent.get_torrents()
             current_hashes = set()
 
@@ -214,9 +207,6 @@ class NotificationService:
         newly_completed = []
 
         try:
-            if not await self.qbittorrent.login():
-                return newly_completed
-
             torrents = await self.qbittorrent.get_torrents()
 
             for torrent in torrents:
