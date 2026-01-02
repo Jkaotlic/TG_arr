@@ -23,6 +23,9 @@ class CallbackData:
     TYPE_MOVIE = "type:movie"
     TYPE_SERIES = "type:series"
 
+    # Quick actions (recent searches)
+    QUICK_SEARCH = "qs:"  # qs:movie:query or qs:series:query
+
     # Pagination
     PAGE = "page:"  # page:5
     BACK = "back"
@@ -108,6 +111,48 @@ class Keyboards:
             resize_keyboard=True,
             input_field_placeholder="Введите название для поиска...",
         )
+
+    @staticmethod
+    def quick_actions(
+        recent_searches: list[tuple[str, str]],
+        show_trending: bool = True,
+    ) -> Optional[InlineKeyboardMarkup]:
+        """
+        Create quick actions keyboard with recent searches.
+
+        Args:
+            recent_searches: List of (query, content_type) tuples
+            show_trending: Whether to show trending button
+        """
+        keyboard = []
+
+        # Recent searches
+        if recent_searches:
+            keyboard.append([
+                InlineKeyboardButton(text="🕐 Недавние поиски:", callback_data="noop"),
+            ])
+            for query, content_type in recent_searches[:4]:
+                icon = "🎬" if content_type == "movie" else "📺"
+                label = f"{icon} {query}"
+                if len(label) > 30:
+                    label = label[:27] + "..."
+                # Encode query in callback data (truncate if too long)
+                query_short = query[:30] if len(query) > 30 else query
+                keyboard.append([
+                    InlineKeyboardButton(
+                        text=label,
+                        callback_data=f"{CallbackData.QUICK_SEARCH}{content_type}:{query_short}",
+                    ),
+                ])
+
+        # Trending button
+        if show_trending:
+            keyboard.append([
+                InlineKeyboardButton(text="🔥 Популярное", callback_data=CallbackData.TRENDING_MOVIES),
+                InlineKeyboardButton(text="📺 Топ сериалы", callback_data=CallbackData.TRENDING_SERIES),
+            ])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
 
     @staticmethod
     def content_type_selection() -> InlineKeyboardMarkup:

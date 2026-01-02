@@ -290,6 +290,43 @@ async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Data
     )
 
 
+@router.callback_query(F.data.startswith(CallbackData.QUICK_SEARCH))
+async def handle_quick_search(callback: CallbackQuery, db_user: User, db: Database) -> None:
+    """Handle quick search from recent searches."""
+    if not callback.data or not callback.message:
+        return
+
+    # Parse callback data: qs:movie:query or qs:series:query
+    try:
+        parts = callback.data.replace(CallbackData.QUICK_SEARCH, "").split(":", 1)
+        if len(parts) != 2:
+            await callback.answer("Ошибка данных", show_alert=True)
+            return
+
+        content_type_str, query = parts
+        content_type = ContentType.MOVIE if content_type_str == "movie" else ContentType.SERIES
+
+    except Exception:
+        await callback.answer("Ошибка разбора запроса", show_alert=True)
+        return
+
+    await callback.answer(f"🔍 Ищу: {query}")
+
+    # Delete quick actions message and start search
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    await process_search(
+        callback.message,
+        query,
+        content_type,
+        db_user,
+        db,
+    )
+
+
 @router.callback_query(F.data.startswith(CallbackData.PAGE))
 async def handle_pagination(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle pagination buttons."""

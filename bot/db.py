@@ -381,3 +381,98 @@ class Database:
         )
         await self.conn.commit()
         return cursor.rowcount
+
+    async def get_recent_searches(
+        self, user_id: int, limit: int = 5, unique: bool = True
+    ) -> list[tuple[str, str]]:
+        """
+        Get recent searches for a user.
+
+        Args:
+            user_id: Telegram user ID
+            limit: Maximum number of results
+            unique: If True, return only unique queries
+
+        Returns:
+            List of (query, content_type) tuples
+        """
+        if unique:
+            # Get unique queries (most recent occurrence)
+            query = """
+                SELECT query, content_type
+                FROM (
+                    SELECT query, content_type, MAX(created_at) as latest
+                    FROM searches
+                    WHERE user_id = ?
+                    GROUP BY query, content_type
+                )
+                ORDER BY latest DESC
+                LIMIT ?
+            """
+        else:
+            query = """
+                SELECT query, content_type
+                FROM searches
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """
+
+        async with self.conn.execute(query, (user_id, limit)) as cursor:
+            rows = await cursor.fetchall()
+            return [(row["query"], row["content_type"]) for row in rows]
+
+    async def get_user_stats(self, user_id: int) -> dict:
+        """Get user statistics."""
+        stats = {
+            "total_searches": 0,
+            "total_grabs": 0,
+            "movies_added": 0,
+            "series_added": 0,
+        }
+
+        # Total searches
+        async with self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM searches WHERE user_id = ?", (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                stats["total_searches"] = row["cnt"]
+
+        # Total grabs (successful downloads)
+        async with self.conn.execute(
+            """
+            SELECT COUNT(*) as cnt FROM actions
+            WHERE user_id = ? AND action_type = 'grab' AND success = 1
+            """,
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                stats["total_grabs"] = row["cnt"]
+
+        # Movies added
+        async with self.conn.execute(
+            """
+            SELECT COUNT(*) as cnt FROM actions
+            WHERE user_id = ? AND action_type = 'add' AND content_type = 'movie' AND success = 1
+            """,
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                stats["movies_added"] = row["cnt"]
+
+        # Series added
+        async with self.conn.execute(
+            """
+            SELECT COUNT(*) as cnt FROM actions
+            WHERE user_id = ? AND action_type = 'add' AND content_type = 'series' AND success = 1
+            """,
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                stats["series_added"] = row["cnt"]
+
+        return stats
