@@ -1,5 +1,6 @@
 """Radarr API client."""
 
+from datetime import datetime
 from typing import Any, Optional
 
 import structlog
@@ -275,6 +276,35 @@ class RadarrClient(BaseAPIClient):
             quality_profile_id=item.get("qualityProfileId"),
             root_folder_path=item.get("rootFolderPath") or item.get("path"),
         )
+
+    async def get_calendar(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        unmonitored: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Get upcoming movie releases from calendar.
+
+        Args:
+            start_date: Start date for calendar range (default: today)
+            end_date: End date for calendar range (default: 7 days from start)
+            unmonitored: Include unmonitored movies
+
+        Returns:
+            List of movie calendar entries from Radarr API
+        """
+        params = {}
+
+        if start_date:
+            params["start"] = start_date.strftime("%Y-%m-%d")
+        if end_date:
+            params["end"] = end_date.strftime("%Y-%m-%d")
+        if unmonitored:
+            params["unmonitored"] = "true"
+
+        results = await self.get("/api/v3/calendar", params=params)
+        return results if isinstance(results, list) else []
 
     async def check_connection(self) -> tuple[bool, str | None, float | None]:
         """Check if Radarr is available. Uses v3 API."""

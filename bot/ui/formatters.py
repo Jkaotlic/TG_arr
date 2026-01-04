@@ -742,3 +742,111 @@ class Formatters:
 
         lines.append("\n💡 Нажмите кнопку ниже для добавления в Sonarr")
         return "\n".join(lines)
+
+    # =========================================================================
+    # Calendar Formatters
+    # =========================================================================
+
+    @staticmethod
+    def format_calendar_events(
+        events: list,
+        days: int,
+        content_filter: Optional[str] = None,
+    ) -> str:
+        """Format calendar events list."""
+        filter_text = ""
+        if content_filter == "movie":
+            filter_text = " (фильмы)"
+        elif content_filter == "series":
+            filter_text = " (сериалы)"
+
+        lines = [
+            f"📅 <b>Предстоящие релизы{filter_text}</b>",
+            f"<i>Ближайшие {days} дней</i>\n",
+        ]
+
+        if not events:
+            lines.append("📭 Нет предстоящих релизов.")
+            return "\n".join(lines)
+
+        # Group events by date
+        events_by_date: dict = {}
+        for event in events:
+            date_key = event.release_date.strftime("%d.%m.%Y")
+            if date_key not in events_by_date:
+                events_by_date[date_key] = []
+            events_by_date[date_key].append(event)
+
+        for date_str, date_events in events_by_date.items():
+            # Calculate relative day
+            first_event = date_events[0]
+            days_until = first_event.days_until_release
+
+            if days_until == 0:
+                day_label = "Сегодня"
+            elif days_until == 1:
+                day_label = "Завтра"
+            elif days_until < 0:
+                day_label = "Вышел"
+            else:
+                day_label = f"Через {days_until} дн."
+
+            lines.append(f"\n<b>{date_str}</b> ({day_label}):")
+
+            for event in date_events[:5]:  # Limit per day
+                emoji = "🎬" if event.event_type.value == "movie" else "📺"
+                title = html.escape(event.display_title)
+
+                if event.event_type.value == "episode" and event.episode_title:
+                    ep_title = html.escape(event.episode_title[:30])
+                    lines.append(f"  {emoji} {title}")
+                    lines.append(f"      <i>{ep_title}</i>")
+                else:
+                    lines.append(f"  {emoji} {title}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_release_notification(event) -> str:
+        """Format notification message for upcoming release."""
+        if event.event_type.value == "movie":
+            emoji = "🎬"
+            title = event.title
+            year = f" ({event.year})" if event.year else ""
+
+            if event.days_until_release == 0:
+                header = "Сегодня выходит!"
+            elif event.days_until_release == 1:
+                header = "Завтра выходит!"
+            else:
+                header = f"Выходит через {event.days_until_release} дн."
+
+            lines = [
+                f"🔔 <b>{header}</b>\n",
+                f"{emoji} <b>{html.escape(title)}</b>{year}",
+                f"📅 {event.release_date_formatted}",
+            ]
+        else:  # Episode
+            emoji = "📺"
+            series_title = event.series_title or event.title
+            ep_str = f"S{event.season_number:02d}E{event.episode_number:02d}"
+
+            if event.days_until_release == 0:
+                header = "Новый эпизод сегодня!"
+            elif event.days_until_release == 1:
+                header = "Новый эпизод завтра!"
+            else:
+                header = f"Новый эпизод через {event.days_until_release} дн."
+
+            lines = [
+                f"🔔 <b>{header}</b>\n",
+                f"{emoji} <b>{html.escape(series_title)}</b>",
+                f"📺 {ep_str}",
+            ]
+
+            if event.episode_title:
+                lines.append(f"<i>{html.escape(event.episode_title)}</i>")
+
+            lines.append(f"📅 {event.release_date_formatted}")
+
+        return "\n".join(lines)

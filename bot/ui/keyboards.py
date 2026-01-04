@@ -94,6 +94,17 @@ class CallbackData:
     TRENDING_MOVIE = "trend_m:"  # trend_m:tmdb_id - view movie details
     TRENDING_SERIES_ITEM = "trend_s:"  # trend_s:tmdb_id - view series details
 
+    # Calendar
+    CALENDAR_MENU = "cal_menu"
+    CALENDAR_ALL = "cal_all"
+    CALENDAR_MOVIES = "cal_movies"
+    CALENDAR_SERIES = "cal_series"
+    CALENDAR_SUBSCRIBE = "cal_sub"
+    CALENDAR_SUB_TOGGLE = "cal_sub_t:"  # cal_sub_t:all, cal_sub_t:movie, cal_sub_t:series
+    CALENDAR_UNSUBSCRIBE = "cal_unsub"
+    CALENDAR_BACK = "cal_back"
+    CALENDAR_REFRESH = "cal_refresh"
+
 
 class Keyboards:
     """Inline keyboard builders."""
@@ -105,8 +116,8 @@ class Keyboards:
             keyboard=[
                 [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="🎬 Фильм"), KeyboardButton(text="📺 Сериал")],
                 [KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit"), KeyboardButton(text="🔥 Топ")],
-                [KeyboardButton(text="📺 Emby"), KeyboardButton(text="🔌 Статус"), KeyboardButton(text="⚙️ Настройки")],
-                [KeyboardButton(text="📋 История"), KeyboardButton(text="❓ Помощь")],
+                [KeyboardButton(text="📅 Календарь"), KeyboardButton(text="📺 Emby"), KeyboardButton(text="🔌 Статус")],
+                [KeyboardButton(text="📋 История"), KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="❓ Помощь")],
             ],
             resize_keyboard=True,
             input_field_placeholder="Введите название для поиска...",
@@ -975,3 +986,142 @@ class Keyboards:
             [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_SERIES)],
         ]
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    # =========================================================================
+    # Calendar Keyboards
+    # =========================================================================
+
+    @staticmethod
+    def calendar_menu() -> InlineKeyboardMarkup:
+        """Create calendar main menu keyboard."""
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="📅 Все релизы (7 дней)",
+                        callback_data=CallbackData.CALENDAR_ALL,
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🎬 Только фильмы",
+                        callback_data=CallbackData.CALENDAR_MOVIES,
+                    ),
+                    InlineKeyboardButton(
+                        text="📺 Только сериалы",
+                        callback_data=CallbackData.CALENDAR_SERIES,
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🔔 Уведомления",
+                        callback_data=CallbackData.CALENDAR_SUBSCRIBE,
+                    ),
+                ],
+            ]
+        )
+
+    @staticmethod
+    def calendar_events(
+        events: list,
+        content_filter: Optional[str] = None,
+    ) -> InlineKeyboardMarkup:
+        """Create keyboard for calendar events list."""
+        keyboard = []
+
+        # Show up to 8 events as buttons
+        for event in events[:8]:
+            emoji = "🎬" if event.event_type.value == "movie" else "📺"
+            days = event.days_until_release
+
+            if days == 0:
+                day_str = "Сегодня"
+            elif days == 1:
+                day_str = "Завтра"
+            else:
+                day_str = f"{days} дн."
+
+            title = event.display_title
+            if len(title) > 22:
+                title = title[:19] + "..."
+            label = f"{emoji} {title} ({day_str})"
+
+            keyboard.append([
+                InlineKeyboardButton(text=label, callback_data="noop"),
+            ])
+
+        # Action buttons
+        keyboard.append([
+            InlineKeyboardButton(text="🔄 Обновить", callback_data=CallbackData.CALENDAR_REFRESH),
+            InlineKeyboardButton(text="🔔 Уведомления", callback_data=CallbackData.CALENDAR_SUBSCRIBE),
+        ])
+
+        keyboard.append([
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.CALENDAR_MENU),
+        ])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def calendar_subscription(
+        is_subscribed: bool = False,
+        content_type: Optional[str] = None,
+    ) -> InlineKeyboardMarkup:
+        """Create keyboard for calendar subscription settings."""
+        keyboard = []
+
+        if is_subscribed:
+            # Show current status
+            type_text = "Все"
+            if content_type == "movie":
+                type_text = "Фильмы"
+            elif content_type == "series":
+                type_text = "Сериалы"
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"✅ Подписка: {type_text}",
+                    callback_data="noop",
+                ),
+            ])
+            keyboard.append([
+                InlineKeyboardButton(
+                    text="❌ Отписаться",
+                    callback_data=CallbackData.CALENDAR_UNSUBSCRIBE,
+                ),
+            ])
+        else:
+            # Subscribe options
+            keyboard.append([
+                InlineKeyboardButton(
+                    text="🔔 Все релизы",
+                    callback_data=f"{CallbackData.CALENDAR_SUB_TOGGLE}all",
+                ),
+            ])
+            keyboard.append([
+                InlineKeyboardButton(
+                    text="🎬 Только фильмы",
+                    callback_data=f"{CallbackData.CALENDAR_SUB_TOGGLE}movie",
+                ),
+                InlineKeyboardButton(
+                    text="📺 Только сериалы",
+                    callback_data=f"{CallbackData.CALENDAR_SUB_TOGGLE}series",
+                ),
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.CALENDAR_MENU),
+        ])
+
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def calendar_back() -> InlineKeyboardMarkup:
+        """Simple back button for calendar."""
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.CALENDAR_MENU),
+                ],
+            ]
+        )

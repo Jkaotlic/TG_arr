@@ -12,6 +12,7 @@ import structlog
 from bot.models import (
     ActionLog,
     ActionType,
+    CalendarSubscription,
     ContentType,
     SearchResult,
     SearchSession,
@@ -116,6 +117,32 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_searches_user ON searches(user_id);
             CREATE INDEX IF NOT EXISTS idx_actions_user ON actions(user_id);
             CREATE INDEX IF NOT EXISTS idx_actions_created ON actions(created_at);
+
+            -- Calendar tables
+            CREATE TABLE IF NOT EXISTS calendar_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                content_type TEXT,
+                notify_days_before INTEGER NOT NULL DEFAULT 1,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(tg_id),
+                UNIQUE(user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS notified_releases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                content_id TEXT NOT NULL,
+                release_date TEXT NOT NULL,
+                notified_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(tg_id),
+                UNIQUE(user_id, event_type, content_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_calendar_subs_user ON calendar_subscriptions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_notified_releases_user ON notified_releases(user_id);
         """)
         await self.conn.commit()
 
@@ -476,3 +503,128 @@ class Database:
                 stats["series_added"] = row["cnt"]
 
         return stats
+
+    # Calendar subscription methods
+    async def get_calendar_subscription(self, user_id: int) -> Optional[CalendarSubscription]:
+        """Get calendar subscription for a user."""
+        async with self.conn.execute(
+            "SELECT * FROM calendar_subscriptions WHERE user_id = ? AND enabled = 1",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return CalendarSubscription(
+                    id=row["id"],
+                    user_id=row["user_id"],
+                    content_type=ContentType(row["content_type"]) if row["content_type"] else None,
+                    notify_days_before=row["notify_days_before"],
+                    enabled=bool(row["enabled"]),
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+        return None
+
+    async def create_calendar_subscription(
+        self,
+        user_id: int,
+        content_type: Optional[ContentType] = None,
+        notify_days_before: int = 1,
+    ) -> CalendarSubscription:
+        """Create or update calendar subscription."""
+        now = datetime.utcnow().isoformat()
+        content_type_val = content_type.value if content_type else None
+
+        await self.conn.execute(
+            """
+            INSERT INTO calendar_subscriptions (user_id, content_type, notify_days_before, enabled, created_at)
+            VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                content_type = excluded.content_type,
+                notify_days_before = excluded.notify_days_before,
+                enabled = 1
+            """,
+            (user_id, content_type_val, notify_days_before, now),
+        )
+        await self.conn.commit()
+
+        return CalendarSubscription(
+            user_id=user_id,
+            content_type=content_type,
+            notify_days_before=notify_days_before,
+            enabled=True,
+            created_at=datetime.fromisoformat(now),
+        )
+
+    async def delete_calendar_subscription(self, user_id: int) -> None:
+        """Delete (disable) calendar subscription for a user."""
+        await self.conn.execute(
+            "UPDATE calendar_subscriptions SET enabled = 0 WHERE user_id = ?",
+            (user_id,),
+        )
+        await self.conn.commit()
+
+    async def get_all_calendar_subscriptions(self) -> list[CalendarSubscription]:
+        """Get all active calendar subscriptions."""
+        async with self.conn.execute(
+            "SELECT * FROM calendar_subscriptions WHERE enabled = 1"
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                CalendarSubscription(
+                    id=row["id"],
+                    user_id=row["user_id"],
+                    content_type=ContentType(row["content_type"]) if row["content_type"] else None,
+                    notify_days_before=row["notify_days_before"],
+                    enabled=bool(row["enabled"]),
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in rows
+            ]
+
+    async def is_release_notified(
+        self,
+        user_id: int,
+        event_type: str,
+        content_id: str,
+    ) -> bool:
+        """Check if a release was already notified to a user."""
+        async with self.conn.execute(
+            """
+            SELECT 1 FROM notified_releases
+            WHERE user_id = ? AND event_type = ? AND content_id = ?
+            """,
+            (user_id, event_type, content_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row is not None
+
+    async def mark_release_notified(
+        self,
+        user_id: int,
+        event_type: str,
+        content_id: str,
+        release_date: datetime,
+    ) -> None:
+        """Mark a release as notified for a user."""
+        now = datetime.utcnow().isoformat()
+
+        await self.conn.execute(
+            """
+            INSERT OR IGNORE INTO notified_releases
+            (user_id, event_type, content_id, release_date, notified_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user_id, event_type, content_id, release_date.isoformat(), now),
+        )
+        await self.conn.commit()
+
+    async def cleanup_old_notifications(self, days: int = 30) -> int:
+        """Clean up old notification records."""
+        from datetime import timedelta
+
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+
+        cursor = await self.conn.execute(
+            "DELETE FROM notified_releases WHERE notified_at < ?", (cutoff,)
+        )
+        await self.conn.commit()
+        return cursor.rowcount

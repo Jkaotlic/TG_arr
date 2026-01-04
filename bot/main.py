@@ -18,6 +18,7 @@ from bot.config import get_settings
 from bot.db import Database
 from bot.handlers import setup_routers
 from bot.middleware.auth import AuthMiddleware, LoggingMiddleware, RateLimitMiddleware
+from bot.services.calendar_notification_service import CalendarNotificationService
 from bot.services.notification_service import NotificationService
 
 
@@ -51,6 +52,7 @@ async def on_startup(
     bot: Bot,
     db: Database,
     notification_service: Optional[NotificationService],
+    calendar_notification_service: Optional[CalendarNotificationService],
 ) -> None:
     """Startup handler."""
     logger = structlog.get_logger()
@@ -80,6 +82,11 @@ async def on_startup(
         await notification_service.start()
         logger.info("Notification service started")
 
+    # Start calendar notification service
+    if calendar_notification_service:
+        await calendar_notification_service.start()
+        logger.info("Calendar notification service started")
+
     # Get bot info
     bot_info = await bot.get_me()
     logger.info(
@@ -93,6 +100,7 @@ async def on_shutdown(
     bot: Bot,
     db: Database,
     notification_service: Optional[NotificationService],
+    calendar_notification_service: Optional[CalendarNotificationService],
     qbittorrent: Optional[QBittorrentClient],
 ) -> None:
     """Shutdown handler."""
@@ -103,6 +111,11 @@ async def on_shutdown(
     if notification_service:
         await notification_service.stop()
         logger.info("Notification service stopped")
+
+    # Stop calendar notification service
+    if calendar_notification_service:
+        await calendar_notification_service.stop()
+        logger.info("Calendar notification service stopped")
 
     # Close qBittorrent client (for notification service)
     if qbittorrent:
@@ -147,6 +160,18 @@ async def main() -> None:
     # Initialize qBittorrent client and notification service if configured
     qbittorrent: Optional[QBittorrentClient] = None
     notification_service: Optional[NotificationService] = None
+    calendar_notification_service: Optional[CalendarNotificationService] = None
+
+    # Create notification sender function (used by multiple services)
+    async def send_notification(user_id: int, message: str) -> None:
+        try:
+            await bot.send_message(user_id, message, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.warning(
+                "Failed to send notification",
+                user_id=user_id,
+                error=str(e),
+            )
 
     if settings.qbittorrent_enabled:
         logger.info("qBittorrent integration enabled", url=settings.qbittorrent_url)
@@ -157,20 +182,14 @@ async def main() -> None:
             timeout=settings.qbittorrent_timeout,
         )
 
-        # Create notification sender function
-        async def send_notification(user_id: int, message: str) -> None:
-            try:
-                await bot.send_message(user_id, message, parse_mode=ParseMode.MARKDOWN)
-            except Exception as e:
-                logger.warning(
-                    "Failed to send notification",
-                    user_id=user_id,
-                    error=str(e),
-                )
-
         notification_service = NotificationService(qbittorrent, send_notification)
     else:
         logger.info("qBittorrent integration disabled")
+
+    # Initialize calendar notification service (always enabled if Radarr/Sonarr is available)
+    if settings.radarr_enabled or settings.sonarr_enabled:
+        calendar_notification_service = CalendarNotificationService(send_notification)
+        logger.info("Calendar notification service initialized")
 
     # Initialize dispatcher
     dp = Dispatcher()
@@ -189,10 +208,10 @@ async def main() -> None:
 
     # Register startup/shutdown handlers
     async def _on_startup(*_: object, **__: object) -> None:
-        await on_startup(bot, db, notification_service)
+        await on_startup(bot, db, notification_service, calendar_notification_service)
 
     async def _on_shutdown(*_: object, **__: object) -> None:
-        await on_shutdown(bot, db, notification_service, qbittorrent)
+        await on_shutdown(bot, db, notification_service, calendar_notification_service, qbittorrent)
 
     dp.startup.register(_on_startup)
     dp.shutdown.register(_on_shutdown)

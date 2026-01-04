@@ -443,3 +443,88 @@ def format_speed(bytes_per_sec: int) -> str:
             return f"{bytes_per_sec:.1f} {unit}"
         bytes_per_sec /= 1024.0
     return f"{bytes_per_sec:.1f} TB/s"
+
+
+# ============================================================================
+# Calendar Models
+# ============================================================================
+
+
+class CalendarEventType(str, Enum):
+    """Type of calendar event."""
+
+    MOVIE = "movie"
+    EPISODE = "episode"
+
+
+class CalendarEvent(BaseModel):
+    """Unified calendar event for movies and episodes."""
+
+    event_type: CalendarEventType
+
+    # Common fields
+    title: str = Field(..., description="Movie or series title")
+    release_date: datetime = Field(..., description="Release/air date")
+    overview: Optional[str] = Field(default=None)
+    poster_url: Optional[str] = Field(default=None)
+
+    # Movie-specific fields
+    tmdb_id: Optional[int] = Field(default=None)
+    radarr_id: Optional[int] = Field(default=None)
+    year: Optional[int] = Field(default=None)
+    has_file: bool = Field(default=False)
+    is_available: bool = Field(default=False)
+
+    # Episode-specific fields
+    tvdb_id: Optional[int] = Field(default=None)
+    sonarr_id: Optional[int] = Field(default=None)
+    series_id: Optional[int] = Field(default=None)
+    series_title: Optional[str] = Field(default=None)
+    season_number: Optional[int] = Field(default=None)
+    episode_number: Optional[int] = Field(default=None)
+    episode_title: Optional[str] = Field(default=None)
+
+    @property
+    def display_title(self) -> str:
+        """Get formatted display title."""
+        if self.event_type == CalendarEventType.MOVIE:
+            year_str = f" ({self.year})" if self.year else ""
+            return f"{self.title}{year_str}"
+        else:
+            ep_str = f"S{self.season_number:02d}E{self.episode_number:02d}"
+            return f"{self.series_title or self.title} - {ep_str}"
+
+    @property
+    def release_date_formatted(self) -> str:
+        """Get formatted release date."""
+        return self.release_date.strftime("%d.%m.%Y")
+
+    @property
+    def days_until_release(self) -> int:
+        """Get days until release (negative if already released)."""
+        now = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        release = self.release_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        return (release - now).days
+
+    @property
+    def content_id(self) -> str:
+        """Get unique content identifier."""
+        if self.event_type == CalendarEventType.MOVIE:
+            return f"movie:{self.radarr_id or self.tmdb_id}"
+        else:
+            return f"episode:{self.sonarr_id}"
+
+
+class CalendarSubscription(BaseModel):
+    """User subscription to calendar notifications."""
+
+    id: Optional[int] = Field(default=None)
+    user_id: int = Field(..., description="Telegram user ID")
+    content_type: Optional[ContentType] = Field(
+        default=None, description="None = all types"
+    )
+    notify_days_before: int = Field(
+        default=1, description="Send notification N days before release"
+    )
+    enabled: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
