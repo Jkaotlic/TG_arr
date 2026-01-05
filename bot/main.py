@@ -186,10 +186,9 @@ async def main() -> None:
     else:
         logger.info("qBittorrent integration disabled")
 
-    # Initialize calendar notification service (always enabled if Radarr/Sonarr is available)
-    if settings.radarr_enabled or settings.sonarr_enabled:
-        calendar_notification_service = CalendarNotificationService(send_notification)
-        logger.info("Calendar notification service initialized")
+    # Initialize calendar notification service (Radarr/Sonarr are always configured)
+    calendar_notification_service = CalendarNotificationService(send_notification)
+    logger.info("Calendar notification service initialized")
 
     # Initialize dispatcher
     dp = Dispatcher()
