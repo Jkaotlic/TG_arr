@@ -118,6 +118,16 @@ class Settings(BaseSettings):
         """Check if TMDb integration is configured."""
         return self.tmdb_api_key is not None
 
+    @property
+    def radarr_enabled(self) -> bool:
+        """Check if Radarr is properly configured."""
+        return bool(self.radarr_url and self.radarr_api_key)
+
+    @property
+    def sonarr_enabled(self) -> bool:
+        """Check if Sonarr is properly configured."""
+        return bool(self.sonarr_url and self.sonarr_api_key)
+
     def is_user_allowed(self, user_id: int) -> bool:
         """Check if user is in the allowlist."""
         return user_id in self.allowed_tg_ids or user_id in self.admin_tg_ids

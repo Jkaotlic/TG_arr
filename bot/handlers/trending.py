@@ -1,8 +1,9 @@
 """Trending/popular content handlers."""
 
+import time
 import structlog
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, Message, BufferedInputFile, FSInputFile, URLInputFile
+from aiogram.types import CallbackQuery, Message
 
 from bot.config import get_settings
 from bot.clients.registry import get_tmdb, get_radarr, get_sonarr, get_qbittorrent, get_prowlarr
@@ -18,9 +19,31 @@ router = Router()
 # Menu button text
 MENU_TRENDING = "🔥 Топ"
 
-# Cache for trending data to avoid re-fetching when viewing details
-_trending_movies_cache = {}
-_trending_series_cache = {}
+# Cache for trending data with TTL (5 minutes)
+CACHE_TTL_SECONDS = 300
+_trending_movies_cache: dict = {}
+_trending_movies_cache_time: float = 0
+_trending_series_cache: dict = {}
+_trending_series_cache_time: float = 0
+
+
+def _is_cache_valid(cache_time: float) -> bool:
+    """Check if cache is still valid based on TTL."""
+    return cache_time > 0 and (time.time() - cache_time) < CACHE_TTL_SECONDS
+
+
+def _get_cached_movie(tmdb_id: int):
+    """Get movie from cache if still valid."""
+    if _is_cache_valid(_trending_movies_cache_time):
+        return _trending_movies_cache.get(tmdb_id)
+    return None
+
+
+def _get_cached_series(tmdb_id: int):
+    """Get series from cache if still valid."""
+    if _is_cache_valid(_trending_series_cache_time):
+        return _trending_series_cache.get(tmdb_id)
+    return None
 
 
 @router.message(F.text == MENU_TRENDING)
@@ -75,9 +98,10 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
             )
             return
 
-        # Cache movies for detail views
-        global _trending_movies_cache
+        # Cache movies for detail views with TTL
+        global _trending_movies_cache, _trending_movies_cache_time
         _trending_movies_cache = {movie.tmdb_id: movie for movie in movies}
+        _trending_movies_cache_time = time.time()
 
         # Format and send results
         text = Formatters.format_trending_movies(movies[:10])  # Top 10
@@ -120,9 +144,10 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
             )
             return
 
-        # Cache series for detail views
-        global _trending_series_cache
+        # Cache series for detail views with TTL
+        global _trending_series_cache, _trending_series_cache_time
         _trending_series_cache = {series.tmdb_id: series for series in series_list}
+        _trending_series_cache_time = time.time()
 
         # Format and send results
         text = Formatters.format_trending_series(series_list[:10])  # Top 10
@@ -152,8 +177,8 @@ async def handle_movie_from_trending(callback: CallbackQuery) -> None:
         await callback.message.answer("❌ Неверный ID фильма")
         return
 
-    # Try to get movie from cache first
-    movie = _trending_movies_cache.get(tmdb_id)
+    # Try to get movie from cache first (with TTL check)
+    movie = _get_cached_movie(tmdb_id)
 
     if not movie:
         # If not in cache, fetch from Radarr
@@ -210,8 +235,8 @@ async def handle_series_from_trending(callback: CallbackQuery) -> None:
         await callback.message.answer("❌ Неверный ID сериала")
         return
 
-    # Try to get series from cache first (if from trending)
-    series = _trending_series_cache.get(series_id)
+    # Try to get series from cache first with TTL check
+    series = _get_cached_series(series_id)
 
     if not series:
         # If not in cache, need to determine if it's TMDB or TVDB ID
@@ -269,8 +294,8 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
         await callback.message.answer("❌ Неверный ID фильма")
         return
 
-    # Try to get movie from cache first
-    movie = _trending_movies_cache.get(tmdb_id)
+    # Try to get movie from cache first (with TTL check)
+    movie = _get_cached_movie(tmdb_id)
 
     if not movie:
         # If not in cache, fetch from Radarr
@@ -353,8 +378,8 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
         await callback.message.answer("❌ Неверный ID сериала")
         return
 
-    # Try to get series from cache first
-    series = _trending_series_cache.get(tmdb_id)
+    # Try to get series from cache first with TTL check
+    series = _get_cached_series(tmdb_id)
 
     if not series:
         # If not in cache, try to lookup via Sonarr using TMDB ID

@@ -1,6 +1,6 @@
 """Calendar handler for viewing upcoming releases."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import structlog
@@ -40,7 +40,7 @@ async def _fetch_calendar_events(
     events: list[CalendarEvent] = []
     settings = get_settings()
 
-    start_date = datetime.utcnow()
+    start_date = datetime.now(timezone.utc)
     end_date = start_date + timedelta(days=CALENDAR_DAYS)
 
     # Fetch movies from Radarr
@@ -145,6 +145,10 @@ async def cmd_calendar(message: Message) -> None:
 @router.callback_query(F.data == CallbackData.CALENDAR_MENU)
 async def callback_calendar_menu(callback: CallbackQuery) -> None:
     """Show calendar menu."""
+    if not callback.message:
+        await callback.answer("Сообщение недоступно", show_alert=True)
+        return
+
     await callback.message.edit_text(
         "📅 <b>Календарь релизов</b>\n\n"
         "Выберите, какие релизы показать:",

@@ -5,6 +5,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from bot.clients.registry import get_prowlarr, get_radarr, get_sonarr, get_qbittorrent
 from bot.config import get_settings
 from bot.db import Database
 from bot.models import User, UserPreferences
@@ -28,24 +29,11 @@ async def get_db() -> Database:
 
 
 async def get_add_service() -> AddService:
-    """Get add service instance."""
-    from bot.clients import ProwlarrClient, RadarrClient, SonarrClient
-    from bot.clients.qbittorrent import QBittorrentClient
-
-    settings = get_settings()
-
-    prowlarr = ProwlarrClient(settings.prowlarr_url, settings.prowlarr_api_key)
-    radarr = RadarrClient(settings.radarr_url, settings.radarr_api_key)
-    sonarr = SonarrClient(settings.sonarr_url, settings.sonarr_api_key)
-
-    # qBittorrent for force downloads
-    qbittorrent = None
-    if settings.qbittorrent_url:
-        qbittorrent = QBittorrentClient(
-            settings.qbittorrent_url,
-            settings.qbittorrent_username,
-            settings.qbittorrent_password,
-        )
+    """Get add service instance using singleton clients."""
+    prowlarr = get_prowlarr()
+    radarr = get_radarr()
+    sonarr = get_sonarr()
+    qbittorrent = get_qbittorrent()
 
     return AddService(prowlarr, radarr, sonarr, qbittorrent)
 

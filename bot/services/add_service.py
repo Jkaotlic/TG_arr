@@ -431,14 +431,14 @@ class AddService:
                 return True, action, msg
 
             action.success = False
-            action.error_message = "Could not grab release or trigger search"
+            action.error_message = "Не удалось захватить релиз или запустить поиск"
             return False, action, "Не удалось захватить релиз"
 
         except Exception as e:
             log.error("Failed to grab release", error=str(e))
             action.success = False
             action.error_message = str(e)
-            return False, action, f"Error: {str(e)}"
+            return False, action, f"Ошибка: {str(e)}"
 
     async def search_and_grab_best(
         self,
@@ -460,14 +460,14 @@ class AddService:
         try:
             if content_type == ContentType.MOVIE:
                 await self.radarr.search_movie(content_id)
-                return True, "Movie search triggered"
+                return True, "Поиск фильма запущен"
             else:
                 if season_number is not None:
                     await self.sonarr.search_season(content_id, season_number)
-                    return True, f"Season {season_number} search triggered"
+                    return True, f"Поиск сезона {season_number} запущен"
                 else:
                     await self.sonarr.search_series(content_id)
-                    return True, "Series search triggered"
+                    return True, "Поиск сериала запущен"
         except Exception as e:
             logger.error("Search failed", error=str(e))
-            return False, f"Search failed: {str(e)}"
+            return False, f"Ошибка поиска: {str(e)}"

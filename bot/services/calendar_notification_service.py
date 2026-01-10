@@ -1,7 +1,7 @@
 """Calendar notification service for upcoming release alerts."""
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import structlog
@@ -95,14 +95,11 @@ class CalendarNotificationService:
             if not events:
                 return
 
-            # Filter events that are coming up tomorrow (or based on notify_days_before)
-            tomorrow = datetime.utcnow().date() + timedelta(days=1)
-
             for sub in subscriptions:
                 if not sub.enabled:
                     continue
 
-                notify_date = datetime.utcnow().date() + timedelta(days=sub.notify_days_before)
+                notify_date = datetime.now(timezone.utc).date() + timedelta(days=sub.notify_days_before)
 
                 for event in events:
                     # Check if event matches subscription content type
@@ -118,7 +115,7 @@ class CalendarNotificationService:
                         continue
 
                     # Check if we already notified about this release
-                    if await db.is_release_notified(sub.user_id, event.content_id):
+                    if await db.is_release_notified(sub.user_id, event.event_type.value, event.content_id):
                         continue
 
                     # Send notification
@@ -134,7 +131,7 @@ class CalendarNotificationService:
         """Fetch upcoming calendar events from Radarr and Sonarr."""
         events: list[CalendarEvent] = []
 
-        start_date = datetime.utcnow()
+        start_date = datetime.now(timezone.utc)
         end_date = start_date + timedelta(days=7)
 
         # Fetch movies from Radarr
@@ -229,7 +226,7 @@ class CalendarNotificationService:
             await self.send_notification(user_id, message)
 
             # Mark as notified
-            await db.mark_release_notified(user_id, event.content_id)
+            await db.mark_release_notified(user_id, event.event_type.value, event.content_id, event.release_date)
 
             logger.info(
                 "Sent calendar notification",

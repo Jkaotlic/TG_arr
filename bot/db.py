@@ -2,7 +2,7 @@
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -159,7 +159,7 @@ class Database:
 
     async def create_user(self, user: User) -> User:
         """Create a new user."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         prefs_json = user.preferences.model_dump_json()
 
         await self.conn.execute(
@@ -177,7 +177,7 @@ class Database:
 
     async def update_user_preferences(self, tg_id: int, preferences: UserPreferences) -> None:
         """Update user preferences."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         prefs_json = preferences.model_dump_json()
 
         await self.conn.execute(
@@ -204,7 +204,7 @@ class Database:
         self, user_id: int, query: str, content_type: ContentType, results: list[SearchResult]
     ) -> int:
         """Save a search and its results. Returns search ID."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         # Insert search
         cursor = await self.conn.execute(
@@ -243,7 +243,7 @@ class Database:
     # Session methods
     async def save_session(self, user_id: int, session: SearchSession) -> None:
         """Save or update user session."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         try:
             session_json = session.model_dump_json()
         except Exception as e:
@@ -305,7 +305,7 @@ class Database:
     # Action log methods
     async def log_action(self, action: ActionLog) -> int:
         """Log an action. Returns action ID."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         cursor = await self.conn.execute(
             """
@@ -379,7 +379,7 @@ class Database:
         """Delete sessions older than specified hours. Returns count deleted."""
         from datetime import timedelta
 
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
         cursor = await self.conn.execute(
             "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
@@ -391,7 +391,7 @@ class Database:
         """Delete searches older than specified days. Returns count deleted."""
         from datetime import timedelta
 
-        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
         # First delete related results
         await self.conn.execute(
@@ -530,7 +530,7 @@ class Database:
         notify_days_before: int = 1,
     ) -> CalendarSubscription:
         """Create or update calendar subscription."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         content_type_val = content_type.value if content_type else None
 
         await self.conn.execute(
@@ -605,7 +605,7 @@ class Database:
         release_date: datetime,
     ) -> None:
         """Mark a release as notified for a user."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         await self.conn.execute(
             """
@@ -621,7 +621,7 @@ class Database:
         """Clean up old notification records."""
         from datetime import timedelta
 
-        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
         cursor = await self.conn.execute(
             "DELETE FROM notified_releases WHERE notified_at < ?", (cutoff,)

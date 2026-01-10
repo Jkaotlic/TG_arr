@@ -1,6 +1,7 @@
 """Notification service for download completion alerts."""
 
 import asyncio
+from collections.abc import Callable, Awaitable
 from datetime import datetime
 from typing import Optional
 
@@ -20,7 +21,7 @@ class NotificationService:
     def __init__(
         self,
         qbittorrent: QBittorrentClient,
-        send_notification: callable,
+        send_notification: Callable[[int, str], Awaitable[None]],
     ):
         """
         Initialize notification service.

@@ -7,8 +7,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from bot.clients import EmbyClient, ProwlarrClient, QBittorrentClient, RadarrClient, SonarrClient
-from bot.config import get_settings
+from bot.clients.registry import get_prowlarr, get_radarr, get_sonarr, get_qbittorrent, get_emby
 from bot.models import SystemStatus
 from bot.ui.formatters import Formatters
 
@@ -23,29 +22,14 @@ MENU_STATUS = "🔌 Статус"
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
     """Handle /status command - check all services status."""
-    settings = get_settings()
-
     status_msg = await message.answer("🔍 Проверяю статус сервисов...")
 
-    # Create clients
-    prowlarr = ProwlarrClient(settings.prowlarr_url, settings.prowlarr_api_key)
-    radarr = RadarrClient(settings.radarr_url, settings.radarr_api_key)
-    sonarr = SonarrClient(settings.sonarr_url, settings.sonarr_api_key)
-
-    # Create qBittorrent client if configured
-    qbittorrent = None
-    if settings.qbittorrent_enabled:
-        qbittorrent = QBittorrentClient(
-            settings.qbittorrent_url,
-            settings.qbittorrent_username,
-            settings.qbittorrent_password,
-            timeout=settings.qbittorrent_timeout,
-        )
-
-    # Create Emby client if configured
-    emby = None
-    if settings.emby_enabled:
-        emby = EmbyClient(settings.emby_url, settings.emby_api_key, timeout=settings.emby_timeout)
+    # Get singleton clients
+    prowlarr = get_prowlarr()
+    radarr = get_radarr()
+    sonarr = get_sonarr()
+    qbittorrent = get_qbittorrent()
+    emby = get_emby()
 
     try:
         # Build list of service checks

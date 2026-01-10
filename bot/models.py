@@ -1,6 +1,6 @@
 """Data models for the application."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Union
 
@@ -198,8 +198,8 @@ class User(BaseModel):
     first_name: Optional[str] = None
     role: UserRole = UserRole.USER
     preferences: UserPreferences = Field(default_factory=UserPreferences)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # Union type with discriminator for content info
@@ -222,7 +222,7 @@ class SearchSession(BaseModel):
     current_page: int = 0
     selected_result: Optional[SearchResult] = None
     selected_content: Optional[ContentInfo] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # For series - season/episode selection
     selected_season: Optional[int] = None
@@ -243,7 +243,7 @@ class ActionLog(BaseModel):
     release_title: Optional[str] = None
     success: bool = True
     error_message: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class SystemStatus(BaseModel):
@@ -502,8 +502,8 @@ class CalendarEvent(BaseModel):
     @property
     def days_until_release(self) -> int:
         """Get days until release (negative if already released)."""
-        now = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        release = self.release_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        now = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        release = self.release_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
         return (release - now).days
 
     @property
@@ -527,4 +527,4 @@ class CalendarSubscription(BaseModel):
         default=1, description="Send notification N days before release"
     )
     enabled: bool = Field(default=True)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
