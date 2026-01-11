@@ -595,30 +595,30 @@ class Formatters:
         libraries: list = None,
     ) -> str:
         """Format Emby server status."""
-        lines = ["**📺 Emby Media Server**\n"]
+        lines = ["<b>📺 Emby Media Server</b>\n"]
 
-        lines.append(f"🏷 **Сервер:** {server_name}")
-        lines.append(f"🖥 **Версия:** {version}")
-        lines.append(f"💻 **ОС:** {operating_system}")
+        lines.append(f"🏷 <b>Сервер:</b> {html.escape(server_name)}")
+        lines.append(f"🖥 <b>Версия:</b> {html.escape(version)}")
+        lines.append(f"💻 <b>ОС:</b> {html.escape(operating_system)}")
 
         lines.append("")
 
         # Status indicators
         if has_update_available:
-            lines.append("⬆️ **Доступно обновление!**")
+            lines.append("⬆️ <b>Доступно обновление!</b>")
 
         if has_pending_restart:
-            lines.append("🔄 **Требуется перезагрузка**")
+            lines.append("🔄 <b>Требуется перезагрузка</b>")
 
         if active_sessions > 0:
-            lines.append(f"👥 **Активных сессий:** {active_sessions}")
+            lines.append(f"👥 <b>Активных сессий:</b> {active_sessions}")
 
         if libraries:
             lines.append("")
-            lines.append("**📚 Библиотеки:**")
+            lines.append("<b>📚 Библиотеки:</b>")
             for lib in libraries:
                 lib_emoji = "🎬" if lib.collection_type == "movies" else "📺" if lib.collection_type == "tvshows" else "📁"
-                lines.append(f"  {lib_emoji} {lib.name}")
+                lines.append(f"  {lib_emoji} {html.escape(lib.name)}")
 
         return "\n".join(lines)
 

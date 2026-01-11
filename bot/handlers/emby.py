@@ -25,11 +25,11 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
     """Show Emby server status."""
     emby = get_emby()
     if not emby:
-        text = "❌ Emby не настроен. Добавьте EMBY\\_URL и EMBY\\_API\\_KEY в конфигурацию."
+        text = "❌ Emby не настроен. Добавьте EMBY_URL и EMBY_API_KEY в конфигурацию."
         if edit and hasattr(message_or_callback, "message"):
-            await message_or_callback.message.edit_text(text, parse_mode="Markdown")
+            await message_or_callback.message.edit_text(text, parse_mode="HTML")
         else:
-            await message_or_callback.answer(text, parse_mode="Markdown")
+            await message_or_callback.answer(text, parse_mode="HTML")
         return
 
     try:
@@ -58,7 +58,7 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
                 await message_or_callback.message.edit_text(
                     text,
                     reply_markup=keyboard,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
             except TelegramBadRequest as e:
                 if "message is not modified" not in str(e):
@@ -69,7 +69,7 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
             await message_or_callback.answer(
                 text,
                 reply_markup=keyboard,
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
 
     except EmbyError as e:
