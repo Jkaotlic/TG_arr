@@ -1,5 +1,6 @@
 """Emby Media Server handler."""
 
+import asyncio
 from typing import Optional
 
 import structlog
@@ -20,6 +21,9 @@ router = Router()
 # Russian menu button text
 MENU_EMBY = "📺 Emby"
 
+# Timeout for Emby operations (seconds)
+EMBY_TIMEOUT = 15.0
+
 
 async def show_emby_status(message_or_callback, edit: bool = False) -> None:
     """Show Emby server status."""
@@ -33,9 +37,17 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
         return
 
     try:
-        info = await emby.get_server_info()
-        libraries = await emby.get_libraries()
-        sessions = await emby.get_sessions()
+        # Fetch all data with a timeout to prevent hanging
+        async def fetch_emby_data():
+            info = await emby.get_server_info()
+            libraries = await emby.get_libraries()
+            sessions = await emby.get_sessions()
+            return info, libraries, sessions
+        
+        info, libraries, sessions = await asyncio.wait_for(
+            fetch_emby_data(),
+            timeout=EMBY_TIMEOUT
+        )
 
         text = Formatters.format_emby_status(
             server_name=info.server_name,
@@ -72,6 +84,18 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
                 parse_mode="HTML",
             )
 
+    except asyncio.TimeoutError:
+        error_text = "❌ Таймаут при подключении к Emby"
+        logger.warning("Emby request timed out")
+        if edit and hasattr(message_or_callback, "message"):
+            try:
+                await message_or_callback.message.edit_text(error_text)
+            except TelegramBadRequest:
+                pass
+            await message_or_callback.answer()
+        else:
+            await message_or_callback.answer(error_text)
+
     except EmbyError as e:
         error_text = f"❌ Ошибка Emby: {e.message}"
         if edit and hasattr(message_or_callback, "message"):
@@ -85,7 +109,7 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
 
     except Exception as e:
         logger.error("Failed to get Emby status", error=str(e))
-        error_text = f"❌ Ошибка: {str(e)}"
+        error_text = f"❌ Ошибка: {str(e)[:100]}"
         if edit and hasattr(message_or_callback, "message"):
             try:
                 await message_or_callback.message.edit_text(error_text)

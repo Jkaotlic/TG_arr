@@ -64,7 +64,7 @@ class EmbyAuthError(EmbyError):
 class EmbyClient:
     """Client for Emby Media Server API."""
 
-    def __init__(self, base_url: str, api_key: str, timeout: float = 30.0):
+    def __init__(self, base_url: str, api_key: str, timeout: float = 10.0):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
@@ -95,9 +95,9 @@ class EmbyClient:
         }
 
     @retry(
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)),
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
         reraise=True,
     )
     async def _request(
@@ -141,6 +141,8 @@ class EmbyClient:
             raise EmbyError("Таймаут соединения с Emby")
         except httpx.ConnectError:
             raise EmbyError(f"Не удалось подключиться к Emby ({self.base_url})")
+        except httpx.RemoteProtocolError:
+            raise EmbyError("Сервер Emby разорвал соединение")
 
     async def get_server_info(self) -> EmbyServerInfo:
         """Get server information."""
