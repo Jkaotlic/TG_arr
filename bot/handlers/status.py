@@ -7,6 +7,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from bot.clients.qbittorrent import QBittorrentClient
 from bot.clients.registry import get_prowlarr, get_radarr, get_sonarr, get_qbittorrent, get_emby
 from bot.models import SystemStatus
 from bot.ui.formatters import Formatters
