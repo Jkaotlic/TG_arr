@@ -40,9 +40,12 @@ async def _get_download_stats() -> Optional[tuple[int, int]]:
 
         qbt = get_qbittorrent()
         if qbt:
-            torrents = await qbt.get_torrents()
+            # Add timeout to prevent blocking for too long
+            torrents = await asyncio.wait_for(qbt.get_torrents(), timeout=3.0)
             active = sum(1 for t in torrents if t.download_speed > 0 or t.upload_speed > 0)
             return active, len(torrents)
+    except asyncio.TimeoutError:
+        logger.debug("qBittorrent stats request timed out")
     except Exception as e:
         logger.debug("Failed to get download stats", error=str(e))
 
@@ -56,14 +59,23 @@ async def _build_home_screen(user_id: int, user_name: str) -> tuple[str, Optiona
     await db.connect()
 
     try:
-        # Get user stats and recent searches in parallel
+        # Get user stats and recent searches in parallel with overall timeout
         stats_task = db.get_user_stats(user_id)
         searches_task = db.get_recent_searches(user_id, limit=4)
         download_task = _get_download_stats()
 
-        stats, recent_searches, download_stats = await asyncio.gather(
-            stats_task, searches_task, download_task, return_exceptions=True
-        )
+        try:
+            stats, recent_searches, download_stats = await asyncio.wait_for(
+                asyncio.gather(
+                    stats_task, searches_task, download_task, return_exceptions=True
+                ),
+                timeout=5.0  # Overall timeout for all tasks
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Home screen data fetch timed out")
+            stats = {"total_searches": 0, "total_grabs": 0, "movies_added": 0, "series_added": 0}
+            recent_searches = []
+            download_stats = None
 
         # Handle exceptions
         if isinstance(stats, Exception):
