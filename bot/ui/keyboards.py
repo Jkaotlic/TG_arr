@@ -91,6 +91,12 @@ class CallbackData:
     TRENDING_MOVIE = "trend_m:"  # trend_m:tmdb_id - view movie details
     TRENDING_SERIES_ITEM = "trend_s:"  # trend_s:tmdb_id - view series details
 
+    # Calendar
+    CALENDAR_7 = "cal_7"  # 7 days
+    CALENDAR_14 = "cal_14"  # 14 days
+    CALENDAR_30 = "cal_30"  # 30 days
+    CALENDAR_REFRESH = "cal_refresh"  # Refresh current view
+
 
 class Keyboards:
     """Inline keyboard builders."""
@@ -102,8 +108,8 @@ class Keyboards:
             keyboard=[
                 [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="🎬 Фильм"), KeyboardButton(text="📺 Сериал")],
                 [KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit"), KeyboardButton(text="🔥 Топ")],
-                [KeyboardButton(text="📺 Emby"), KeyboardButton(text="🔌 Статус"), KeyboardButton(text="⚙️ Настройки")],
-                [KeyboardButton(text="📋 История"), KeyboardButton(text="❓ Помощь")],
+                [KeyboardButton(text="📺 Emby"), KeyboardButton(text="� Календарь"), KeyboardButton(text="🔌 Статус")],
+                [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 История"), KeyboardButton(text="❓ Помощь")],
             ],
             resize_keyboard=True,
             input_field_placeholder="Введите название для поиска...",
@@ -930,3 +936,27 @@ class Keyboards:
             [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_SERIES)],
         ]
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    # =========================================================================
+    # Calendar Keyboards
+    # =========================================================================
+
+    @staticmethod
+    def calendar_controls(current_days: int = 7) -> InlineKeyboardMarkup:
+        """Create keyboard for calendar period selection."""
+        periods = [
+            ("7 дней", CallbackData.CALENDAR_7, 7),
+            ("14 дней", CallbackData.CALENDAR_14, 14),
+            ("30 дней", CallbackData.CALENDAR_30, 30),
+        ]
+        buttons = []
+        for label, callback, days in periods:
+            text = f"• {label} •" if days == current_days else label
+            buttons.append(InlineKeyboardButton(text=text, callback_data=callback))
+
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                buttons,
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data=CallbackData.CALENDAR_REFRESH)],
+            ]
+        )

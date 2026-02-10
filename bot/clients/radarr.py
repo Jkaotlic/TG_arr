@@ -1,5 +1,6 @@
 """Radarr API client."""
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import structlog
@@ -197,6 +198,53 @@ class RadarrClient(BaseAPIClient):
         }
         result = await self.post("/api/v3/command", json_data=payload)
         return result if isinstance(result, dict) else {}
+
+    async def get_calendar(self, days: int = 7) -> list[dict[str, Any]]:
+        """Get upcoming movie releases from Radarr calendar.
+
+        Args:
+            days: Number of days to look ahead.
+
+        Returns:
+            List of movie dicts with release info.
+        """
+        now = datetime.now(timezone.utc)
+        start = now.strftime("%Y-%m-%d")
+        end = (now + timedelta(days=days)).strftime("%Y-%m-%d")
+
+        params = {
+            "start": start,
+            "end": end,
+        }
+        results = await self.get("/api/v3/calendar", params=params)
+        if not isinstance(results, list):
+            return []
+
+        movies = []
+        for item in results:
+            try:
+                # Radarr calendar returns full movie objects
+                digital_release = item.get("digitalRelease", "")
+                physical_release = item.get("physicalRelease", "")
+                in_cinemas = item.get("inCinemas", "")
+                release_date = digital_release or physical_release or in_cinemas
+
+                movies.append({
+                    "title": item.get("title", "Unknown"),
+                    "year": item.get("year", 0),
+                    "release_date": release_date,
+                    "has_file": item.get("hasFile", False),
+                    "is_available": item.get("isAvailable", False),
+                    "overview": item.get("overview", ""),
+                    "runtime": item.get("runtime", 0),
+                    "digital_release": digital_release,
+                    "physical_release": physical_release,
+                    "in_cinemas": in_cinemas,
+                })
+            except Exception as e:
+                logger.warning("Failed to parse calendar movie", error=str(e))
+
+        return movies
 
     async def get_quality_profiles(self) -> list[QualityProfile]:
         """Get all quality profiles."""
