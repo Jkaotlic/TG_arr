@@ -14,14 +14,11 @@ router = Router()
 
 # Russian menu button texts
 MENU_SEARCH = "🔍 Поиск"
-MENU_MOVIE = "🎬 Фильм"
-MENU_SERIES = "📺 Сериал"
 MENU_DOWNLOADS = "📥 Загрузки"
 MENU_QSTATUS = "📊 qBit"
 MENU_STATUS = "🔌 Статус"
 MENU_SETTINGS = "⚙️ Настройки"
 MENU_HISTORY = "📋 История"
-MENU_HELP = "❓ Помощь"
 
 
 @router.message(CommandStart())
@@ -36,9 +33,8 @@ async def cmd_start(message: Message) -> None:
         "Я помогу найти и скачать фильмы и сериалы через Prowlarr/Radarr/Sonarr.\n\n"
         "<b>🚀 Быстрый старт:</b>\n"
         "• Просто напишите название\n"
-        "• Или используйте 🎬 <b>Фильм</b> / 📺 <b>Сериал</b>\n"
-        "• Настройки: ⚙️ <b>Настройки</b>\n\n"
-        "Нажмите ❓ <b>Помощь</b> для списка команд."
+        "• Или нажмите 🔍 <b>Поиск</b>\n\n"
+        "Используйте /help для списка команд."
     )
 
     await message.answer(welcome_text, parse_mode="HTML", reply_markup=Keyboards.main_menu())
@@ -50,7 +46,6 @@ async def cmd_menu(message: Message) -> None:
     await message.answer("📋 Меню:", reply_markup=Keyboards.main_menu())
 
 
-@router.message(F.text == MENU_HELP)
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     """Handle /help command."""
