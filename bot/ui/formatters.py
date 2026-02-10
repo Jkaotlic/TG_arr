@@ -1,4 +1,7 @@
-"""Message formatters for Telegram bot."""
+"""Message formatters for Telegram bot.
+
+All output uses HTML parse_mode. User-provided content is escaped via html.escape().
+"""
 
 import html
 from datetime import datetime
@@ -20,21 +23,20 @@ from bot.models import (
 )
 
 
-class Formatters:
-    """Message formatting utilities."""
+def _e(text) -> str:
+    """Escape HTML entities in user-provided text."""
+    if not text:
+        return ""
+    return html.escape(str(text))
 
-    @staticmethod
-    def escape_markdown(text: str) -> str:
-        """Escape special characters for MarkdownV2."""
-        special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-        for char in special_chars:
-            text = text.replace(char, f"\\{char}")
-        return text
+
+class Formatters:
+    """Message formatting utilities — HTML mode."""
 
     @staticmethod
     def format_search_result(result: SearchResult, index: int) -> str:
         """Format a single search result for display."""
-        lines = [f"**{index}. {result.title}**"]
+        lines = [f"<b>{index}. {_e(result.title)}</b>"]
 
         # Quality info
         quality_parts = []
@@ -65,7 +67,7 @@ class Formatters:
                 lines.append(f"🌱 {' | '.join(seeder_info)}")
 
         # Indexer and score
-        lines.append(f"🔍 {result.indexer} | Score: {result.calculated_score}")
+        lines.append(f"🔍 {_e(result.indexer)} | Score: {result.calculated_score}")
 
         return "\n".join(lines)
 
@@ -76,25 +78,28 @@ class Formatters:
         total_pages: int,
         query: str,
         content_type: ContentType,
+        per_page: int = 5,
     ) -> str:
         """Format a page of search results."""
         type_emoji = "🎬" if content_type == ContentType.MOVIE else "📺"
-        header = f"{type_emoji} **Результаты поиска:** `{query}`\n"
+        header = f"{type_emoji} <b>Результаты поиска:</b> <code>{_e(query)}</code>\n"
         header += f"Стр. {page + 1}/{total_pages} | Показано: {len(results)}\n\n"
 
         result_texts = []
         for i, result in enumerate(results):
-            result_texts.append(Formatters.format_search_result(result, i + 1 + (page * len(results))))
+            result_texts.append(
+                Formatters.format_search_result(result, i + 1 + (page * per_page))
+            )
 
         return header + "\n\n".join(result_texts)
 
     @staticmethod
     def format_release_details(result: SearchResult) -> str:
         """Format detailed view of a release."""
-        lines = [f"**{result.title}**\n"]
+        lines = [f"<b>{_e(result.title)}</b>\n"]
 
         # Quality
-        lines.append("**📊 Качество:**")
+        lines.append("<b>📊 Качество:</b>")
         if result.quality.resolution:
             lines.append(f"  • Разрешение: {result.quality.resolution}")
         if result.quality.source:
@@ -113,21 +118,21 @@ class Formatters:
         lines.append("")
 
         # Size and protocol
-        lines.append(f"💾 **Размер:** {result.size_formatted}")
-        lines.append(f"📡 **Протокол:** {result.protocol.upper()}")
+        lines.append(f"💾 <b>Размер:</b> {result.size_formatted}")
+        lines.append(f"📡 <b>Протокол:</b> {result.protocol.upper()}")
 
         # Torrent info
         if result.protocol == "torrent":
             if result.seeders is not None:
-                lines.append(f"🌱 **Сиды:** {result.seeders}")
+                lines.append(f"🌱 <b>Сиды:</b> {result.seeders}")
             if result.leechers is not None:
-                lines.append(f"📥 **Личи:** {result.leechers}")
+                lines.append(f"📥 <b>Личи:</b> {result.leechers}")
 
         # Indexer
-        lines.append(f"🔍 **Индексатор:** {result.indexer}")
+        lines.append(f"🔍 <b>Индексатор:</b> {_e(result.indexer)}")
 
         # Score
-        lines.append(f"\n**Оценка:** {result.calculated_score}/100")
+        lines.append(f"\n<b>Оценка:</b> {result.calculated_score}/100")
 
         # Season/episode info
         if result.detected_season is not None:
@@ -141,7 +146,7 @@ class Formatters:
         # Publish date
         if result.publish_date:
             date_str = result.publish_date.strftime("%d.%m.%Y %H:%M")
-            lines.append(f"📆 **Опубликовано:** {date_str}")
+            lines.append(f"📆 <b>Опубликовано:</b> {date_str}")
 
         return "\n".join(lines)
 
@@ -149,27 +154,27 @@ class Formatters:
     def format_movie_info(movie: MovieInfo, compact: bool = False) -> str:
         """Format movie information."""
         if compact:
-            return f"🎬 **{movie.title}** ({movie.year})"
+            return f"🎬 <b>{_e(movie.title)}</b> ({movie.year})"
 
-        lines = [f"🎬 **{movie.title}** ({movie.year})"]
+        lines = [f"🎬 <b>{_e(movie.title)}</b> ({movie.year})"]
 
         if movie.original_title and movie.original_title != movie.title:
-            lines.append(f"_Оригинал: {movie.original_title}_")
+            lines.append(f"<i>Оригинал: {_e(movie.original_title)}</i>")
 
         if movie.runtime:
             lines.append(f"⏱ Длительность: {movie.runtime} мин")
 
         if movie.genres:
-            lines.append(f"🎭 Жанры: {', '.join(movie.genres[:5])}")
+            lines.append(f"🎭 Жанры: {_e(', '.join(movie.genres[:5]))}")
 
         if movie.studio:
-            lines.append(f"🏢 Студия: {movie.studio}")
+            lines.append(f"🏢 Студия: {_e(movie.studio)}")
 
         if movie.overview:
             overview = movie.overview[:300]
             if len(movie.overview) > 300:
                 overview += "..."
-            lines.append(f"\n📝 {overview}")
+            lines.append(f"\n📝 {_e(overview)}")
 
         # Status in Radarr
         if movie.radarr_id:
@@ -185,37 +190,41 @@ class Formatters:
         """Format series information."""
         if compact:
             year_str = f" ({series.year})" if series.year else ""
-            return f"📺 **{series.title}**{year_str}"
+            return f"📺 <b>{_e(series.title)}</b>{year_str}"
 
-        lines = [f"📺 **{series.title}**"]
+        lines = [f"📺 <b>{_e(series.title)}</b>"]
 
         if series.year:
             lines[0] += f" ({series.year})"
 
         if series.original_title and series.original_title != series.title:
-            lines.append(f"_Оригинал: {series.original_title}_")
+            lines.append(f"<i>Оригинал: {_e(series.original_title)}</i>")
 
         if series.network:
-            lines.append(f"📡 Канал: {series.network}")
+            lines.append(f"📡 Канал: {_e(series.network)}")
 
         if series.status:
             status_emoji = "🟢" if series.status.lower() == "continuing" else "🔴"
-            status_text = "Выходит" if series.status.lower() == "continuing" else "Завершён"
+            status_text = (
+                "Выходит" if series.status.lower() == "continuing" else "Завершён"
+            )
             lines.append(f"{status_emoji} Статус: {status_text}")
 
-        lines.append(f"📊 Сезонов: {series.season_count} | Серий: {series.total_episode_count}")
+        lines.append(
+            f"📊 Сезонов: {series.season_count} | Серий: {series.total_episode_count}"
+        )
 
         if series.runtime:
             lines.append(f"⏱ Длительность: ~{series.runtime} мин/серия")
 
         if series.genres:
-            lines.append(f"🎭 Жанры: {', '.join(series.genres[:5])}")
+            lines.append(f"🎭 Жанры: {_e(', '.join(series.genres[:5]))}")
 
         if series.overview:
             overview = series.overview[:300]
             if len(series.overview) > 300:
                 overview += "..."
-            lines.append(f"\n📝 {overview}")
+            lines.append(f"\n📝 {_e(overview)}")
 
         # Status in Sonarr
         if series.sonarr_id:
@@ -226,18 +235,22 @@ class Formatters:
     @staticmethod
     def format_system_status(statuses: list[SystemStatus]) -> str:
         """Format system status information."""
-        lines = ["**🔌 Статус сервисов**\n"]
+        lines = ["<b>🔌 Статус сервисов</b>\n"]
 
         for status in statuses:
             if status.available:
                 emoji = "✅"
-                version_str = f" v{status.version}" if status.version else ""
-                time_str = f" ({status.response_time_ms}мс)" if status.response_time_ms else ""
-                lines.append(f"{emoji} **{status.service}**{version_str}{time_str}")
+                version_str = f" v{_e(status.version)}" if status.version else ""
+                time_str = (
+                    f" ({status.response_time_ms}мс)" if status.response_time_ms else ""
+                )
+                lines.append(
+                    f"{emoji} <b>{_e(status.service)}</b>{version_str}{time_str}"
+                )
             else:
                 emoji = "❌"
-                error_str = f": {status.error}" if status.error else ""
-                lines.append(f"{emoji} **{status.service}**{error_str}")
+                error_str = f": {_e(status.error)}" if status.error else ""
+                lines.append(f"{emoji} <b>{_e(status.service)}</b>{error_str}")
 
         return "\n".join(lines)
 
@@ -250,26 +263,38 @@ class Formatters:
         sonarr_folders: list[RootFolder],
     ) -> str:
         """Format user preferences for settings display."""
-        lines = ["**⚙️ Ваши настройки**\n"]
+        lines = ["<b>⚙️ Ваши настройки</b>\n"]
 
         # Radarr settings
-        lines.append("**🎬 Radarr (фильмы):**")
-        rp = next((p for p in radarr_profiles if p.id == prefs.radarr_quality_profile_id), None)
-        lines.append(f"  Профиль: {rp.name if rp else 'Не выбран'}")
-        rf = next((f for f in radarr_folders if f.id == prefs.radarr_root_folder_id), None)
-        lines.append(f"  Папка: {rf.path if rf else 'Не выбрана'}")
+        lines.append("<b>🎬 Radarr (фильмы):</b>")
+        rp = next(
+            (p for p in radarr_profiles if p.id == prefs.radarr_quality_profile_id),
+            None,
+        )
+        lines.append(f"  Профиль: {_e(rp.name) if rp else 'Не выбран'}")
+        rf = next(
+            (f for f in radarr_folders if f.id == prefs.radarr_root_folder_id), None
+        )
+        lines.append(f"  Папка: {_e(rf.path) if rf else 'Не выбрана'}")
 
         # Sonarr settings
-        lines.append("\n**📺 Sonarr (сериалы):**")
-        sp = next((p for p in sonarr_profiles if p.id == prefs.sonarr_quality_profile_id), None)
-        lines.append(f"  Профиль: {sp.name if sp else 'Не выбран'}")
-        sf = next((f for f in sonarr_folders if f.id == prefs.sonarr_root_folder_id), None)
-        lines.append(f"  Папка: {sf.path if sf else 'Не выбрана'}")
+        lines.append("\n<b>📺 Sonarr (сериалы):</b>")
+        sp = next(
+            (p for p in sonarr_profiles if p.id == prefs.sonarr_quality_profile_id),
+            None,
+        )
+        lines.append(f"  Профиль: {_e(sp.name) if sp else 'Не выбран'}")
+        sf = next(
+            (f for f in sonarr_folders if f.id == prefs.sonarr_root_folder_id), None
+        )
+        lines.append(f"  Папка: {_e(sf.path) if sf else 'Не выбрана'}")
 
         # General preferences
-        lines.append("\n**🎯 Общие:**")
+        lines.append("\n<b>🎯 Общие:</b>")
         lines.append(f"  Качество: {prefs.preferred_resolution or 'Любое'}")
-        lines.append(f"  Авто-граб: {'ВКЛ ✓' if prefs.auto_grab_enabled else 'ВЫКЛ'}")
+        lines.append(
+            f"  Авто-граб: {'ВКЛ ✓' if prefs.auto_grab_enabled else 'ВЫКЛ'}"
+        )
 
         return "\n".join(lines)
 
@@ -279,7 +304,7 @@ class Formatters:
         if not actions:
             return "📭 История пуста."
 
-        lines = ["**📋 Последние действия**\n"]
+        lines = ["<b>📋 Последние действия</b>\n"]
 
         for action in actions[:limit]:
             emoji = "✅" if action.success else "❌"
@@ -293,44 +318,44 @@ class Formatters:
 
             date_str = action.created_at.strftime("%d.%m %H:%M")
 
-            lines.append(f"{emoji} {type_emoji} {action_str}: {title} ({date_str})")
+            lines.append(
+                f"{emoji} {type_emoji} {action_str}: {_e(title)} ({date_str})"
+            )
 
             if not action.success and action.error_message:
                 error = action.error_message[:50]
-                lines.append(f"   ↳ Ошибка: {error}")
+                lines.append(f"   ↳ Ошибка: {_e(error)}")
 
         return "\n".join(lines)
 
     @staticmethod
     def format_help() -> str:
         """Format help message."""
-        return """**🤖 TG\\_arr — Справка**
-
-**📌 Команды:**
-• `/search` — поиск фильмов и сериалов
-• `/movie` — поиск только фильмов
-• `/series` — поиск только сериалов
-• `/downloads` — активные загрузки
-• `/qstatus` — статус qBittorrent
-• `/settings` — настройки
-• `/status` — статус сервисов
-• `/history` — история действий
-
-**💡 Примеры поиска:**
-• `Дюна 2021` — поиск фильма
-• `Breaking Bad S02` — 2 сезон сериала
-• `1080p remux` — в названии
-
-**⚡ Советы:**
-• Просто напишите название для поиска
-• Используйте `/settings` для качества по умолчанию
-• Включите авто-граб для быстрой загрузки лучших релизов
-"""
+        return (
+            "<b>🤖 TG_arr — Справка</b>\n\n"
+            "<b>📌 Команды:</b>\n"
+            "• <code>/search</code> — поиск фильмов и сериалов\n"
+            "• <code>/movie</code> — поиск только фильмов\n"
+            "• <code>/series</code> — поиск только сериалов\n"
+            "• <code>/downloads</code> — активные загрузки\n"
+            "• <code>/qstatus</code> — статус qBittorrent\n"
+            "• <code>/settings</code> — настройки\n"
+            "• <code>/status</code> — статус сервисов\n"
+            "• <code>/history</code> — история действий\n\n"
+            "<b>💡 Примеры поиска:</b>\n"
+            "• <code>Дюна 2021</code> — поиск фильма\n"
+            "• <code>Breaking Bad S02</code> — 2 сезон сериала\n"
+            "• <code>1080p remux</code> — в названии\n\n"
+            "<b>⚡ Советы:</b>\n"
+            "• Просто напишите название для поиска\n"
+            "• Используйте /settings для качества по умолчанию\n"
+            "• Включите авто-граб для быстрой загрузки лучших релизов"
+        )
 
     @staticmethod
     def format_error(error: str, include_retry: bool = True) -> str:
         """Format error message."""
-        msg = f"❌ **Ошибка:** {error}"
+        msg = f"❌ <b>Ошибка:</b> {_e(error)}"
         if include_retry:
             msg += "\n\nПопробуйте ещё раз или /cancel для отмены."
         return msg
@@ -357,45 +382,60 @@ class Formatters:
     @staticmethod
     def format_qbittorrent_status(status: QBittorrentStatus) -> str:
         """Format qBittorrent global status."""
-        lines = ["**📊 Статус qBittorrent**\n"]
+        lines = ["<b>📊 Статус qBittorrent</b>\n"]
 
         # Version and connection
-        lines.append(f"🖥 **Версия:** {status.version}")
+        lines.append(f"🖥 <b>Версия:</b> {_e(status.version)}")
         conn_emoji = "🟢" if status.connection_status == "connected" else "🔴"
-        conn_text = "подключён" if status.connection_status == "connected" else status.connection_status
-        lines.append(f"{conn_emoji} **Соединение:** {conn_text}")
+        conn_text = (
+            "подключён"
+            if status.connection_status == "connected"
+            else _e(status.connection_status)
+        )
+        lines.append(f"{conn_emoji} <b>Соединение:</b> {conn_text}")
 
         lines.append("")
 
         # Transfer speeds
-        lines.append("**📡 Скорость:**")
+        lines.append("<b>📡 Скорость:</b>")
         lines.append(f"  ⬇️ Загрузка: {status.download_speed_formatted}")
         lines.append(f"  ⬆️ Отдача: {status.upload_speed_formatted}")
 
         # Limits
         if status.download_limit > 0 or status.upload_limit > 0:
             from bot.models import format_speed
-            dl_limit = format_speed(status.download_limit) if status.download_limit > 0 else "∞"
-            ul_limit = format_speed(status.upload_limit) if status.upload_limit > 0 else "∞"
+
+            dl_limit = (
+                format_speed(status.download_limit)
+                if status.download_limit > 0
+                else "∞"
+            )
+            ul_limit = (
+                format_speed(status.upload_limit)
+                if status.upload_limit > 0
+                else "∞"
+            )
             lines.append(f"  📉 Лимиты: ⬇️ {dl_limit} | ⬆️ {ul_limit}")
 
         lines.append("")
 
         # Torrents
-        lines.append("**📋 Торренты:**")
+        lines.append("<b>📋 Торренты:</b>")
         lines.append(f"  Всего: {status.total_torrents}")
-        lines.append(f"  Активных: ⬇️ {status.active_downloads} | ⬆️ {status.active_uploads}")
+        lines.append(
+            f"  Активных: ⬇️ {status.active_downloads} | ⬆️ {status.active_uploads}"
+        )
         if status.paused_torrents > 0:
             lines.append(f"  На паузе: {status.paused_torrents}")
 
         lines.append("")
 
         # Disk
-        lines.append(f"💾 **Свободно:** {status.free_space_formatted}")
+        lines.append(f"💾 <b>Свободно:</b> {status.free_space_formatted}")
 
         # DHT
         if status.dht_nodes > 0:
-            lines.append(f"🌐 **DHT узлов:** {status.dht_nodes}")
+            lines.append(f"🌐 <b>DHT узлов:</b> {status.dht_nodes}")
 
         return "\n".join(lines)
 
@@ -421,7 +461,7 @@ class Formatters:
         }
 
         filter_name = filter_names.get(current_filter, "Все")
-        header = f"**📥 Загрузки** — {filter_name}\n"
+        header = f"<b>📥 Загрузки</b> — {filter_name}\n"
         header += f"Показано {len(torrents)} из {total_count}"
 
         if total_pages > 1:
@@ -432,7 +472,7 @@ class Formatters:
     @staticmethod
     def format_torrent_details(torrent: TorrentInfo) -> str:
         """Format detailed view of a torrent."""
-        lines = [f"**{torrent.name}**\n"]
+        lines = [f"<b>{_e(torrent.name)}</b>\n"]
 
         # State and progress
         state_names = {
@@ -448,61 +488,68 @@ class Formatters:
             "unknown": "Неизвестно",
         }
         state_text = state_names.get(torrent.state.value, torrent.state.value)
-        lines.append(f"{torrent.state_emoji} **Статус:** {state_text}")
-        lines.append(f"📊 **Прогресс:** {torrent.progress_percent}%")
+        lines.append(f"{torrent.state_emoji} <b>Статус:</b> {state_text}")
+        lines.append(f"📊 <b>Прогресс:</b> {torrent.progress_percent}%")
 
         # Progress bar
         progress_bar = Formatters._progress_bar(torrent.progress)
-        lines.append(f"`{progress_bar}`")
+        lines.append(f"<code>{progress_bar}</code>")
 
         lines.append("")
 
         # Size info
         from bot.models import format_bytes
+
         downloaded = format_bytes(torrent.downloaded)
-        lines.append(f"💾 **Размер:** {downloaded} / {torrent.size_formatted}")
+        lines.append(f"💾 <b>Размер:</b> {downloaded} / {torrent.size_formatted}")
 
         # Speeds
         if torrent.download_speed > 0 or torrent.upload_speed > 0:
-            lines.append(f"⬇️ **Загрузка:** {torrent.download_speed_formatted}")
-            lines.append(f"⬆️ **Отдача:** {torrent.upload_speed_formatted}")
+            lines.append(f"⬇️ <b>Загрузка:</b> {torrent.download_speed_formatted}")
+            lines.append(f"⬆️ <b>Отдача:</b> {torrent.upload_speed_formatted}")
 
         # ETA
         if torrent.eta is not None and torrent.eta > 0 and torrent.progress < 1.0:
-            lines.append(f"⏱ **Осталось:** {torrent.eta_formatted}")
+            lines.append(f"⏱ <b>Осталось:</b> {torrent.eta_formatted}")
 
         lines.append("")
 
         # Peers
-        lines.append("**🌐 Пиры:**")
+        lines.append("<b>🌐 Пиры:</b>")
         lines.append(f"  Сиды: {torrent.seeds} (всего {torrent.seeds_total})")
         lines.append(f"  Личи: {torrent.peers} (всего {torrent.peers_total})")
 
         # Ratio
-        lines.append(f"\n📈 **Рейтинг:** {torrent.ratio:.2f}")
+        lines.append(f"\n📈 <b>Рейтинг:</b> {torrent.ratio:.2f}")
 
         # Category and tags
         if torrent.category:
-            lines.append(f"📁 **Категория:** {torrent.category}")
+            lines.append(f"📁 <b>Категория:</b> {_e(torrent.category)}")
         if torrent.tags:
-            lines.append(f"🏷 **Теги:** {', '.join(torrent.tags)}")
+            lines.append(f"🏷 <b>Теги:</b> {_e(', '.join(torrent.tags))}")
 
         # Save path
-        lines.append(f"\n📂 **Путь:** `{torrent.save_path}`")
+        lines.append(f"\n📂 <b>Путь:</b> <code>{_e(torrent.save_path)}</code>")
 
         # Dates
         if torrent.added_on:
-            lines.append(f"📅 **Добавлен:** {torrent.added_on.strftime('%d.%m.%Y %H:%M')}")
+            lines.append(
+                f"📅 <b>Добавлен:</b> {torrent.added_on.strftime('%d.%m.%Y %H:%M')}"
+            )
         if torrent.completion_on and torrent.progress >= 1.0:
-            lines.append(f"✅ **Завершён:** {torrent.completion_on.strftime('%d.%m.%Y %H:%M')}")
+            lines.append(
+                f"✅ <b>Завершён:</b> {torrent.completion_on.strftime('%d.%m.%Y %H:%M')}"
+            )
 
         return "\n".join(lines)
 
     @staticmethod
     def format_torrent_compact(torrent: TorrentInfo) -> str:
         """Format compact single-line torrent info."""
-        name = torrent.name[:30] + "..." if len(torrent.name) > 33 else torrent.name
-        return f"{torrent.state_emoji} {torrent.progress_percent}% | {name}"
+        name = (
+            torrent.name[:30] + "..." if len(torrent.name) > 33 else torrent.name
+        )
+        return f"{torrent.state_emoji} {torrent.progress_percent}% | {_e(name)}"
 
     @staticmethod
     def _progress_bar(progress: float, length: int = 20) -> str:
@@ -514,13 +561,15 @@ class Formatters:
     @staticmethod
     def format_download_complete_notification(torrent: TorrentInfo) -> str:
         """Format notification message for completed download."""
-        lines = ["✅ **Загрузка завершена!**\n"]
-        lines.append(f"📥 **{torrent.name}**")
+        lines = ["✅ <b>Загрузка завершена!</b>\n"]
+        lines.append(f"📥 <b>{_e(torrent.name)}</b>")
         lines.append(f"💾 Размер: {torrent.size_formatted}")
-        lines.append(f"📂 Путь: `{torrent.save_path}`")
+        lines.append(f"📂 Путь: <code>{_e(torrent.save_path)}</code>")
 
         if torrent.completion_on:
-            lines.append(f"⏱ Завершено: {torrent.completion_on.strftime('%d.%m.%Y %H:%M')}")
+            lines.append(
+                f"⏱ Завершено: {torrent.completion_on.strftime('%d.%m.%Y %H:%M')}"
+            )
 
         return "\n".join(lines)
 
@@ -550,26 +599,33 @@ class Formatters:
             speed_str = "без ограничений"
         else:
             from bot.models import format_speed
+
             speed_str = format_speed(speed_kb * 1024)
 
         direction = "Загрузка" if limit_type == "dl" else "Отдача"
         return f"✅ {direction}: {speed_str}"
 
     @staticmethod
-    def format_torrent_action(action: str, torrent_name: str, success: bool = True) -> str:
+    def format_torrent_action(
+        action: str, torrent_name: str, success: bool = True
+    ) -> str:
         """Format message for torrent action result."""
-        name = torrent_name[:40] + "..." if len(torrent_name) > 43 else torrent_name
+        name = (
+            torrent_name[:40] + "..."
+            if len(torrent_name) > 43
+            else torrent_name
+        )
 
         if success:
             action_messages = {
-                "pause": f"⏸ Пауза: {name}",
-                "resume": f"▶️ Возобновлён: {name}",
-                "delete": f"🗑 Удалён: {name}",
-                "delete_files": f"🗑 Удалён с файлами: {name}",
+                "pause": f"⏸ Пауза: {_e(name)}",
+                "resume": f"▶️ Возобновлён: {_e(name)}",
+                "delete": f"🗑 Удалён: {_e(name)}",
+                "delete_files": f"🗑 Удалён с файлами: {_e(name)}",
             }
-            return action_messages.get(action, f"✅ {action}: {name}")
+            return action_messages.get(action, f"✅ {action}: {_e(name)}")
         else:
-            return f"❌ Ошибка {action}: {name}"
+            return f"❌ Ошибка {action}: {_e(name)}"
 
     @staticmethod
     def format_bulk_action(action: str, count: int) -> str:
@@ -595,35 +651,43 @@ class Formatters:
         libraries: list = None,
     ) -> str:
         """Format Emby server status."""
-        lines = ["**📺 Emby Media Server**\n"]
+        lines = ["<b>📺 Emby Media Server</b>\n"]
 
-        lines.append(f"🏷 **Сервер:** {server_name}")
-        lines.append(f"🖥 **Версия:** {version}")
-        lines.append(f"💻 **ОС:** {operating_system}")
+        lines.append(f"🏷 <b>Сервер:</b> {_e(server_name)}")
+        lines.append(f"🖥 <b>Версия:</b> {_e(version)}")
+        lines.append(f"💻 <b>ОС:</b> {_e(operating_system)}")
 
         lines.append("")
 
         # Status indicators
         if has_update_available:
-            lines.append("⬆️ **Доступно обновление!**")
+            lines.append("⬆️ <b>Доступно обновление!</b>")
 
         if has_pending_restart:
-            lines.append("🔄 **Требуется перезагрузка**")
+            lines.append("🔄 <b>Требуется перезагрузка</b>")
 
         if active_sessions > 0:
-            lines.append(f"👥 **Активных сессий:** {active_sessions}")
+            lines.append(f"👥 <b>Активных сессий:</b> {active_sessions}")
 
         if libraries:
             lines.append("")
-            lines.append("**📚 Библиотеки:**")
+            lines.append("<b>📚 Библиотеки:</b>")
             for lib in libraries:
-                lib_emoji = "🎬" if lib.collection_type == "movies" else "📺" if lib.collection_type == "tvshows" else "📁"
-                lines.append(f"  {lib_emoji} {lib.name}")
+                lib_emoji = (
+                    "🎬"
+                    if lib.collection_type == "movies"
+                    else "📺"
+                    if lib.collection_type == "tvshows"
+                    else "📁"
+                )
+                lines.append(f"  {lib_emoji} {_e(lib.name)}")
 
         return "\n".join(lines)
 
     @staticmethod
-    def format_emby_action(action: str, success: bool = True, error: str = None) -> str:
+    def format_emby_action(
+        action: str, success: bool = True, error: str = None
+    ) -> str:
         """Format Emby action result."""
         if success:
             messages = {
@@ -635,7 +699,7 @@ class Formatters:
             }
             return messages.get(action, f"✅ {action}")
         else:
-            return f"❌ Ошибка: {error or action}"
+            return f"❌ Ошибка: {_e(error or action)}"
 
     @staticmethod
     def _get_rating(ratings: dict) -> Optional[float]:
@@ -644,8 +708,12 @@ class Formatters:
             return None
         # Try TMDb first, then other sources
         for source in ["tmdb", "imdb", "rottenTomatoes"]:
-            if source in ratings and "value" in ratings[source]:
-                return ratings[source]["value"]
+            if source in ratings:
+                val = ratings[source]
+                if isinstance(val, dict) and "value" in val:
+                    return val["value"]
+                elif isinstance(val, (int, float)):
+                    return val
         return None
 
     @staticmethod
@@ -660,16 +728,18 @@ class Formatters:
             rating_value = Formatters._get_rating(movie.ratings)
             rating = f"⭐ {rating_value:.1f}" if rating_value else ""
             year = f" ({movie.year})" if movie.year else ""
-            title = html.escape(movie.title)
+            title = _e(movie.title)
 
             lines.append(f"{i}. <b>{title}</b>{year}")
             if rating:
                 lines.append(f"   {rating}")
             if movie.overview:
-                # Truncate overview to 100 chars
-                overview = movie.overview[:100] + "..." if len(movie.overview) > 100 else movie.overview
-                overview = html.escape(overview)
-                lines.append(f"   <i>{overview}</i>")
+                overview = (
+                    movie.overview[:100] + "..."
+                    if len(movie.overview) > 100
+                    else movie.overview
+                )
+                lines.append(f"   <i>{_e(overview)}</i>")
             lines.append("")
 
         lines.append("\n💡 Нажмите на фильм чтобы увидеть постер")
@@ -687,16 +757,18 @@ class Formatters:
             rating_value = Formatters._get_rating(series.ratings)
             rating = f"⭐ {rating_value:.1f}" if rating_value else ""
             year = f" ({series.year})" if series.year else ""
-            title = html.escape(series.title)
+            title = _e(series.title)
 
             lines.append(f"{i}. <b>{title}</b>{year}")
             if rating:
                 lines.append(f"   {rating}")
             if series.overview:
-                # Truncate overview to 100 chars
-                overview = series.overview[:100] + "..." if len(series.overview) > 100 else series.overview
-                overview = html.escape(overview)
-                lines.append(f"   <i>{overview}</i>")
+                overview = (
+                    series.overview[:100] + "..."
+                    if len(series.overview) > 100
+                    else series.overview
+                )
+                lines.append(f"   <i>{_e(overview)}</i>")
             lines.append("")
 
         lines.append("\n💡 Нажмите на сериал чтобы увидеть постер")
@@ -708,7 +780,7 @@ class Formatters:
         rating_value = Formatters._get_rating(movie.ratings)
         rating = f"⭐ {rating_value:.1f}/10" if rating_value else "Нет рейтинга"
         year = f" ({movie.year})" if movie.year else ""
-        title = html.escape(movie.title)
+        title = _e(movie.title)
 
         lines = [
             f"🎬 <b>{title}</b>{year}\n",
@@ -716,7 +788,7 @@ class Formatters:
         ]
 
         if movie.overview:
-            lines.append(f"\n{html.escape(movie.overview)}")
+            lines.append(f"\n{_e(movie.overview)}")
 
         lines.append("\n💡 Нажмите кнопку ниже для добавления в Radarr")
         return "\n".join(lines)
@@ -727,7 +799,7 @@ class Formatters:
         rating_value = Formatters._get_rating(series.ratings)
         rating = f"⭐ {rating_value:.1f}/10" if rating_value else "Нет рейтинга"
         year = f" ({series.year})" if series.year else ""
-        title = html.escape(series.title)
+        title = _e(series.title)
 
         lines = [
             f"📺 <b>{title}</b>{year}\n",
@@ -735,10 +807,10 @@ class Formatters:
         ]
 
         if series.network:
-            lines.append(f"📡 {html.escape(series.network)}")
+            lines.append(f"📡 {_e(series.network)}")
 
         if series.overview:
-            lines.append(f"\n{html.escape(series.overview)}")
+            lines.append(f"\n{_e(series.overview)}")
 
         lines.append("\n💡 Нажмите кнопку ниже для добавления в Sonarr")
         return "\n".join(lines)

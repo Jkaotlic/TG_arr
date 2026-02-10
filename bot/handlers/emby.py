@@ -25,11 +25,11 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
     """Show Emby server status."""
     emby = get_emby()
     if not emby:
-        text = "❌ Emby не настроен. Добавьте EMBY\\_URL и EMBY\\_API\\_KEY в конфигурацию."
+        text = "❌ Emby не настроен. Добавьте <code>EMBY_URL</code> и <code>EMBY_API_KEY</code> в конфигурацию."
         if edit and hasattr(message_or_callback, "message"):
-            await message_or_callback.message.edit_text(text, parse_mode="Markdown")
+            await message_or_callback.message.edit_text(text, parse_mode="HTML")
         else:
-            await message_or_callback.answer(text, parse_mode="Markdown")
+            await message_or_callback.answer(text, parse_mode="HTML")
         return
 
     try:
@@ -58,7 +58,7 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
                 await message_or_callback.message.edit_text(
                     text,
                     reply_markup=keyboard,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
             except TelegramBadRequest as e:
                 if "message is not modified" not in str(e):
@@ -69,7 +69,7 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
             await message_or_callback.answer(
                 text,
                 reply_markup=keyboard,
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
 
     except EmbyError as e:
@@ -201,10 +201,10 @@ async def handle_restart_prompt(callback: CallbackQuery) -> None:
         return
 
     await callback.message.edit_text(
-        "⚠️ **Перезагрузить Emby сервер?**\n\n"
+        "⚠️ <b>Перезагрузить Emby сервер?</b>\n\n"
         "Все активные сессии будут прерваны.",
         reply_markup=Keyboards.emby_confirm_restart(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -222,9 +222,9 @@ async def handle_restart_confirm(callback: CallbackQuery) -> None:
 
         if callback.message:
             await callback.message.edit_text(
-                "🔁 **Сервер перезагружается...**\n\n"
+                "🔁 <b>Сервер перезагружается...</b>\n\n"
                 "Подождите 30-60 секунд, затем используйте /emby для проверки.",
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
 
         await callback.answer("Перезагрузка запущена")
@@ -246,10 +246,10 @@ async def handle_update_prompt(callback: CallbackQuery) -> None:
         return
 
     await callback.message.edit_text(
-        "⚠️ **Установить обновление Emby?**\n\n"
+        "⚠️ <b>Установить обновление Emby?</b>\n\n"
         "Сервер будет перезагружен после установки.",
         reply_markup=Keyboards.emby_confirm_update(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -267,10 +267,10 @@ async def handle_update_confirm(callback: CallbackQuery) -> None:
 
         if callback.message:
             await callback.message.edit_text(
-                "⬆️ **Обновление устанавливается...**\n\n"
+                "⬆️ <b>Обновление устанавливается...</b>\n\n"
                 "Сервер перезагрузится автоматически. "
                 "Подождите несколько минут, затем используйте /emby для проверки.",
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
 
         await callback.answer("Обновление запущено")

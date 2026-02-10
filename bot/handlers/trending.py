@@ -139,13 +139,13 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
         )
 
 
-@router.callback_query(F.data.startswith(CallbackData.MOVIE))
+@router.callback_query(F.data.startswith(CallbackData.TRENDING_MOVIE))
 async def handle_movie_from_trending(callback: CallbackQuery) -> None:
     """Show movie details with poster when clicked from trending list."""
     await callback.answer()
 
     # Extract TMDB ID from callback data
-    tmdb_id_str = callback.data.replace(CallbackData.MOVIE, "")
+    tmdb_id_str = callback.data.replace(CallbackData.TRENDING_MOVIE, "")
     try:
         tmdb_id = int(tmdb_id_str)
     except ValueError:
@@ -197,13 +197,13 @@ async def handle_movie_from_trending(callback: CallbackQuery) -> None:
         )
 
 
-@router.callback_query(F.data.startswith(CallbackData.SERIES))
+@router.callback_query(F.data.startswith(CallbackData.TRENDING_SERIES_ITEM))
 async def handle_series_from_trending(callback: CallbackQuery) -> None:
     """Show series details with poster when clicked from trending list."""
     await callback.answer()
 
-    # Extract TMDB ID from callback data (or TVDB ID for regular series search)
-    series_id_str = callback.data.replace(CallbackData.SERIES, "")
+    # Extract TMDB ID from callback data
+    series_id_str = callback.data.replace(CallbackData.TRENDING_SERIES_ITEM, "")
     try:
         series_id = int(series_id_str)
     except ValueError:

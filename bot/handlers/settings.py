@@ -5,7 +5,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from bot.config import get_settings
+from bot.clients.registry import get_prowlarr, get_radarr, get_sonarr, get_qbittorrent
 from bot.db import Database
 from bot.models import User, UserPreferences
 from bot.services.add_service import AddService
@@ -19,42 +19,21 @@ router = Router()
 MENU_SETTINGS = "⚙️ Настройки"
 
 
-async def get_db() -> Database:
-    """Get database instance."""
-    settings = get_settings()
-    db = Database(settings.database_path)
-    await db.connect()
-    return db
-
-
-async def get_add_service() -> AddService:
-    """Get add service instance."""
-    from bot.clients import ProwlarrClient, RadarrClient, SonarrClient
-    from bot.clients.qbittorrent import QBittorrentClient
-
-    settings = get_settings()
-
-    prowlarr = ProwlarrClient(settings.prowlarr_url, settings.prowlarr_api_key)
-    radarr = RadarrClient(settings.radarr_url, settings.radarr_api_key)
-    sonarr = SonarrClient(settings.sonarr_url, settings.sonarr_api_key)
-
-    # qBittorrent for force downloads
-    qbittorrent = None
-    if settings.qbittorrent_url:
-        qbittorrent = QBittorrentClient(
-            settings.qbittorrent_url,
-            settings.qbittorrent_username,
-            settings.qbittorrent_password,
-        )
-
-    return AddService(prowlarr, radarr, sonarr, qbittorrent)
+def _get_add_service() -> AddService:
+    """Get add service instance using singleton clients from registry."""
+    return AddService(
+        get_prowlarr(),
+        get_radarr(),
+        get_sonarr(),
+        get_qbittorrent(),
+    )
 
 
 @router.message(F.text == MENU_SETTINGS)
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, db_user: User) -> None:
     """Handle /settings command."""
-    add_service = await get_add_service()
+    add_service = _get_add_service()
 
     try:
         # Get current settings data
@@ -74,16 +53,12 @@ async def cmd_settings(message: Message, db_user: User) -> None:
         await message.answer(
             text,
             reply_markup=Keyboards.settings_menu(),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
 
     except Exception as e:
         logger.error("Failed to load settings", error=str(e))
         await message.answer(Formatters.format_error(f"Ошибка загрузки настроек: {str(e)}"))
-    finally:
-        await add_service.radarr.close()
-        await add_service.sonarr.close()
-        await add_service.prowlarr.close()
 
 
 @router.callback_query(F.data == CallbackData.SETTINGS)
@@ -92,7 +67,7 @@ async def handle_settings_back(callback: CallbackQuery, db_user: User) -> None:
     if not callback.message:
         return
 
-    add_service = await get_add_service()
+    add_service = _get_add_service()
 
     try:
         radarr_profiles = await add_service.get_radarr_profiles()
@@ -111,17 +86,13 @@ async def handle_settings_back(callback: CallbackQuery, db_user: User) -> None:
         await callback.message.edit_text(
             text,
             reply_markup=Keyboards.settings_menu(),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         await callback.answer()
 
     except Exception as e:
         logger.error("Failed to load settings", error=str(e))
         await callback.answer("Ошибка загрузки настроек", show_alert=True)
-    finally:
-        await add_service.radarr.close()
-        await add_service.sonarr.close()
-        await add_service.prowlarr.close()
 
 
 @router.callback_query(F.data == "settings:radarr_profile")
@@ -130,7 +101,7 @@ async def handle_radarr_profile_menu(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    add_service = await get_add_service()
+    add_service = _get_add_service()
 
     try:
         profiles = await add_service.get_radarr_profiles()
@@ -140,28 +111,23 @@ async def handle_radarr_profile_menu(callback: CallbackQuery) -> None:
             return
 
         await callback.message.edit_text(
-            "**Выберите профиль качества Radarr:**",
+            "<b>Выберите профиль качества Radarr:</b>",
             reply_markup=Keyboards.quality_profiles(profiles, CallbackData.SET_RADARR_PROFILE),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         await callback.answer()
 
     except Exception as e:
         logger.error("Failed to load Radarr profiles", error=str(e))
         await callback.answer("Ошибка загрузки профилей", show_alert=True)
-    finally:
-        await add_service.radarr.close()
-        await add_service.sonarr.close()
-        await add_service.prowlarr.close()
 
 
 @router.callback_query(F.data.startswith(CallbackData.SET_RADARR_PROFILE))
-async def handle_set_radarr_profile(callback: CallbackQuery, db_user: User) -> None:
+async def handle_set_radarr_profile(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Set Radarr quality profile."""
     if not callback.data or not callback.message:
         return
 
-    db = await get_db()
 
     try:
         profile_id = int(callback.data.replace(CallbackData.SET_RADARR_PROFILE, ""))
@@ -179,8 +145,6 @@ async def handle_set_radarr_profile(callback: CallbackQuery, db_user: User) -> N
     except Exception as e:
         logger.error("Failed to update profile", error=str(e))
         await callback.answer("Ошибка обновления", show_alert=True)
-    finally:
-        await db.close()
 
 
 @router.callback_query(F.data == "settings:radarr_folder")
@@ -189,7 +153,7 @@ async def handle_radarr_folder_menu(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    add_service = await get_add_service()
+    add_service = _get_add_service()
 
     try:
         folders = await add_service.get_radarr_root_folders()
@@ -199,28 +163,23 @@ async def handle_radarr_folder_menu(callback: CallbackQuery) -> None:
             return
 
         await callback.message.edit_text(
-            "**Выберите корневую папку Radarr:**",
+            "<b>Выберите корневую папку Radarr:</b>",
             reply_markup=Keyboards.root_folders(folders, CallbackData.SET_RADARR_FOLDER),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         await callback.answer()
 
     except Exception as e:
         logger.error("Failed to load Radarr folders", error=str(e))
         await callback.answer("Ошибка загрузки папок", show_alert=True)
-    finally:
-        await add_service.radarr.close()
-        await add_service.sonarr.close()
-        await add_service.prowlarr.close()
 
 
 @router.callback_query(F.data.startswith(CallbackData.SET_RADARR_FOLDER))
-async def handle_set_radarr_folder(callback: CallbackQuery, db_user: User) -> None:
+async def handle_set_radarr_folder(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Set Radarr root folder."""
     if not callback.data or not callback.message:
         return
 
-    db = await get_db()
 
     try:
         folder_id = int(callback.data.replace(CallbackData.SET_RADARR_FOLDER, ""))
@@ -237,8 +196,6 @@ async def handle_set_radarr_folder(callback: CallbackQuery, db_user: User) -> No
     except Exception as e:
         logger.error("Failed to update folder", error=str(e))
         await callback.answer("Ошибка обновления", show_alert=True)
-    finally:
-        await db.close()
 
 
 @router.callback_query(F.data == "settings:sonarr_profile")
@@ -247,7 +204,7 @@ async def handle_sonarr_profile_menu(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    add_service = await get_add_service()
+    add_service = _get_add_service()
 
     try:
         profiles = await add_service.get_sonarr_profiles()
@@ -257,28 +214,23 @@ async def handle_sonarr_profile_menu(callback: CallbackQuery) -> None:
             return
 
         await callback.message.edit_text(
-            "**Выберите профиль качества Sonarr:**",
+            "<b>Выберите профиль качества Sonarr:</b>",
             reply_markup=Keyboards.quality_profiles(profiles, CallbackData.SET_SONARR_PROFILE),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         await callback.answer()
 
     except Exception as e:
         logger.error("Failed to load Sonarr profiles", error=str(e))
         await callback.answer("Ошибка загрузки профилей", show_alert=True)
-    finally:
-        await add_service.radarr.close()
-        await add_service.sonarr.close()
-        await add_service.prowlarr.close()
 
 
 @router.callback_query(F.data.startswith(CallbackData.SET_SONARR_PROFILE))
-async def handle_set_sonarr_profile(callback: CallbackQuery, db_user: User) -> None:
+async def handle_set_sonarr_profile(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Set Sonarr quality profile."""
     if not callback.data or not callback.message:
         return
 
-    db = await get_db()
 
     try:
         profile_id = int(callback.data.replace(CallbackData.SET_SONARR_PROFILE, ""))
@@ -295,8 +247,6 @@ async def handle_set_sonarr_profile(callback: CallbackQuery, db_user: User) -> N
     except Exception as e:
         logger.error("Failed to update profile", error=str(e))
         await callback.answer("Ошибка обновления", show_alert=True)
-    finally:
-        await db.close()
 
 
 @router.callback_query(F.data == "settings:sonarr_folder")
@@ -305,7 +255,7 @@ async def handle_sonarr_folder_menu(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    add_service = await get_add_service()
+    add_service = _get_add_service()
 
     try:
         folders = await add_service.get_sonarr_root_folders()
@@ -315,28 +265,23 @@ async def handle_sonarr_folder_menu(callback: CallbackQuery) -> None:
             return
 
         await callback.message.edit_text(
-            "**Выберите корневую папку Sonarr:**",
+            "<b>Выберите корневую папку Sonarr:</b>",
             reply_markup=Keyboards.root_folders(folders, CallbackData.SET_SONARR_FOLDER),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         await callback.answer()
 
     except Exception as e:
         logger.error("Failed to load Sonarr folders", error=str(e))
         await callback.answer("Ошибка загрузки папок", show_alert=True)
-    finally:
-        await add_service.radarr.close()
-        await add_service.sonarr.close()
-        await add_service.prowlarr.close()
 
 
 @router.callback_query(F.data.startswith(CallbackData.SET_SONARR_FOLDER))
-async def handle_set_sonarr_folder(callback: CallbackQuery, db_user: User) -> None:
+async def handle_set_sonarr_folder(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Set Sonarr root folder."""
     if not callback.data or not callback.message:
         return
 
-    db = await get_db()
 
     try:
         folder_id = int(callback.data.replace(CallbackData.SET_SONARR_FOLDER, ""))
@@ -353,8 +298,6 @@ async def handle_set_sonarr_folder(callback: CallbackQuery, db_user: User) -> No
     except Exception as e:
         logger.error("Failed to update folder", error=str(e))
         await callback.answer("Ошибка обновления", show_alert=True)
-    finally:
-        await db.close()
 
 
 @router.callback_query(F.data == "settings:resolution")
@@ -364,20 +307,19 @@ async def handle_resolution_menu(callback: CallbackQuery) -> None:
         return
 
     await callback.message.edit_text(
-        "**Выберите предпочитаемое разрешение:**",
+        "<b>Выберите предпочитаемое разрешение:</b>",
         reply_markup=Keyboards.resolution_selection(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith(CallbackData.SET_RESOLUTION))
-async def handle_set_resolution(callback: CallbackQuery, db_user: User) -> None:
+async def handle_set_resolution(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Set preferred resolution."""
     if not callback.data or not callback.message:
         return
 
-    db = await get_db()
 
     try:
         resolution = callback.data.replace(CallbackData.SET_RESOLUTION, "")
@@ -394,8 +336,6 @@ async def handle_set_resolution(callback: CallbackQuery, db_user: User) -> None:
     except Exception as e:
         logger.error("Failed to update resolution", error=str(e))
         await callback.answer("Ошибка обновления", show_alert=True)
-    finally:
-        await db.close()
 
 
 @router.callback_query(F.data == "settings:auto_grab")
@@ -407,22 +347,21 @@ async def handle_auto_grab_menu(callback: CallbackQuery, db_user: User) -> None:
     settings = get_settings()
 
     await callback.message.edit_text(
-        f"**Авто-загрузка**\n\n"
+        f"<b>Авто-загрузка</b>\n\n"
         f"При включении релизы с высоким рейтингом (≥ {settings.auto_grab_score_threshold}) "
         f"покажут кнопку «Скачать лучшее» для быстрой загрузки.",
         reply_markup=Keyboards.auto_grab_toggle(db_user.preferences.auto_grab_enabled),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith(CallbackData.SET_AUTO_GRAB))
-async def handle_set_auto_grab(callback: CallbackQuery, db_user: User) -> None:
+async def handle_set_auto_grab(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Toggle auto-grab setting."""
     if not callback.data or not callback.message:
         return
 
-    db = await get_db()
 
     try:
         value = callback.data.replace(CallbackData.SET_AUTO_GRAB, "")
@@ -438,5 +377,3 @@ async def handle_set_auto_grab(callback: CallbackQuery, db_user: User) -> None:
     except Exception as e:
         logger.error("Failed to update auto-grab", error=str(e))
         await callback.answer("Ошибка обновления", show_alert=True)
-    finally:
-        await db.close()

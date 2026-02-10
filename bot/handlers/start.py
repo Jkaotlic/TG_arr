@@ -6,6 +6,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
+from bot.db import Database
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import Keyboards
 
@@ -75,19 +76,8 @@ async def cmd_help(message: Message) -> None:
 
 
 @router.message(Command("cancel"))
-async def cmd_cancel(message: Message) -> None:
+async def cmd_cancel(message: Message, db: Database) -> None:
     """Handle /cancel command."""
-    # Import here to avoid circular imports
-    from bot.config import get_settings
-    from bot.db import Database
-
-    settings = get_settings()
-    db = Database(settings.database_path)
-    await db.connect()
-
-    try:
-        user_id = message.from_user.id if message.from_user else 0
-        await db.delete_session(user_id)
-        await message.answer("❌ Отменено. Напишите название для нового поиска.")
-    finally:
-        await db.close()
+    user_id = message.from_user.id if message.from_user else 0
+    await db.delete_session(user_id)
+    await message.answer("❌ Отменено. Напишите название для нового поиска.")

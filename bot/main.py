@@ -141,7 +141,7 @@ async def main() -> None:
     # Initialize bot
     bot = Bot(
         token=settings.telegram_bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
     # Initialize qBittorrent client and notification service if configured
@@ -160,7 +160,7 @@ async def main() -> None:
         # Create notification sender function
         async def send_notification(user_id: int, message: str) -> None:
             try:
-                await bot.send_message(user_id, message, parse_mode=ParseMode.MARKDOWN)
+                await bot.send_message(user_id, message, parse_mode=ParseMode.HTML)
             except Exception as e:
                 logger.warning(
                     "Failed to send notification",
