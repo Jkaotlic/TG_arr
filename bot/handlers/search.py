@@ -38,6 +38,7 @@ MENU_SERIES = "📺 Сериал"
 MENU_BUTTONS = {
     MENU_SEARCH, MENU_MOVIE, MENU_SERIES,
     "📥 Загрузки", "📊 qBit", "📺 Emby", "🔌 Статус", "⚙️ Настройки", "📋 История", "❓ Помощь", "🔥 Топ",
+    "📅 Календарь",
 }
 
 
