@@ -1,5 +1,6 @@
 """Sonarr API client."""
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import structlog
@@ -270,6 +271,46 @@ class SonarrClient(BaseAPIClient):
         }
         result = await self.post("/api/v3/command", json_data=payload)
         return result if isinstance(result, dict) else {}
+
+    async def get_calendar(self, days: int = 7) -> list[dict[str, Any]]:
+        """Get upcoming episodes from Sonarr calendar.
+
+        Args:
+            days: Number of days to look ahead.
+
+        Returns:
+            List of episode dicts with series info.
+        """
+        now = datetime.now(timezone.utc)
+        start = now.strftime("%Y-%m-%d")
+        end = (now + timedelta(days=days)).strftime("%Y-%m-%d")
+
+        params = {
+            "start": start,
+            "end": end,
+            "includeSeries": "true",
+            "includeEpisodeFile": "false",
+        }
+        results = await self.get("/api/v3/calendar", params=params)
+        if not isinstance(results, list):
+            return []
+
+        episodes = []
+        for ep in results:
+            try:
+                episodes.append({
+                    "series_title": ep.get("series", {}).get("title", "Unknown"),
+                    "season": ep.get("seasonNumber", 0),
+                    "episode": ep.get("episodeNumber", 0),
+                    "title": ep.get("title", ""),
+                    "air_date": ep.get("airDateUtc", ""),
+                    "has_file": ep.get("hasFile", False),
+                    "overview": ep.get("overview", ""),
+                })
+            except Exception as e:
+                logger.warning("Failed to parse calendar episode", error=str(e))
+
+        return episodes
 
     async def get_quality_profiles(self) -> list[QualityProfile]:
         """Get all quality profiles."""
