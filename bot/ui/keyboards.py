@@ -106,10 +106,9 @@ class Keyboards:
         """Create main (reply) menu keyboard with the most used commands."""
         return ReplyKeyboardMarkup(
             keyboard=[
-                [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="🎬 Фильм"), KeyboardButton(text="📺 Сериал")],
-                [KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit"), KeyboardButton(text="🔥 Топ")],
-                [KeyboardButton(text="📺 Emby"), KeyboardButton(text="📅 Календарь"), KeyboardButton(text="🔌 Статус")],
-                [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 История"), KeyboardButton(text="❓ Помощь")],
+                [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="🔥 Топ"), KeyboardButton(text="📅 Календарь")],
+                [KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit"), KeyboardButton(text="📺 Emby")],
+                [KeyboardButton(text="🔌 Статус"), KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 История")],
             ],
             resize_keyboard=True,
             input_field_placeholder="Введите название для поиска...",

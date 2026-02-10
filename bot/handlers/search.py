@@ -30,15 +30,13 @@ router = Router()
 
 # Russian menu button texts
 MENU_SEARCH = "🔍 Поиск"
-MENU_MOVIE = "🎬 Фильм"
-MENU_SERIES = "📺 Сериал"
 
 # All menu button texts that should NOT trigger text search
 # These are handled by their respective routers
 MENU_BUTTONS = {
-    MENU_SEARCH, MENU_MOVIE, MENU_SERIES,
-    "📥 Загрузки", "📊 qBit", "📺 Emby", "🔌 Статус", "⚙️ Настройки", "📋 История", "❓ Помощь", "🔥 Топ",
-    "📅 Календарь",
+    MENU_SEARCH,
+    "📥 Загрузки", "📊 qBit", "📺 Emby", "🔌 Статус", "⚙️ Настройки", "📋 История",
+    "🔥 Топ", "📅 Календарь",
 }
 
 
@@ -104,19 +102,7 @@ async def cmd_series(message: Message, db_user: User, db: Database) -> None:
 @router.message(F.text == MENU_SEARCH)
 async def handle_menu_search(message: Message) -> None:
     """Handle search menu button."""
-    await message.answer("🔍 Введите название для поиска:")
-
-
-@router.message(F.text == MENU_MOVIE)
-async def handle_menu_movie(message: Message) -> None:
-    """Handle movie menu button."""
-    await message.answer("🎬 Введите название фильма:")
-
-
-@router.message(F.text == MENU_SERIES)
-async def handle_menu_series(message: Message) -> None:
-    """Handle series menu button."""
-    await message.answer("📺 Введите название сериала:")
+    await message.answer("🔍 Введите название фильма или сериала:")
 
 
 @router.message(F.text & ~F.text.startswith("/") & ~F.text.in_(MENU_BUTTONS))
