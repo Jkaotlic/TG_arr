@@ -29,7 +29,7 @@ MENU_QSTATUS = "📊 qBit"
 async def check_qbt_enabled(message_or_callback) -> bool:
     """Check if qBittorrent is enabled and send message if not."""
     if get_qbittorrent() is None:
-        text = "⚠️ Интеграция с qBittorrent не настроена.\n\nУстановите `QBITTORRENT_URL` и `QBITTORRENT_PASSWORD` в переменных окружения."
+        text = "⚠️ Интеграция с qBittorrent не настроена.\n\nУстановите <code>QBITTORRENT_URL</code> и <code>QBITTORRENT_PASSWORD</code> в переменных окружения."
         if isinstance(message_or_callback, Message):
             await message_or_callback.answer(text)
         elif isinstance(message_or_callback, CallbackQuery):
@@ -73,7 +73,7 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
         await status_msg.edit_text(
             text,
             reply_markup=Keyboards.torrent_list(torrents, 0, total_pages, TorrentFilter.ALL),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
 
     except QBittorrentError as e:
@@ -101,7 +101,7 @@ async def cmd_qstatus(message: Message, db_user: User) -> None:
         status = await qbt.get_status()
         text = Formatters.format_qbittorrent_status(status)
 
-        await status_msg.edit_text(text, parse_mode="Markdown")
+        await status_msg.edit_text(text, parse_mode="HTML")
 
     except QBittorrentError as e:
         logger.error("qBittorrent error", error=str(e))
@@ -199,7 +199,7 @@ async def handle_refresh(callback: CallbackQuery) -> None:
             await callback.message.edit_text(
                 text,
                 reply_markup=Keyboards.torrent_list(torrents, 0, total_pages, TorrentFilter.ALL),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
@@ -240,7 +240,7 @@ async def handle_page(callback: CallbackQuery) -> None:
             await callback.message.edit_text(
                 text,
                 reply_markup=Keyboards.torrent_list(torrents, page, total_pages, TorrentFilter.ALL),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
@@ -276,7 +276,7 @@ async def handle_torrent_details(callback: CallbackQuery) -> None:
             await callback.message.edit_text(
                 text,
                 reply_markup=Keyboards.torrent_details(torrent),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
@@ -520,9 +520,9 @@ async def handle_filter_menu(callback: CallbackQuery) -> None:
 
     try:
         await callback.message.edit_text(
-            "**Выберите фильтр:**",
+            "<b>Выберите фильтр:</b>",
             reply_markup=Keyboards.torrent_filters(),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
     except TelegramBadRequest as e:
         if "message is not modified" not in str(e):
@@ -562,7 +562,7 @@ async def handle_filter_select(callback: CallbackQuery) -> None:
             await callback.message.edit_text(
                 text,
                 reply_markup=Keyboards.torrent_list(torrents, 0, total_pages, filter_type),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
@@ -591,7 +591,7 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
         current_ul = "Без лимита" if status.upload_limit == 0 else format_speed(status.upload_limit)
 
         text = (
-            f"**Лимиты скорости**\n\n"
+            f"<b>Лимиты скорости</b>\n\n"
             f"Текущие:\n"
             f"⬇️ Загрузка: {current_dl}\n"
             f"⬆️ Отдача: {current_ul}\n\n"
@@ -602,7 +602,7 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
             await callback.message.edit_text(
                 text,
                 reply_markup=Keyboards.speed_limits_menu(),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):

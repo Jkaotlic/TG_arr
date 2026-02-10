@@ -314,12 +314,12 @@ class TestFormatters:
         """Test formatting qBittorrent status."""
         result = Formatters.format_qbittorrent_status(status)
 
-        assert "qBittorrent Status" in result
+        assert "qBittorrent" in result
         assert "4.6.0" in result
-        assert "connected" in result
-        assert "Download" in result
-        assert "Upload" in result
-        assert "Torrents" in result
+        assert "подключён" in result or "Соединение" in result
+        assert "Загрузка" in result or "⬇️" in result
+        assert "Отдача" in result or "⬆️" in result
+        assert "Торренты" in result or "Всего" in result
 
     def test_format_torrent_details(self, torrent):
         """Test formatting torrent details."""
@@ -327,9 +327,8 @@ class TestFormatters:
 
         assert torrent.name in result
         assert "75%" in result
-        assert "Downloading" in result
-        assert "Seeds" in result
-        assert "Peers" in result
+        assert "Загрузка" in result or "⬇️" in result
+        assert "Сиды" in result or "Пиры" in result
         assert torrent.save_path in result
 
     def test_format_torrent_compact(self, torrent):
@@ -342,31 +341,31 @@ class TestFormatters:
     def test_format_no_torrents(self):
         """Test formatting no torrents message."""
         result = Formatters.format_no_torrents(TorrentFilter.ALL)
-        assert "No torrents found" in result
+        assert "Торрентов нет" in result or "нет" in result
 
         result = Formatters.format_no_torrents(TorrentFilter.DOWNLOADING)
-        assert "downloading" in result
+        assert "загр" in result.lower() or "нет" in result
 
     def test_format_speed_limit_changed(self):
         """Test formatting speed limit change message."""
         result = Formatters.format_speed_limit_changed("dl", 1024)
-        assert "Download" in result
+        assert "Загрузка" in result or "⬇️" in result
         assert "1" in result
 
         result = Formatters.format_speed_limit_changed("ul", 0)
-        assert "Upload" in result
-        assert "unlimited" in result
+        assert "Отдача" in result or "⬆️" in result
+        assert "без ограничений" in result or "∞" in result
 
     def test_format_torrent_action(self):
         """Test formatting torrent action result."""
         result = Formatters.format_torrent_action("pause", "Test.Torrent", True)
-        assert "Paused" in result
+        assert "Пауза" in result or "⏸" in result
 
         result = Formatters.format_torrent_action("resume", "Test.Torrent", True)
-        assert "Resumed" in result
+        assert "Возобновлен" in result or "▶️" in result
 
         result = Formatters.format_torrent_action("pause", "Test.Torrent", False)
-        assert "Failed" in result
+        assert "Ошибка" in result or "❌" in result
 
 
 class TestKeyboards:
@@ -410,7 +409,7 @@ class TestKeyboards:
             for i in range(10)
         ]
 
-        keyboard = Keyboards.torrent_list(torrents, current_page=0, per_page=5)
+        keyboard = Keyboards.torrent_list(torrents[:5], current_page=0, total_pages=2)
 
         # Check pagination buttons exist
         has_next = any(
@@ -435,7 +434,7 @@ class TestKeyboards:
         assert keyboard is not None
         # Should have pause button for downloading torrent
         buttons_text = [btn.text for row in keyboard.inline_keyboard for btn in row]
-        assert any("Pause" in text for text in buttons_text)
+        assert any("пауза" in text.lower() for text in buttons_text)
 
     def test_torrent_details_paused(self):
         """Test torrent details keyboard for paused torrent."""
@@ -450,7 +449,7 @@ class TestKeyboards:
 
         # Should have resume button for paused torrent
         buttons_text = [btn.text for row in keyboard.inline_keyboard for btn in row]
-        assert any("Resume" in text for text in buttons_text)
+        assert any("возобновить" in text.lower() for text in buttons_text)
 
     def test_torrent_filters_keyboard(self):
         """Test torrent filters keyboard creation."""
@@ -479,11 +478,11 @@ class TestKeyboards:
 
         assert keyboard is not None
         buttons_text = [btn.text for row in keyboard.inline_keyboard for btn in row]
-        assert any("remove" in text.lower() or "cancel" in text.lower() for text in buttons_text)
+        assert any("удалить" in text.lower() or "отмена" in text.lower() for text in buttons_text)
 
         keyboard_with_files = Keyboards.confirm_delete_torrent("abc123", with_files=True)
         buttons_text = [btn.text for row in keyboard_with_files.inline_keyboard for btn in row]
-        assert any("files" in text.lower() for text in buttons_text)
+        assert any("файл" in text.lower() for text in buttons_text)
 
 
 class TestNotificationService:

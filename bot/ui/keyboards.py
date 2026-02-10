@@ -881,7 +881,7 @@ class Keyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=title,
-                    callback_data=f"{CallbackData.MOVIE}{movie.tmdb_id}",
+                    callback_data=f"{CallbackData.TRENDING_MOVIE}{movie.tmdb_id}",
                 )
             ])
 
@@ -903,7 +903,7 @@ class Keyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=title,
-                    callback_data=f"{CallbackData.SERIES}{series.tmdb_id}",
+                    callback_data=f"{CallbackData.TRENDING_SERIES_ITEM}{series.tmdb_id}",
                 )
             ])
 

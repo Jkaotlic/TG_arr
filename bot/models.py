@@ -1,6 +1,10 @@
 """Data models for the application."""
 
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Union
 
@@ -198,8 +202,8 @@ class User(BaseModel):
     first_name: Optional[str] = None
     role: UserRole = UserRole.USER
     preferences: UserPreferences = Field(default_factory=UserPreferences)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
 
 
 # Union type with discriminator for content info
@@ -222,7 +226,7 @@ class SearchSession(BaseModel):
     current_page: int = 0
     selected_result: Optional[SearchResult] = None
     selected_content: Optional[ContentInfo] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
 
     # For series - season/episode selection
     selected_season: Optional[int] = None
@@ -243,7 +247,7 @@ class ActionLog(BaseModel):
     release_title: Optional[str] = None
     success: bool = True
     error_message: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
 
 
 class SystemStatus(BaseModel):

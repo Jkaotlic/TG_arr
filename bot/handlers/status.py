@@ -7,8 +7,8 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from bot.clients import EmbyClient, ProwlarrClient, QBittorrentClient, RadarrClient, SonarrClient
-from bot.config import get_settings
+from bot.clients.qbittorrent import QBittorrentClient
+from bot.clients.registry import get_prowlarr, get_radarr, get_sonarr, get_qbittorrent, get_emby
 from bot.models import SystemStatus
 from bot.ui.formatters import Formatters
 
@@ -23,28 +23,13 @@ MENU_STATUS = "🔌 Статус"
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
     """Handle /status command - check all services status."""
-    settings = get_settings()
-
     status_msg = await message.answer("🔍 Проверяю статус сервисов...")
 
-    # Create clients
-    prowlarr = ProwlarrClient(settings.prowlarr_url, settings.prowlarr_api_key)
-    radarr = RadarrClient(settings.radarr_url, settings.radarr_api_key)
-    sonarr = SonarrClient(settings.sonarr_url, settings.sonarr_api_key)
-
-    # Create qBittorrent client if configured
-    qbittorrent = None
-    if settings.qbittorrent_enabled:
-        qbittorrent = QBittorrentClient(
-            settings.qbittorrent_url,
-            settings.qbittorrent_username,
-            settings.qbittorrent_password,
-        )
-
-    # Create Emby client if configured
-    emby = None
-    if settings.emby_enabled:
-        emby = EmbyClient(settings.emby_url, settings.emby_api_key)
+    prowlarr = get_prowlarr()
+    radarr = get_radarr()
+    sonarr = get_sonarr()
+    qbittorrent = get_qbittorrent()
+    emby = get_emby()
 
     try:
         # Build list of service checks
@@ -75,20 +60,11 @@ async def cmd_status(message: Message) -> None:
                 statuses.append(result)
 
         text = Formatters.format_system_status(statuses)
-        await status_msg.edit_text(text, parse_mode="Markdown")
+        await status_msg.edit_text(text, parse_mode="HTML")
 
     except Exception as e:
         logger.error("Status check failed", error=str(e))
         await status_msg.edit_text(Formatters.format_error(f"Status check failed: {str(e)}"))
-
-    finally:
-        await prowlarr.close()
-        await radarr.close()
-        await sonarr.close()
-        if qbittorrent:
-            await qbittorrent.close()
-        if emby:
-            await emby.close()
 
 
 async def check_service(client, name: str) -> SystemStatus:

@@ -1,5 +1,6 @@
 """Search and content management handlers."""
 
+import html
 import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -58,12 +59,12 @@ def get_services() -> tuple[SearchService, AddService, ScoringService]:
 async def cmd_search(message: Message, db_user: User, db: Database) -> None:
     """Handle /search <query> command - auto-detect content type."""
     if not message.text:
-        await message.answer("Укажите запрос: `/search Дюна 2021`", parse_mode="Markdown")
+        await message.answer("Укажите запрос: <code>/search Дюна 2021</code>")
         return
 
     query = message.text.replace("/search", "").strip()
     if not query:
-        await message.answer("Укажите запрос: `/search Дюна 2021`", parse_mode="Markdown")
+        await message.answer("Укажите запрос: <code>/search Дюна 2021</code>")
         return
 
     await process_search(message, query, ContentType.UNKNOWN, db_user, db)
@@ -73,12 +74,12 @@ async def cmd_search(message: Message, db_user: User, db: Database) -> None:
 async def cmd_movie(message: Message, db_user: User, db: Database) -> None:
     """Handle /movie <query> command."""
     if not message.text:
-        await message.answer("Укажите название фильма: `/movie Дюна 2021`", parse_mode="Markdown")
+        await message.answer("Укажите название фильма: <code>/movie Дюна 2021</code>")
         return
 
     query = message.text.replace("/movie", "").strip()
     if not query:
-        await message.answer("Укажите название фильма: `/movie Дюна 2021`", parse_mode="Markdown")
+        await message.answer("Укажите название фильма: <code>/movie Дюна 2021</code>")
         return
 
     await process_search(message, query, ContentType.MOVIE, db_user, db)
@@ -88,12 +89,12 @@ async def cmd_movie(message: Message, db_user: User, db: Database) -> None:
 async def cmd_series(message: Message, db_user: User, db: Database) -> None:
     """Handle /series <query> command."""
     if not message.text:
-        await message.answer("Укажите название сериала: `/series Breaking Bad`", parse_mode="Markdown")
+        await message.answer("Укажите название сериала: <code>/series Breaking Bad</code>")
         return
 
     query = message.text.replace("/series", "").strip()
     if not query:
-        await message.answer("Укажите название сериала: `/series Breaking Bad`", parse_mode="Markdown")
+        await message.answer("Укажите название сериала: <code>/series Breaking Bad</code>")
         return
 
     await process_search(message, query, ContentType.SERIES, db_user, db)
@@ -169,9 +170,9 @@ async def process_search(
             if content_type == ContentType.UNKNOWN:
                 # Ask user to choose
                 await status_msg.edit_text(
-                    f"🤔 **{query}** — это фильм или сериал?",
+                    f"🤔 <b>{query}</b> — это фильм или сериал?",
                     reply_markup=Keyboards.content_type_selection(),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
 
                 # Save partial session
@@ -192,8 +193,8 @@ async def process_search(
 
         if not results:
             await status_msg.edit_text(
-                Formatters.format_warning(f"Ничего не найдено для **{query}**"),
-                parse_mode="Markdown",
+                Formatters.format_warning(f"Ничего не найдено для <b>{query}</b>"),
+                parse_mode="HTML",
             )
             return
 
@@ -229,6 +230,7 @@ async def process_search(
             total_pages,
             query,
             content_type,
+            per_page=per_page,
         )
 
         await status_msg.edit_text(
@@ -241,7 +243,7 @@ async def process_search(
                 show_grab_best,
                 best_result.calculated_score if best_result else 0,
             ),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
 
         # Log action
@@ -279,8 +281,7 @@ async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Data
 
     await callback.answer()
 
-    # Create a fake message object to reuse process_search
-    await callback.message.delete()
+    # Use message.answer() to send results to same chat
     await process_search(
         callback.message,
         session.query,
@@ -340,6 +341,7 @@ async def handle_pagination(callback: CallbackQuery, db_user: User, db: Database
         total_pages,
         session.query,
         session.content_type,
+        per_page=per_page,
     )
 
     await callback.message.edit_text(
@@ -352,7 +354,7 @@ async def handle_pagination(callback: CallbackQuery, db_user: User, db: Database
             show_grab_best,
             best_result.calculated_score if best_result else 0,
         ),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
 
     await callback.answer()
@@ -394,7 +396,7 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
     # Now need to look up the actual content in Radarr/Sonarr
     await callback.message.edit_text(
         text + "\n\n🔍 Загружаю информацию...",
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
 
     # Check if force grab is available
@@ -413,13 +415,13 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
                 await callback.message.edit_text(
                     f"{text}\n\n---\n{movie_text}",
                     reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
             else:
                 await callback.message.edit_text(
                     f"{text}\n\n⚠️ Не удалось найти информацию о фильме. Продолжить?",
                     reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
         else:
             series_list = await search_service.lookup_series(session.query)
@@ -432,20 +434,20 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
                 await callback.message.edit_text(
                     f"{text}\n\n---\n{series_text}",
                     reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
             else:
                 await callback.message.edit_text(
                     f"{text}\n\n⚠️ Не удалось найти информацию о сериале. Продолжить?",
                     reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
     except Exception as e:
         logger.warning("Failed to lookup content", error=str(e))
         await callback.message.edit_text(
             f"{text}\n\n⚠️ Ошибка загрузки информации: {str(e)}",
             reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
 
     await callback.answer()
@@ -555,8 +557,8 @@ async def grab_release(
 
             if success:
                 await message.edit_text(
-                    Formatters.format_success(f"**{movie.title}** ({movie.year})\n\n{msg}\n\nРелиз: _{result.title}_"),
-                    parse_mode="Markdown",
+                    Formatters.format_success(f"<b>{html.escape(movie.title)}</b> ({movie.year})\n\n{msg}\n\nРелиз: <i>{html.escape(result.title)}</i>"),
+                    parse_mode="HTML",
                 )
             else:
                 await message.edit_text(Formatters.format_error(msg))
@@ -613,8 +615,8 @@ async def grab_release(
             if success:
                 year_str = f" ({series.year})" if series.year else ""
                 await message.edit_text(
-                    Formatters.format_success(f"**{series.title}**{year_str}\n\n{msg}\n\nРелиз: _{result.title}_"),
-                    parse_mode="Markdown",
+                    Formatters.format_success(f"<b>{html.escape(series.title)}</b>{year_str}\n\n{msg}\n\nРелиз: <i>{html.escape(result.title)}</i>"),
+                    parse_mode="HTML",
                 )
             else:
                 await message.edit_text(Formatters.format_error(msg))
@@ -666,6 +668,7 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
         total_pages,
         session.query,
         session.content_type,
+        per_page=per_page,
     )
 
     await callback.message.edit_text(
@@ -678,7 +681,7 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
             show_grab_best,
             best_result.calculated_score if best_result else 0,
         ),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
 
     await callback.answer()
@@ -765,8 +768,8 @@ async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database
 
             if success:
                 await message.edit_text(
-                    Formatters.format_success(f"**{movie.title}** ({movie.year})\n\n{msg}\n\nРелиз: _{result.title}_"),
-                    parse_mode="Markdown",
+                    Formatters.format_success(f"<b>{html.escape(movie.title)}</b> ({movie.year})\n\n{msg}\n\nРелиз: <i>{html.escape(result.title)}</i>"),
+                    parse_mode="HTML",
                 )
             else:
                 await message.edit_text(Formatters.format_error(msg))
@@ -814,8 +817,8 @@ async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database
             if success:
                 year_str = f" ({series.year})" if series.year else ""
                 await message.edit_text(
-                    Formatters.format_success(f"**{series.title}**{year_str}\n\n{msg}\n\nРелиз: _{result.title}_"),
-                    parse_mode="Markdown",
+                    Formatters.format_success(f"<b>{html.escape(series.title)}</b>{year_str}\n\n{msg}\n\nРелиз: <i>{html.escape(result.title)}</i>"),
+                    parse_mode="HTML",
                 )
             else:
                 await message.edit_text(Formatters.format_error(msg))
