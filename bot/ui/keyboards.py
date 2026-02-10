@@ -108,7 +108,7 @@ class Keyboards:
             keyboard=[
                 [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="🎬 Фильм"), KeyboardButton(text="📺 Сериал")],
                 [KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit"), KeyboardButton(text="🔥 Топ")],
-                [KeyboardButton(text="📺 Emby"), KeyboardButton(text="� Календарь"), KeyboardButton(text="🔌 Статус")],
+                [KeyboardButton(text="📺 Emby"), KeyboardButton(text="📅 Календарь"), KeyboardButton(text="🔌 Статус")],
                 [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 История"), KeyboardButton(text="❓ Помощь")],
             ],
             resize_keyboard=True,
