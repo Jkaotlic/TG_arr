@@ -214,18 +214,11 @@ async def handle_series_from_trending(callback: CallbackQuery) -> None:
     series = _trending_series_cache.get(series_id)
 
     if not series:
-        # If not in cache, need to determine if it's TMDB or TVDB ID
-        # For now, assume it's from regular search (TVDB ID)
-        sonarr = get_sonarr()
-        try:
-            series = await sonarr.lookup_series_by_tvdb(series_id)
-        except Exception as e:
-            logger.error("Failed to lookup series", series_id=series_id, error=str(e))
-            await callback.message.answer(f"❌ Ошибка: {str(e)}")
-            return
-
-    if not series:
-        await callback.message.answer("❌ Сериал не найден")
+        # series_id is a TMDb ID from trending — cannot use as TVDB ID for Sonarr lookup
+        await callback.message.answer(
+            "❌ Сериал не найден в кэше.\n"
+            "Попробуйте обновить список или используйте обычный поиск."
+        )
         return
 
     # Send poster with series details
