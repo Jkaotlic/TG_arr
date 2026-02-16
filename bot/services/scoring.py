@@ -68,9 +68,9 @@ class ScoringWeights:
     def __post_init__(self):
         if self.bad_keywords is None:
             self.bad_keywords = {
-                "sample": -100,
-                "trailer": -100,
-                "teaser": -100,
+                "sample": -200,
+                "trailer": -200,
+                "teaser": -200,
                 "screener": -30,
                 "workprint": -40,
                 "r5": -20,

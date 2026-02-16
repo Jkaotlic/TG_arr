@@ -243,7 +243,7 @@ class ProwlarrClient(BaseAPIClient):
 
         # HDR
         hdr = None
-        if "dolby vision" in title_lower or " dv " in title_lower or "dovi" in title_lower:
+        if "dolby vision" in title_lower or "dolby.vision" in title_lower or re.search(r"[\.\s\-]dv[\.\s\-]|[\.\s\-]dv$", title_lower) or "dovi" in title_lower:
             hdr = "DV"
         if "hdr10+" in title_lower:
             hdr = "HDR10+" if hdr is None else f"{hdr}+HDR10+"
@@ -262,7 +262,7 @@ class ProwlarrClient(BaseAPIClient):
             audio = "DTS-HD"
         elif "dts" in title_lower:
             audio = "DTS"
-        elif "dd5.1" in title_lower or "dd 5.1" in title_lower or "ac3" in title_lower:
+        elif "dd5.1" in title_lower or "dd 5.1" in title_lower or "dd.5.1" in title_lower or "ac3" in title_lower:
             audio = "DD5.1"
         elif "aac" in title_lower:
             audio = "AAC"
@@ -316,8 +316,8 @@ class ProwlarrClient(BaseAPIClient):
         if match:
             return int(match.group(1)), None
 
-        # Season 1 Episode 2 format
-        match = re.search(r"season\s*(\d{1,2})(?:\s*episode\s*(\d{1,3}))?", title_lower)
+        # Season 1 Episode 2 format (supports dot/space separators)
+        match = re.search(r"season[\s.]*(\d{1,2})(?:[\s.]*episode[\s.]*(\d{1,3}))?", title_lower)
         if match:
             season = int(match.group(1))
             episode = int(match.group(2)) if match.group(2) else None
@@ -334,17 +334,19 @@ class ProwlarrClient(BaseAPIClient):
         """Check if release is a season pack."""
         title_lower = title.lower()
 
-        # Has season but no episode
-        match = re.search(r"s(\d{1,2})(?!e\d)", title_lower)
-        if match:
-            return True
-
-        # Explicit season pack markers
+        # Explicit season pack markers (check first — most reliable)
         if any(x in title_lower for x in ["complete season", "season pack", "full season"]):
             return True
 
-        # "Season X" without episode
-        if re.search(r"season\s*\d{1,2}(?!\s*episode)", title_lower):
+        # S01 format — season pack only if no episode follows
+        match = re.search(r"s(\d{1,2})(?!e\d)", title_lower)
+        if match:
+            # Also verify there's no episode range like S01E01-E10
+            if not re.search(r"s\d{1,2}e\d", title_lower):
+                return True
+
+        # "Season X" without episode (supports dot/space separators)
+        if re.search(r"season[\s.]*\d{1,2}(?![\s.]*episode)", title_lower):
             return True
 
         return False

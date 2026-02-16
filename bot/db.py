@@ -114,8 +114,11 @@ class Database:
             );
 
             CREATE INDEX IF NOT EXISTS idx_searches_user ON searches(user_id);
+            CREATE INDEX IF NOT EXISTS idx_searches_created ON searches(created_at);
+            CREATE INDEX IF NOT EXISTS idx_search_results_search ON search_results(search_id);
             CREATE INDEX IF NOT EXISTS idx_actions_user ON actions(user_id);
             CREATE INDEX IF NOT EXISTS idx_actions_created ON actions(created_at);
+            CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
         """)
         await self.conn.commit()
 
