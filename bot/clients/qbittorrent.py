@@ -1,7 +1,7 @@
 """qBittorrent Web API client."""
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -485,11 +485,11 @@ class QBittorrentClient:
         # Parse timestamps
         added_on = None
         if item.get("added_on", 0) > 0:
-            added_on = datetime.fromtimestamp(item["added_on"])
+            added_on = datetime.fromtimestamp(item["added_on"], tz=timezone.utc)
 
         completion_on = None
         if item.get("completion_on", 0) > 0:
-            completion_on = datetime.fromtimestamp(item["completion_on"])
+            completion_on = datetime.fromtimestamp(item["completion_on"], tz=timezone.utc)
 
         # Parse tags
         tags = []

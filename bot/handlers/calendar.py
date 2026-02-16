@@ -22,7 +22,6 @@ async def _fetch_and_send_calendar(
     days: int,
     *,
     answer_func,
-    edit: bool = False,
 ) -> None:
     """Fetch calendar data from Sonarr & Radarr and send/edit the message."""
     sonarr = get_sonarr()
@@ -48,16 +47,11 @@ async def _fetch_and_send_calendar(
     if errors:
         text += "\n\n⚠️ " + " | ".join(errors)
 
-    kwargs = dict(
+    await answer_func(
         text=text,
         parse_mode="HTML",
         reply_markup=Keyboards.calendar_controls(current_days=days),
     )
-
-    if edit:
-        await answer_func(**kwargs)
-    else:
-        await answer_func(**kwargs)
 
 
 @router.message(F.text == MENU_CALENDAR)
@@ -70,7 +64,6 @@ async def handle_calendar_menu(message: Message) -> None:
     await _fetch_and_send_calendar(
         days,
         answer_func=message.answer,
-        edit=False,
     )
 
 
@@ -83,7 +76,6 @@ async def handle_calendar_7(callback: CallbackQuery) -> None:
     await _fetch_and_send_calendar(
         7,
         answer_func=callback.message.edit_text,
-        edit=True,
     )
 
 
@@ -96,7 +88,6 @@ async def handle_calendar_14(callback: CallbackQuery) -> None:
     await _fetch_and_send_calendar(
         14,
         answer_func=callback.message.edit_text,
-        edit=True,
     )
 
 
@@ -109,7 +100,6 @@ async def handle_calendar_30(callback: CallbackQuery) -> None:
     await _fetch_and_send_calendar(
         30,
         answer_func=callback.message.edit_text,
-        edit=True,
     )
 
 
@@ -122,5 +112,4 @@ async def handle_calendar_refresh(callback: CallbackQuery) -> None:
     await _fetch_and_send_calendar(
         days,
         answer_func=callback.message.edit_text,
-        edit=True,
     )

@@ -27,7 +27,7 @@ class APIError(Exception):
         super().__init__(self.message)
 
 
-class ConnectionError(APIError):
+class ServiceConnectionError(APIError):
     """Connection error to the service."""
 
     pass
@@ -149,11 +149,11 @@ class BaseAPIClient:
 
         except httpx.TimeoutException as e:
             log.error("Request timeout", error=str(e))
-            raise ConnectionError(f"Таймаут соединения с {self.service_name}") from e
+            raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}") from e
 
         except httpx.ConnectError as e:
             log.error("Connection error", error=str(e))
-            raise ConnectionError(f"Не удалось подключиться к {self.service_name} ({self.base_url})") from e
+            raise ServiceConnectionError(f"Не удалось подключиться к {self.service_name} ({self.base_url})") from e
 
     async def get(
         self,

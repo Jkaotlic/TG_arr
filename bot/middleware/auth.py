@@ -160,6 +160,10 @@ class RateLimitMiddleware(BaseMiddleware):
         # Clean old requests
         _user_requests[user_id] = [t for t in _user_requests[user_id] if t > window_start]
 
+        # Remove empty entries to prevent unbounded dict growth
+        if not _user_requests[user_id]:
+            del _user_requests[user_id]
+
         # Check rate limit
         if len(_user_requests[user_id]) >= self.max_requests:
             logger.warning("Rate limit exceeded", user_id=user_id)

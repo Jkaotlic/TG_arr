@@ -14,9 +14,6 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
-        # Treat env values as plain strings (disable JSON decoding for complex types like list[int])
-        # so validators can handle comma-separated values such as "123,456".
-        enable_decoding=False,
         extra="ignore",
     )
 

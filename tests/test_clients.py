@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 import httpx
 
-from bot.clients.base import BaseAPIClient, APIError, ConnectionError, AuthenticationError
+from bot.clients.base import BaseAPIClient, APIError, ServiceConnectionError, AuthenticationError
 from bot.clients.prowlarr import ProwlarrClient
 from bot.clients.radarr import RadarrClient
 from bot.clients.sonarr import SonarrClient

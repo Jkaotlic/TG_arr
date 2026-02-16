@@ -1,14 +1,14 @@
 """Data models for the application."""
 
 from datetime import datetime, timezone
+from enum import Enum
+from typing import Annotated, Any, Literal, Optional, Union
+
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-from enum import Enum
-from typing import Annotated, Any, Literal, Optional, Union
-
-from pydantic import BaseModel, Discriminator, Field, Tag, field_validator
 
 
 class ContentType(str, Enum):
@@ -96,10 +96,7 @@ class SearchResult(BaseModel):
         """Get size in gigabytes."""
         return self.size / (1024 ** 3)
 
-    class Config:
-        """Pydantic config."""
-
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class MovieInfo(BaseModel):
@@ -427,23 +424,25 @@ class QBittorrentStatus(BaseModel):
 # ============================================================================
 
 
-def format_bytes(size: int) -> str:
+def format_bytes(size: int | float) -> str:
     """Format bytes to human-readable string."""
     if size == 0:
         return "0 B"
+    value = float(size)
     for unit in ["B", "KB", "MB", "GB", "TB", "PB"]:
-        if abs(size) < 1024.0:
-            return f"{size:.1f} {unit}"
-        size /= 1024.0
-    return f"{size:.1f} EB"
+        if abs(value) < 1024.0:
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} EB"
 
 
-def format_speed(bytes_per_sec: int) -> str:
+def format_speed(bytes_per_sec: int | float) -> str:
     """Format speed to human-readable string."""
     if bytes_per_sec == 0:
         return "0 B/s"
+    value = float(bytes_per_sec)
     for unit in ["B/s", "KB/s", "MB/s", "GB/s"]:
-        if abs(bytes_per_sec) < 1024.0:
-            return f"{bytes_per_sec:.1f} {unit}"
-        bytes_per_sec /= 1024.0
-    return f"{bytes_per_sec:.1f} TB/s"
+        if abs(value) < 1024.0:
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} TB/s"
