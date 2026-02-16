@@ -24,6 +24,11 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - bot-data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
 
 volumes:
   bot-data:

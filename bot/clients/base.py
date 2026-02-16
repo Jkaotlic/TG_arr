@@ -45,6 +45,12 @@ class NotFoundError(APIError):
     pass
 
 
+class RetryableAPIError(APIError):
+    """Transient API error that should be retried (429, 503, 504)."""
+
+    pass
+
+
 class BaseAPIClient:
     """Base async HTTP client with retry logic."""
 
@@ -81,9 +87,9 @@ class BaseAPIClient:
             self._client = None
 
     @retry(
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError, RetryableAPIError)),
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
         reraise=True,
     )
     async def _request(
@@ -132,6 +138,13 @@ class BaseAPIClient:
                 raise NotFoundError(
                     f"Ресурс не найден: {endpoint}",
                     status_code=404,
+                )
+
+            if response.status_code in (429, 503, 504):
+                log.warning("Retryable HTTP error", status_code=response.status_code)
+                raise RetryableAPIError(
+                    f"{self.service_name} временно недоступен ({response.status_code})",
+                    status_code=response.status_code,
                 )
 
             if response.status_code >= 400:

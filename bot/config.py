@@ -18,21 +18,21 @@ class Settings(BaseSettings):
     )
 
     # Telegram
-    telegram_bot_token: str = Field(..., description="Telegram bot token from @BotFather")
+    telegram_bot_token: str = Field(..., min_length=1, description="Telegram bot token from @BotFather")
     allowed_tg_ids: list[int] = Field(default_factory=list, description="Allowed Telegram user IDs")
     admin_tg_ids: list[int] = Field(default_factory=list, description="Admin Telegram user IDs")
 
     # Prowlarr
-    prowlarr_url: str = Field(..., description="Prowlarr base URL")
-    prowlarr_api_key: str = Field(..., description="Prowlarr API key")
+    prowlarr_url: str = Field(..., min_length=1, description="Prowlarr base URL")
+    prowlarr_api_key: str = Field(..., min_length=1, description="Prowlarr API key")
 
     # Radarr
-    radarr_url: str = Field(..., description="Radarr base URL")
-    radarr_api_key: str = Field(..., description="Radarr API key")
+    radarr_url: str = Field(..., min_length=1, description="Radarr base URL")
+    radarr_api_key: str = Field(..., min_length=1, description="Radarr API key")
 
     # Sonarr
-    sonarr_url: str = Field(..., description="Sonarr base URL")
-    sonarr_api_key: str = Field(..., description="Sonarr API key")
+    sonarr_url: str = Field(..., min_length=1, description="Sonarr base URL")
+    sonarr_api_key: str = Field(..., min_length=1, description="Sonarr API key")
 
     # qBittorrent (optional)
     qbittorrent_url: Optional[str] = Field(default=None, description="qBittorrent Web UI URL")
