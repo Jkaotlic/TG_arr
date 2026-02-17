@@ -496,6 +496,28 @@ async def grab_release(
     add_service: AddService,
 ) -> None:
     """Perform the actual grab operation."""
+    await _execute_grab(message, session, db_user, db, search_service, add_service)
+
+
+def _resolve_folder(folders: list, preferred_id: int | None) -> str:
+    """Resolve root folder path from user preference or first available."""
+    if preferred_id:
+        folder = next((f for f in folders if f.id == preferred_id), None)
+        return folder.path if folder else folders[0].path
+    return folders[0].path
+
+
+async def _execute_grab(
+    message: Message,
+    session: SearchSession,
+    db_user: User,
+    db: Database,
+    search_service: SearchService,
+    add_service: AddService,
+    *,
+    force_download: bool = False,
+) -> None:
+    """Common grab logic for normal and force grab."""
     user_id = session.user_id
     result = session.selected_result
     prefs = db_user.preferences
@@ -506,7 +528,6 @@ async def grab_release(
 
     try:
         if session.content_type == ContentType.MOVIE:
-            # Get or lookup movie
             movie = session.selected_content
             if not isinstance(movie, MovieInfo):
                 movies = await search_service.lookup_movie(session.query)
@@ -515,7 +536,6 @@ async def grab_release(
                     return
                 movie = movies[0]
 
-            # Get quality profile and root folder
             profiles = await add_service.get_radarr_profiles()
             folders = await add_service.get_radarr_root_folders()
 
@@ -524,19 +544,14 @@ async def grab_release(
                 return
 
             profile_id = prefs.radarr_quality_profile_id or profiles[0].id
-            folder_path = None
-            if prefs.radarr_root_folder_id:
-                folder = next((f for f in folders if f.id == prefs.radarr_root_folder_id), None)
-                folder_path = folder.path if folder else folders[0].path
-            else:
-                folder_path = folders[0].path
+            folder_path = _resolve_folder(folders, prefs.radarr_root_folder_id)
 
-            # Grab
             success, action, msg = await add_service.grab_movie_release(
                 movie=movie,
                 release=result,
                 quality_profile_id=profile_id,
                 root_folder_path=folder_path,
+                force_download=force_download,
             )
 
             action.user_id = user_id
@@ -550,11 +565,7 @@ async def grab_release(
             else:
                 await message.edit_text(Formatters.format_error(msg))
 
-            await db.delete_session(user_id)
-            return
-
         else:
-            # Series
             series = session.selected_content
             if not isinstance(series, SeriesInfo):
                 series_list = await search_service.lookup_series(session.query)
@@ -563,7 +574,6 @@ async def grab_release(
                     return
                 series = series_list[0]
 
-            # Get quality profile and root folder
             profiles = await add_service.get_sonarr_profiles()
             folders = await add_service.get_sonarr_root_folders()
 
@@ -572,28 +582,23 @@ async def grab_release(
                 return
 
             profile_id = prefs.sonarr_quality_profile_id or profiles[0].id
-            folder_path = None
-            if prefs.sonarr_root_folder_id:
-                folder = next((f for f in folders if f.id == prefs.sonarr_root_folder_id), None)
-                folder_path = folder.path if folder else folders[0].path
-            else:
-                folder_path = folders[0].path
+            folder_path = _resolve_folder(folders, prefs.sonarr_root_folder_id)
 
             # Determine monitor type based on release
-            monitor_type = "all"
-            if result.detected_season is not None and not result.is_season_pack:
-                if result.detected_episode is not None:
-                    monitor_type = "none"  # Just this episode
-                else:
+            if force_download:
+                monitor_type = "all"
+            else:
+                monitor_type = "all"
+                if result.detected_season is not None and not result.is_season_pack:
                     monitor_type = "none"
 
-            # Grab
             success, action, msg = await add_service.grab_series_release(
                 series=series,
                 release=result,
                 quality_profile_id=profile_id,
                 root_folder_path=folder_path,
                 monitor_type=monitor_type,
+                force_download=force_download,
             )
 
             action.user_id = user_id
@@ -608,11 +613,12 @@ async def grab_release(
             else:
                 await message.edit_text(Formatters.format_error(msg))
 
-            await db.delete_session(user_id)
+        await db.delete_session(user_id)
 
     except Exception as e:
         logger.error("Grab failed", error=str(e))
         await message.edit_text(Formatters.format_error(str(e)))
+        await db.delete_session(user_id)
 
 
 @router.callback_query(F.data == CallbackData.BACK)
@@ -703,120 +709,14 @@ async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database
         await message.edit_text(Formatters.format_error("Сессия истекла. Повторите поиск."))
         return
 
-    result = session.selected_result
-    _, add_service, _ = get_services()
+    search_service, add_service, _ = get_services()
 
     if not add_service.qbittorrent:
         await message.edit_text(Formatters.format_error("qBittorrent не настроен"))
         await db.delete_session(user_id)
         return
 
-    prefs = db_user.preferences
-
-    try:
-        if session.content_type == ContentType.MOVIE:
-            # Movie
-            movie = session.selected_content
-            if not isinstance(movie, MovieInfo):
-                search_service, _, _ = get_services()
-                movie_list = await search_service.lookup_movie(session.query)
-                if not movie_list:
-                    await message.edit_text(Formatters.format_error("Не удалось найти фильм в Radarr"))
-                    return
-                movie = movie_list[0]
-
-            # Get quality profile and root folder
-            profiles = await add_service.get_radarr_profiles()
-            folders = await add_service.get_radarr_root_folders()
-
-            if not profiles or not folders:
-                await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Radarr"))
-                return
-
-            profile_id = prefs.radarr_quality_profile_id or profiles[0].id
-            folder_path = None
-            if prefs.radarr_root_folder_id:
-                folder = next((f for f in folders if f.id == prefs.radarr_root_folder_id), None)
-                folder_path = folder.path if folder else folders[0].path
-            else:
-                folder_path = folders[0].path
-
-            # Force grab
-            success, action, msg = await add_service.grab_movie_release(
-                movie=movie,
-                release=result,
-                quality_profile_id=profile_id,
-                root_folder_path=folder_path,
-                force_download=True,
-            )
-
-            action.user_id = user_id
-            await db.log_action(action)
-
-            if success:
-                await message.edit_text(
-                    Formatters.format_success(f"<b>{html.escape(movie.title)}</b> ({movie.year})\n\n{msg}\n\nРелиз: <i>{html.escape(result.title)}</i>"),
-                    parse_mode="HTML",
-                )
-            else:
-                await message.edit_text(Formatters.format_error(msg))
-
-        else:
-            # Series
-            series = session.selected_content
-            if not isinstance(series, SeriesInfo):
-                search_service, _, _ = get_services()
-                series_list = await search_service.lookup_series(session.query)
-                if not series_list:
-                    await message.edit_text(Formatters.format_error("Не удалось найти сериал в Sonarr"))
-                    return
-                series = series_list[0]
-
-            # Get quality profile and root folder
-            profiles = await add_service.get_sonarr_profiles()
-            folders = await add_service.get_sonarr_root_folders()
-
-            if not profiles or not folders:
-                await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Sonarr"))
-                return
-
-            profile_id = prefs.sonarr_quality_profile_id or profiles[0].id
-            folder_path = None
-            if prefs.sonarr_root_folder_id:
-                folder = next((f for f in folders if f.id == prefs.sonarr_root_folder_id), None)
-                folder_path = folder.path if folder else folders[0].path
-            else:
-                folder_path = folders[0].path
-
-            # Force grab
-            success, action, msg = await add_service.grab_series_release(
-                series=series,
-                release=result,
-                quality_profile_id=profile_id,
-                root_folder_path=folder_path,
-                monitor_type="all",
-                force_download=True,
-            )
-
-            action.user_id = user_id
-            await db.log_action(action)
-
-            if success:
-                year_str = f" ({series.year})" if series.year else ""
-                await message.edit_text(
-                    Formatters.format_success(f"<b>{html.escape(series.title)}</b>{year_str}\n\n{msg}\n\nРелиз: <i>{html.escape(result.title)}</i>"),
-                    parse_mode="HTML",
-                )
-            else:
-                await message.edit_text(Formatters.format_error(msg))
-
-        # Clean up session
-        await db.delete_session(user_id)
-
-    except Exception as e:
-        logger.error("Force grab failed", error=str(e))
-        await message.edit_text(Formatters.format_error(str(e)))
-        await db.delete_session(user_id)
+    await _execute_grab(message, session, db_user, db, search_service, add_service, force_download=True)
 
 
 @router.callback_query(F.data == "noop")

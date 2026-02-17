@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     notify_check_interval: int = Field(default=60, ge=10, description="Check interval for notifications (seconds)")
 
     # Optional
-    timezone: str = Field(default="UTC", description="Timezone for timestamps")
+    timezone: str = Field(default="Europe/Moscow", description="Timezone for timestamps")
     log_level: str = Field(default="INFO", description="Logging level")
     database_path: str = Field(default="data/bot.db", description="SQLite database path")
     auto_grab_score_threshold: int = Field(
