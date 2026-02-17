@@ -1,7 +1,6 @@
 """Authentication middleware for Telegram bot."""
 
 import time
-from collections import defaultdict
 from typing import Any, Awaitable, Callable, Dict
 
 import structlog
@@ -14,7 +13,7 @@ from bot.db import Database
 logger = structlog.get_logger()
 
 # Simple in-memory rate limiting
-_user_requests: Dict[int, list] = defaultdict(list)
+_user_requests: Dict[int, list] = {}
 MAX_REQUESTS_PER_MINUTE = 30  # Max requests per user per minute
 
 
@@ -157,15 +156,12 @@ class RateLimitMiddleware(BaseMiddleware):
         now = time.time()
         window_start = now - self.window_seconds
 
-        # Clean old requests
-        _user_requests[user_id] = [t for t in _user_requests[user_id] if t > window_start]
-
-        # Remove empty entries to prevent unbounded dict growth
-        if not _user_requests[user_id]:
-            del _user_requests[user_id]
+        # Clean old requests, get current count
+        recent = [t for t in _user_requests.get(user_id, []) if t > window_start]
 
         # Check rate limit
-        if len(_user_requests[user_id]) >= self.max_requests:
+        if len(recent) >= self.max_requests:
+            _user_requests[user_id] = recent
             logger.warning("Rate limit exceeded", user_id=user_id)
             if isinstance(event, Message):
                 await event.answer("⏳ Слишком много запросов. Подождите минуту.")
@@ -174,6 +170,7 @@ class RateLimitMiddleware(BaseMiddleware):
             return None
 
         # Record request
-        _user_requests[user_id].append(now)
+        recent.append(now)
+        _user_requests[user_id] = recent
 
         return await handler(event, data)
