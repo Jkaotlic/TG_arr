@@ -4,7 +4,7 @@ All output uses HTML parse_mode. User-provided content is escaped via html.escap
 """
 
 import html
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from bot.models import (
@@ -822,23 +822,26 @@ class Formatters:
     @staticmethod
     def format_calendar(episodes: list[dict], movies: list[dict], days: int = 7) -> str:
         """Format combined calendar for Sonarr episodes and Radarr movies."""
-        lines = [f"📅 <b>Календарь релизов</b> (ближайшие {days} дн.)\n"]
+        lines = [f"📅 <b>Календарь релизов</b> ({days} дн.)\n"]
 
         if not episodes and not movies:
             lines.append("Нет предстоящих релизов.")
             return "\n".join(lines)
 
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
         if episodes:
             lines.append(f"📺 <b>Сериалы ({len(episodes)})</b>")
-            # Group episodes by date
             by_date: dict[str, list[dict]] = {}
             for ep in episodes:
-                date_str = Formatters._parse_calendar_date(ep.get("air_date", ""))
-                by_date.setdefault(date_str, []).append(ep)
+                date_key = Formatters._extract_date_key(ep.get("air_date", ""))
+                by_date.setdefault(date_key, []).append(ep)
 
-            for date_str in sorted(by_date.keys()):
-                lines.append(f"\n  📆 <b>{date_str}</b>")
-                for ep in by_date[date_str]:
+            for date_key in sorted(by_date.keys()):
+                date_header = Formatters._format_date_header(date_key, today)
+                lines.append(f"\n  📆 <b>{date_header}</b>")
+                for ep in by_date[date_key]:
                     s = ep.get("season", 0)
                     e = ep.get("episode", 0)
                     series = _e(ep.get("series_title", "?"))
@@ -856,12 +859,13 @@ class Formatters:
             lines.append(f"🎬 <b>Фильмы ({len(movies)})</b>")
             by_date: dict[str, list[dict]] = {}
             for m in movies:
-                date_str = Formatters._parse_calendar_date(m.get("release_date", ""))
-                by_date.setdefault(date_str, []).append(m)
+                date_key = Formatters._extract_date_key(m.get("release_date", ""))
+                by_date.setdefault(date_key, []).append(m)
 
-            for date_str in sorted(by_date.keys()):
-                lines.append(f"\n  📆 <b>{date_str}</b>")
-                for m in by_date[date_str]:
+            for date_key in sorted(by_date.keys()):
+                date_header = Formatters._format_date_header(date_key, today)
+                lines.append(f"\n  📆 <b>{date_header}</b>")
+                for m in by_date[date_key]:
                     title = _e(m.get("title", "?"))
                     year = m.get("year", "")
                     year_str = f" ({year})" if year else ""
@@ -869,7 +873,6 @@ class Formatters:
                     runtime = m.get("runtime", 0)
                     runtime_str = f" • {runtime} мин" if runtime else ""
 
-                    # Release type
                     release_types = []
                     if m.get("digital_release"):
                         release_types.append("💾 цифровой")
@@ -884,16 +887,42 @@ class Formatters:
         return "\n".join(lines)
 
     @staticmethod
-    def _parse_calendar_date(date_str: str) -> str:
-        """Parse an ISO date string to a human-readable date."""
+    def _extract_date_key(date_str: str) -> str:
+        """Extract sortable date key (YYYY-MM-DD) from ISO date string."""
         if not date_str:
-            return "Дата неизвестна"
+            return "9999-99-99"
         try:
             dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-            months = [
-                "", "января", "февраля", "марта", "апреля", "мая", "июня",
-                "июля", "августа", "сентября", "октября", "ноября", "декабря",
-            ]
-            return f"{dt.day} {months[dt.month]} {dt.year}"
+            return dt.strftime("%Y-%m-%d")
         except (ValueError, IndexError):
-            return date_str[:10] if len(date_str) >= 10 else date_str
+            return date_str[:10] if len(date_str) >= 10 else "9999-99-99"
+
+    @staticmethod
+    def _format_date_header(date_key: str, today) -> str:
+        """Format date key to human-readable header with relative day marker."""
+        months = [
+            "", "января", "февраля", "марта", "апреля", "мая", "июня",
+            "июля", "августа", "сентября", "октября", "ноября", "декабря",
+        ]
+        try:
+            from datetime import date as date_cls
+            parts = date_key.split("-")
+            dt_date = date_cls(int(parts[0]), int(parts[1]), int(parts[2]))
+        except (ValueError, IndexError):
+            return date_key
+
+        diff = (dt_date - today).days
+        day_month = f"{dt_date.day} {months[dt_date.month]}"
+
+        if diff == 0:
+            return f"{day_month} — сегодня"
+        elif diff == 1:
+            return f"{day_month} — завтра"
+        elif diff == 2:
+            return f"{day_month} — послезавтра"
+        elif diff == -1:
+            return f"{day_month} — вчера"
+        elif diff < -1:
+            return f"{day_month} ({-diff} дн. назад)"
+        else:
+            return f"{day_month} (через {diff} дн.)"

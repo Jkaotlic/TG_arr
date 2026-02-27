@@ -2,7 +2,7 @@
 
 import structlog
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, Message, URLInputFile
+from aiogram.types import CallbackQuery, Message
 
 from bot.config import get_settings
 from bot.clients.registry import get_tmdb, get_radarr, get_sonarr, get_qbittorrent, get_prowlarr
@@ -181,7 +181,7 @@ async def handle_movie_from_trending(callback: CallbackQuery) -> None:
     if movie.poster_url:
         try:
             await callback.message.answer_photo(
-                photo=URLInputFile(movie.poster_url),
+                photo=movie.poster_url,
                 caption=caption,
                 parse_mode="HTML",
                 reply_markup=Keyboards.movie_details(movie),
@@ -235,7 +235,7 @@ async def handle_series_from_trending(callback: CallbackQuery) -> None:
     if series.poster_url:
         try:
             await callback.message.answer_photo(
-                photo=URLInputFile(series.poster_url),
+                photo=series.poster_url,
                 caption=caption,
                 parse_mode="HTML",
                 reply_markup=Keyboards.series_details(series),
