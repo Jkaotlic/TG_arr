@@ -267,6 +267,19 @@ class ProwlarrClient(BaseAPIClient):
         elif "aac" in title_lower:
             audio = "AAC"
 
+        # Subtitles / Russian audio
+        subtitle = None
+        if re.search(r"rus[\.\s\-_]?sub|russian[\.\s\-_]?sub|russub", title_lower):
+            subtitle = "RusSub"
+        elif re.search(r"[\.\s\-_]mvo[\.\s\-_$]", title_lower):
+            subtitle = "MVO"
+        elif re.search(r"[\.\s\-_]dvo[\.\s\-_$]", title_lower):
+            subtitle = "DVO"
+        elif re.search(r"[\.\s\-_]avo[\.\s\-_$]", title_lower):
+            subtitle = "AVO"
+        elif re.search(r"multi[\.\s\-_]?sub", title_lower):
+            subtitle = "MultiSub"
+
         # Remux
         is_remux = "remux" in title_lower
 
@@ -280,6 +293,7 @@ class ProwlarrClient(BaseAPIClient):
             codec=codec,
             hdr=hdr,
             audio=audio,
+            subtitle=subtitle,
             is_remux=is_remux,
             is_repack=is_repack,
             is_proper=is_proper,
