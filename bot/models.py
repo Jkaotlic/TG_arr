@@ -43,6 +43,7 @@ class QualityInfo(BaseModel):
     codec: Optional[str] = None  # x264, x265, HEVC, AV1, etc.
     hdr: Optional[str] = None  # HDR, HDR10, DV (Dolby Vision), etc.
     audio: Optional[str] = None  # DTS, Atmos, TrueHD, etc.
+    subtitle: Optional[str] = None  # RusSub, MVO, DVO, etc.
     is_remux: bool = False
     is_repack: bool = False
     is_proper: bool = False

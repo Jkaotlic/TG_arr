@@ -261,26 +261,26 @@ class AddService:
                 except APIError as e:
                     log.warning("Direct grab failed", error=str(e))
 
-            # Force download via qBittorrent if rejected and force_download enabled
-            if release_rejected and force_download and self.qbittorrent:
+            # Download via qBittorrent if rejected by Radarr profile
+            if release_rejected and self.qbittorrent:
                 download_url = release.download_url or release.magnet_url
                 if download_url:
                     try:
                         success = await self.qbittorrent.add_torrent_url(
                             download_url,
-                            category="radarr",  # Tag for Radarr/movies
+                            category="radarr",
                         )
                         if success:
                             action.success = True
-                            log.info("Force downloaded via qBittorrent with radarr category")
-                            return True, action, "Принудительно загружено через qBittorrent"
+                            log.info("Downloaded via qBittorrent (bypassed profile rejection)")
+                            return True, action, "Загружено через qBittorrent"
                         else:
                             log.error("qBittorrent rejected torrent", download_url=download_url[:100])
                             raise QBittorrentError("Failed to add torrent to qBittorrent")
                     except Exception as e:
-                        log.error("Force download failed", error=str(e))
+                        log.error("qBittorrent download failed", error=str(e))
 
-            # If rejected, return rejection info without fallback
+            # If rejected and no qBittorrent fallback available
             if release_rejected:
                 action.success = False
                 rejection_msg = ", ".join(rejections) if rejections else "Отклонено"
@@ -391,26 +391,26 @@ class AddService:
                 except APIError as e:
                     log.warning("Direct grab failed", error=str(e))
 
-            # Force download via qBittorrent if rejected and force_download enabled
-            if release_rejected and force_download and self.qbittorrent:
+            # Download via qBittorrent if rejected by Sonarr profile
+            if release_rejected and self.qbittorrent:
                 download_url = release.download_url or release.magnet_url
                 if download_url:
                     try:
                         success = await self.qbittorrent.add_torrent_url(
                             download_url,
-                            category="tv-sonarr",  # Tag for Sonarr/series
+                            category="tv-sonarr",
                         )
                         if success:
                             action.success = True
-                            log.info("Force downloaded via qBittorrent with sonarr category")
-                            return True, action, "Принудительно загружено через qBittorrent"
+                            log.info("Downloaded via qBittorrent (bypassed profile rejection)")
+                            return True, action, "Загружено через qBittorrent"
                         else:
                             log.error("qBittorrent rejected torrent", download_url=download_url[:100])
                             raise QBittorrentError("Failed to add torrent to qBittorrent")
                     except Exception as e:
-                        log.error("Force download failed", error=str(e))
+                        log.error("qBittorrent download failed", error=str(e))
 
-            # If rejected, return rejection info without fallback
+            # If rejected and no qBittorrent fallback available
             if release_rejected:
                 action.success = False
                 rejection_msg = ", ".join(rejections) if rejections else "Отклонено"

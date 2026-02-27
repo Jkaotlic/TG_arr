@@ -48,6 +48,8 @@ class Formatters:
             quality_parts.append(result.quality.codec)
         if result.quality.hdr:
             quality_parts.append(result.quality.hdr)
+        if result.quality.subtitle:
+            quality_parts.append(f"💬{result.quality.subtitle}")
 
         if quality_parts:
             lines.append(f"📊 Quality: {' / '.join(quality_parts)}")
@@ -114,6 +116,8 @@ class Formatters:
             lines.append("  • 📀 REMUX")
         if result.quality.is_repack:
             lines.append("  • 🔄 REPACK")
+        if result.quality.subtitle:
+            lines.append(f"  • 💬 Субтитры: {result.quality.subtitle}")
 
         lines.append("")
 

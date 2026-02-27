@@ -48,6 +48,9 @@ class ScoringWeights:
     audio_dts: int = 5
     audio_dd51: int = 3
 
+    # Subtitle bonuses
+    russian_subtitle_bonus: int = 15
+
     # Repack/Proper bonuses
     repack_bonus: int = 5
     proper_bonus: int = 5
@@ -74,7 +77,6 @@ class ScoringWeights:
                 "screener": -30,
                 "workprint": -40,
                 "r5": -20,
-                "subbed": -5,
                 "hardcoded": -10,
                 "hc": -10,
                 "korsub": -10,
@@ -86,7 +88,6 @@ class ScoringWeights:
                 "hindi": -3,
                 "korean": -3,
                 "chinese": -3,
-                "rus": -3,
             }
 
 
@@ -190,6 +191,10 @@ class ScoringService:
             score += self.weights.repack_bonus
         if quality.is_proper:
             score += self.weights.proper_bonus
+
+        # Russian subtitle/audio bonus
+        if quality.subtitle:
+            score += self.weights.russian_subtitle_bonus
 
         # Seeder bonus
         if result.seeders is not None and result.seeders > 0:
