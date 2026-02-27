@@ -1,5 +1,6 @@
 """Radarr API client."""
 
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -326,7 +327,6 @@ class RadarrClient(BaseAPIClient):
 
     async def check_connection(self) -> tuple[bool, str | None, float | None]:
         """Check if Radarr is available. Uses v3 API."""
-        import time
         start_time = time.monotonic()
         try:
             result = await self.get("/api/v3/system/status")

@@ -2,7 +2,7 @@
 
 import structlog
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, Message, BufferedInputFile, FSInputFile, URLInputFile
+from aiogram.types import CallbackQuery, Message, URLInputFile
 
 from bot.config import get_settings
 from bot.clients.registry import get_tmdb, get_radarr, get_sonarr, get_qbittorrent, get_prowlarr
@@ -53,6 +53,8 @@ async def handle_trending_menu(message: Message) -> None:
 async def handle_trending_movies(callback: CallbackQuery) -> None:
     """Show trending/popular movies."""
     await callback.answer()
+    if not callback.message:
+        return
 
     tmdb = get_tmdb()
     if not tmdb:
@@ -98,6 +100,8 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
 async def handle_trending_series(callback: CallbackQuery) -> None:
     """Show trending/popular TV series."""
     await callback.answer()
+    if not callback.message:
+        return
 
     tmdb = get_tmdb()
     if not tmdb:
@@ -143,6 +147,8 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
 async def handle_movie_from_trending(callback: CallbackQuery) -> None:
     """Show movie details with poster when clicked from trending list."""
     await callback.answer()
+    if not callback.message:
+        return
 
     # Extract TMDB ID from callback data
     tmdb_id_str = callback.data.replace(CallbackData.TRENDING_MOVIE, "")
@@ -201,6 +207,8 @@ async def handle_movie_from_trending(callback: CallbackQuery) -> None:
 async def handle_series_from_trending(callback: CallbackQuery) -> None:
     """Show series details with poster when clicked from trending list."""
     await callback.answer()
+    if not callback.message:
+        return
 
     # Extract TMDB ID from callback data
     series_id_str = callback.data.replace(CallbackData.TRENDING_SERIES_ITEM, "")
@@ -253,6 +261,8 @@ async def handle_series_from_trending(callback: CallbackQuery) -> None:
 async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Add movie to Radarr from trending list."""
     await callback.answer()
+    if not callback.message:
+        return
 
     # Extract TMDB ID from callback data
     tmdb_id_str = callback.data.replace(CallbackData.ADD_MOVIE, "")
@@ -337,6 +347,8 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
 async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Add series to Sonarr from trending list."""
     await callback.answer()
+    if not callback.message:
+        return
 
     # Extract TMDB ID from callback data
     tmdb_id_str = callback.data.replace(CallbackData.ADD_SERIES, "")
@@ -350,23 +362,15 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
     series = _trending_series_cache.get(tmdb_id)
 
     if not series:
-        # If not in cache, try to lookup via Sonarr using TMDB ID
-        sonarr = get_sonarr()
-        try:
-            # For series from TMDb, we need to lookup by title since we may not have TVDB ID
-            # This is a limitation - Sonarr needs TVDB ID
-            await callback.message.answer(
-                "❌ Сериал не найден в кэше. "
-                "Для добавления сериалов из топа, пожалуйста, используйте обычный поиск."
-            )
+        if not callback.message:
             return
-        except Exception as e:
-            logger.error("Failed to lookup series", tmdb_id=tmdb_id, error=str(e))
-            await callback.message.answer(f"❌ Ошибка: {str(e)}")
-            return
+        await callback.message.answer(
+            "❌ Сериал не найден в кэше.\n"
+            "Попробуйте обновить список или используйте обычный поиск."
+        )
+        return
 
-    if not series:
-        await callback.message.answer("❌ Сериал не найден")
+    if not callback.message:
         return
 
     # Show loading message
@@ -396,6 +400,26 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
             folder_path = folder.path if folder else folders[0].path
         else:
             folder_path = folders[0].path
+
+        # Resolve TVDB ID if missing (TMDb trending returns tvdb_id=0)
+        if not series.tvdb_id:
+            sonarr_client = get_sonarr()
+            lookup_results = await sonarr_client.lookup_series(series.title)
+            matched = None
+            for lr in lookup_results:
+                if lr.tmdb_id == series.tmdb_id:
+                    matched = lr
+                    break
+            if not matched and lookup_results:
+                matched = lookup_results[0]
+            if matched and matched.tvdb_id:
+                series = matched
+            else:
+                await status_msg.edit_text(
+                    "❌ Не удалось определить TVDB ID для сериала.\n"
+                    "Попробуйте добавить через обычный поиск."
+                )
+                return
 
         # Add series to Sonarr
         added_series, action = await add_service.add_series(
