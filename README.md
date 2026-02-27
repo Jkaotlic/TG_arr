@@ -1,307 +1,354 @@
-# TG_arr - Telegram Bot for Prowlarr/Radarr/Sonarr
+<div align="center">
 
-A production-ready Telegram bot that provides a mobile-friendly interface for managing your media server stack (Prowlarr, Radarr, Sonarr) directly from Telegram.
+# TG_arr
 
-## Features
+### Telegram-бот для управления медиасервером
 
-- **Smart Search**: Auto-detects if query is for a movie or series
-- **Release Browser**: View and compare releases with quality info, size, seeders
-- **Quality Scoring**: Intelligent scoring system to rank releases
-- **One-Click Grab**: Download releases directly to your media server
-- **User Settings**: Persistent preferences for quality profiles and folders
-- **Access Control**: Whitelist-based authorization with admin roles
-- **Full Async**: Built on aiogram 3.x with httpx for high performance
+[![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](https://python.org)
+[![aiogram 3.x](https://img.shields.io/badge/aiogram-3.x-2CA5E0?logo=telegram&logoColor=white)](https://github.com/aiogram/aiogram)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)](https://hub.docker.com)
+[![Pydantic v2](https://img.shields.io/badge/pydantic-v2-E92063?logo=pydantic&logoColor=white)](https://docs.pydantic.dev)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-D7FF64?logo=ruff&logoColor=black)](https://docs.astral.sh/ruff/)
 
-## Architecture
+**Полноценный Telegram-бот для поиска, скачивания и управления фильмами и сериалами через Prowlarr + Radarr + Sonarr с поддержкой qBittorrent, Emby и TMDb.**
+
+[Возможности](#-возможности) &bull; [Быстрый старт](#-быстрый-старт) &bull; [Настройка](#-настройка) &bull; [Команды](#-команды) &bull; [Скоринг](#-система-скоринга)
+
+</div>
+
+---
+
+## Возможности
+
+| | Функция | Описание |
+|---|---------|----------|
+| **Поиск** | Умный поиск | Автоматически определяет фильм или сериал по запросу |
+| | Русские субтитры | Приоритизация релизов с RusSub, MVO, DVO, AVO |
+| | Качество в деталях | Разрешение, кодек, HDR, аудио, субтитры — всё видно |
+| **Скачивание** | One-click grab | Скачивание релиза одной кнопкой |
+| | qBittorrent fallback | Автообход профильных ограничений Radarr/Sonarr |
+| | Push release | Отправка релизов напрямую в *arr |
+| **Трендинг** | Популярные фильмы | Топ недели из TMDb с постерами |
+| | Популярные сериалы | Трендовые сериалы с детальной информацией |
+| **Мониторинг** | Календарь релизов | Расписание выходов с индикатором дней |
+| | Уведомления | Оповещения о завершении скачивания |
+| | Статус сервисов | Проверка доступности Prowlarr/Radarr/Sonarr |
+| **Emby** | Библиотека | Просмотр последних добавлений в Emby |
+| | Сканирование | Запуск сканирования библиотек |
+| **Управление** | Настройки | Профили качества, папки, разрешение — на пользователя |
+| | История | Лог всех действий с фильтрами |
+| | Доступ | Whitelist по Telegram ID + роли админов |
+
+---
+
+## Архитектура
 
 ```
-bot/
-├── main.py              # Entry point
-├── config.py            # Pydantic settings
-├── db.py                # SQLite database layer
-├── models.py            # Data models
-├── services/
-│   ├── search_service.py    # Search orchestration
-│   ├── add_service.py       # Content addition logic
-│   └── scoring.py           # Release scoring algorithm
-├── clients/
-│   ├── base.py              # Base HTTP client with retries
-│   ├── prowlarr.py          # Prowlarr API client
-│   ├── radarr.py            # Radarr API client
-│   └── sonarr.py            # Sonarr API client
-├── handlers/
-│   ├── start.py             # /start, /help, /cancel
-│   ├── search.py            # Search and grab handlers
-│   ├── settings.py          # User preferences
-│   ├── status.py            # Service health check
-│   └── history.py           # Action history
-├── ui/
-│   ├── keyboards.py         # Inline keyboard builders
-│   └── formatters.py        # Message formatters
-└── middleware/
-    └── auth.py              # Authorization middleware
+TG_arr
+├── bot/
+│   ├── main.py                    # Точка входа
+│   ├── config.py                  # Pydantic Settings из ENV
+│   ├── db.py                      # SQLite (aiosqlite)
+│   ├── models.py                  # Датаклассы и Pydantic-модели
+│   ├── clients/
+│   │   ├── base.py                # HTTP-клиент (httpx + tenacity)
+│   │   ├── prowlarr.py            # Prowlarr API + парсинг качества
+│   │   ├── radarr.py              # Radarr API v3
+│   │   ├── sonarr.py              # Sonarr API v3
+│   │   ├── qbittorrent.py         # qBittorrent Web API
+│   │   ├── emby.py                # Emby API
+│   │   ├── tmdb.py                # TMDb API (трендинг)
+│   │   └── registry.py            # Фабрика клиентов (singleton)
+│   ├── services/
+│   │   ├── search_service.py      # Оркестрация поиска
+│   │   ├── add_service.py         # Добавление + grab + fallback
+│   │   ├── scoring.py             # Скоринг релизов
+│   │   └── notification_service.py # Уведомления
+│   ├── handlers/
+│   │   ├── start.py               # /start, /help, /cancel
+│   │   ├── search.py              # Поиск и граб
+│   │   ├── trending.py            # Популярное (TMDb)
+│   │   ├── calendar.py            # Календарь релизов
+│   │   ├── downloads.py           # Активные загрузки
+│   │   ├── emby.py                # Emby-интеграция
+│   │   ├── settings.py            # Настройки пользователя
+│   │   ├── status.py              # Здоровье сервисов
+│   │   └── history.py             # История действий
+│   ├── ui/
+│   │   ├── keyboards.py           # Inline-клавиатуры
+│   │   └── formatters.py          # HTML-форматирование
+│   └── middleware/
+│       └── auth.py                # Авторизация (whitelist)
+├── tests/                         # pytest + pytest-asyncio
+├── Dockerfile                     # Python 3.12-slim, non-root
+├── docker-compose.yml             # Portainer-ready
+└── .env.example                   # Все переменные с описанием
 ```
 
-## Quick Start
+---
 
-### 1. Prerequisites
+## Быстрый старт
 
-- Docker and Docker Compose
-- Prowlarr, Radarr, and Sonarr running and accessible
-- A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- Your Telegram user ID (get it from [@userinfobot](https://t.me/userinfobot))
+### Требования
 
-### 2. Configuration
+- **Docker** и **Docker Compose** (или Portainer)
+- Работающие **Prowlarr**, **Radarr**, **Sonarr**
+- Telegram-бот от [@BotFather](https://t.me/BotFather)
+- Ваш Telegram ID (узнать: [@userinfobot](https://t.me/userinfobot))
 
-Copy the example environment file:
+### 1. Клонирование
+
+```bash
+git clone https://github.com/Jkaotlic/TG_arr.git
+cd TG_arr
+```
+
+### 2. Конфигурация
 
 ```bash
 cp .env.example .env
+nano .env  # Заполнить обязательные переменные
 ```
 
-Edit `.env` with your settings:
+<details>
+<summary><b>Обязательные переменные</b></summary>
 
-```env
-# Required
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-ALLOWED_TG_IDS=123456789,987654321
+| Переменная | Описание |
+|-----------|----------|
+| `TELEGRAM_BOT_TOKEN` | Токен бота из @BotFather |
+| `ALLOWED_TG_IDS` | Telegram ID пользователей (через запятую) |
+| `PROWLARR_URL` | URL Prowlarr (например `http://prowlarr:9696`) |
+| `PROWLARR_API_KEY` | API-ключ Prowlarr |
+| `RADARR_URL` | URL Radarr (например `http://radarr:7878`) |
+| `RADARR_API_KEY` | API-ключ Radarr |
+| `SONARR_URL` | URL Sonarr (например `http://sonarr:8989`) |
+| `SONARR_API_KEY` | API-ключ Sonarr |
 
-# Prowlarr
-PROWLARR_URL=http://prowlarr:9696
-PROWLARR_API_KEY=your_prowlarr_api_key
+</details>
 
-# Radarr
-RADARR_URL=http://radarr:7878
-RADARR_API_KEY=your_radarr_api_key
+<details>
+<summary><b>Опциональные переменные</b></summary>
 
-# Sonarr
-SONARR_URL=http://sonarr:8989
-SONARR_API_KEY=your_sonarr_api_key
+| Переменная | По умолчанию | Описание |
+|-----------|-------------|----------|
+| `ADMIN_TG_IDS` | — | ID админов (через запятую) |
+| `QBITTORRENT_URL` | — | URL qBittorrent Web UI |
+| `QBITTORRENT_USERNAME` | `admin` | Логин qBittorrent |
+| `QBITTORRENT_PASSWORD` | — | Пароль qBittorrent |
+| `EMBY_URL` | — | URL Emby Server |
+| `EMBY_API_KEY` | — | API-ключ Emby |
+| `TMDB_API_KEY` | — | API-ключ TMDb (для трендинга) |
+| `TMDB_LANGUAGE` | `ru-RU` | Язык TMDb-ответов |
+| `TIMEZONE` | `Europe/Moscow` | Часовой пояс |
+| `LOG_LEVEL` | `INFO` | Уровень логирования |
+| `AUTO_GRAB_SCORE_THRESHOLD` | `80` | Порог автозахвата |
+| `NOTIFY_DOWNLOAD_COMPLETE` | `true` | Уведомлять о скачивании |
+| `NOTIFY_CHECK_INTERVAL` | `60` | Интервал проверки (сек) |
+| `RESULTS_PER_PAGE` | `5` | Результатов на страницу |
 
-# Optional
-ADMIN_TG_IDS=123456789
-TIMEZONE=Europe/Moscow
-LOG_LEVEL=INFO
-AUTO_GRAB_SCORE_THRESHOLD=80
-```
+</details>
 
-### 3. Network Setup
-
-If your *arr stack uses a Docker network, create it first:
-
-```bash
-docker network create arr-network
-```
-
-Or update `docker-compose.yml` to use your existing network name.
-
-### 4. Deploy
+### 3. Запуск
 
 ```bash
 docker compose up -d
 ```
 
-Check logs:
+Проверка логов:
 
 ```bash
 docker compose logs -f tg-arr-bot
 ```
 
-### Deploy via Portainer (Stacks)
+### Portainer
 
-Для Portainer не нужно “загружать `.env` файл”: важны именно переменные окружения контейнера.
+В Portainer создайте Stack, вставьте содержимое `docker-compose.yml` и добавьте переменные окружения в секции **Environment variables** (не нужно загружать `.env` файл). Нажмите **Deploy the stack**.
 
-- В Stack добавь переменные `TELEGRAM_BOT_TOKEN`, `ALLOWED_TG_IDS` (и/или `ADMIN_TG_IDS`), плюс `PROWLARR_*`, `RADARR_*`, `SONARR_*`, затем **Redeploy**.
-- Быстрая проверка: открой консоль контейнера и выполни `printenv | grep -E "ALLOWED_TG_IDS|ADMIN_TG_IDS|TELEGRAM_BOT_TOKEN"`.
+---
 
-## Commands
+## Команды
 
-| Command | Description |
-|---------|-------------|
-| `/start` | Start the bot and see welcome message |
-| `/help` | Show help and command list |
-| `/search <query>` | Search for movies or series (auto-detect) |
-| `/movie <query>` | Search specifically for movies |
-| `/series <query>` | Search specifically for TV series |
-| `/settings` | Configure your preferences |
-| `/status` | Check Prowlarr/Radarr/Sonarr availability |
-| `/history` | View your recent actions |
-| `/cancel` | Cancel current operation |
+| Команда | Описание |
+|---------|----------|
+| `/start` | Приветствие и главное меню |
+| `/help` | Список команд и справка |
+| `/search <запрос>` | Умный поиск (автоопределение) |
+| `/movie <запрос>` | Поиск фильмов |
+| `/series <запрос>` | Поиск сериалов |
+| `/settings` | Настройки профиля |
+| `/status` | Статус Prowlarr/Radarr/Sonarr |
+| `/history` | История действий |
+| `/cancel` | Отмена текущей операции |
 
-You can also just send any text message as a search query.
+Также можно просто отправить текстовое сообщение как поисковый запрос.
 
-## Search Examples
+### Примеры поиска
 
 ```
-Dune 2021              # Movie with year
-Breaking Bad S02       # Series, Season 2
-The Office 1080p       # With quality preference
-Пацаны 3 сезон         # Russian language supported
-Andor S01E05           # Specific episode
+Dune 2021              # Фильм с годом
+Breaking Bad S02       # Сериал, 2-й сезон
+The Office 1080p       # С предпочтением качества
+Andor S01E05           # Конкретный эпизод
 ```
 
-## API Endpoints Used
+---
 
-### Prowlarr
-- `GET /api/v1/search` - Search across all indexers
-- `GET /api/v1/indexer` - List configured indexers
-- `GET /api/v1/system/status` - Health check
+## Система скоринга
 
-### Radarr
-- `GET /api/v3/movie/lookup` - Search movies
-- `GET /api/v3/movie/lookup/tmdb` - Lookup by TMDB ID
-- `GET /api/v3/movie` - Get movies in library
-- `POST /api/v3/movie` - Add movie
-- `POST /api/v3/release/push` - Push release for download
-- `POST /api/v3/release` - Grab specific release
-- `POST /api/v3/command` - Trigger movie search
-- `GET /api/v3/qualityprofile` - List quality profiles
-- `GET /api/v3/rootfolder` - List root folders
+Каждый релиз оценивается по множеству факторов. Базовый балл — **50**.
 
-### Sonarr
-- `GET /api/v3/series/lookup` - Search series
-- `GET /api/v3/series` - Get series in library
-- `POST /api/v3/series` - Add series
-- `POST /api/v3/release/push` - Push release for download
-- `POST /api/v3/release` - Grab specific release
-- `POST /api/v3/command` - Trigger series/season search
-- `GET /api/v3/qualityprofile` - List quality profiles
-- `GET /api/v3/rootfolder` - List root folders
+### Бонусы
 
-## Scoring System
+| Категория | Фактор | Баллы |
+|-----------|--------|-------|
+| Разрешение | 2160p / 1080p / 720p | +25 / +20 / +10 |
+| Источник | REMUX / BluRay / WEB-DL / WEBRip | +30 / +20 / +15 / +10 |
+| Кодек | AV1 / x265 (HEVC) / x264 | +15 / +10 / +5 |
+| HDR | Dolby Vision / HDR10+ / HDR10 | +15 / +12 / +10 |
+| Аудио | Atmos / TrueHD / DTS-HD / DTS | +10 / +8 / +7 / +5 |
+| Субтитры | RusSub / MVO / DVO / AVO | +15 |
+| Сиды | За каждые 10 сидов (макс. +20) | +2 |
+| Качество | REPACK / PROPER | +5 |
 
-Releases are scored based on multiple factors:
+### Штрафы
 
-### Positive Factors
-| Factor | Bonus |
+| Фактор | Баллы |
 |--------|-------|
-| 2160p resolution | +25 |
-| 1080p resolution | +20 |
-| REMUX | +30 |
-| BluRay source | +20 |
-| WEB-DL source | +15 |
-| x265/HEVC codec | +10 |
-| Dolby Vision | +15 |
-| HDR10+ | +12 |
-| Atmos audio | +10 |
-| REPACK/PROPER | +5 |
-| Seeders (per 10, capped) | +2 |
+| CAM / TS / TC | -50 / -40 / -30 |
+| `sample` / `trailer` в названии | -200 |
+| Слишком маленький файл | -20 |
+| Слишком большой файл | -10 |
 
-### Negative Factors
-| Factor | Penalty |
-|--------|---------|
-| CAM source | -50 |
-| TS/Telesync | -40 |
-| "sample" in title | -100 |
-| "trailer" in title | -100 |
-| Too small file size | -20 |
-| Too large file size | -10 |
+---
 
-## User Preferences
+## Интеграции
 
-Each user can configure:
-- **Radarr Quality Profile**: Default profile for movies
-- **Radarr Root Folder**: Where to store movies
-- **Sonarr Quality Profile**: Default profile for series
-- **Sonarr Root Folder**: Where to store series
-- **Preferred Resolution**: Filter results (Any/720p/1080p/2160p)
-- **Auto-Grab**: Enable "Grab Best" button for high-scored releases
+<table>
+<tr>
+<td width="50%" valign="top">
 
-## Troubleshooting
+### Обязательные
 
-### Bot doesn't respond
-1. Check if your Telegram ID is in `ALLOWED_TG_IDS`
-2. Verify the bot token is correct
-3. Check container logs: `docker compose logs tg-arr-bot`
+| Сервис | Для чего |
+|--------|----------|
+| [Prowlarr](https://prowlarr.com) | Поиск по индексерам |
+| [Radarr](https://radarr.video) | Управление фильмами |
+| [Sonarr](https://sonarr.tv) | Управление сериалами |
 
-### "Cannot connect to Prowlarr/Radarr/Sonarr"
-1. Ensure services are running
-2. Verify URLs are accessible from the bot container
-3. Check API keys are correct
-4. Use `/status` command to diagnose
+</td>
+<td width="50%" valign="top">
 
-### "No releases found"
-1. Check if Prowlarr has working indexers
-2. Try a more specific search query
-3. Verify Prowlarr can search (test in Prowlarr UI)
+### Опциональные
 
-### "Failed to add movie/series"
-1. Check quality profiles exist in Radarr/Sonarr
-2. Verify root folders are configured
-3. Check Radarr/Sonarr logs for errors
+| Сервис | Для чего |
+|--------|----------|
+| [qBittorrent](https://qbittorrent.org) | Fallback-загрузка |
+| [Emby](https://emby.media) | Медиабиблиотека |
+| [TMDb](https://themoviedb.org) | Трендинг и постеры |
 
-### Database issues
-The SQLite database is stored in the `data/` volume. To reset:
+</td>
+</tr>
+</table>
+
+---
+
+## Разработка
 
 ```bash
-docker compose down
-docker volume rm tg_arr_bot-data
-docker compose up -d
-```
-
-## Development
-
-### Local Setup
-
-```bash
-# Create virtual environment
+# Виртуальное окружение
 python -m venv venv
-source venv/bin/activate  # or `venv\Scripts\activate` on Windows
+source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# Install dependencies
+# Установка зависимостей
 pip install -r requirements.txt
 
-# Copy and configure environment
+# Конфигурация
 cp .env.example .env
-# Edit .env with your settings
 
-# Run bot
+# Запуск
 python -m bot.main
-```
 
-### Running Tests
+# Тесты
+pytest -x -q
 
-```bash
-# Install dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# With coverage
+# Тесты с покрытием
 pytest --cov=bot --cov-report=html
 ```
 
-### Project Structure
+---
 
-- `bot/config.py` - All configuration via pydantic-settings
-- `bot/clients/base.py` - Customize HTTP behavior (timeouts, retries)
-- `bot/services/scoring.py` - Adjust scoring weights
-- `bot/ui/keyboards.py` - Modify UI buttons
-- `bot/ui/formatters.py` - Change message formats
+## Безопасность
 
-## Security Notes
+- Доступ только для пользователей из `ALLOWED_TG_IDS`
+- API-ключи никогда не попадают в сообщения
+- Non-root пользователь в Docker-контейнере
+- Health check для мониторинга состояния
+- SQLite хранит только метаданные и настройки
 
-- Only users in `ALLOWED_TG_IDS` can use the bot
-- API keys are never exposed in messages
-- The bot doesn't store torrent files or media
-- SQLite database contains only metadata and preferences
+---
 
-## License
+## Устранение неполадок
 
-MIT License - feel free to use and modify.
+<details>
+<summary><b>Бот не отвечает</b></summary>
 
-## Contributing
+1. Проверьте `ALLOWED_TG_IDS` — ваш Telegram ID должен быть в списке
+2. Проверьте токен бота
+3. Смотрите логи: `docker compose logs tg-arr-bot`
+</details>
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests
-5. Submit a pull request
+<details>
+<summary><b>Не подключается к Prowlarr/Radarr/Sonarr</b></summary>
 
-## Acknowledgments
+1. Убедитесь что сервисы запущены
+2. Проверьте URL-адреса из контейнера бота
+3. Проверьте API-ключи
+4. Используйте команду `/status` для диагностики
+</details>
 
-- [aiogram](https://github.com/aiogram/aiogram) - Telegram Bot framework
-- [Prowlarr](https://github.com/Prowlarr/Prowlarr) - Indexer manager
-- [Radarr](https://github.com/Radarr/Radarr) - Movie collection manager
-- [Sonarr](https://github.com/Sonarr/Sonarr) - TV series collection manager
+<details>
+<summary><b>Не находит релизы</b></summary>
+
+1. Проверьте индексеры в Prowlarr
+2. Попробуйте более точный запрос
+3. Проверьте поиск через UI Prowlarr
+</details>
+
+<details>
+<summary><b>Ошибка добавления фильма/сериала</b></summary>
+
+1. Проверьте наличие профилей качества в Radarr/Sonarr
+2. Проверьте настройку root folders
+3. Смотрите логи Radarr/Sonarr
+</details>
+
+---
+
+## Стек технологий
+
+| Компонент | Технология |
+|-----------|------------|
+| Язык | Python 3.12 |
+| Telegram | aiogram 3.13 |
+| HTTP | httpx + tenacity (retry) |
+| Конфигурация | pydantic-settings v2 |
+| БД | SQLite (aiosqlite) |
+| Логирование | structlog |
+| Сериализация | orjson |
+| Контейнеризация | Docker (python:3.12-slim) |
+| Тесты | pytest + pytest-asyncio |
+
+---
+
+## Лицензия
+
+Проект распространяется под лицензией [MIT](LICENSE).
+
+---
+
+<div align="center">
+
+**[Jkaotlic/TG_arr](https://github.com/Jkaotlic/TG_arr)**
+
+</div>
