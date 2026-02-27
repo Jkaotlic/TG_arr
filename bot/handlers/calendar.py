@@ -71,6 +71,8 @@ async def handle_calendar_menu(message: Message) -> None:
 async def handle_calendar_7(callback: CallbackQuery) -> None:
     """Switch calendar to 7 days."""
     await callback.answer()
+    if not callback.message:
+        return
     user_id = callback.from_user.id
     _user_period[user_id] = 7
     await _fetch_and_send_calendar(
@@ -83,6 +85,8 @@ async def handle_calendar_7(callback: CallbackQuery) -> None:
 async def handle_calendar_14(callback: CallbackQuery) -> None:
     """Switch calendar to 14 days."""
     await callback.answer()
+    if not callback.message:
+        return
     user_id = callback.from_user.id
     _user_period[user_id] = 14
     await _fetch_and_send_calendar(
@@ -95,6 +99,8 @@ async def handle_calendar_14(callback: CallbackQuery) -> None:
 async def handle_calendar_30(callback: CallbackQuery) -> None:
     """Switch calendar to 30 days."""
     await callback.answer()
+    if not callback.message:
+        return
     user_id = callback.from_user.id
     _user_period[user_id] = 30
     await _fetch_and_send_calendar(
@@ -107,6 +113,8 @@ async def handle_calendar_30(callback: CallbackQuery) -> None:
 async def handle_calendar_refresh(callback: CallbackQuery) -> None:
     """Refresh calendar without changing period."""
     await callback.answer("🔄 Обновляю...")
+    if not callback.message:
+        return
     user_id = callback.from_user.id
     days = _user_period.get(user_id, 7)
     await _fetch_and_send_calendar(

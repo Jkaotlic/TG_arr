@@ -217,7 +217,7 @@ class TMDbClient(BaseAPIClient):
             title=item.get("name", "Unknown"),
             tvdb_id=0,  # Will be looked up via Sonarr
             tmdb_id=item["id"],  # Store TMDb ID
-            year=year,
+            year=year or 0,
             overview=item.get("overview", ""),
             network=item.get("networks", [{}])[0].get("name", "") if item.get("networks") else "",
             status="",

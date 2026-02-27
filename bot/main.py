@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime
 from typing import Optional
 
 import structlog
