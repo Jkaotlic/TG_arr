@@ -29,6 +29,7 @@ services:
       # TMDb (optional)
       TMDB_API_KEY: ${TMDB_API_KEY:-}
       TMDB_LANGUAGE: ${TMDB_LANGUAGE:-ru-RU}
+      TMDB_PROXY_URL: ${TMDB_PROXY_URL:-}
       # Notifications
       NOTIFY_DOWNLOAD_COMPLETE: ${NOTIFY_DOWNLOAD_COMPLETE:-true}
       NOTIFY_CHECK_INTERVAL: ${NOTIFY_CHECK_INTERVAL:-60}

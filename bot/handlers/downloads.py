@@ -1,16 +1,13 @@
 """Download management handlers for qBittorrent integration."""
 
-from typing import Optional
-
 import structlog
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from bot.clients.qbittorrent import QBittorrentClient, QBittorrentError
+from bot.clients.qbittorrent import QBittorrentError
 from bot.clients.registry import get_qbittorrent
-from bot.config import get_settings
 from bot.models import TorrentFilter, User, format_speed
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import Keyboards

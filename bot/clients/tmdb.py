@@ -2,6 +2,7 @@
 
 from typing import Any, Optional
 
+import httpx
 import structlog
 
 from bot.clients.base import BaseAPIClient
@@ -13,15 +14,28 @@ logger = structlog.get_logger()
 class TMDbClient(BaseAPIClient):
     """Client for TMDb API to fetch trending/popular content."""
 
-    def __init__(self, api_key: str, language: str = "en-US"):
+    def __init__(self, api_key: str, language: str = "en-US", proxy_url: Optional[str] = None):
         """Initialize TMDb client.
 
         Args:
             api_key: TMDb API key (v3)
             language: Language for TMDb content (e.g., ru-RU, en-US)
+            proxy_url: Optional HTTP proxy for TMDb requests (bypasses geo-blocks)
         """
         super().__init__("https://api.themoviedb.org/3", api_key, "TMDb")
         self.language = language
+        self._proxy_url = proxy_url
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create HTTP client with optional proxy."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url,
+                headers=self._get_headers(),
+                timeout=httpx.Timeout(self._settings.http_timeout),
+                proxy=self._proxy_url,
+            )
+        return self._client
 
     def _get_headers(self) -> dict[str, str]:
         """Override to not include X-Api-Key header (TMDb uses query param)."""

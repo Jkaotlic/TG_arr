@@ -1,7 +1,6 @@
 """Notification service for download completion alerts."""
 
 import asyncio
-from datetime import datetime
 from typing import Optional
 
 import structlog

@@ -61,7 +61,7 @@ class AddService:
         root_folder_path: str,
         search_for_movie: bool = True,
         tags: Optional[list[int]] = None,
-    ) -> tuple[MovieInfo, ActionLog]:
+    ) -> tuple[Optional[MovieInfo], ActionLog]:
         """
         Add a movie to Radarr.
 
@@ -73,7 +73,7 @@ class AddService:
             tags: Optional tag IDs
 
         Returns:
-            Tuple of (added MovieInfo, ActionLog)
+            Tuple of (added MovieInfo or None on failure, ActionLog)
         """
         log = logger.bind(title=movie.title, tmdb_id=movie.tmdb_id)
         log.info("Adding movie to Radarr")
@@ -110,7 +110,7 @@ class AddService:
             log.error("Failed to add movie", error=str(e))
             action.success = False
             action.error_message = str(e)
-            raise
+            return None, action
 
     async def add_series(
         self,
@@ -120,7 +120,7 @@ class AddService:
         monitor_type: str = "all",
         search_for_missing: bool = True,
         tags: Optional[list[int]] = None,
-    ) -> tuple[SeriesInfo, ActionLog]:
+    ) -> tuple[Optional[SeriesInfo], ActionLog]:
         """
         Add a series to Sonarr.
 
@@ -133,7 +133,7 @@ class AddService:
             tags: Optional tag IDs
 
         Returns:
-            Tuple of (added SeriesInfo, ActionLog)
+            Tuple of (added SeriesInfo or None on failure, ActionLog)
         """
         log = logger.bind(title=series.title, tvdb_id=series.tvdb_id)
         log.info("Adding series to Sonarr")
@@ -171,7 +171,7 @@ class AddService:
             log.error("Failed to add series", error=str(e))
             action.success = False
             action.error_message = str(e)
-            raise
+            return None, action
 
     async def grab_movie_release(
         self,
@@ -219,12 +219,17 @@ class AddService:
             existing = await self.radarr.get_movie_by_tmdb(movie.tmdb_id)
             if not existing or not existing.radarr_id:
                 log.info("Movie not in library, adding first")
-                existing, _ = await self.add_movie(
+                added, add_action = await self.add_movie(
                     movie=movie,
                     quality_profile_id=quality_profile_id,
                     root_folder_path=root_folder_path,
                     search_for_movie=False,  # We'll grab manually
                 )
+                if not added:
+                    action.success = False
+                    action.error_message = add_action.error_message or "Failed to add movie"
+                    return False, action, f"Не удалось добавить фильм: {action.error_message}"
+                existing = added
 
             # Try to push the release
             release_rejected = False
@@ -279,6 +284,9 @@ class AddService:
                             raise QBittorrentError("Failed to add torrent to qBittorrent")
                     except Exception as e:
                         log.error("qBittorrent download failed", error=str(e))
+                        action.success = False
+                        action.error_message = f"qBittorrent fallback failed: {e}"
+                        return False, action, f"Ошибка qBittorrent: {e}"
 
             # If rejected and no qBittorrent fallback available
             if release_rejected:
@@ -348,13 +356,18 @@ class AddService:
             existing = await self.sonarr.get_series_by_tvdb(series.tvdb_id)
             if not existing or not existing.sonarr_id:
                 log.info("Series not in library, adding first")
-                existing, _ = await self.add_series(
+                added, add_action = await self.add_series(
                     series=series,
                     quality_profile_id=quality_profile_id,
                     root_folder_path=root_folder_path,
                     monitor_type=monitor_type,
                     search_for_missing=False,
                 )
+                if not added:
+                    action.success = False
+                    action.error_message = add_action.error_message or "Failed to add series"
+                    return False, action, f"Не удалось добавить сериал: {action.error_message}"
+                existing = added
 
             # Try to push the release
             release_rejected = False
@@ -409,6 +422,9 @@ class AddService:
                             raise QBittorrentError("Failed to add torrent to qBittorrent")
                     except Exception as e:
                         log.error("qBittorrent download failed", error=str(e))
+                        action.success = False
+                        action.error_message = f"qBittorrent fallback failed: {e}"
+                        return False, action, f"Ошибка qBittorrent: {e}"
 
             # If rejected and no qBittorrent fallback available
             if release_rejected:

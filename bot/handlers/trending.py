@@ -19,8 +19,12 @@ router = Router()
 MENU_TRENDING = "🔥 Топ"
 
 # Cache for trending data to avoid re-fetching when viewing details
-_trending_movies_cache = {}
-_trending_series_cache = {}
+# Keyed by tmdb_id for O(1) lookup; items accumulate across requests
+_trending_movies_cache: dict[int, any] = {}
+_trending_series_cache: dict[int, any] = {}
+
+# Limit cache size to prevent unbounded growth
+_MAX_CACHE_SIZE = 200
 
 
 @router.message(F.text == MENU_TRENDING)
@@ -77,9 +81,11 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
             )
             return
 
-        # Cache movies for detail views
+        # Cache movies for detail views (merge into existing cache)
         global _trending_movies_cache
-        _trending_movies_cache = {movie.tmdb_id: movie for movie in movies}
+        if len(_trending_movies_cache) > _MAX_CACHE_SIZE:
+            _trending_movies_cache = {}
+        _trending_movies_cache.update({movie.tmdb_id: movie for movie in movies})
 
         # Format and send results
         text = Formatters.format_trending_movies(movies[:10])  # Top 10
@@ -124,9 +130,11 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
             )
             return
 
-        # Cache series for detail views
+        # Cache series for detail views (merge into existing cache)
         global _trending_series_cache
-        _trending_series_cache = {series.tmdb_id: series for series in series_list}
+        if len(_trending_series_cache) > _MAX_CACHE_SIZE:
+            _trending_series_cache = {}
+        _trending_series_cache.update({series.tmdb_id: series for series in series_list})
 
         # Format and send results
         text = Formatters.format_trending_series(series_list[:10])  # Top 10
@@ -328,7 +336,7 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
         action.user_id = db_user.tg_id
         await db.log_action(action)
 
-        if action.success:
+        if action.success and added_movie:
             await status_msg.edit_text(
                 f"✅ <b>{added_movie.title}</b> ({added_movie.year})\n\n"
                 f"Фильм добавлен в Radarr. Начат поиск релизов.",
@@ -433,7 +441,7 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
         action.user_id = db_user.tg_id
         await db.log_action(action)
 
-        if action.success:
+        if action.success and added_series:
             year_str = f" ({added_series.year})" if added_series.year else ""
             await status_msg.edit_text(
                 f"✅ <b>{added_series.title}</b>{year_str}\n\n"

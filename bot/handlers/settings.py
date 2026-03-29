@@ -6,6 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from bot.clients.registry import get_prowlarr, get_radarr, get_sonarr, get_qbittorrent
+from bot.config import get_settings
 from bot.db import Database
 from bot.models import User, UserPreferences
 from bot.services.add_service import AddService

@@ -1,16 +1,13 @@
 """Emby Media Server handler."""
 
-from typing import Optional
-
 import structlog
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from bot.clients.emby import EmbyClient, EmbyError, EmbyLibrary
+from bot.clients.emby import EmbyError
 from bot.clients.registry import get_emby
-from bot.config import get_settings
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 
