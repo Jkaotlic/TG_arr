@@ -15,7 +15,9 @@ router = Router()
 MENU_CALENDAR = "📅 Календарь"
 
 # Store current period per-user so refresh keeps the same range
+# Limited to prevent unbounded growth (whitelist bots have few users anyway)
 _user_period: dict[int, int] = {}
+_MAX_USER_PERIOD_ENTRIES = 100
 
 
 async def _fetch_and_send_calendar(
@@ -59,6 +61,8 @@ async def handle_calendar_menu(message: Message) -> None:
     """Show calendar for the next 7 days (default)."""
     user_id = message.from_user.id if message.from_user else 0
     days = _user_period.get(user_id, 7)
+    if len(_user_period) >= _MAX_USER_PERIOD_ENTRIES:
+        _user_period.clear()
     _user_period[user_id] = days
 
     await _fetch_and_send_calendar(

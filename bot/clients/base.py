@@ -160,12 +160,28 @@ class BaseAPIClient:
 
             return response.json()
 
-        except httpx.TimeoutException as e:
-            log.error("Request timeout", error=str(e))
-            raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}") from e
+        except httpx.TimeoutException:
+            log.warning("Request timeout, will retry if attempts remain")
+            raise  # Let tenacity handle retries
 
+        except httpx.ConnectError:
+            log.warning("Connection error, will retry if attempts remain")
+            raise  # Let tenacity handle retries
+
+    async def _safe_request(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[dict[str, Any]] = None,
+        json_data: Optional[dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any] | list[Any]:
+        """Wrap _request to convert transport errors after retries are exhausted."""
+        try:
+            return await self._request(method, endpoint, params=params, json_data=json_data, timeout=timeout)
+        except httpx.TimeoutException as e:
+            raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}") from e
         except httpx.ConnectError as e:
-            log.error("Connection error", error=str(e))
             raise ServiceConnectionError(f"Не удалось подключиться к {self.service_name} ({self.base_url})") from e
 
     async def get(
@@ -175,7 +191,7 @@ class BaseAPIClient:
         timeout: Optional[float] = None,
     ) -> dict[str, Any] | list[Any]:
         """HTTP GET request."""
-        return await self._request("GET", endpoint, params=params, timeout=timeout)
+        return await self._safe_request("GET", endpoint, params=params, timeout=timeout)
 
     async def post(
         self,
@@ -185,7 +201,7 @@ class BaseAPIClient:
         timeout: Optional[float] = None,
     ) -> dict[str, Any] | list[Any]:
         """HTTP POST request."""
-        return await self._request("POST", endpoint, params=params, json_data=json_data, timeout=timeout)
+        return await self._safe_request("POST", endpoint, params=params, json_data=json_data, timeout=timeout)
 
     async def put(
         self,
@@ -194,7 +210,7 @@ class BaseAPIClient:
         timeout: Optional[float] = None,
     ) -> dict[str, Any] | list[Any]:
         """HTTP PUT request."""
-        return await self._request("PUT", endpoint, json_data=json_data, timeout=timeout)
+        return await self._safe_request("PUT", endpoint, json_data=json_data, timeout=timeout)
 
     async def delete(
         self,
@@ -203,7 +219,7 @@ class BaseAPIClient:
         timeout: Optional[float] = None,
     ) -> dict[str, Any] | list[Any]:
         """HTTP DELETE request."""
-        return await self._request("DELETE", endpoint, params=params, timeout=timeout)
+        return await self._safe_request("DELETE", endpoint, params=params, timeout=timeout)
 
     async def check_connection(self) -> tuple[bool, Optional[str], Optional[float]]:
         """Check if service is available. Returns (available, version, response_time_ms)."""

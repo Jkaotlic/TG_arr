@@ -90,7 +90,11 @@ def get_tmdb() -> Optional["TMDbClient"]:
     if not settings.tmdb_enabled:
         return None
     if _tmdb is None:
-        _tmdb = TMDbClient(settings.tmdb_api_key, language=settings.tmdb_language)
+        _tmdb = TMDbClient(
+            settings.tmdb_api_key,
+            language=settings.tmdb_language,
+            proxy_url=settings.tmdb_proxy_url,
+        )
     return _tmdb
 
 

@@ -223,9 +223,9 @@ class ProwlarrClient(BaseAPIClient):
             source = "DVDRip"
         elif any(x in title_lower for x in ["cam", "camrip", "hdcam"]):
             source = "CAM"
-        elif any(x in title_lower for x in ["telesync", "ts", "hdts"]):
+        elif any(x in title_lower for x in ["telesync", "hdts"]) or re.search(r"[\.\s\-\[]ts[\.\s\-\]]", title_lower):
             source = "TS"
-        elif "telecine" in title_lower or "tc" in title_lower:
+        elif "telecine" in title_lower or re.search(r"[\.\s\-\[]tc[\.\s\-\]]", title_lower):
             source = "TC"
 
         # Codec
@@ -352,14 +352,15 @@ class ProwlarrClient(BaseAPIClient):
         if any(x in title_lower for x in ["complete season", "season pack", "full season"]):
             return True
 
-        # S01 format — season pack only if no episode follows
-        match = re.search(r"s(\d{1,2})(?!e\d)", title_lower)
-        if match:
-            # Also verify there's no episode range like S01E01-E10
-            if not re.search(r"s\d{1,2}e\d", title_lower):
-                return True
+        # Has any episode reference at all? If so, not a season pack.
+        if re.search(r"s\d{1,2}e\d|(\d{1,2})x(\d{1,3})|episode[\s.]*\d", title_lower):
+            return False
 
-        # "Season X" without episode (supports dot/space separators)
+        # S01 format without any episode reference
+        if re.search(r"s\d{1,2}(?:\b|[\.\s\-])", title_lower):
+            return True
+
+        # "Season X" without episode
         if re.search(r"season[\s.]*\d{1,2}(?![\s.]*episode)", title_lower):
             return True
 

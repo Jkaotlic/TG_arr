@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     # TMDb (optional, for trending/popular content)
     tmdb_api_key: Optional[str] = Field(default=None, description="TMDb API key (v3) for trending/popular content")
     tmdb_language: str = Field(default="ru-RU", description="TMDb language for content (ru-RU, en-US, etc.)")
+    tmdb_proxy_url: Optional[str] = Field(default=None, description="HTTP proxy URL for TMDb requests (e.g. http://vps:8899)")
 
     # Notifications
     notify_download_complete: bool = Field(default=True, description="Notify when download completes")
