@@ -1,6 +1,7 @@
 """Status command handler."""
 
 import asyncio
+import time
 
 import structlog
 from aiogram import F, Router
@@ -25,11 +26,11 @@ async def cmd_status(message: Message) -> None:
     """Handle /status command - check all services status."""
     status_msg = await message.answer("🔍 Проверяю статус сервисов...")
 
-    prowlarr = get_prowlarr()
-    radarr = get_radarr()
-    sonarr = get_sonarr()
-    qbittorrent = get_qbittorrent()
-    emby = get_emby()
+    prowlarr = await get_prowlarr()
+    radarr = await get_radarr()
+    sonarr = await get_sonarr()
+    qbittorrent = await get_qbittorrent()
+    emby = await get_emby()
 
     try:
         # Build list of service checks
@@ -88,8 +89,6 @@ async def check_service(client, name: str) -> SystemStatus:
 
 async def check_qbittorrent(client: QBittorrentClient) -> SystemStatus:
     """Check qBittorrent status."""
-    import time
-
     try:
         start = time.monotonic()
         logged_in = await client.login()

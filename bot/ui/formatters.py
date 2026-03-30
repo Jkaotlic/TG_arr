@@ -303,7 +303,7 @@ class Formatters:
         return "\n".join(lines)
 
     @staticmethod
-    def format_action_log(actions: list[ActionLog], limit: int = 10) -> str:
+    def format_action_log(actions: list[ActionLog], limit: int = 20) -> str:
         """Format action history."""
         if not actions:
             return "📭 История пуста."
@@ -333,30 +333,6 @@ class Formatters:
         return "\n".join(lines)
 
     @staticmethod
-    def format_help() -> str:
-        """Format help message."""
-        return (
-            "<b>🤖 TG_arr — Справка</b>\n\n"
-            "<b>📌 Команды:</b>\n"
-            "• <code>/search</code> — поиск фильмов и сериалов\n"
-            "• <code>/movie</code> — поиск только фильмов\n"
-            "• <code>/series</code> — поиск только сериалов\n"
-            "• <code>/downloads</code> — активные загрузки\n"
-            "• <code>/qstatus</code> — статус qBittorrent\n"
-            "• <code>/settings</code> — настройки\n"
-            "• <code>/status</code> — статус сервисов\n"
-            "• <code>/history</code> — история действий\n\n"
-            "<b>💡 Примеры поиска:</b>\n"
-            "• <code>Дюна 2021</code> — поиск фильма\n"
-            "• <code>Breaking Bad S02</code> — 2 сезон сериала\n"
-            "• <code>1080p remux</code> — в названии\n\n"
-            "<b>⚡ Советы:</b>\n"
-            "• Просто напишите название для поиска\n"
-            "• Используйте /settings для качества по умолчанию\n"
-            "• Включите авто-граб для быстрой загрузки лучших релизов"
-        )
-
-    @staticmethod
     def format_error(error: str, include_retry: bool = True) -> str:
         """Format error message."""
         msg = f"❌ <b>Ошибка:</b> {_e(error)}"
@@ -373,11 +349,6 @@ class Formatters:
     def format_warning(message: str) -> str:
         """Format warning message."""
         return f"⚠️ {message}"
-
-    @staticmethod
-    def format_info(message: str) -> str:
-        """Format info message."""
-        return f"ℹ️ {message}"
 
     # =========================================================================
     # qBittorrent / Torrent Formatters
@@ -631,15 +602,6 @@ class Formatters:
         else:
             return f"❌ Ошибка {action}: {_e(name)}"
 
-    @staticmethod
-    def format_bulk_action(action: str, count: int) -> str:
-        """Format message for bulk torrent action."""
-        action_messages = {
-            "pause": f"⏸ Приостановлено: {count} торрентов",
-            "resume": f"▶️ Возобновлено: {count} торрентов",
-        }
-        return action_messages.get(action, f"✅ {action}: {count} торрентов")
-
     # =========================================================================
     # Emby Formatters
     # =========================================================================
@@ -687,23 +649,6 @@ class Formatters:
                 lines.append(f"  {lib_emoji} {_e(lib.name)}")
 
         return "\n".join(lines)
-
-    @staticmethod
-    def format_emby_action(
-        action: str, success: bool = True, error: str = None
-    ) -> str:
-        """Format Emby action result."""
-        if success:
-            messages = {
-                "scan_all": "✅ Сканирование всех библиотек запущено",
-                "scan_movies": "✅ Сканирование фильмов запущено",
-                "scan_series": "✅ Сканирование сериалов запущено",
-                "restart": "🔁 Сервер перезагружается...",
-                "update": "⬆️ Обновление устанавливается...",
-            }
-            return messages.get(action, f"✅ {action}")
-        else:
-            return f"❌ Ошибка: {_e(error or action)}"
 
     @staticmethod
     def _get_rating(ratings: dict) -> Optional[float]:
@@ -792,7 +737,10 @@ class Formatters:
         ]
 
         if movie.overview:
-            lines.append(f"\n{_e(movie.overview)}")
+            overview = movie.overview
+            if len(overview) > 500:
+                overview = overview[:497] + "..."
+            lines.append(f"\n{_e(overview)}")
 
         lines.append("\n💡 Нажмите кнопку ниже для добавления в Radarr")
         return "\n".join(lines)
@@ -814,7 +762,10 @@ class Formatters:
             lines.append(f"📡 {_e(series.network)}")
 
         if series.overview:
-            lines.append(f"\n{_e(series.overview)}")
+            overview = series.overview
+            if len(overview) > 500:
+                overview = overview[:497] + "..."
+            lines.append(f"\n{_e(overview)}")
 
         lines.append("\n💡 Нажмите кнопку ниже для добавления в Sonarr")
         return "\n".join(lines)
@@ -888,7 +839,14 @@ class Formatters:
 
                     lines.append(f"  {status} <b>{title}</b>{year_str}{runtime_str}{type_str}")
 
-        return "\n".join(lines)
+        result = "\n".join(lines)
+
+        MAX_MSG_LEN = 3800
+        if len(result) > MAX_MSG_LEN:
+            truncated = result[:MAX_MSG_LEN].rsplit('\n', 1)[0]
+            result = truncated + "\n\n... и ещё записи (сообщение слишком длинное)"
+
+        return result
 
     @staticmethod
     def _extract_date_key(date_str: str) -> str:

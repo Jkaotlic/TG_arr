@@ -1,5 +1,9 @@
 """Calendar/schedule handlers — upcoming episodes and movie releases."""
 
+import asyncio
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 import structlog
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
@@ -19,15 +23,18 @@ MENU_CALENDAR = "📅 Календарь"
 _user_period: dict[int, int] = {}
 _MAX_USER_PERIOD_ENTRIES = 100
 
+# Lock for _user_period mutations (protects across awaits)
+_period_lock = asyncio.Lock()
+
 
 async def _fetch_and_send_calendar(
     days: int,
     *,
-    answer_func,
+    answer_func: Callable[..., Awaitable[Any]],
 ) -> None:
     """Fetch calendar data from Sonarr & Radarr and send/edit the message."""
-    sonarr = get_sonarr()
-    radarr = get_radarr()
+    sonarr = await get_sonarr()
+    radarr = await get_radarr()
 
     episodes: list[dict] = []
     movies: list[dict] = []
@@ -61,9 +68,10 @@ async def handle_calendar_menu(message: Message) -> None:
     """Show calendar for the next 7 days (default)."""
     user_id = message.from_user.id if message.from_user else 0
     days = _user_period.get(user_id, 7)
-    if len(_user_period) >= _MAX_USER_PERIOD_ENTRIES:
-        _user_period.clear()
-    _user_period[user_id] = days
+    async with _period_lock:
+        if len(_user_period) >= _MAX_USER_PERIOD_ENTRIES:
+            _user_period.clear()
+        _user_period[user_id] = days
 
     await _fetch_and_send_calendar(
         days,
@@ -78,7 +86,8 @@ async def handle_calendar_7(callback: CallbackQuery) -> None:
     if not callback.message:
         return
     user_id = callback.from_user.id
-    _user_period[user_id] = 7
+    async with _period_lock:
+        _user_period[user_id] = 7
     await _fetch_and_send_calendar(
         7,
         answer_func=callback.message.edit_text,
@@ -92,7 +101,8 @@ async def handle_calendar_14(callback: CallbackQuery) -> None:
     if not callback.message:
         return
     user_id = callback.from_user.id
-    _user_period[user_id] = 14
+    async with _period_lock:
+        _user_period[user_id] = 14
     await _fetch_and_send_calendar(
         14,
         answer_func=callback.message.edit_text,
@@ -106,7 +116,8 @@ async def handle_calendar_30(callback: CallbackQuery) -> None:
     if not callback.message:
         return
     user_id = callback.from_user.id
-    _user_period[user_id] = 30
+    async with _period_lock:
+        _user_period[user_id] = 30
     await _fetch_and_send_calendar(
         30,
         answer_func=callback.message.edit_text,

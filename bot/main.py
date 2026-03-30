@@ -54,9 +54,6 @@ async def on_startup(
     """Startup handler."""
     logger = structlog.get_logger()
 
-    # Ensure database is connected and tables exist
-    await db.connect()
-
     # Clean up old sessions
     cleaned_sessions = await db.cleanup_old_sessions(hours=24)
     if cleaned_sessions > 0:
@@ -71,9 +68,7 @@ async def on_startup(
     if notification_service:
         # Subscribe all allowed users to notifications
         settings = get_settings()
-        for user_id in settings.allowed_tg_ids:
-            notification_service.subscribe_user(user_id)
-        for user_id in settings.admin_tg_ids:
+        for user_id in set(settings.allowed_tg_ids) | set(settings.admin_tg_ids or []):
             notification_service.subscribe_user(user_id)
 
         await notification_service.start()
@@ -177,8 +172,9 @@ async def main() -> None:
     # Setup middleware (order matters: logging -> rate limit -> auth)
     dp.message.middleware(LoggingMiddleware())
     dp.callback_query.middleware(LoggingMiddleware())
-    dp.message.middleware(RateLimitMiddleware())
-    dp.callback_query.middleware(RateLimitMiddleware())
+    rate_limiter = RateLimitMiddleware()
+    dp.message.middleware(rate_limiter)
+    dp.callback_query.middleware(rate_limiter)
     dp.message.middleware(AuthMiddleware(db))
     dp.callback_query.middleware(AuthMiddleware(db))
 

@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import BaseAPIClient, NotFoundError
+from bot.clients.base import APIError, BaseAPIClient
 from bot.models import MovieInfo, QualityProfile, RootFolder
 
 logger = structlog.get_logger()
@@ -58,16 +58,6 @@ class RadarrClient(BaseAPIClient):
             return self._parse_movie(results)
         elif isinstance(results, list) and results:
             return self._parse_movie(results[0])
-        return None
-
-    async def get_movie(self, radarr_id: int) -> Optional[MovieInfo]:
-        """Get movie by Radarr ID."""
-        try:
-            result = await self.get(f"/api/v3/movie/{radarr_id}")
-            if isinstance(result, dict):
-                return self._parse_movie(result)
-        except NotFoundError:
-            return None
         return None
 
     async def get_movie_by_tmdb(self, tmdb_id: int) -> Optional[MovieInfo]:
@@ -134,13 +124,7 @@ class RadarrClient(BaseAPIClient):
                 log.info("Movie added successfully", radarr_id=added_movie.radarr_id)
                 return added_movie
 
-        raise ValueError("Не удалось добавить фильм в Radarr")
-
-    async def get_releases(self, movie_id: int) -> list[dict[str, Any]]:
-        """Get available releases for a movie."""
-        params = {"movieId": movie_id}
-        results = await self.get("/api/v3/release", params=params)
-        return results if isinstance(results, list) else []
+        raise APIError("Не удалось добавить фильм в Radarr")
 
     async def grab_release(self, guid: str, indexer_id: int) -> dict[str, Any]:
         """
@@ -157,7 +141,7 @@ class RadarrClient(BaseAPIClient):
             "guid": guid,
             "indexerId": indexer_id,
         }
-        result = await self.post("/api/v3/release", json_data=payload)
+        result = await self._post_no_retry("/api/v3/release", json_data=payload)
         return result if isinstance(result, dict) else {}
 
     async def push_release(
@@ -188,7 +172,7 @@ class RadarrClient(BaseAPIClient):
         if publish_date:
             payload["publishDate"] = publish_date
 
-        result = await self.post("/api/v3/release/push", json_data=payload)
+        result = await self._post_no_retry("/api/v3/release/push", json_data=payload)
         return result if isinstance(result, dict) else {}
 
     async def search_movie(self, movie_id: int) -> dict[str, Any]:
@@ -253,10 +237,13 @@ class RadarrClient(BaseAPIClient):
         profiles = []
         if isinstance(results, list):
             for item in results:
-                profiles.append(QualityProfile(
-                    id=item["id"],
-                    name=item["name"],
-                ))
+                try:
+                    profiles.append(QualityProfile(
+                        id=item["id"],
+                        name=item["name"],
+                    ))
+                except (KeyError, TypeError) as e:
+                    logger.warning("Skipping malformed profile", error=str(e))
         return profiles
 
     async def get_root_folders(self) -> list[RootFolder]:
@@ -265,17 +252,15 @@ class RadarrClient(BaseAPIClient):
         folders = []
         if isinstance(results, list):
             for item in results:
-                folders.append(RootFolder(
-                    id=item["id"],
-                    path=item["path"],
-                    free_space=item.get("freeSpace"),
-                ))
+                try:
+                    folders.append(RootFolder(
+                        id=item["id"],
+                        path=item["path"],
+                        free_space=item.get("freeSpace"),
+                    ))
+                except (KeyError, TypeError) as e:
+                    logger.warning("Skipping malformed root folder", error=str(e))
         return folders
-
-    async def get_tags(self) -> list[dict[str, Any]]:
-        """Get all tags."""
-        results = await self.get("/api/v3/tag")
-        return results if isinstance(results, list) else []
 
     def _parse_movie(self, item: dict[str, Any]) -> Optional[MovieInfo]:
         """Parse Radarr movie response to MovieInfo."""

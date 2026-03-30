@@ -52,7 +52,7 @@ class Settings(BaseSettings):
 
     # Notifications
     notify_download_complete: bool = Field(default=True, description="Notify when download completes")
-    notify_check_interval: int = Field(default=60, ge=10, description="Check interval for notifications (seconds)")
+    notify_check_interval: int = Field(default=60, ge=10, le=3600, description="Check interval for notifications (seconds)")
 
     # Optional
     timezone: str = Field(default="Europe/Moscow", description="Timezone for timestamps")
@@ -64,7 +64,6 @@ class Settings(BaseSettings):
 
     # HTTP client settings
     http_timeout: float = Field(default=30.0, description="HTTP request timeout in seconds")
-    http_max_retries: int = Field(default=3, description="Maximum HTTP retry attempts")
 
     # Pagination
     results_per_page: int = Field(default=5, ge=1, le=10, description="Search results per page")
@@ -84,7 +83,15 @@ class Settings(BaseSettings):
         if isinstance(v, list):
             return v
         if isinstance(v, str):
-            return [int(x.strip()) for x in v.split(",") if x.strip()]
+            ids = []
+            for x in v.split(","):
+                x = x.strip()
+                if x:
+                    try:
+                        ids.append(int(x))
+                    except ValueError:
+                        raise ValueError(f"Некорректный Telegram ID: {x!r}. Должно быть целое число.")
+            return ids
         return []
 
     @field_validator("prowlarr_url", "radarr_url", "sonarr_url", mode="after")

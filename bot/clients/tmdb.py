@@ -28,19 +28,20 @@ class TMDbClient(BaseAPIClient):
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client with optional proxy."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url,
-                headers=self._get_headers(),
-                timeout=httpx.Timeout(self._settings.http_timeout),
-                proxy=self._proxy_url,
-            )
+        async with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.AsyncClient(
+                    base_url=self.base_url,
+                    headers=self._get_headers(),
+                    timeout=httpx.Timeout(self._settings.http_timeout),
+                    proxy=self._proxy_url,
+                )
         return self._client
 
     def _get_headers(self) -> dict[str, str]:
-        """Override to not include X-Api-Key header (TMDb uses query param)."""
+        """Override to use Bearer token authentication."""
         return {
-            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
             "User-Agent": "TG_arr-bot/1.0",
         }
@@ -58,7 +59,7 @@ class TMDbClient(BaseAPIClient):
         log = logger.bind(time_window=time_window, page=page)
         log.info("Fetching trending movies from TMDb")
 
-        params = {"api_key": self.api_key, "page": page, "language": self.language}
+        params = {"page": page, "language": self.language}
         result = await self.get(f"/trending/movie/{time_window}", params=params)
 
         if not isinstance(result, dict) or "results" not in result:
@@ -76,36 +77,6 @@ class TMDbClient(BaseAPIClient):
         log.info("Trending movies fetched", count=len(movies))
         return movies
 
-    async def get_popular_movies(self, page: int = 1) -> list[MovieInfo]:
-        """Get popular movies.
-
-        Args:
-            page: Page number (1-500)
-
-        Returns:
-            List of MovieInfo objects
-        """
-        log = logger.bind(page=page)
-        log.info("Fetching popular movies from TMDb")
-
-        params = {"api_key": self.api_key, "page": page, "language": self.language}
-        result = await self.get("/movie/popular", params=params)
-
-        if not isinstance(result, dict) or "results" not in result:
-            return []
-
-        movies = []
-        for item in result["results"]:
-            try:
-                movie = self._parse_movie(item)
-                if movie:
-                    movies.append(movie)
-            except Exception as e:
-                log.warning("Failed to parse movie", error=str(e))
-
-        log.info("Popular movies fetched", count=len(movies))
-        return movies
-
     async def get_trending_series(self, time_window: str = "week", page: int = 1) -> list[SeriesInfo]:
         """Get trending TV series.
 
@@ -119,7 +90,7 @@ class TMDbClient(BaseAPIClient):
         log = logger.bind(time_window=time_window, page=page)
         log.info("Fetching trending series from TMDb")
 
-        params = {"api_key": self.api_key, "page": page, "language": self.language}
+        params = {"page": page, "language": self.language}
         result = await self.get(f"/trending/tv/{time_window}", params=params)
 
         if not isinstance(result, dict) or "results" not in result:
@@ -135,36 +106,6 @@ class TMDbClient(BaseAPIClient):
                 log.warning("Failed to parse series", error=str(e))
 
         log.info("Trending series fetched", count=len(series_list))
-        return series_list
-
-    async def get_popular_series(self, page: int = 1) -> list[SeriesInfo]:
-        """Get popular TV series.
-
-        Args:
-            page: Page number (1-500)
-
-        Returns:
-            List of SeriesInfo objects
-        """
-        log = logger.bind(page=page)
-        log.info("Fetching popular series from TMDb")
-
-        params = {"api_key": self.api_key, "page": page, "language": self.language}
-        result = await self.get("/tv/popular", params=params)
-
-        if not isinstance(result, dict) or "results" not in result:
-            return []
-
-        series_list = []
-        for item in result["results"]:
-            try:
-                series = self._parse_series(item)
-                if series:
-                    series_list.append(series)
-            except Exception as e:
-                log.warning("Failed to parse series", error=str(e))
-
-        log.info("Popular series fetched", count=len(series_list))
         return series_list
 
     def _parse_movie(self, item: dict) -> Optional[MovieInfo]:
@@ -200,7 +141,7 @@ class TMDbClient(BaseAPIClient):
             imdb_id=None,
             poster_url=poster_url,
             fanart_url=fanart_url,
-            ratings={"tmdb": {"value": item.get("vote_average", 0.0), "votes": item.get("vote_count", 0)}},
+            ratings={"tmdb": item.get("vote_average", 0.0)},
         )
 
     def _parse_series(self, item: dict) -> Optional[SeriesInfo]:
@@ -238,5 +179,5 @@ class TMDbClient(BaseAPIClient):
             genres=[],
             poster_url=poster_url,
             fanart_url=fanart_url,
-            ratings={"tmdb": {"value": item.get("vote_average", 0.0), "votes": item.get("vote_count", 0)}},
+            ratings={"tmdb": item.get("vote_average", 0.0)},
         )

@@ -179,6 +179,10 @@ docker compose logs -f tg-arr-bot
 | `/settings` | Настройки профиля |
 | `/status` | Статус Prowlarr/Radarr/Sonarr |
 | `/history` | История действий |
+| `/downloads` (`/dl`) | Показать список активных загрузок qBittorrent |
+| `/qstatus` | Статус qBittorrent (скорость, активные загрузки) |
+| `/pause <hash>` | Поставить торрент на паузу |
+| `/resume <hash>` | Возобновить торрент |
 | `/cancel` | Отмена текущей операции |
 
 Также можно просто отправить текстовое сообщение как поисковый запрос.
@@ -330,7 +334,7 @@ pytest --cov=bot --cov-report=html
 | Компонент | Технология |
 |-----------|------------|
 | Язык | Python 3.12 |
-| Telegram | aiogram 3.13 |
+| Telegram | aiogram 3.26.0 |
 | HTTP | httpx + tenacity (retry) |
 | Конфигурация | pydantic-settings v2 |
 | БД | SQLite (aiosqlite) |

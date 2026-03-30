@@ -1,5 +1,6 @@
 """qBittorrent Web API client."""
 
+import json
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -129,9 +130,8 @@ class QBittorrentClient:
                 status_code=response.status_code,
             )
 
-        except httpx.ConnectError as e:
-            log.error("Cannot connect to qBittorrent", error=str(e))
-            raise QBittorrentError(f"Не удалось подключиться к qBittorrent ({self.base_url})")
+        except httpx.ConnectError:
+            raise  # Let tenacity handle retries for ConnectError
 
     async def _request(
         self,
@@ -156,7 +156,11 @@ class QBittorrentClient:
             # Session expired
             if response.status_code == 403:
                 self._authenticated = False
-                await self._ensure_authenticated()
+                try:
+                    await self._ensure_authenticated()
+                except (QBittorrentAuthError, QBittorrentError):
+                    raise  # Don't retry if re-auth failed
+                # Only re-issue if re-auth succeeded
                 response = await client.request(
                     method=method,
                     url=endpoint,
@@ -177,7 +181,7 @@ class QBittorrentClient:
             # Try to parse as JSON
             try:
                 return response.json()
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 return response.text
 
         except httpx.TimeoutException:
@@ -188,11 +192,6 @@ class QBittorrentClient:
     async def get_version(self) -> str:
         """Get qBittorrent version."""
         result = await self._request("GET", "/api/v2/app/version")
-        return str(result) if result else "unknown"
-
-    async def get_api_version(self) -> str:
-        """Get Web API version."""
-        result = await self._request("GET", "/api/v2/app/webapiVersion")
         return str(result) if result else "unknown"
 
     async def get_transfer_info(self) -> dict:
@@ -287,15 +286,6 @@ class QBittorrentClient:
 
         return torrents
 
-    async def get_torrent(self, torrent_hash: str) -> Optional[TorrentInfo]:
-        """Get single torrent by hash."""
-        params = {"hashes": torrent_hash.lower()}
-        result = await self._request("GET", "/api/v2/torrents/info", params=params)
-
-        if isinstance(result, list) and len(result) > 0:
-            return self._parse_torrent(result[0])
-        return None
-
     async def get_torrent_by_short_hash(self, short_hash: str) -> Optional[TorrentInfo]:
         """Get torrent by partial hash (first 8 chars)."""
         torrents = await self.get_torrents()
@@ -373,22 +363,6 @@ class QBittorrentClient:
             data={"hashes": "|".join(hashes)},
         )
 
-    async def increase_priority(self, hashes: list[str]) -> None:
-        """Increase torrent(s) priority."""
-        await self._request(
-            "POST",
-            "/api/v2/torrents/increasePrio",
-            data={"hashes": "|".join(hashes)},
-        )
-
-    async def decrease_priority(self, hashes: list[str]) -> None:
-        """Decrease torrent(s) priority."""
-        await self._request(
-            "POST",
-            "/api/v2/torrents/decreasePrio",
-            data={"hashes": "|".join(hashes)},
-        )
-
     async def set_download_limit(self, limit: int) -> None:
         """Set global download speed limit in bytes/s. 0 = unlimited."""
         await self._request(
@@ -406,40 +380,6 @@ class QBittorrentClient:
             data={"limit": limit},
         )
         logger.info("Set upload limit", limit=limit)
-
-    async def set_speed_limits(
-        self,
-        download_limit: Optional[int] = None,
-        upload_limit: Optional[int] = None,
-    ) -> None:
-        """Set global speed limits. 0 = unlimited."""
-        if download_limit is not None:
-            await self.set_download_limit(download_limit)
-        if upload_limit is not None:
-            await self.set_upload_limit(upload_limit)
-
-    async def get_torrent_files(self, torrent_hash: str) -> list[dict]:
-        """Get files in a torrent."""
-        result = await self._request(
-            "GET",
-            "/api/v2/torrents/files",
-            params={"hash": torrent_hash},
-        )
-        return result if isinstance(result, list) else []
-
-    async def get_torrent_trackers(self, torrent_hash: str) -> list[dict]:
-        """Get trackers for a torrent."""
-        result = await self._request(
-            "GET",
-            "/api/v2/torrents/trackers",
-            params={"hash": torrent_hash},
-        )
-        return result if isinstance(result, list) else []
-
-    async def get_categories(self) -> dict[str, dict]:
-        """Get all categories."""
-        result = await self._request("GET", "/api/v2/torrents/categories")
-        return result if isinstance(result, dict) else {}
 
     async def add_torrent_url(
         self,
@@ -465,7 +405,7 @@ class QBittorrentClient:
 
         # Check if torrent was added successfully
         # qBittorrent API returns "Ok." on success or "Fails." on failure
-        if result and "Ok." in str(result):
+        if isinstance(result, str) and result.strip() == "Ok.":
             logger.info("Added torrent from URL", category=category)
             return True
         else:

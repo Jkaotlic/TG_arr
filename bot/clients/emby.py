@@ -37,15 +37,6 @@ class EmbyLibrary:
     item_count: int = 0
 
 
-@dataclass
-class EmbyUpdateInfo:
-    """Emby update information."""
-
-    version: str
-    changelog: Optional[str] = None
-    is_available: bool = False
-
-
 class EmbyError(Exception):
     """Emby API error."""
 
@@ -161,12 +152,6 @@ class EmbyClient:
             wan_address=result.get("WanAddress"),
         )
 
-    async def get_public_info(self) -> dict:
-        """Get public server info (no auth required)."""
-        client = await self._get_client()
-        response = await client.get("/System/Info/Public")
-        return response.json() if response.status_code == 200 else {}
-
     async def get_libraries(self) -> list[EmbyLibrary]:
         """Get all media libraries."""
         result = await self._request("GET", "/Library/VirtualFolders")
@@ -180,7 +165,8 @@ class EmbyClient:
                 id=item.get("ItemId", ""),
                 name=item.get("Name", "Unknown"),
                 collection_type=item.get("CollectionType", "unknown"),
-                item_count=item.get("LibraryOptions", {}).get("EnabledMetadataFetchersCount", 0),
+                # VirtualFolders endpoint does not provide real item counts
+                item_count=0,
             ))
 
         return libraries
@@ -209,32 +195,6 @@ class EmbyClient:
         result = await self._request("GET", "/ScheduledTasks")
         return result if isinstance(result, list) else []
 
-    async def run_scheduled_task(self, task_id: str) -> None:
-        """Run a scheduled task by ID."""
-        await self._request("POST", f"/ScheduledTasks/Running/{task_id}")
-        logger.info("Scheduled task started", task_id=task_id)
-
-    async def get_running_tasks(self) -> list[dict]:
-        """Get currently running tasks."""
-        tasks = await self.get_scheduled_tasks()
-        return [t for t in tasks if t.get("State") == "Running"]
-
-    async def check_for_updates(self) -> EmbyUpdateInfo:
-        """Check if updates are available."""
-        try:
-            result = await self._request("GET", "/System/Info")
-
-            if isinstance(result, dict):
-                has_update = result.get("HasUpdateAvailable", False)
-                return EmbyUpdateInfo(
-                    version=result.get("Version", "Unknown"),
-                    is_available=has_update,
-                )
-        except Exception as e:
-            logger.warning("Failed to check for updates", error=str(e))
-
-        return EmbyUpdateInfo(version="Unknown", is_available=False)
-
     async def install_update(self) -> None:
         """Install available update (if supported)."""
         info = await self.get_server_info()
@@ -257,20 +217,6 @@ class EmbyClient:
 
         await self._request("POST", "/System/Restart")
         logger.info("Server restart initiated")
-
-    async def shutdown_server(self) -> None:
-        """Shutdown the Emby server."""
-        await self._request("POST", "/System/Shutdown")
-        logger.info("Server shutdown initiated")
-
-    async def get_activity_log(self, limit: int = 10) -> list[dict]:
-        """Get recent activity log entries."""
-        params = {"Limit": limit, "StartIndex": 0}
-        result = await self._request("GET", "/System/ActivityLog/Entries", params=params)
-
-        if isinstance(result, dict):
-            return result.get("Items", [])
-        return []
 
     async def get_sessions(self) -> list[dict]:
         """Get active sessions (who is watching/playing)."""

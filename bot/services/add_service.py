@@ -1,5 +1,7 @@
 """Service for adding content to Radarr/Sonarr."""
 
+import ipaddress
+import urllib.parse
 from typing import Any, Optional
 
 import structlog
@@ -21,6 +23,27 @@ from bot.models import (
 )
 
 logger = structlog.get_logger()
+
+_ALLOWED_SCHEMES = {"http", "https", "magnet"}
+
+
+def _validate_download_url(url: str) -> bool:
+    """Validate URL is safe for download (not SSRF)."""
+    if not url:
+        return False
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        return False
+    if parsed.scheme == "magnet":
+        return url.startswith("magnet:?xt=urn:btih:")
+    if parsed.hostname:
+        try:
+            addr = ipaddress.ip_address(parsed.hostname)
+            if addr.is_private or addr.is_loopback or addr.is_link_local:
+                return False
+        except ValueError:
+            pass  # hostname, not IP — acceptable
+    return True
 
 
 class AddService:
@@ -205,6 +228,7 @@ class AddService:
         )
         log.info("Grabbing movie release")
 
+        # user_id will be set by caller before logging
         action = ActionLog(
             user_id=0,
             action_type=ActionType.GRAB,
@@ -266,10 +290,12 @@ class AddService:
                 except APIError as e:
                     log.warning("Direct grab failed", error=str(e))
 
-            # Download via qBittorrent if rejected by Radarr profile
-            if release_rejected and self.qbittorrent:
+            # Download via qBittorrent if rejected by Radarr profile or force_download
+            if (release_rejected or force_download) and self.qbittorrent:
                 download_url = release.download_url or release.magnet_url
                 if download_url:
+                    if not _validate_download_url(download_url):
+                        raise ValueError("Небезопасный URL для скачивания")
                     try:
                         success = await self.qbittorrent.add_torrent_url(
                             download_url,
@@ -342,6 +368,7 @@ class AddService:
         )
         log.info("Grabbing series release")
 
+        # user_id will be set by caller before logging
         action = ActionLog(
             user_id=0,
             action_type=ActionType.GRAB,
@@ -404,10 +431,12 @@ class AddService:
                 except APIError as e:
                     log.warning("Direct grab failed", error=str(e))
 
-            # Download via qBittorrent if rejected by Sonarr profile
-            if release_rejected and self.qbittorrent:
+            # Download via qBittorrent if rejected by Sonarr profile or force_download
+            if (release_rejected or force_download) and self.qbittorrent:
                 download_url = release.download_url or release.magnet_url
                 if download_url:
+                    if not _validate_download_url(download_url):
+                        raise ValueError("Небезопасный URL для скачивания")
                     try:
                         success = await self.qbittorrent.add_torrent_url(
                             download_url,
@@ -456,34 +485,3 @@ class AddService:
             action.error_message = str(e)
             return False, action, f"Error: {str(e)}"
 
-    async def search_and_grab_best(
-        self,
-        content_type: ContentType,
-        content_id: int,  # Radarr movie ID or Sonarr series ID
-        season_number: Optional[int] = None,
-    ) -> tuple[bool, str]:
-        """
-        Trigger a search for the best available release.
-
-        Args:
-            content_type: Movie or Series
-            content_id: Radarr movie ID or Sonarr series ID
-            season_number: Optional season number for series
-
-        Returns:
-            Tuple of (success, message)
-        """
-        try:
-            if content_type == ContentType.MOVIE:
-                await self.radarr.search_movie(content_id)
-                return True, "Movie search triggered"
-            else:
-                if season_number is not None:
-                    await self.sonarr.search_season(content_id, season_number)
-                    return True, f"Season {season_number} search triggered"
-                else:
-                    await self.sonarr.search_series(content_id)
-                    return True, "Series search triggered"
-        except Exception as e:
-            logger.error("Search failed", error=str(e))
-            return False, f"Search failed: {str(e)}"

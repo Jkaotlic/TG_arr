@@ -4,7 +4,7 @@ import pytest
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from bot.clients.qbittorrent import QBittorrentClient
+from bot.clients.qbittorrent import QBittorrentAuthError, QBittorrentClient, STATE_MAP
 from bot.models import (
     QBittorrentStatus,
     TorrentFilter,
@@ -35,35 +35,35 @@ class TestQBittorrentClient:
         assert client.base_url == "http://localhost:8080"
         assert client.username == "admin"
         assert client.password == "password123"
-        assert client._session_cookie is None
+        assert client._authenticated is False
 
     @pytest.mark.asyncio
     async def test_login_success(self, client):
         """Test successful login."""
-        with patch.object(client._client, 'post', new_callable=AsyncMock) as mock_post:
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            mock_response.text = "Ok."
-            mock_response.cookies = {"SID": "test_session_id"}
-            mock_post.return_value = mock_response
+        mock_http = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "Ok."
+        mock_http.post.return_value = mock_response
 
+        with patch.object(client, '_get_client', new_callable=AsyncMock, return_value=mock_http):
             result = await client.login()
 
             assert result is True
-            assert client._session_cookie == "test_session_id"
+            assert client._authenticated is True
 
     @pytest.mark.asyncio
     async def test_login_failure(self, client):
         """Test failed login."""
-        with patch.object(client._client, 'post', new_callable=AsyncMock) as mock_post:
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            mock_response.text = "Fails."
-            mock_post.return_value = mock_response
+        mock_http = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "Fails."
+        mock_http.post.return_value = mock_response
 
-            result = await client.login()
-
-            assert result is False
+        with patch.object(client, '_get_client', new_callable=AsyncMock, return_value=mock_http):
+            with pytest.raises(QBittorrentAuthError):
+                await client.login()
 
     @pytest.mark.asyncio
     async def test_add_torrent_url_success(self, client):
@@ -97,20 +97,20 @@ class TestQBittorrentClient:
             mock_request.assert_called_once()
 
     def test_parse_torrent_state(self, client):
-        """Test parsing torrent states."""
-        assert client._parse_state("downloading") == TorrentState.DOWNLOADING
-        assert client._parse_state("uploading") == TorrentState.SEEDING
-        assert client._parse_state("pausedDL") == TorrentState.PAUSED
-        assert client._parse_state("stalledDL") == TorrentState.STALLED
-        assert client._parse_state("error") == TorrentState.ERROR
-        assert client._parse_state("unknown_state") == TorrentState.UNKNOWN
+        """Test parsing torrent states via STATE_MAP."""
+        assert STATE_MAP.get("downloading", TorrentState.UNKNOWN) == TorrentState.DOWNLOADING
+        assert STATE_MAP.get("uploading", TorrentState.UNKNOWN) == TorrentState.SEEDING
+        assert STATE_MAP.get("pausedDL", TorrentState.UNKNOWN) == TorrentState.PAUSED
+        assert STATE_MAP.get("stalledDL", TorrentState.UNKNOWN) == TorrentState.STALLED
+        assert STATE_MAP.get("error", TorrentState.UNKNOWN) == TorrentState.ERROR
+        assert STATE_MAP.get("unknown_state", TorrentState.UNKNOWN) == TorrentState.UNKNOWN
 
     def test_normalize_torrent(self, client):
         """Test normalizing torrent data."""
         raw = {
             "hash": "abc123def456",
             "name": "Test.Torrent.2024.1080p",
-            "size": 5000000000,
+            "total_size": 5000000000,
             "progress": 0.75,
             "dlspeed": 1500000,
             "upspeed": 500000,
@@ -131,7 +131,7 @@ class TestQBittorrentClient:
             "tracker": "http://tracker.example.com",
         }
 
-        torrent = client._normalize_torrent(raw)
+        torrent = client._parse_torrent(raw)
 
         assert torrent is not None
         assert torrent.hash == "abc123def456"
@@ -150,7 +150,7 @@ class TestQBittorrentClient:
             "name": "Minimal Torrent",
         }
 
-        torrent = client._normalize_torrent(raw)
+        torrent = client._parse_torrent(raw)
 
         assert torrent is not None
         assert torrent.hash == "abc123"

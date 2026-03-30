@@ -24,7 +24,7 @@ USER botuser
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
-HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
-    CMD ["python", "-c", "from bot.config import get_settings; get_settings()"]
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD ["python", "-c", "from bot.config import get_settings; s=get_settings(); assert s.telegram_bot_token"]
 
 CMD ["python", "-m", "bot.main"]

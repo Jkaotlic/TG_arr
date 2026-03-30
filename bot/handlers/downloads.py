@@ -23,9 +23,9 @@ MENU_DOWNLOADS = "📥 Загрузки"
 MENU_QSTATUS = "📊 qBit"
 
 
-async def check_qbt_enabled(message_or_callback) -> bool:
+async def check_qbt_enabled(message_or_callback: Message | CallbackQuery) -> bool:
     """Check if qBittorrent is enabled and send message if not."""
-    if get_qbittorrent() is None:
+    if await get_qbittorrent() is None:
         text = "⚠️ Интеграция с qBittorrent не настроена.\n\nУстановите <code>QBITTORRENT_URL</code> и <code>QBITTORRENT_PASSWORD</code> в переменных окружения."
         if isinstance(message_or_callback, Message):
             await message_or_callback.answer(text)
@@ -47,7 +47,7 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
     if not await check_qbt_enabled(message):
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -88,7 +88,7 @@ async def cmd_qstatus(message: Message, db_user: User) -> None:
     if not await check_qbt_enabled(message):
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -114,7 +114,7 @@ async def cmd_pause(message: Message, db_user: User) -> None:
     if not await check_qbt_enabled(message):
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -143,7 +143,7 @@ async def cmd_resume(message: Message, db_user: User) -> None:
     if not await check_qbt_enabled(message):
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -176,7 +176,7 @@ async def handle_refresh(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         await callback.answer("qBittorrent не настроен", show_alert=True)
         return
@@ -213,7 +213,7 @@ async def handle_page(callback: CallbackQuery) -> None:
     if not callback.message or not callback.data:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -255,7 +255,7 @@ async def handle_torrent_details(callback: CallbackQuery) -> None:
     if not callback.message or not callback.data:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -291,7 +291,7 @@ async def handle_pause_torrent(callback: CallbackQuery) -> None:
     if not callback.data:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -320,7 +320,7 @@ async def handle_resume_torrent(callback: CallbackQuery) -> None:
     if not callback.data:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -349,7 +349,7 @@ async def handle_delete_torrent(callback: CallbackQuery) -> None:
     if not callback.data or not callback.message:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -378,7 +378,7 @@ async def handle_delete_with_files(callback: CallbackQuery) -> None:
     if not callback.data or not callback.message:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -407,7 +407,7 @@ async def handle_recheck(callback: CallbackQuery) -> None:
     if not callback.data:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -433,7 +433,7 @@ async def handle_priority(callback: CallbackQuery) -> None:
     if not callback.data:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -455,6 +455,9 @@ async def handle_priority(callback: CallbackQuery) -> None:
         elif priority == "min":
             await qbt.set_priority_bottom([torrent.hash])
             await callback.answer(f"⬇️ Мин. приоритет: {torrent.name[:25]}")
+        else:
+            await callback.answer("Неверный приоритет", show_alert=True)
+            return
 
     except Exception as e:
         logger.error("Failed to set priority", error=str(e))
@@ -464,7 +467,7 @@ async def handle_priority(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "t_pause_all")
 async def handle_pause_all(callback: CallbackQuery) -> None:
     """Pause all torrents."""
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -481,7 +484,7 @@ async def handle_pause_all(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == "t_resume_all")
 async def handle_resume_all(callback: CallbackQuery) -> None:
     """Resume all torrents."""
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -533,13 +536,14 @@ async def handle_filter_select(callback: CallbackQuery) -> None:
     if not callback.message or not callback.data:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
     try:
         filter_value = callback.data.replace("t_filter:", "")
         if filter_value == "menu":
+            await callback.answer()
             return
 
         try:
@@ -577,7 +581,7 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
@@ -617,7 +621,7 @@ async def handle_speed_set(callback: CallbackQuery) -> None:
     if not callback.data:
         return
 
-    qbt = get_qbittorrent()
+    qbt = await get_qbittorrent()
     if not qbt:
         return
 
