@@ -1,5 +1,6 @@
 """Search service for finding content."""
 
+import asyncio
 import re
 from typing import Optional
 
@@ -56,28 +57,27 @@ class SearchService:
             if re.search(pattern, query_lower):
                 return ContentType.SERIES
 
-        # Try to identify by looking up in both services
-        # First check Radarr
-        try:
-            movies = await self.radarr.lookup_movie(query)
-            if movies:
-                # Check if any movie matches well
-                for movie in movies[:3]:
-                    if self._title_matches(query, movie.title, movie.year):
-                        return ContentType.MOVIE
-        except Exception as e:
-            logger.warning("Radarr lookup failed during type detection", error=str(e))
+        # Try to identify by looking up in both services in parallel
+        movie_task = asyncio.create_task(self.radarr.lookup_movie(query))
+        series_task = asyncio.create_task(self.sonarr.lookup_series(query))
+        movies_result, series_result = await asyncio.gather(movie_task, series_task, return_exceptions=True)
+        movies = movies_result if not isinstance(movies_result, Exception) else []
+        series = series_result if not isinstance(series_result, Exception) else []
 
-        # Then check Sonarr
-        try:
-            series = await self.sonarr.lookup_series(query)
-            if series:
-                # Check if any series matches well
-                for s in series[:3]:
-                    if self._title_matches(query, s.title, s.year):
-                        return ContentType.SERIES
-        except Exception as e:
-            logger.warning("Sonarr lookup failed during type detection", error=str(e))
+        if isinstance(movies_result, Exception):
+            logger.warning("Radarr lookup failed during type detection", error=str(movies_result))
+        if isinstance(series_result, Exception):
+            logger.warning("Sonarr lookup failed during type detection", error=str(series_result))
+
+        if movies:
+            for movie in movies[:3]:
+                if self._title_matches(query, movie.title, movie.year):
+                    return ContentType.MOVIE
+
+        if series:
+            for s in series[:3]:
+                if self._title_matches(query, s.title, s.year):
+                    return ContentType.SERIES
 
         return ContentType.UNKNOWN
 
@@ -91,7 +91,11 @@ class SearchService:
         query_year = int(year_match.group(1)) if year_match else None
 
         # Remove year from query for title comparison
-        query_clean = re.sub(r"\d{4}", "", query_lower).strip()
+        year_match_clean = re.search(r"[\(\[]?(\d{4})[\)\]]?", query_lower)
+        if year_match_clean and 1900 <= int(year_match_clean.group(1)) <= 2100:
+            query_clean = (query_lower[:year_match_clean.start()] + query_lower[year_match_clean.end():]).strip()
+        else:
+            query_clean = query_lower
 
         # Check title similarity
         if query_clean in title_lower or title_lower in query_clean:
@@ -181,26 +185,6 @@ class SearchService:
 
         # Otherwise lookup
         return await self.sonarr.lookup_series_by_tvdb(tvdb_id)
-
-    async def check_movie_exists(self, tmdb_id: int) -> tuple[bool, Optional[MovieInfo]]:
-        """
-        Check if movie already exists in Radarr library.
-
-        Returns:
-            Tuple of (exists, MovieInfo if exists)
-        """
-        movie = await self.radarr.get_movie_by_tmdb(tmdb_id)
-        return (movie is not None, movie)
-
-    async def check_series_exists(self, tvdb_id: int) -> tuple[bool, Optional[SeriesInfo]]:
-        """
-        Check if series already exists in Sonarr library.
-
-        Returns:
-            Tuple of (exists, SeriesInfo if exists)
-        """
-        series = await self.sonarr.get_series_by_tvdb(tvdb_id)
-        return (series is not None, series)
 
     def parse_query(self, query: str) -> dict:
         """

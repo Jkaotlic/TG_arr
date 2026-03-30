@@ -366,11 +366,6 @@ class ProwlarrClient(BaseAPIClient):
 
         return False
 
-    async def get_indexers(self) -> list[dict[str, Any]]:
-        """Get list of configured indexers."""
-        result = await self.get("/api/v1/indexer")
-        return result if isinstance(result, list) else []
-
     async def grab_release(self, guid: str, indexer_id: int) -> dict[str, Any]:
         """
         Grab a release directly through Prowlarr.
@@ -380,5 +375,5 @@ class ProwlarrClient(BaseAPIClient):
             "guid": guid,
             "indexerId": indexer_id,
         }
-        result = await self.post("/api/v1/search", json_data=payload)
+        result = await self._post_no_retry("/api/v1/search", json_data=payload)
         return result if isinstance(result, dict) else {}

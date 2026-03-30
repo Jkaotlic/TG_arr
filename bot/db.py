@@ -1,5 +1,6 @@
 """Database layer using aiosqlite."""
 
+import asyncio
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -29,22 +30,24 @@ class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._connection: Optional[aiosqlite.Connection] = None
+        self._connect_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         """Connect to the database and initialize tables."""
-        if self._connection is not None:
-            return
+        async with self._connect_lock:
+            if self._connection is not None:
+                return
 
-        # Ensure directory exists
-        db_dir = os.path.dirname(self.db_path)
-        if db_dir:
-            Path(db_dir).mkdir(parents=True, exist_ok=True)
+            # Ensure directory exists
+            db_dir = os.path.dirname(self.db_path)
+            if db_dir:
+                Path(db_dir).mkdir(parents=True, exist_ok=True)
 
-        self._connection = await aiosqlite.connect(self.db_path)
-        self._connection.row_factory = aiosqlite.Row
+            self._connection = await aiosqlite.connect(self.db_path)
+            self._connection.row_factory = aiosqlite.Row
 
-        await self._create_tables()
-        logger.info("Database connected", path=self.db_path)
+            await self._create_tables()
+            logger.info("Database connected", path=self.db_path)
 
     async def close(self) -> None:
         """Close database connection."""
@@ -165,11 +168,15 @@ class Database:
     def _row_to_user(self, row: aiosqlite.Row) -> User:
         """Convert database row to User model."""
         prefs_data = json.loads(row["preferences"]) if row["preferences"] else {}
+        try:
+            role = UserRole(row["role"])
+        except ValueError:
+            role = UserRole.USER
         return User(
             tg_id=row["tg_id"],
             username=row["username"],
             first_name=row["first_name"],
-            role=UserRole(row["role"]),
+            role=role,
             preferences=UserPreferences(**prefs_data),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
@@ -182,27 +189,32 @@ class Database:
         """Save a search and its results. Returns search ID."""
         now = datetime.now(timezone.utc).isoformat()
 
-        # Insert search
-        cursor = await self.conn.execute(
-            """
-            INSERT INTO searches (user_id, query, content_type, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (user_id, query, content_type.value, now),
-        )
-        search_id = cursor.lastrowid
+        await self.conn.execute("BEGIN")
+        try:
+            # Insert search
+            cursor = await self.conn.execute(
+                """
+                INSERT INTO searches (user_id, query, content_type, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (user_id, query, content_type.value, now),
+            )
+            search_id = cursor.lastrowid
 
-        # Insert results
-        results_json = json.dumps([r.model_dump(mode="json") for r in results])
-        await self.conn.execute(
-            """
-            INSERT INTO search_results (search_id, results_json, created_at)
-            VALUES (?, ?, ?)
-            """,
-            (search_id, results_json, now),
-        )
+            # Insert results
+            results_json = json.dumps([r.model_dump(mode="json") for r in results])
+            await self.conn.execute(
+                """
+                INSERT INTO search_results (search_id, results_json, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (search_id, results_json, now),
+            )
 
-        await self.conn.commit()
+            await self.conn.commit()
+        except Exception:
+            await self.conn.rollback()
+            raise
         return search_id
 
     async def get_search_results(self, search_id: int) -> list[SearchResult]:
@@ -336,11 +348,19 @@ class Database:
 
     def _row_to_action(self, row: aiosqlite.Row) -> ActionLog:
         """Convert database row to ActionLog model."""
+        try:
+            action_type = ActionType(row["action_type"])
+        except ValueError:
+            action_type = ActionType.ERROR
+        try:
+            content_type = ContentType(row["content_type"])
+        except ValueError:
+            content_type = ContentType.UNKNOWN
         return ActionLog(
             id=row["id"],
             user_id=row["user_id"],
-            action_type=ActionType(row["action_type"]),
-            content_type=ContentType(row["content_type"]),
+            action_type=action_type,
+            content_type=content_type,
             query=row["query"],
             content_title=row["content_title"],
             content_id=row["content_id"],
@@ -365,18 +385,23 @@ class Database:
         """Delete searches older than specified days. Returns count deleted."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-        # First delete related results
-        await self.conn.execute(
-            """
-            DELETE FROM search_results
-            WHERE search_id IN (SELECT id FROM searches WHERE created_at < ?)
-            """,
-            (cutoff,),
-        )
+        await self.conn.execute("BEGIN")
+        try:
+            # First delete related results
+            await self.conn.execute(
+                """
+                DELETE FROM search_results
+                WHERE search_id IN (SELECT id FROM searches WHERE created_at < ?)
+                """,
+                (cutoff,),
+            )
 
-        # Then delete searches
-        cursor = await self.conn.execute(
-            "DELETE FROM searches WHERE created_at < ?", (cutoff,)
-        )
-        await self.conn.commit()
+            # Then delete searches
+            cursor = await self.conn.execute(
+                "DELETE FROM searches WHERE created_at < ?", (cutoff,)
+            )
+            await self.conn.commit()
+        except Exception:
+            await self.conn.rollback()
+            raise
         return cursor.rowcount

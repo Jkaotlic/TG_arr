@@ -1,5 +1,6 @@
 """Base HTTP client with retry logic and error handling."""
 
+import asyncio
 import time
 from typing import Any, Optional
 
@@ -59,16 +60,18 @@ class BaseAPIClient:
         self.api_key = api_key
         self.service_name = service_name
         self._client: Optional[httpx.AsyncClient] = None
+        self._client_lock = asyncio.Lock()
         self._settings = get_settings()
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url,
-                headers=self._get_headers(),
-                timeout=httpx.Timeout(self._settings.http_timeout),
-            )
+        async with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.AsyncClient(
+                    base_url=self.base_url,
+                    headers=self._get_headers(),
+                    timeout=httpx.Timeout(self._settings.http_timeout),
+                )
         return self._client
 
     def _get_headers(self) -> dict[str, str]:
@@ -203,15 +206,6 @@ class BaseAPIClient:
         """HTTP POST request."""
         return await self._safe_request("POST", endpoint, params=params, json_data=json_data, timeout=timeout)
 
-    async def put(
-        self,
-        endpoint: str,
-        json_data: Optional[dict[str, Any]] = None,
-        timeout: Optional[float] = None,
-    ) -> dict[str, Any] | list[Any]:
-        """HTTP PUT request."""
-        return await self._safe_request("PUT", endpoint, json_data=json_data, timeout=timeout)
-
     async def delete(
         self,
         endpoint: str,
@@ -220,6 +214,32 @@ class BaseAPIClient:
     ) -> dict[str, Any] | list[Any]:
         """HTTP DELETE request."""
         return await self._safe_request("DELETE", endpoint, params=params, timeout=timeout)
+
+    async def _post_no_retry(
+        self,
+        endpoint: str,
+        json_data: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any] | list[Any]:
+        """POST without retry — for non-idempotent operations like grab/push."""
+        client = await self._get_client()
+        url = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+        try:
+            response = await client.request(
+                method="POST", url=url, params=params, json=json_data, timeout=timeout,
+            )
+            if response.status_code == 401:
+                raise AuthenticationError(f"Ошибка авторизации в {self.service_name}", status_code=401)
+            if response.status_code >= 400:
+                raise APIError(f"Ошибка {self.service_name}: {response.status_code}", status_code=response.status_code)
+            if response.status_code == 204:
+                return {}
+            return response.json()
+        except httpx.TimeoutException:
+            raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}")
+        except httpx.ConnectError:
+            raise ServiceConnectionError(f"Не удалось подключиться к {self.service_name} ({self.base_url})")
 
     async def check_connection(self) -> tuple[bool, Optional[str], Optional[float]]:
         """Check if service is available. Returns (available, version, response_time_ms)."""
@@ -231,5 +251,5 @@ class BaseAPIClient:
             return True, version, round(elapsed, 2)
         except Exception as e:
             elapsed = (time.monotonic() - start_time) * 1000
-            logger.warning(f"{self.service_name} health check failed", error=str(e))
+            logger.warning("health_check_failed", service=self.service_name, error=str(e))
             return False, None, round(elapsed, 2)

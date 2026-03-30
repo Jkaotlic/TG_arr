@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import BaseAPIClient, NotFoundError
+from bot.clients.base import APIError, BaseAPIClient
 from bot.models import QualityProfile, RootFolder, SeriesInfo
 
 logger = structlog.get_logger()
@@ -56,16 +56,6 @@ class SonarrClient(BaseAPIClient):
 
         if isinstance(results, list) and results:
             return self._parse_series(results[0])
-        return None
-
-    async def get_series(self, sonarr_id: int) -> Optional[SeriesInfo]:
-        """Get series by Sonarr ID."""
-        try:
-            result = await self.get(f"/api/v3/series/{sonarr_id}")
-            if isinstance(result, dict):
-                return self._parse_series(result)
-        except NotFoundError:
-            return None
         return None
 
     async def get_series_by_tvdb(self, tvdb_id: int) -> Optional[SeriesInfo]:
@@ -152,7 +142,7 @@ class SonarrClient(BaseAPIClient):
                 log.info("Series added successfully", sonarr_id=added_series.sonarr_id)
                 return added_series
 
-        raise ValueError("Не удалось добавить сериал в Sonarr")
+        raise APIError("Не удалось добавить сериал в Sonarr")
 
     def _should_monitor_season(self, season_num: int, monitor_type: str, total_seasons: int) -> bool:
         """Determine if a season should be monitored based on monitor type."""
@@ -174,28 +164,6 @@ class SonarrClient(BaseAPIClient):
             return season_num == total_seasons
         return True
 
-    async def get_episodes(self, series_id: int, season_number: Optional[int] = None) -> list[dict[str, Any]]:
-        """Get episodes for a series."""
-        params = {"seriesId": series_id}
-        if season_number is not None:
-            params["seasonNumber"] = season_number
-
-        results = await self.get("/api/v3/episode", params=params)
-        return results if isinstance(results, list) else []
-
-    async def get_releases(self, episode_id: Optional[int] = None, series_id: Optional[int] = None) -> list[dict[str, Any]]:
-        """Get available releases for an episode or series."""
-        params = {}
-        if episode_id:
-            params["episodeId"] = episode_id
-        elif series_id:
-            params["seriesId"] = series_id
-        else:
-            return []
-
-        results = await self.get("/api/v3/release", params=params)
-        return results if isinstance(results, list) else []
-
     async def grab_release(self, guid: str, indexer_id: int) -> dict[str, Any]:
         """
         Grab a specific release for download.
@@ -211,7 +179,7 @@ class SonarrClient(BaseAPIClient):
             "guid": guid,
             "indexerId": indexer_id,
         }
-        result = await self.post("/api/v3/release", json_data=payload)
+        result = await self._post_no_retry("/api/v3/release", json_data=payload)
         return result if isinstance(result, dict) else {}
 
     async def push_release(
@@ -242,7 +210,7 @@ class SonarrClient(BaseAPIClient):
         if publish_date:
             payload["publishDate"] = publish_date
 
-        result = await self.post("/api/v3/release/push", json_data=payload)
+        result = await self._post_no_retry("/api/v3/release/push", json_data=payload)
         return result if isinstance(result, dict) else {}
 
     async def search_series(self, series_id: int) -> dict[str, Any]:
@@ -260,15 +228,6 @@ class SonarrClient(BaseAPIClient):
             "name": "SeasonSearch",
             "seriesId": series_id,
             "seasonNumber": season_number,
-        }
-        result = await self.post("/api/v3/command", json_data=payload)
-        return result if isinstance(result, dict) else {}
-
-    async def search_episodes(self, episode_ids: list[int]) -> dict[str, Any]:
-        """Trigger a search for specific episodes."""
-        payload = {
-            "name": "EpisodeSearch",
-            "episodeIds": episode_ids,
         }
         result = await self.post("/api/v3/command", json_data=payload)
         return result if isinstance(result, dict) else {}
@@ -319,10 +278,13 @@ class SonarrClient(BaseAPIClient):
         profiles = []
         if isinstance(results, list):
             for item in results:
-                profiles.append(QualityProfile(
-                    id=item["id"],
-                    name=item["name"],
-                ))
+                try:
+                    profiles.append(QualityProfile(
+                        id=item["id"],
+                        name=item["name"],
+                    ))
+                except (KeyError, TypeError) as e:
+                    logger.warning("Skipping malformed profile", error=str(e))
         return profiles
 
     async def get_root_folders(self) -> list[RootFolder]:
@@ -331,17 +293,15 @@ class SonarrClient(BaseAPIClient):
         folders = []
         if isinstance(results, list):
             for item in results:
-                folders.append(RootFolder(
-                    id=item["id"],
-                    path=item["path"],
-                    free_space=item.get("freeSpace"),
-                ))
+                try:
+                    folders.append(RootFolder(
+                        id=item["id"],
+                        path=item["path"],
+                        free_space=item.get("freeSpace"),
+                    ))
+                except (KeyError, TypeError) as e:
+                    logger.warning("Skipping malformed root folder", error=str(e))
         return folders
-
-    async def get_tags(self) -> list[dict[str, Any]]:
-        """Get all tags."""
-        results = await self.get("/api/v3/tag")
-        return results if isinstance(results, list) else []
 
     def _parse_series(self, item: dict[str, Any]) -> Optional[SeriesInfo]:
         """Parse Sonarr series response to SeriesInfo."""

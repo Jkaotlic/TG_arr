@@ -40,12 +40,12 @@ MENU_BUTTONS = {
 }
 
 
-def get_services() -> tuple[SearchService, AddService, ScoringService]:
+async def get_services() -> tuple[SearchService, AddService, ScoringService]:
     """Get service instances using singleton clients from registry."""
-    prowlarr = get_prowlarr()
-    radarr = get_radarr()
-    sonarr = get_sonarr()
-    qbittorrent = get_qbittorrent()  # Returns None if not configured
+    prowlarr = await get_prowlarr()
+    radarr = await get_radarr()
+    sonarr = await get_sonarr()
+    qbittorrent = await get_qbittorrent()  # Returns None if not configured
 
     scoring = ScoringService()
     search_service = SearchService(prowlarr, radarr, sonarr, scoring)
@@ -133,7 +133,7 @@ async def process_search(
         return
 
     settings = get_settings()
-    search_service, add_service, scoring = get_services()
+    search_service, add_service, scoring = await get_services()
 
     try:
         # Always use db_user.tg_id - message.from_user can be bot when called from callback
@@ -180,7 +180,7 @@ async def process_search(
 
         if not results:
             await status_msg.edit_text(
-                Formatters.format_warning(f"Ничего не найдено для <b>{query}</b>"),
+                Formatters.format_warning(f"Ничего не найдено для <b>{html.escape(query)}</b>"),
                 parse_mode="HTML",
             )
             return
@@ -353,7 +353,7 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
     if not callback.data or not callback.message:
         return
 
-    search_service, add_service, _ = get_services()
+    search_service, add_service, _ = await get_services()
 
     user_id = callback.from_user.id
     session = await db.get_session(user_id)
@@ -446,7 +446,7 @@ async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database)
     if not callback.message:
         return
 
-    search_service, add_service, _ = get_services()
+    search_service, add_service, _ = await get_services()
 
     user_id = callback.from_user.id
     session = await db.get_session(user_id)
@@ -472,7 +472,7 @@ async def handle_confirm_grab(callback: CallbackQuery, db_user: User, db: Databa
     if not callback.message:
         return
 
-    search_service, add_service, _ = get_services()
+    search_service, add_service, _ = await get_services()
 
     user_id = callback.from_user.id
     session = await db.get_session(user_id)
@@ -501,6 +501,8 @@ async def grab_release(
 
 def _resolve_folder(folders: list, preferred_id: int | None) -> str:
     """Resolve root folder path from user preference or first available."""
+    if not folders:
+        raise ValueError("Нет доступных папок для сохранения")
     if preferred_id:
         folder = next((f for f in folders if f.id == preferred_id), None)
         return folder.path if folder else folders[0].path
@@ -643,7 +645,7 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
     # Show results page
     per_page = settings.results_per_page
     total_pages = (len(session.results) + per_page - 1) // per_page
-    page = session.current_page
+    page = min(session.current_page, max(0, total_pages - 1))
 
     start_idx = page * per_page
     page_results = session.results[start_idx:start_idx + per_page]
@@ -709,7 +711,7 @@ async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database
         await message.edit_text(Formatters.format_error("Сессия истекла. Повторите поиск."))
         return
 
-    search_service, add_service, _ = get_services()
+    search_service, add_service, _ = await get_services()
 
     if not add_service.qbittorrent:
         await message.edit_text(Formatters.format_error("qBittorrent не настроен"))

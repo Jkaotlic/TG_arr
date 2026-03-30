@@ -62,7 +62,7 @@ class CallbackData:
     TORRENT = "t:"  # t:hash - select torrent
     TORRENT_PAUSE = "t_pause:"  # t_pause:hash
     TORRENT_RESUME = "t_resume:"  # t_resume:hash
-    TORRENT_DELETE = "t_del:"  # t_del:hash
+    TORRENT_DELETE = "t_delete:"  # t_delete:hash
     TORRENT_DELETE_FILES = "t_delf:"  # t_delf:hash (delete with files)
     TORRENT_REFRESH = "t_refresh"  # Refresh torrent list
     TORRENT_FILTER = "t_filter:"  # t_filter:downloading
@@ -234,53 +234,6 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
-    def movie_list(
-        movies: list[MovieInfo],
-        current_page: int = 0,
-        per_page: int = 5,
-    ) -> InlineKeyboardMarkup:
-        """Create keyboard for movie selection from lookup results."""
-        total_pages = max(1, (len(movies) + per_page - 1) // per_page)
-        start_idx = current_page * per_page
-        page_movies = movies[start_idx:start_idx + per_page]
-
-        keyboard = []
-
-        for movie in page_movies:
-            label = f"{movie.title} ({movie.year})"
-            if len(label) > 40:
-                label = label[:37] + "..."
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"{CallbackData.MOVIE}{movie.tmdb_id}",
-                )
-            ])
-
-        # Pagination
-        if total_pages > 1:
-            nav_buttons = []
-            if current_page > 0:
-                nav_buttons.append(
-                    InlineKeyboardButton(text="◀️", callback_data=f"{CallbackData.PAGE}{current_page - 1}")
-                )
-            nav_buttons.append(
-                InlineKeyboardButton(text=f"{current_page + 1}/{total_pages}", callback_data="noop")
-            )
-            if current_page < total_pages - 1:
-                nav_buttons.append(
-                    InlineKeyboardButton(text="▶️", callback_data=f"{CallbackData.PAGE}{current_page + 1}")
-                )
-            keyboard.append(nav_buttons)
-
-        keyboard.append([
-            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    @staticmethod
     def series_list(
         series: list[SeriesInfo],
         current_page: int = 0,
@@ -321,86 +274,6 @@ class Keyboards:
                     InlineKeyboardButton(text="▶️", callback_data=f"{CallbackData.PAGE}{current_page + 1}")
                 )
             keyboard.append(nav_buttons)
-
-        keyboard.append([
-            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    @staticmethod
-    def confirm_add(content_type: ContentType, has_release: bool = False) -> InlineKeyboardMarkup:
-        """Create confirmation keyboard for adding content."""
-        keyboard = []
-
-        if has_release:
-            keyboard.append([
-                InlineKeyboardButton(text="✅ Добавить и скачать", callback_data=CallbackData.CONFIRM_GRAB),
-            ])
-        else:
-            keyboard.append([
-                InlineKeyboardButton(text="✅ Добавить", callback_data=CallbackData.CONFIRM_ADD),
-            ])
-
-        keyboard.append([
-            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
-            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    @staticmethod
-    def monitor_type_selection() -> InlineKeyboardMarkup:
-        """Create keyboard for selecting monitor type (series)."""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="Все серии", callback_data=f"{CallbackData.MONITOR}all"),
-                    InlineKeyboardButton(text="Только будущие", callback_data=f"{CallbackData.MONITOR}future"),
-                ],
-                [
-                    InlineKeyboardButton(text="Пропущенные", callback_data=f"{CallbackData.MONITOR}missing"),
-                    InlineKeyboardButton(text="Первый сезон", callback_data=f"{CallbackData.MONITOR}firstSeason"),
-                ],
-                [
-                    InlineKeyboardButton(text="Последний сезон", callback_data=f"{CallbackData.MONITOR}latestSeason"),
-                    InlineKeyboardButton(text="Только пилот", callback_data=f"{CallbackData.MONITOR}pilot"),
-                ],
-                [
-                    InlineKeyboardButton(text="Ничего", callback_data=f"{CallbackData.MONITOR}none"),
-                ],
-                [
-                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
-                ],
-            ]
-        )
-
-    @staticmethod
-    def season_selection(seasons: list[dict], include_all: bool = True) -> InlineKeyboardMarkup:
-        """Create keyboard for selecting season(s)."""
-        keyboard = []
-
-        if include_all:
-            keyboard.append([
-                InlineKeyboardButton(text="📦 Все сезоны", callback_data=f"{CallbackData.SEASON}all"),
-            ])
-
-        # Group seasons in rows of 4
-        season_buttons = []
-        for s in seasons:
-            season_num = s.get("seasonNumber", 0)
-            if season_num == 0:
-                continue  # Skip specials for now
-            season_buttons.append(
-                InlineKeyboardButton(
-                    text=f"S{season_num:02d}",
-                    callback_data=f"{CallbackData.SEASON}{season_num}",
-                )
-            )
-
-        # Arrange in rows of 4
-        for i in range(0, len(season_buttons), 4):
-            keyboard.append(season_buttons[i:i + 4])
 
         keyboard.append([
             InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
@@ -510,29 +383,6 @@ class Keyboards:
                 ],
                 [
                     InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.SETTINGS),
-                ],
-            ]
-        )
-
-    @staticmethod
-    def simple_back_cancel() -> InlineKeyboardMarkup:
-        """Simple keyboard with back and cancel buttons."""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
-                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
-                ],
-            ]
-        )
-
-    @staticmethod
-    def cancel_only() -> InlineKeyboardMarkup:
-        """Simple keyboard with only cancel button."""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
                 ],
             ]
         )

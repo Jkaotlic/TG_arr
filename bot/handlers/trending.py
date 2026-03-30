@@ -1,8 +1,12 @@
 """Trending/popular content handlers."""
 
+import asyncio
+import html
+
 import structlog
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
+from typing import Any
 
 from bot.config import get_settings
 from bot.clients.registry import get_tmdb, get_radarr, get_sonarr, get_qbittorrent, get_prowlarr
@@ -20,11 +24,14 @@ MENU_TRENDING = "🔥 Топ"
 
 # Cache for trending data to avoid re-fetching when viewing details
 # Keyed by tmdb_id for O(1) lookup; items accumulate across requests
-_trending_movies_cache: dict[int, any] = {}
-_trending_series_cache: dict[int, any] = {}
+_trending_movies_cache: dict[int, Any] = {}
+_trending_series_cache: dict[int, Any] = {}
 
 # Limit cache size to prevent unbounded growth
 _MAX_CACHE_SIZE = 200
+
+# Lock for cache mutations (asyncio is single-threaded, but protects across awaits)
+_cache_lock = asyncio.Lock()
 
 
 @router.message(F.text == MENU_TRENDING)
@@ -60,7 +67,7 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    tmdb = get_tmdb()
+    tmdb = await get_tmdb()
     if not tmdb:
         await callback.message.edit_text(
             "❌ TMDb интеграция не настроена."
@@ -82,10 +89,11 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
             return
 
         # Cache movies for detail views (merge into existing cache)
-        global _trending_movies_cache
-        if len(_trending_movies_cache) > _MAX_CACHE_SIZE:
-            _trending_movies_cache = {}
-        _trending_movies_cache.update({movie.tmdb_id: movie for movie in movies})
+        async with _cache_lock:
+            global _trending_movies_cache
+            if len(_trending_movies_cache) > _MAX_CACHE_SIZE:
+                _trending_movies_cache = {}
+            _trending_movies_cache.update({movie.tmdb_id: movie for movie in movies})
 
         # Format and send results
         text = Formatters.format_trending_movies(movies[:10])  # Top 10
@@ -98,7 +106,7 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to fetch trending movies", error=str(e))
         await callback.message.edit_text(
-            f"❌ Ошибка при загрузке популярных фильмов:\n{str(e)}"
+            f"❌ Ошибка при загрузке популярных фильмов:\n{html.escape(str(e))}"
         )
 
 
@@ -109,7 +117,7 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    tmdb = get_tmdb()
+    tmdb = await get_tmdb()
     if not tmdb:
         await callback.message.edit_text(
             "❌ TMDb интеграция не настроена."
@@ -131,10 +139,11 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
             return
 
         # Cache series for detail views (merge into existing cache)
-        global _trending_series_cache
-        if len(_trending_series_cache) > _MAX_CACHE_SIZE:
-            _trending_series_cache = {}
-        _trending_series_cache.update({series.tmdb_id: series for series in series_list})
+        async with _cache_lock:
+            global _trending_series_cache
+            if len(_trending_series_cache) > _MAX_CACHE_SIZE:
+                _trending_series_cache = {}
+            _trending_series_cache.update({series.tmdb_id: series for series in series_list})
 
         # Format and send results
         text = Formatters.format_trending_series(series_list[:10])  # Top 10
@@ -147,7 +156,7 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to fetch trending series", error=str(e))
         await callback.message.edit_text(
-            f"❌ Ошибка при загрузке популярных сериалов:\n{str(e)}"
+            f"❌ Ошибка при загрузке популярных сериалов:\n{html.escape(str(e))}"
         )
 
 
@@ -171,12 +180,12 @@ async def handle_movie_from_trending(callback: CallbackQuery) -> None:
 
     if not movie:
         # If not in cache, fetch from Radarr
-        radarr = get_radarr()
+        radarr = await get_radarr()
         try:
             movie = await radarr.lookup_movie_by_tmdb(tmdb_id)
         except Exception as e:
             logger.error("Failed to lookup movie", tmdb_id=tmdb_id, error=str(e))
-            await callback.message.answer(f"❌ Ошибка: {str(e)}")
+            await callback.message.answer(f"❌ Ошибка: {html.escape(str(e))}")
             return
 
     if not movie:
@@ -285,12 +294,12 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
 
     if not movie:
         # If not in cache, fetch from Radarr
-        radarr = get_radarr()
+        radarr = await get_radarr()
         try:
             movie = await radarr.lookup_movie_by_tmdb(tmdb_id)
         except Exception as e:
             logger.error("Failed to lookup movie", tmdb_id=tmdb_id, error=str(e))
-            await callback.message.answer(f"❌ Ошибка: {str(e)}")
+            await callback.message.answer(f"❌ Ошибка: {html.escape(str(e))}")
             return
 
     if not movie:
@@ -302,10 +311,10 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
 
     try:
         # Get services
-        prowlarr = get_prowlarr()
-        radarr = get_radarr()
-        sonarr = get_sonarr()
-        qbittorrent = get_qbittorrent()
+        prowlarr = await get_prowlarr()
+        radarr = await get_radarr()
+        sonarr = await get_sonarr()
+        qbittorrent = await get_qbittorrent()
         add_service = AddService(prowlarr, radarr, sonarr, qbittorrent)
 
         # Get user preferences
@@ -348,7 +357,7 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
 
     except Exception as e:
         logger.error("Failed to add movie from trending", tmdb_id=tmdb_id, error=str(e))
-        await status_msg.edit_text(f"❌ Ошибка при добавлении: {str(e)}")
+        await status_msg.edit_text(f"❌ Ошибка при добавлении: {html.escape(str(e))}")
 
 
 @router.callback_query(F.data.startswith(CallbackData.ADD_SERIES))
@@ -386,10 +395,10 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
 
     try:
         # Get services
-        prowlarr = get_prowlarr()
-        radarr = get_radarr()
-        sonarr = get_sonarr()
-        qbittorrent = get_qbittorrent()
+        prowlarr = await get_prowlarr()
+        radarr = await get_radarr()
+        sonarr = await get_sonarr()
+        qbittorrent = await get_qbittorrent()
         add_service = AddService(prowlarr, radarr, sonarr, qbittorrent)
 
         # Get user preferences
@@ -411,7 +420,7 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
 
         # Resolve TVDB ID if missing (TMDb trending returns tvdb_id=0)
         if not series.tvdb_id:
-            sonarr_client = get_sonarr()
+            sonarr_client = await get_sonarr()
             lookup_results = await sonarr_client.lookup_series(series.title)
             matched = None
             for lr in lookup_results:
@@ -454,4 +463,4 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
 
     except Exception as e:
         logger.error("Failed to add series from trending", tmdb_id=tmdb_id, error=str(e))
-        await status_msg.edit_text(f"❌ Ошибка при добавлении: {str(e)}")
+        await status_msg.edit_text(f"❌ Ошибка при добавлении: {html.escape(str(e))}")

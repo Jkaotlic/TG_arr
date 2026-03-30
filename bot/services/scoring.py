@@ -66,7 +66,7 @@ class ScoringWeights:
     size_too_large_penalty: int = -10
 
     # Bad keywords penalties
-    bad_keywords: dict[str, int] = None
+    bad_keywords: Optional[dict[str, int]] = None
 
     def __post_init__(self):
         if self.bad_keywords is None:
@@ -160,17 +160,15 @@ class ScoringService:
             elif "x264" in codec:
                 score += self.weights.codec_x264
 
-        # HDR scoring
+        # HDR scoring (mutually exclusive)
         if quality.hdr:
             hdr = quality.hdr.lower()
-            if "dv" in hdr or "dolby" in hdr:
+            if "dv" in hdr or "dolby vision" in hdr:
                 score += self.weights.hdr_dolby_vision
-            if "hdr10+" in hdr:
+            elif "hdr10+" in hdr:
                 score += self.weights.hdr_hdr10plus
-            elif "hdr10" in hdr:
+            elif "hdr10" in hdr or "hdr" in hdr:
                 score += self.weights.hdr_hdr10
-            elif "hdr" in hdr:
-                score += self.weights.hdr_hdr
 
         # Audio scoring
         if quality.audio:
@@ -251,10 +249,11 @@ class ScoringService:
         Returns:
             Sorted list with calculated_score populated
         """
-        for result in results:
-            result.calculated_score = self.calculate_score(result, content_type)
-
-        return sorted(results, key=lambda x: x.calculated_score, reverse=True)
+        scored = []
+        for r in results:
+            score = self.calculate_score(r, content_type)
+            scored.append(r.model_copy(update={"calculated_score": score}))
+        return sorted(scored, key=lambda x: x.calculated_score, reverse=True)
 
     def get_best_result(
         self,

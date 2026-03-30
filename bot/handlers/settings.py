@@ -20,13 +20,13 @@ router = Router()
 MENU_SETTINGS = "⚙️ Настройки"
 
 
-def _get_add_service() -> AddService:
+async def _get_add_service() -> AddService:
     """Get add service instance using singleton clients from registry."""
     return AddService(
-        get_prowlarr(),
-        get_radarr(),
-        get_sonarr(),
-        get_qbittorrent(),
+        await get_prowlarr(),
+        await get_radarr(),
+        await get_sonarr(),
+        await get_qbittorrent(),
     )
 
 
@@ -34,7 +34,7 @@ def _get_add_service() -> AddService:
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, db_user: User) -> None:
     """Handle /settings command."""
-    add_service = _get_add_service()
+    add_service = await _get_add_service()
 
     try:
         # Get current settings data
@@ -68,7 +68,7 @@ async def handle_settings_back(callback: CallbackQuery, db_user: User) -> None:
     if not callback.message:
         return
 
-    add_service = _get_add_service()
+    add_service = await _get_add_service()
 
     try:
         radarr_profiles = await add_service.get_radarr_profiles()
@@ -102,7 +102,7 @@ async def handle_radarr_profile_menu(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    add_service = _get_add_service()
+    add_service = await _get_add_service()
 
     try:
         profiles = await add_service.get_radarr_profiles()
@@ -154,7 +154,7 @@ async def handle_radarr_folder_menu(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    add_service = _get_add_service()
+    add_service = await _get_add_service()
 
     try:
         folders = await add_service.get_radarr_root_folders()
@@ -205,7 +205,7 @@ async def handle_sonarr_profile_menu(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    add_service = _get_add_service()
+    add_service = await _get_add_service()
 
     try:
         profiles = await add_service.get_sonarr_profiles()
@@ -256,7 +256,7 @@ async def handle_sonarr_folder_menu(callback: CallbackQuery) -> None:
     if not callback.message:
         return
 
-    add_service = _get_add_service()
+    add_service = await _get_add_service()
 
     try:
         folders = await add_service.get_sonarr_root_folders()

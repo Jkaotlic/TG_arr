@@ -12,8 +12,6 @@ from bot.db import Database
 
 logger = structlog.get_logger()
 
-# Simple in-memory rate limiting
-_user_requests: Dict[int, list] = {}
 MAX_REQUESTS_PER_MINUTE = 30  # Max requests per user per minute
 
 
@@ -80,8 +78,14 @@ class AuthMiddleware(BaseMiddleware):
                 first_name=user.first_name,
                 role=UserRole.ADMIN if is_admin else UserRole.USER,
             )
-            await self.db.create_user(db_user)
-            logger.info("Created new user", user_id=user_id, role=db_user.role.value)
+            try:
+                await self.db.create_user(db_user)
+                logger.info("Created new user", user_id=user_id, role=db_user.role.value)
+            except Exception:
+                # Concurrent creation - re-fetch
+                db_user = await self.db.get_user(user_id)
+                if db_user is None:
+                    raise
 
         # Add user info and database to handler data
         data["db_user"] = db_user
@@ -134,6 +138,7 @@ class RateLimitMiddleware(BaseMiddleware):
     def __init__(self, max_requests: int = MAX_REQUESTS_PER_MINUTE, window_seconds: int = 60):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
+        self._user_requests: dict[int, list[float]] = {}
         super().__init__()
 
     async def __call__(
@@ -157,11 +162,11 @@ class RateLimitMiddleware(BaseMiddleware):
         window_start = now - self.window_seconds
 
         # Clean old requests, get current count
-        recent = [t for t in _user_requests.get(user_id, []) if t > window_start]
+        recent = [t for t in self._user_requests.get(user_id, []) if t > window_start]
 
         # Check rate limit
         if len(recent) >= self.max_requests:
-            _user_requests[user_id] = recent
+            self._user_requests[user_id] = recent
             logger.warning("Rate limit exceeded", user_id=user_id)
             if isinstance(event, Message):
                 await event.answer("⏳ Слишком много запросов. Подождите минуту.")
@@ -171,6 +176,9 @@ class RateLimitMiddleware(BaseMiddleware):
 
         # Record request
         recent.append(now)
-        _user_requests[user_id] = recent
+        if recent:
+            self._user_requests[user_id] = recent
+        elif user_id in self._user_requests:
+            del self._user_requests[user_id]
 
         return await handler(event, data)

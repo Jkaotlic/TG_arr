@@ -1,6 +1,7 @@
 """Notification service for download completion alerts."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Optional
 
 import structlog
@@ -19,7 +20,7 @@ class NotificationService:
     def __init__(
         self,
         qbittorrent: QBittorrentClient,
-        send_notification: callable,
+        send_notification: Callable[[int, str], Awaitable[None]],
     ):
         """
         Initialize notification service.
@@ -53,9 +54,9 @@ class NotificationService:
         self._subscribed_users.discard(user_id)
         logger.info("User unsubscribed from notifications", user_id=user_id)
 
-    def get_subscribed_users(self) -> set[int]:
-        """Get set of subscribed user IDs."""
-        return self._subscribed_users.copy()
+    def get_subscribed_users(self) -> frozenset[int]:
+        """Get snapshot of subscribed user IDs (safe for iteration)."""
+        return frozenset(self._subscribed_users)
 
     async def start(self) -> None:
         """Start the notification monitoring loop."""
@@ -95,12 +96,12 @@ class NotificationService:
 
         while self._running:
             try:
+                await self._check_for_completions()
+
                 await asyncio.sleep(self.settings.notify_check_interval)
 
                 if not self._running:
                     break
-
-                await self._check_for_completions()
 
             except asyncio.CancelledError:
                 break
@@ -181,7 +182,7 @@ class NotificationService:
 
         message = Formatters.format_download_complete_notification(torrent)
 
-        for user_id in self._subscribed_users:
+        for user_id in self.get_subscribed_users():
             try:
                 await self.send_notification(user_id, message)
                 logger.info(
@@ -199,6 +200,9 @@ class NotificationService:
     async def force_check(self) -> list[TorrentInfo]:
         """
         Force an immediate check for completed downloads.
+
+        Returns newly completed torrents. Does NOT send notifications --
+        caller must handle notification delivery.
 
         Returns:
             List of newly completed torrents.

@@ -86,12 +86,7 @@ class SearchResult(BaseModel):
         """Return human-readable size."""
         if self.size == 0:
             return "N/A"
-        size = float(self.size)
-        for unit in ["B", "KB", "MB", "GB", "TB"]:
-            if abs(size) < 1024.0:
-                return f"{size:.1f} {unit}"
-            size /= 1024.0
-        return f"{size:.1f} PB"
+        return format_bytes(self.size)
 
     def get_size_gb(self) -> float:
         """Get size in gigabytes."""
@@ -172,12 +167,7 @@ class RootFolder(BaseModel):
         """Return human-readable free space."""
         if self.free_space is None:
             return "N/A"
-        size = self.free_space
-        for unit in ["B", "KB", "MB", "GB", "TB"]:
-            if abs(size) < 1024.0:
-                return f"{size:.1f} {unit}"
-            size /= 1024.0
-        return f"{size:.1f} PB"
+        return format_bytes(self.free_space)
 
 
 class UserPreferences(BaseModel):
@@ -229,7 +219,7 @@ class SearchSession(BaseModel):
     # For series - season/episode selection
     selected_season: Optional[int] = None
     selected_episodes: list[int] = Field(default_factory=list)
-    monitor_type: str = "all"  # all, future, missing, existing, pilot, firstSeason, latestSeason, none
+    monitor_type: Literal["all", "future", "missing", "existing", "pilot", "firstSeason", "latestSeason", "none"] = "all"
 
 
 class ActionLog(BaseModel):
