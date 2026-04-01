@@ -84,7 +84,7 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
 
     except Exception as e:
         logger.error("Failed to get Emby status", error=str(e))
-        error_text = f"❌ Ошибка: {str(e)}"
+        error_text = "❌ Ошибка получения статуса Emby"
         if edit and is_callback:
             try:
                 await message_or_callback.message.edit_text(error_text)
@@ -134,7 +134,7 @@ async def handle_scan_all(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to scan all libraries", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data == CallbackData.EMBY_SCAN_MOVIES)
@@ -162,7 +162,7 @@ async def handle_scan_movies(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to scan movies library", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data == CallbackData.EMBY_SCAN_SERIES)
@@ -190,7 +190,7 @@ async def handle_scan_series(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to scan series library", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data == CallbackData.EMBY_RESTART)
@@ -209,8 +209,12 @@ async def handle_restart_prompt(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == CallbackData.EMBY_RESTART_CONFIRM)
-async def handle_restart_confirm(callback: CallbackQuery) -> None:
+async def handle_restart_confirm(callback: CallbackQuery, is_admin: bool = False) -> None:
     """Confirm and restart server."""
+    if not is_admin:
+        await callback.answer("Недостаточно прав для перезагрузки", show_alert=True)
+        return
+
     emby = await get_emby()
     if not emby:
         await callback.answer("Emby не настроен", show_alert=True)
@@ -234,7 +238,7 @@ async def handle_restart_confirm(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to restart server", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
         await show_emby_status(callback, edit=True)
 
 
@@ -254,8 +258,12 @@ async def handle_update_prompt(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == CallbackData.EMBY_UPDATE_CONFIRM)
-async def handle_update_confirm(callback: CallbackQuery) -> None:
+async def handle_update_confirm(callback: CallbackQuery, is_admin: bool = False) -> None:
     """Confirm and install update."""
+    if not is_admin:
+        await callback.answer("Недостаточно прав для обновления", show_alert=True)
+        return
+
     emby = await get_emby()
     if not emby:
         await callback.answer("Emby не настроен", show_alert=True)
@@ -280,5 +288,5 @@ async def handle_update_confirm(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to install update", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
         await show_emby_status(callback, edit=True)

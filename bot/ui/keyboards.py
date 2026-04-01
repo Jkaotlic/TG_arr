@@ -1,6 +1,5 @@
 """Inline keyboard builders for Telegram bot."""
 
-from typing import Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
@@ -39,7 +38,6 @@ class CallbackData:
     ADD_SERIES = "add_series:"  # add_series:tmdb_id
 
     # Confirmation
-    CONFIRM_ADD = "confirm_add"
     CONFIRM_GRAB = "confirm_grab"
     FORCE_GRAB = "force_grab"  # Force download via qBittorrent
 
@@ -51,12 +49,6 @@ class CallbackData:
     SET_SONARR_FOLDER = "set:sf:"  # set:sf:1
     SET_RESOLUTION = "set:res:"  # set:res:1080p
     SET_AUTO_GRAB = "set:ag:"  # set:ag:1 or set:ag:0
-
-    # Monitor type for series
-    MONITOR = "mon:"  # mon:all, mon:future, etc.
-
-    # Season selection
-    SEASON = "season:"  # season:1
 
     # qBittorrent / Downloads
     TORRENT = "t:"  # t:hash - select torrent

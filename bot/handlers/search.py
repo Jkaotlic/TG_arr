@@ -13,7 +13,6 @@ from bot.models import (
     ActionType,
     ContentType,
     MovieInfo,
-    SearchResult,
     SearchSession,
     SeriesInfo,
     User,
@@ -244,7 +243,7 @@ async def process_search(
 
     except Exception as e:
         log.error("Search failed", error=str(e))
-        await message.answer(Formatters.format_error(str(e)))
+        await message.answer(Formatters.format_error("Поиск временно недоступен"))
 
 
 @router.callback_query(F.data.startswith(CallbackData.TYPE_MOVIE) | F.data.startswith(CallbackData.TYPE_SERIES))
@@ -619,7 +618,7 @@ async def _execute_grab(
 
     except Exception as e:
         logger.error("Grab failed", error=str(e))
-        await message.edit_text(Formatters.format_error(str(e)))
+        await message.edit_text(Formatters.format_error("Операция временно недоступна"))
         await db.delete_session(user_id)
 
 

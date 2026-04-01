@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, Message
 from bot.clients.registry import get_prowlarr, get_radarr, get_sonarr, get_qbittorrent
 from bot.config import get_settings
 from bot.db import Database
-from bot.models import User, UserPreferences
+from bot.models import User
 from bot.services.add_service import AddService
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -59,7 +59,7 @@ async def cmd_settings(message: Message, db_user: User) -> None:
 
     except Exception as e:
         logger.error("Failed to load settings", error=str(e))
-        await message.answer(Formatters.format_error(f"Ошибка загрузки настроек: {str(e)}"))
+        await message.answer(Formatters.format_error("Ошибка загрузки настроек"))
 
 
 @router.callback_query(F.data == CallbackData.SETTINGS)

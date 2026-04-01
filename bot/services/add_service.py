@@ -1,8 +1,9 @@
 """Service for adding content to Radarr/Sonarr."""
 
 import ipaddress
+import socket
 import urllib.parse
-from typing import Any, Optional
+from typing import Optional
 
 import structlog
 
@@ -42,7 +43,15 @@ def _validate_download_url(url: str) -> bool:
             if addr.is_private or addr.is_loopback or addr.is_link_local:
                 return False
         except ValueError:
-            pass  # hostname, not IP — acceptable
+            pass  # hostname, not IP — check via DNS below
+        # DNS rebinding protection: resolve hostname and check resolved IP
+        try:
+            resolved = socket.gethostbyname(parsed.hostname)
+            addr = ipaddress.ip_address(resolved)
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast:
+                return False
+        except socket.gaierror:
+            return False  # Cannot resolve — reject
     return True
 
 
@@ -252,7 +261,7 @@ class AddService:
                 if not added:
                     action.success = False
                     action.error_message = add_action.error_message or "Failed to add movie"
-                    return False, action, f"Не удалось добавить фильм: {action.error_message}"
+                    return False, action, "Не удалось добавить фильм"
                 existing = added
 
             # Try to push the release
@@ -312,7 +321,7 @@ class AddService:
                         log.error("qBittorrent download failed", error=str(e))
                         action.success = False
                         action.error_message = f"qBittorrent fallback failed: {e}"
-                        return False, action, f"Ошибка qBittorrent: {e}"
+                        return False, action, "Ошибка загрузки через qBittorrent"
 
             # If rejected and no qBittorrent fallback available
             if release_rejected:
@@ -336,7 +345,7 @@ class AddService:
             log.error("Failed to grab release", error=str(e))
             action.success = False
             action.error_message = str(e)
-            return False, action, f"Error: {str(e)}"
+            return False, action, "Ошибка захвата релиза"
 
     async def grab_series_release(
         self,
@@ -378,6 +387,9 @@ class AddService:
             release_title=release.title,
         )
 
+        if not series.tvdb_id:
+            return False, action, "Сериал не найден в TVDB"
+
         try:
             # Ensure series is in Sonarr
             existing = await self.sonarr.get_series_by_tvdb(series.tvdb_id)
@@ -393,7 +405,7 @@ class AddService:
                 if not added:
                     action.success = False
                     action.error_message = add_action.error_message or "Failed to add series"
-                    return False, action, f"Не удалось добавить сериал: {action.error_message}"
+                    return False, action, "Не удалось добавить сериал"
                 existing = added
 
             # Try to push the release
@@ -453,7 +465,7 @@ class AddService:
                         log.error("qBittorrent download failed", error=str(e))
                         action.success = False
                         action.error_message = f"qBittorrent fallback failed: {e}"
-                        return False, action, f"Ошибка qBittorrent: {e}"
+                        return False, action, "Ошибка загрузки через qBittorrent"
 
             # If rejected and no qBittorrent fallback available
             if release_rejected:
@@ -483,5 +495,5 @@ class AddService:
             log.error("Failed to grab release", error=str(e))
             action.success = False
             action.error_message = str(e)
-            return False, action, f"Error: {str(e)}"
+            return False, action, "Ошибка захвата релиза"
 

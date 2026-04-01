@@ -5,8 +5,13 @@ from typing import Optional
 
 from bot.config import get_settings
 
-# Module-level lock to prevent race conditions in singleton creation
-_lock = asyncio.Lock()
+# Per-client locks to prevent race conditions in singleton creation
+_prowlarr_lock = asyncio.Lock()
+_radarr_lock = asyncio.Lock()
+_sonarr_lock = asyncio.Lock()
+_qbittorrent_lock = asyncio.Lock()
+_emby_lock = asyncio.Lock()
+_tmdb_lock = asyncio.Lock()
 
 # Singleton instances
 _prowlarr: Optional["ProwlarrClient"] = None
@@ -20,7 +25,7 @@ _tmdb: Optional["TMDbClient"] = None
 async def get_prowlarr() -> "ProwlarrClient":
     """Get or create Prowlarr client singleton."""
     global _prowlarr
-    async with _lock:
+    async with _prowlarr_lock:
         if _prowlarr is None:
             from bot.clients.prowlarr import ProwlarrClient
 
@@ -32,7 +37,7 @@ async def get_prowlarr() -> "ProwlarrClient":
 async def get_radarr() -> "RadarrClient":
     """Get or create Radarr client singleton."""
     global _radarr
-    async with _lock:
+    async with _radarr_lock:
         if _radarr is None:
             from bot.clients.radarr import RadarrClient
 
@@ -44,7 +49,7 @@ async def get_radarr() -> "RadarrClient":
 async def get_sonarr() -> "SonarrClient":
     """Get or create Sonarr client singleton."""
     global _sonarr
-    async with _lock:
+    async with _sonarr_lock:
         if _sonarr is None:
             from bot.clients.sonarr import SonarrClient
 
@@ -59,7 +64,7 @@ async def get_qbittorrent() -> Optional["QBittorrentClient"]:
     settings = get_settings()
     if not settings.qbittorrent_enabled:
         return None
-    async with _lock:
+    async with _qbittorrent_lock:
         if _qbittorrent is None:
             from bot.clients.qbittorrent import QBittorrentClient
 
@@ -78,7 +83,7 @@ async def get_emby() -> Optional["EmbyClient"]:
     settings = get_settings()
     if not settings.emby_enabled:
         return None
-    async with _lock:
+    async with _emby_lock:
         if _emby is None:
             from bot.clients.emby import EmbyClient
 
@@ -96,7 +101,7 @@ async def get_tmdb() -> Optional["TMDbClient"]:
     settings = get_settings()
     if not settings.tmdb_enabled:
         return None
-    async with _lock:
+    async with _tmdb_lock:
         if _tmdb is None:
             from bot.clients.tmdb import TMDbClient
 

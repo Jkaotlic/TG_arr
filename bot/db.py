@@ -43,7 +43,7 @@ class Database:
             if db_dir:
                 Path(db_dir).mkdir(parents=True, exist_ok=True)
 
-            self._connection = await aiosqlite.connect(self.db_path)
+            self._connection = await aiosqlite.connect(self.db_path, isolation_level=None)
             self._connection.row_factory = aiosqlite.Row
 
             await self._create_tables()
@@ -200,6 +200,9 @@ class Database:
                 (user_id, query, content_type.value, now),
             )
             search_id = cursor.lastrowid
+            if search_id is None:
+                await self.conn.rollback()
+                raise RuntimeError("Failed to insert search record")
 
             # Insert results
             results_json = json.dumps([r.model_dump(mode="json") for r in results])

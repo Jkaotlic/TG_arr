@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
 
 
 def _utcnow() -> datetime:
@@ -210,15 +210,12 @@ class SearchSession(BaseModel):
     user_id: int
     query: str
     content_type: ContentType
-    results: list[SearchResult] = Field(default_factory=list)
+    results: list[SearchResult] = Field(default_factory=list, max_length=500)
     current_page: int = 0
     selected_result: Optional[SearchResult] = None
     selected_content: Optional[ContentInfo] = None
     created_at: datetime = Field(default_factory=_utcnow)
 
-    # For series - season/episode selection
-    selected_season: Optional[int] = None
-    selected_episodes: list[int] = Field(default_factory=list)
     monitor_type: Literal["all", "future", "missing", "existing", "pilot", "firstSeason", "latestSeason", "none"] = "all"
 
 
@@ -380,10 +377,6 @@ class QBittorrentStatus(BaseModel):
     upload_speed: int = Field(default=0)
     download_limit: int = Field(default=0, description="0 = unlimited")
     upload_limit: int = Field(default=0, description="0 = unlimited")
-
-    # Session stats
-    total_downloaded: int = Field(default=0)
-    total_uploaded: int = Field(default=0)
 
     # Disk
     free_space: int = Field(default=0)

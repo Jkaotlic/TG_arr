@@ -81,8 +81,9 @@ class AuthMiddleware(BaseMiddleware):
             try:
                 await self.db.create_user(db_user)
                 logger.info("Created new user", user_id=user_id, role=db_user.role.value)
-            except Exception:
-                # Concurrent creation - re-fetch
+            except Exception as e:
+                # Concurrent creation conflict - re-fetch
+                logger.debug("User creation conflict, re-fetching", user_id=user_id, error=str(e))
                 db_user = await self.db.get_user(user_id)
                 if db_user is None:
                     raise
@@ -118,7 +119,7 @@ class LoggingMiddleware(BaseMiddleware):
             log = log.bind(
                 event_type="callback",
                 user_id=event.from_user.id if event.from_user else None,
-                data=event.data,
+                data=event.data[:20] if event.data else None,
             )
 
         log.debug("Incoming event")
@@ -176,9 +177,12 @@ class RateLimitMiddleware(BaseMiddleware):
 
         # Record request
         recent.append(now)
-        if recent:
-            self._user_requests[user_id] = recent
-        elif user_id in self._user_requests:
-            del self._user_requests[user_id]
+        self._user_requests[user_id] = recent
+
+        # Periodic cleanup: remove users with no recent requests
+        if len(self._user_requests) > 10000:
+            stale = [uid for uid, reqs in self._user_requests.items() if not reqs]
+            for uid in stale:
+                del self._user_requests[uid]
 
         return await handler(event, data)

@@ -161,12 +161,17 @@ class QBittorrentClient:
                 except (QBittorrentAuthError, QBittorrentError):
                     raise  # Don't retry if re-auth failed
                 # Only re-issue if re-auth succeeded
-                response = await client.request(
-                    method=method,
-                    url=endpoint,
-                    data=data,
-                    params=params,
-                )
+                try:
+                    response = await client.request(
+                        method=method,
+                        url=endpoint,
+                        data=data,
+                        params=params,
+                    )
+                except httpx.TimeoutException:
+                    raise QBittorrentError("Таймаут соединения с qBittorrent")
+                except httpx.ConnectError:
+                    raise QBittorrentError(f"Не удалось подключиться к qBittorrent ({self.base_url})")
 
             if response.status_code >= 400:
                 raise QBittorrentError(
@@ -235,8 +240,6 @@ class QBittorrentClient:
                 upload_speed=transfer.get("up_info_speed", 0),
                 download_limit=transfer.get("dl_rate_limit", 0),
                 upload_limit=transfer.get("up_rate_limit", 0),
-                total_downloaded=transfer.get("dl_info_data", 0),
-                total_uploaded=transfer.get("up_info_data", 0),
                 free_space=server_state.get("free_space_on_disk", 0),
                 active_downloads=active_downloads,
                 active_uploads=active_uploads,
