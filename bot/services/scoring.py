@@ -39,7 +39,6 @@ class ScoringWeights:
     hdr_dolby_vision: int = 15
     hdr_hdr10plus: int = 12
     hdr_hdr10: int = 10
-    hdr_hdr: int = 8
 
     # Audio bonuses
     audio_atmos: int = 10

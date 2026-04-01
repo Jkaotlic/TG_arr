@@ -2,12 +2,11 @@
 
 from html import escape as html_escape
 
-from aiogram import F, Router
+from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 from bot.db import Database
-from bot.ui.formatters import Formatters
 from bot.ui.keyboards import Keyboards
 
 router = Router()

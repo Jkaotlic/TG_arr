@@ -1,7 +1,6 @@
 """Status command handler."""
 
 import asyncio
-import time
 
 import structlog
 from aiogram import F, Router
@@ -65,7 +64,7 @@ async def cmd_status(message: Message) -> None:
 
     except Exception as e:
         logger.error("Status check failed", error=str(e))
-        await status_msg.edit_text(Formatters.format_error(f"Status check failed: {str(e)}"))
+        await status_msg.edit_text(Formatters.format_error("Проверка статуса не удалась"))
 
 
 async def check_service(client, name: str) -> SystemStatus:
@@ -90,24 +89,12 @@ async def check_service(client, name: str) -> SystemStatus:
 async def check_qbittorrent(client: QBittorrentClient) -> SystemStatus:
     """Check qBittorrent status."""
     try:
-        start = time.monotonic()
-        logged_in = await client.login()
-
-        if not logged_in:
-            return SystemStatus(
-                service="qBittorrent",
-                available=False,
-                error="Login failed",
-            )
-
-        status = await client.get_status()
-        response_time = (time.monotonic() - start) * 1000
-
+        available, version, elapsed = await client.check_connection()
         return SystemStatus(
             service="qBittorrent",
-            available=True,
-            version=status.version,
-            response_time_ms=round(response_time, 1),
+            available=available,
+            version=version,
+            response_time_ms=elapsed,
         )
 
     except Exception as e:

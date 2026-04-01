@@ -1,6 +1,7 @@
 """Base HTTP client with retry logic and error handling."""
 
 import asyncio
+import json
 import time
 from typing import Any, Optional
 
@@ -235,7 +236,10 @@ class BaseAPIClient:
                 raise APIError(f"Ошибка {self.service_name}: {response.status_code}", status_code=response.status_code)
             if response.status_code == 204:
                 return {}
-            return response.json()
+            try:
+                return response.json()
+            except (json.JSONDecodeError, ValueError):
+                return {"raw": response.text}
         except httpx.TimeoutException:
             raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}")
         except httpx.ConnectError:

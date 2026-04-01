@@ -38,7 +38,6 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       AUTO_GRAB_SCORE_THRESHOLD: ${AUTO_GRAB_SCORE_THRESHOLD:-80}
       HTTP_TIMEOUT: ${HTTP_TIMEOUT:-30.0}
-      HTTP_MAX_RETRIES: ${HTTP_MAX_RETRIES:-3}
       RESULTS_PER_PAGE: ${RESULTS_PER_PAGE:-5}
     volumes:
       - bot-data:/app/data

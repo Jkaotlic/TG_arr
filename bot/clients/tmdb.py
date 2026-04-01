@@ -1,6 +1,6 @@
 """TMDb API client for trending/popular content."""
 
-from typing import Any, Optional
+from typing import Optional
 
 import httpx
 import structlog

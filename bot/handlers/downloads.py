@@ -75,10 +75,10 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
 
     except QBittorrentError as e:
         logger.error("qBittorrent error", error=str(e))
-        await message.answer(f"❌ Ошибка qBittorrent: {e.message}")
+        await message.answer("❌ Ошибка qBittorrent. Попробуйте позже.")
     except Exception as e:
         logger.error("Failed to get downloads", error=str(e))
-        await message.answer(f"❌ Ошибка: {str(e)}")
+        await message.answer("❌ Ошибка загрузки данных. Попробуйте позже.")
 
 
 @router.message(F.text == MENU_QSTATUS)
@@ -102,10 +102,10 @@ async def cmd_qstatus(message: Message, db_user: User) -> None:
 
     except QBittorrentError as e:
         logger.error("qBittorrent error", error=str(e))
-        await message.answer(f"❌ Ошибка qBittorrent: {e.message}")
+        await message.answer("❌ Ошибка qBittorrent. Попробуйте позже.")
     except Exception as e:
         logger.error("Failed to get qBittorrent status", error=str(e))
-        await message.answer(f"❌ Ошибка: {str(e)}")
+        await message.answer("❌ Ошибка получения статуса. Попробуйте позже.")
 
 
 @router.message(Command("pause"))
@@ -204,7 +204,7 @@ async def handle_refresh(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to refresh", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("t_page:"))
@@ -246,7 +246,7 @@ async def handle_page(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Pagination error", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("t:"))
@@ -282,7 +282,7 @@ async def handle_torrent_details(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to get torrent details", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("t_pause:"))
@@ -311,7 +311,7 @@ async def handle_pause_torrent(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to pause", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("t_resume:"))
@@ -340,12 +340,16 @@ async def handle_resume_torrent(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to resume", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("t_delete:"))
-async def handle_delete_torrent(callback: CallbackQuery) -> None:
+async def handle_delete_torrent(callback: CallbackQuery, is_admin: bool = False) -> None:
     """Delete a torrent (keep files)."""
+    if not is_admin:
+        await callback.answer("Недостаточно прав для удаления", show_alert=True)
+        return
+
     if not callback.data or not callback.message:
         return
 
@@ -369,12 +373,16 @@ async def handle_delete_torrent(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to delete", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("t_delf:"))
-async def handle_delete_with_files(callback: CallbackQuery) -> None:
+async def handle_delete_with_files(callback: CallbackQuery, is_admin: bool = False) -> None:
     """Delete a torrent with files."""
+    if not is_admin:
+        await callback.answer("Недостаточно прав для удаления", show_alert=True)
+        return
+
     if not callback.data or not callback.message:
         return
 
@@ -398,7 +406,7 @@ async def handle_delete_with_files(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to delete", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("t_recheck:"))
@@ -424,7 +432,7 @@ async def handle_recheck(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to recheck", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("t_prio:"))
@@ -461,7 +469,7 @@ async def handle_priority(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to set priority", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data == "t_pause_all")
@@ -478,7 +486,7 @@ async def handle_pause_all(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to pause all", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data == "t_resume_all")
@@ -495,7 +503,7 @@ async def handle_resume_all(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to resume all", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data == "t_back")
@@ -572,7 +580,7 @@ async def handle_filter_select(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Filter error", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data == "speed_menu")
@@ -612,7 +620,7 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Speed menu error", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("speed:"))
@@ -647,4 +655,4 @@ async def handle_speed_set(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Speed set error", error=str(e))
-        await callback.answer(f"Ошибка: {str(e)[:50]}", show_alert=True)
+        await callback.answer("Ошибка операции", show_alert=True)
