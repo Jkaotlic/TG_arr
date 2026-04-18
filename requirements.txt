@@ -10,7 +10,8 @@ httpx==0.28.1
 tenacity==9.1.4
 
 # Configuration
-pydantic==2.13.2
+# pydantic 2.13.x blocked by aiogram 3.27.0 (pydantic<2.13). Keep 2.12.x.
+pydantic==2.12.5
 pydantic-settings==2.13.1
 
 # Database
