@@ -9,17 +9,21 @@ from bot.config import get_settings
 _prowlarr_lock = asyncio.Lock()
 _radarr_lock = asyncio.Lock()
 _sonarr_lock = asyncio.Lock()
+_lidarr_lock = asyncio.Lock()
 _qbittorrent_lock = asyncio.Lock()
 _emby_lock = asyncio.Lock()
 _tmdb_lock = asyncio.Lock()
+_deezer_lock = asyncio.Lock()
 
 # Singleton instances
 _prowlarr: Optional["ProwlarrClient"] = None
 _radarr: Optional["RadarrClient"] = None
 _sonarr: Optional["SonarrClient"] = None
+_lidarr: Optional["LidarrClient"] = None
 _qbittorrent: Optional["QBittorrentClient"] = None
 _emby: Optional["EmbyClient"] = None
 _tmdb: Optional["TMDbClient"] = None
+_deezer: Optional["DeezerClient"] = None
 
 
 async def get_prowlarr() -> "ProwlarrClient":
@@ -56,6 +60,34 @@ async def get_sonarr() -> "SonarrClient":
             settings = get_settings()
             _sonarr = SonarrClient(settings.sonarr_url, settings.sonarr_api_key)
     return _sonarr
+
+
+async def get_lidarr() -> Optional["LidarrClient"]:
+    """Get or create Lidarr client singleton (if configured)."""
+    global _lidarr
+    settings = get_settings()
+    if not settings.lidarr_enabled:
+        return None
+    async with _lidarr_lock:
+        if _lidarr is None:
+            from bot.clients.lidarr import LidarrClient
+
+            _lidarr = LidarrClient(settings.lidarr_url, settings.lidarr_api_key)
+    return _lidarr
+
+
+async def get_deezer() -> Optional["DeezerClient"]:
+    """Get or create Deezer client singleton (if enabled)."""
+    global _deezer
+    settings = get_settings()
+    if not settings.deezer_enabled:
+        return None
+    async with _deezer_lock:
+        if _deezer is None:
+            from bot.clients.deezer import DeezerClient
+
+            _deezer = DeezerClient()
+    return _deezer
 
 
 async def get_qbittorrent() -> Optional["QBittorrentClient"]:
@@ -115,7 +147,7 @@ async def get_tmdb() -> Optional["TMDbClient"]:
 
 async def close_all() -> None:
     """Close all client connections. Call on shutdown."""
-    global _prowlarr, _radarr, _sonarr, _qbittorrent, _emby, _tmdb
+    global _prowlarr, _radarr, _sonarr, _lidarr, _qbittorrent, _emby, _tmdb, _deezer
 
     if _prowlarr:
         await _prowlarr.close()
@@ -126,6 +158,9 @@ async def close_all() -> None:
     if _sonarr:
         await _sonarr.close()
         _sonarr = None
+    if _lidarr:
+        await _lidarr.close()
+        _lidarr = None
     if _qbittorrent:
         await _qbittorrent.close()
         _qbittorrent = None
@@ -135,3 +170,6 @@ async def close_all() -> None:
     if _tmdb:
         await _tmdb.close()
         _tmdb = None
+    if _deezer:
+        await _deezer.close()
+        _deezer = None

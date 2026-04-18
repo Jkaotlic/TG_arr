@@ -1,5 +1,6 @@
 """Emby Media Server handler."""
 
+import html
 import structlog
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -72,7 +73,7 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
             )
 
     except EmbyError as e:
-        error_text = f"❌ Ошибка Emby: {e.message}"
+        error_text = f"❌ Ошибка Emby: {html.escape(str(e.message))}"
         if edit and is_callback:
             try:
                 await message_or_callback.message.edit_text(error_text)
@@ -130,7 +131,7 @@ async def handle_scan_all(callback: CallbackQuery) -> None:
         await show_emby_status(callback, edit=True)
 
     except EmbyError as e:
-        await callback.answer(f"Ошибка: {e.message}", show_alert=True)
+        await callback.answer(f"Ошибка: {html.escape(str(e.message))}", show_alert=True)
 
     except Exception as e:
         logger.error("Failed to scan all libraries", error=str(e))
@@ -158,7 +159,7 @@ async def handle_scan_movies(callback: CallbackQuery) -> None:
         await show_emby_status(callback, edit=True)
 
     except EmbyError as e:
-        await callback.answer(f"Ошибка: {e.message}", show_alert=True)
+        await callback.answer(f"Ошибка: {html.escape(str(e.message))}", show_alert=True)
 
     except Exception as e:
         logger.error("Failed to scan movies library", error=str(e))
@@ -186,7 +187,7 @@ async def handle_scan_series(callback: CallbackQuery) -> None:
         await show_emby_status(callback, edit=True)
 
     except EmbyError as e:
-        await callback.answer(f"Ошибка: {e.message}", show_alert=True)
+        await callback.answer(f"Ошибка: {html.escape(str(e.message))}", show_alert=True)
 
     except Exception as e:
         logger.error("Failed to scan series library", error=str(e))
@@ -233,7 +234,7 @@ async def handle_restart_confirm(callback: CallbackQuery, is_admin: bool = False
         await callback.answer("Перезагрузка запущена")
 
     except EmbyError as e:
-        await callback.answer(f"Ошибка: {e.message}", show_alert=True)
+        await callback.answer(f"Ошибка: {html.escape(str(e.message))}", show_alert=True)
         await show_emby_status(callback, edit=True)
 
     except Exception as e:
@@ -283,7 +284,7 @@ async def handle_update_confirm(callback: CallbackQuery, is_admin: bool = False)
         await callback.answer("Обновление запущено")
 
     except EmbyError as e:
-        await callback.answer(f"Ошибка: {e.message}", show_alert=True)
+        await callback.answer(f"Ошибка: {html.escape(str(e.message))}", show_alert=True)
         await show_emby_status(callback, edit=True)
 
     except Exception as e:

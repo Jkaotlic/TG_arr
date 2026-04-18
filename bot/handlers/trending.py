@@ -39,7 +39,8 @@ async def handle_trending_menu(message: Message) -> None:
     """Show trending/popular content selection menu."""
     settings = get_settings()
 
-    if not settings.tmdb_enabled:
+    show_music = settings.deezer_enabled and settings.lidarr_enabled
+    if not settings.tmdb_enabled and not show_music:
         await message.answer(
             "❌ Топ контента недоступен.\n\n"
             "Для использования этой функции необходим TMDb API ключ.\n"
@@ -56,7 +57,7 @@ async def handle_trending_menu(message: Message) -> None:
     await message.answer(
         text,
         parse_mode="HTML",
-        reply_markup=Keyboards.trending_menu(),
+        reply_markup=Keyboards.trending_menu(show_music=show_music),
     )
 
 
@@ -168,7 +169,7 @@ async def handle_movie_from_trending(callback: CallbackQuery) -> None:
         return
 
     # Extract TMDB ID from callback data
-    tmdb_id_str = callback.data.replace(CallbackData.TRENDING_MOVIE, "")
+    tmdb_id_str = callback.data.removeprefix(CallbackData.TRENDING_MOVIE)
     try:
         tmdb_id = int(tmdb_id_str)
     except ValueError:
@@ -228,7 +229,7 @@ async def handle_series_from_trending(callback: CallbackQuery) -> None:
         return
 
     # Extract TMDB ID from callback data
-    series_id_str = callback.data.replace(CallbackData.TRENDING_SERIES_ITEM, "")
+    series_id_str = callback.data.removeprefix(CallbackData.TRENDING_SERIES_ITEM)
     try:
         series_id = int(series_id_str)
     except ValueError:
@@ -282,7 +283,7 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
         return
 
     # Extract TMDB ID from callback data
-    tmdb_id_str = callback.data.replace(CallbackData.ADD_MOVIE, "")
+    tmdb_id_str = callback.data.removeprefix(CallbackData.ADD_MOVIE)
     try:
         tmdb_id = int(tmdb_id_str)
     except ValueError:
@@ -368,7 +369,7 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
         return
 
     # Extract TMDB ID from callback data
-    tmdb_id_str = callback.data.replace(CallbackData.ADD_SERIES, "")
+    tmdb_id_str = callback.data.removeprefix(CallbackData.ADD_SERIES)
     try:
         tmdb_id = int(tmdb_id_str)
     except ValueError:

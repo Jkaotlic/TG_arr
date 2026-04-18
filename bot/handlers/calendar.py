@@ -8,7 +8,7 @@ import structlog
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
-from bot.clients.registry import get_radarr, get_sonarr
+from bot.clients.registry import get_lidarr, get_radarr, get_sonarr
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 
@@ -35,9 +35,11 @@ async def _fetch_and_send_calendar(
     """Fetch calendar data from Sonarr & Radarr and send/edit the message."""
     sonarr = await get_sonarr()
     radarr = await get_radarr()
+    lidarr = await get_lidarr()
 
     episodes: list[dict] = []
     movies: list[dict] = []
+    albums: list[dict] = []
     errors: list[str] = []
 
     try:
@@ -52,7 +54,14 @@ async def _fetch_and_send_calendar(
         logger.error("Radarr calendar error", error=str(e))
         errors.append(f"Radarr: {e}")
 
-    text = Formatters.format_calendar(episodes, movies, days=days)
+    if lidarr is not None:
+        try:
+            albums = await lidarr.get_calendar(days=days)
+        except Exception as e:
+            logger.error("Lidarr calendar error", error=str(e))
+            errors.append(f"Lidarr: {e}")
+
+    text = Formatters.format_calendar(episodes, movies, days=days, albums=albums)
     if errors:
         text += "\n\n⚠️ " + " | ".join(errors)
 

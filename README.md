@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-D7FF64?logo=ruff&logoColor=black)](https://docs.astral.sh/ruff/)
 
-**Полноценный Telegram-бот для поиска, скачивания и управления фильмами и сериалами через Prowlarr + Radarr + Sonarr с поддержкой qBittorrent, Emby и TMDb.**
+**Полноценный Telegram-бот для поиска, скачивания и управления фильмами, сериалами и музыкой через Prowlarr + Radarr + Sonarr + Lidarr с поддержкой qBittorrent, Emby, TMDb и Deezer.**
 
 [Возможности](#-возможности) &bull; [Быстрый старт](#-быстрый-старт) &bull; [Настройка](#-настройка) &bull; [Команды](#-команды) &bull; [Скоринг](#-система-скоринга)
 
@@ -23,9 +23,13 @@
 
 | | Функция | Описание |
 |---|---------|----------|
-| **Поиск** | Умный поиск | Автоматически определяет фильм или сериал по запросу |
+| **Поиск** | Умный поиск | Автоматически определяет фильм, сериал или музыку по запросу |
 | | Русские субтитры | Приоритизация релизов с RusSub, MVO, DVO, AVO |
 | | Качество в деталях | Разрешение, кодек, HDR, аудио, субтитры — всё видно |
+| **Музыка** | Поиск артистов | `/music <artist>` — поиск через MusicBrainz (Lidarr) |
+| | Добавление в Lidarr | Артист + все альбомы (мониторинг) |
+| | Календарь релизов | Грядущие альбомы в /calendar |
+| | Топ артистов | Deezer chart — популярные артисты недели |
 | **Скачивание** | One-click grab | Скачивание релиза одной кнопкой |
 | | qBittorrent fallback | Автообход профильных ограничений Radarr/Sonarr |
 | | Push release | Отправка релизов напрямую в *arr |
@@ -56,9 +60,11 @@ TG_arr
 │   │   ├── prowlarr.py            # Prowlarr API + парсинг качества
 │   │   ├── radarr.py              # Radarr API v3
 │   │   ├── sonarr.py              # Sonarr API v3
+│   │   ├── lidarr.py              # Lidarr API v1 (музыка)
 │   │   ├── qbittorrent.py         # qBittorrent Web API
 │   │   ├── emby.py                # Emby API
-│   │   ├── tmdb.py                # TMDb API (трендинг)
+│   │   ├── tmdb.py                # TMDb API (трендинг кино/ТВ)
+│   │   ├── deezer.py              # Deezer public API (трендинг музыки)
 │   │   └── registry.py            # Фабрика клиентов (singleton)
 │   ├── services/
 │   │   ├── search_service.py      # Оркестрация поиска
@@ -68,7 +74,8 @@ TG_arr
 │   ├── handlers/
 │   │   ├── start.py               # /start, /help, /cancel
 │   │   ├── search.py              # Поиск и граб
-│   │   ├── trending.py            # Популярное (TMDb)
+│   │   ├── music.py               # /music, добавление артистов в Lidarr
+│   │   ├── trending.py            # Популярное (TMDb + Deezer)
 │   │   ├── calendar.py            # Календарь релизов
 │   │   ├── downloads.py           # Активные загрузки
 │   │   ├── emby.py                # Emby-интеграция
@@ -138,7 +145,10 @@ nano .env  # Заполнить обязательные переменные
 | `QBITTORRENT_PASSWORD` | — | Пароль qBittorrent |
 | `EMBY_URL` | — | URL Emby Server |
 | `EMBY_API_KEY` | — | API-ключ Emby |
-| `TMDB_API_KEY` | — | API-ключ TMDb (для трендинга) |
+| `LIDARR_URL` | — | URL Lidarr (для музыки) |
+| `LIDARR_API_KEY` | — | API-ключ Lidarr |
+| `DEEZER_ENABLED` | `true` | Deezer public API для трендинга музыки |
+| `TMDB_API_KEY` | — | API-ключ TMDb (для трендинга кино/ТВ) |
 | `TMDB_LANGUAGE` | `ru-RU` | Язык TMDb-ответов |
 | `TIMEZONE` | `Europe/Moscow` | Часовой пояс |
 | `LOG_LEVEL` | `INFO` | Уровень логирования |
@@ -173,11 +183,12 @@ docker compose logs -f tg-arr-bot
 |---------|----------|
 | `/start` | Приветствие и главное меню |
 | `/help` | Список команд и справка |
-| `/search <запрос>` | Умный поиск (автоопределение) |
+| `/search <запрос>` | Умный поиск (автоопределение фильм/сериал/музыка) |
 | `/movie <запрос>` | Поиск фильмов |
 | `/series <запрос>` | Поиск сериалов |
+| `/music <артист>` | Поиск артиста в Lidarr |
 | `/settings` | Настройки профиля |
-| `/status` | Статус Prowlarr/Radarr/Sonarr |
+| `/status` | Статус Prowlarr/Radarr/Sonarr/Lidarr |
 | `/history` | История действий |
 | `/downloads` (`/dl`) | Показать список активных загрузок qBittorrent |
 | `/qstatus` | Статус qBittorrent (скорость, активные загрузки) |

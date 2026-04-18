@@ -9,6 +9,8 @@ from typing import Optional
 
 from bot.models import (
     ActionLog,
+    AlbumInfo,
+    ArtistInfo,
     ContentType,
     MovieInfo,
     QBittorrentStatus,
@@ -234,6 +236,85 @@ class Formatters:
         if series.sonarr_id:
             lines.append("\n✅ В библиотеке")
 
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_artist_info(artist: ArtistInfo, compact: bool = False) -> str:
+        """Format artist information for display."""
+        name_line = f"🎵 <b>{_e(artist.name)}</b>"
+        if artist.disambiguation:
+            name_line += f" <i>[{_e(artist.disambiguation)}]</i>"
+
+        if compact:
+            return name_line
+
+        lines = [name_line]
+
+        if artist.artist_type:
+            lines.append(f"🧑 Тип: {_e(artist.artist_type)}")
+        if artist.status:
+            status_emoji = "🟢" if artist.status.lower() == "active" else "🔴"
+            lines.append(f"{status_emoji} Статус: {_e(artist.status)}")
+        if artist.genres:
+            lines.append(f"🎭 Жанры: {_e(', '.join(artist.genres[:5]))}")
+        if artist.album_count:
+            lines.append(f"💿 Альбомов: {artist.album_count} | Треков: {artist.track_count}")
+        if artist.overview:
+            overview = artist.overview[:300]
+            if len(artist.overview) > 300:
+                overview += "..."
+            lines.append(f"\n📝 {_e(overview)}")
+
+        if artist.lidarr_id:
+            lines.append("\n✅ В библиотеке")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_album_info(album: AlbumInfo, compact: bool = False) -> str:
+        """Format album information."""
+        artist_str = f" — {_e(album.artist_name)}" if album.artist_name else ""
+        year_str = f" ({album.year})" if album.year else ""
+        header = f"💿 <b>{_e(album.title)}</b>{artist_str}{year_str}"
+
+        if compact:
+            return header
+
+        lines = [header]
+        if album.album_type:
+            lines.append(f"📂 Тип: {_e(album.album_type)}")
+        if album.track_count:
+            duration_min = album.duration_ms // 60000
+            if duration_min:
+                lines.append(f"🎵 Треков: {album.track_count} | ⏱ {duration_min} мин")
+            else:
+                lines.append(f"🎵 Треков: {album.track_count}")
+        if album.genres:
+            lines.append(f"🎭 Жанры: {_e(', '.join(album.genres[:5]))}")
+        if album.overview:
+            overview = album.overview[:300]
+            if len(album.overview) > 300:
+                overview += "..."
+            lines.append(f"\n📝 {_e(overview)}")
+
+        if album.has_file:
+            lines.append("\n✅ Скачан")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_trending_artists(artists: list[dict]) -> str:
+        """Format trending artists list (from Deezer)."""
+        lines = [
+            "🎵 <b>Топ популярных артистов</b>\n",
+            "<i>По данным Deezer</i>\n",
+        ]
+        for i, a in enumerate(artists[:10], 1):
+            name = _e(a.get("name", "Unknown"))
+            fans = a.get("fans")
+            fans_str = f" 👥 {fans:,}" if isinstance(fans, int) and fans > 0 else ""
+            lines.append(f"{i}. <b>{name}</b>{fans_str}")
+        lines.append("\n💡 Нажмите на артиста чтобы посмотреть и добавить в Lidarr")
         return "\n".join(lines)
 
     @staticmethod
@@ -775,11 +856,17 @@ class Formatters:
     # =========================================================================
 
     @staticmethod
-    def format_calendar(episodes: list[dict], movies: list[dict], days: int = 7) -> str:
-        """Format combined calendar for Sonarr episodes and Radarr movies."""
+    def format_calendar(
+        episodes: list[dict],
+        movies: list[dict],
+        days: int = 7,
+        albums: Optional[list[dict]] = None,
+    ) -> str:
+        """Format combined calendar for Sonarr/Radarr/Lidarr."""
+        albums = albums or []
         lines = [f"📅 <b>Календарь релизов</b> ({days} дн.)\n"]
 
-        if not episodes and not movies:
+        if not episodes and not movies and not albums:
             lines.append("Нет предстоящих релизов.")
             return "\n".join(lines)
 
@@ -838,6 +925,26 @@ class Formatters:
                     type_str = f" [{', '.join(release_types)}]" if release_types else ""
 
                     lines.append(f"  {status} <b>{title}</b>{year_str}{runtime_str}{type_str}")
+
+        if albums:
+            if episodes or movies:
+                lines.append("")
+            lines.append(f"🎵 <b>Музыка ({len(albums)})</b>")
+            by_date: dict[str, list[dict]] = {}
+            for a in albums:
+                date_key = Formatters._extract_date_key(a.get("release_date", ""))
+                by_date.setdefault(date_key, []).append(a)
+
+            for date_key in sorted(by_date.keys()):
+                date_header = Formatters._format_date_header(date_key, today)
+                lines.append(f"\n  📆 <b>{date_header}</b>")
+                for a in by_date[date_key]:
+                    artist = _e(a.get("artist_name", "?"))
+                    title = _e(a.get("title", "?"))
+                    album_type = a.get("album_type", "")
+                    type_str = f" [{_e(album_type)}]" if album_type else ""
+                    status = "✅" if a.get("has_file") else "⏳"
+                    lines.append(f"  {status} <b>{artist}</b> — {title}{type_str}")
 
         result = "\n".join(lines)
 

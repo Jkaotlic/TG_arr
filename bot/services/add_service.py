@@ -1,5 +1,6 @@
 """Service for adding content to Radarr/Sonarr."""
 
+import asyncio
 import ipaddress
 import socket
 import urllib.parse
@@ -8,6 +9,7 @@ from typing import Optional
 import structlog
 
 from bot.clients.base import APIError
+from bot.clients.lidarr import LidarrClient
 from bot.clients.prowlarr import ProwlarrClient
 from bot.clients.qbittorrent import QBittorrentClient, QBittorrentError
 from bot.clients.radarr import RadarrClient
@@ -15,7 +17,9 @@ from bot.clients.sonarr import SonarrClient
 from bot.models import (
     ActionLog,
     ActionType,
+    ArtistInfo,
     ContentType,
+    MetadataProfile,
     MovieInfo,
     QualityProfile,
     RootFolder,
@@ -27,9 +31,50 @@ logger = structlog.get_logger()
 
 _ALLOWED_SCHEMES = {"http", "https", "magnet"}
 
+# SEC-04: parameters in indexer download URLs commonly contain private trackers' credentials
+_SENSITIVE_QUERY_PARAMS = {"apikey", "api_key", "token", "passkey", "auth", "authkey"}
 
-def _validate_download_url(url: str) -> bool:
-    """Validate URL is safe for download (not SSRF)."""
+
+def _mask_url(url: str, max_len: int = 100) -> str:
+    """Return a safe representation of a download URL for logs (strips secrets)."""
+    if not url:
+        return ""
+    if url.startswith("magnet:"):
+        return url[:max_len]
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.query:
+        base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        return base[:max_len]
+    parts = []
+    for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+        if k.lower() in _SENSITIVE_QUERY_PARAMS:
+            parts.append(f"{k}=***")
+        else:
+            parts.append(f"{k}={v}")
+    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{'&'.join(parts)}"
+    return base[:max_len]
+
+
+def _is_internal_ip(addr: ipaddress._BaseAddress) -> bool:
+    """Classify any non-public IP (private/loopback/link-local/reserved/multicast)."""
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+async def _validate_download_url(url: str) -> bool:
+    """
+    Validate URL is safe for download (not SSRF).
+
+    Async to avoid blocking the event loop on DNS (SEC-11) and to inspect every
+    A/AAAA record returned by getaddrinfo so a hostname with both public and
+    private addresses is rejected (SEC-01).
+    """
     if not url:
         return False
     parsed = urllib.parse.urlparse(url)
@@ -37,21 +82,26 @@ def _validate_download_url(url: str) -> bool:
         return False
     if parsed.scheme == "magnet":
         return url.startswith("magnet:?xt=urn:btih:")
-    if parsed.hostname:
+    if not parsed.hostname:
+        return False
+    try:
+        addr = ipaddress.ip_address(parsed.hostname)
+        return not _is_internal_ip(addr)
+    except ValueError:
+        pass  # hostname, resolve below
+    try:
+        infos = await asyncio.to_thread(socket.getaddrinfo, parsed.hostname, None)
+    except socket.gaierror:
+        return False
+    for family, _t, _p, _c, sockaddr in infos:
+        if family not in (socket.AF_INET, socket.AF_INET6):
+            continue
         try:
-            addr = ipaddress.ip_address(parsed.hostname)
-            if addr.is_private or addr.is_loopback or addr.is_link_local:
-                return False
+            addr = ipaddress.ip_address(sockaddr[0])
         except ValueError:
-            pass  # hostname, not IP — check via DNS below
-        # DNS rebinding protection: resolve hostname and check resolved IP
-        try:
-            resolved = socket.gethostbyname(parsed.hostname)
-            addr = ipaddress.ip_address(resolved)
-            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved or addr.is_multicast:
-                return False
-        except socket.gaierror:
-            return False  # Cannot resolve — reject
+            continue
+        if _is_internal_ip(addr):
+            return False
     return True
 
 
@@ -64,10 +114,12 @@ class AddService:
         radarr: RadarrClient,
         sonarr: SonarrClient,
         qbittorrent: Optional[QBittorrentClient] = None,
+        lidarr: Optional[LidarrClient] = None,
     ):
         self.prowlarr = prowlarr
         self.radarr = radarr
         self.sonarr = sonarr
+        self.lidarr = lidarr
         self.qbittorrent = qbittorrent
 
     async def get_radarr_profiles(self) -> list[QualityProfile]:
@@ -85,6 +137,24 @@ class AddService:
     async def get_sonarr_root_folders(self) -> list[RootFolder]:
         """Get Sonarr root folders."""
         return await self.sonarr.get_root_folders()
+
+    async def get_lidarr_profiles(self) -> list[QualityProfile]:
+        """Get Lidarr quality profiles (empty list if Lidarr is not configured)."""
+        if self.lidarr is None:
+            return []
+        return await self.lidarr.get_quality_profiles()
+
+    async def get_lidarr_metadata_profiles(self) -> list[MetadataProfile]:
+        """Get Lidarr metadata profiles (empty list if Lidarr is not configured)."""
+        if self.lidarr is None:
+            return []
+        return await self.lidarr.get_metadata_profiles()
+
+    async def get_lidarr_root_folders(self) -> list[RootFolder]:
+        """Get Lidarr root folders (empty list if Lidarr is not configured)."""
+        if self.lidarr is None:
+            return []
+        return await self.lidarr.get_root_folders()
 
     async def add_movie(
         self,
@@ -269,7 +339,7 @@ class AddService:
             rejections = []
             if release.download_url:
                 try:
-                    log.info("Attempting push_release", download_url=release.download_url[:100])
+                    log.info("Attempting push_release", download_url=_mask_url(release.download_url))
                     result = await self.radarr.push_release(
                         title=release.title,
                         download_url=release.download_url,
@@ -303,7 +373,7 @@ class AddService:
             if (release_rejected or force_download) and self.qbittorrent:
                 download_url = release.download_url or release.magnet_url
                 if download_url:
-                    if not _validate_download_url(download_url):
+                    if not await _validate_download_url(download_url):
                         raise ValueError("Небезопасный URL для скачивания")
                     try:
                         success = await self.qbittorrent.add_torrent_url(
@@ -315,7 +385,7 @@ class AddService:
                             log.info("Downloaded via qBittorrent (bypassed profile rejection)")
                             return True, action, "Загружено через qBittorrent"
                         else:
-                            log.error("qBittorrent rejected torrent", download_url=download_url[:100])
+                            log.error("qBittorrent rejected torrent", download_url=_mask_url(download_url))
                             raise QBittorrentError("Failed to add torrent to qBittorrent")
                     except Exception as e:
                         log.error("qBittorrent download failed", error=str(e))
@@ -413,7 +483,7 @@ class AddService:
             rejections = []
             if release.download_url:
                 try:
-                    log.info("Attempting push_release", download_url=release.download_url[:100])
+                    log.info("Attempting push_release", download_url=_mask_url(release.download_url))
                     result = await self.sonarr.push_release(
                         title=release.title,
                         download_url=release.download_url,
@@ -447,7 +517,7 @@ class AddService:
             if (release_rejected or force_download) and self.qbittorrent:
                 download_url = release.download_url or release.magnet_url
                 if download_url:
-                    if not _validate_download_url(download_url):
+                    if not await _validate_download_url(download_url):
                         raise ValueError("Небезопасный URL для скачивания")
                     try:
                         success = await self.qbittorrent.add_torrent_url(
@@ -459,7 +529,7 @@ class AddService:
                             log.info("Downloaded via qBittorrent (bypassed profile rejection)")
                             return True, action, "Загружено через qBittorrent"
                         else:
-                            log.error("qBittorrent rejected torrent", download_url=download_url[:100])
+                            log.error("qBittorrent rejected torrent", download_url=_mask_url(download_url))
                             raise QBittorrentError("Failed to add torrent to qBittorrent")
                     except Exception as e:
                         log.error("qBittorrent download failed", error=str(e))
@@ -493,6 +563,186 @@ class AddService:
 
         except Exception as e:
             log.error("Failed to grab release", error=str(e))
+            action.success = False
+            action.error_message = str(e)
+            return False, action, "Ошибка захвата релиза"
+
+    async def add_artist(
+        self,
+        artist: ArtistInfo,
+        quality_profile_id: int,
+        metadata_profile_id: int,
+        root_folder_path: str,
+        monitor: str = "all",
+        search_for_missing: bool = True,
+        tags: Optional[list[int]] = None,
+    ) -> tuple[Optional[ArtistInfo], ActionLog]:
+        """Add an artist to Lidarr."""
+        log = logger.bind(name=artist.name, mb_id=artist.mb_id)
+        log.info("Adding artist to Lidarr")
+
+        action = ActionLog(
+            user_id=0,
+            action_type=ActionType.ADD,
+            content_type=ContentType.MUSIC,
+            content_title=artist.name,
+            content_id=artist.mb_id,
+        )
+
+        if self.lidarr is None:
+            action.success = False
+            action.error_message = "Lidarr не настроен"
+            return None, action
+
+        try:
+            existing = await self.lidarr.get_artist_by_mbid(artist.mb_id)
+            if existing and existing.lidarr_id:
+                log.info("Artist already exists", lidarr_id=existing.lidarr_id)
+                action.success = True
+                return existing, action
+
+            added = await self.lidarr.add_artist(
+                artist=artist,
+                quality_profile_id=quality_profile_id,
+                metadata_profile_id=metadata_profile_id,
+                root_folder_path=root_folder_path,
+                monitor=monitor,
+                search_for_missing=search_for_missing,
+                tags=tags,
+            )
+
+            action.success = True
+            log.info("Artist added successfully", lidarr_id=added.lidarr_id)
+            return added, action
+
+        except Exception as e:
+            log.error("Failed to add artist", error=str(e))
+            action.success = False
+            action.error_message = str(e)
+            return None, action
+
+    async def grab_music_release(
+        self,
+        artist: ArtistInfo,
+        release: SearchResult,
+        quality_profile_id: int,
+        metadata_profile_id: int,
+        root_folder_path: str,
+        monitor: str = "all",
+        force_download: bool = False,
+    ) -> tuple[bool, ActionLog, str]:
+        """
+        Grab a specific release for a music artist.
+
+        Ensures the artist exists in Lidarr, then tries push/grab, and falls back
+        to qBittorrent (category="music") when Lidarr rejects the release.
+        """
+        log = logger.bind(name=artist.name, release_title=release.title, indexer=release.indexer)
+        log.info("Grabbing music release")
+
+        action = ActionLog(
+            user_id=0,
+            action_type=ActionType.GRAB,
+            content_type=ContentType.MUSIC,
+            content_title=artist.name,
+            content_id=artist.mb_id,
+            release_title=release.title,
+        )
+
+        if self.lidarr is None:
+            action.success = False
+            action.error_message = "Lidarr не настроен"
+            return False, action, "Lidarr не настроен"
+
+        try:
+            existing = await self.lidarr.get_artist_by_mbid(artist.mb_id)
+            if not existing or not existing.lidarr_id:
+                log.info("Artist not in library, adding first")
+                added, add_action = await self.add_artist(
+                    artist=artist,
+                    quality_profile_id=quality_profile_id,
+                    metadata_profile_id=metadata_profile_id,
+                    root_folder_path=root_folder_path,
+                    monitor=monitor,
+                    search_for_missing=False,
+                )
+                if not added:
+                    action.success = False
+                    action.error_message = add_action.error_message or "Failed to add artist"
+                    return False, action, "Не удалось добавить артиста"
+                existing = added
+
+            release_rejected = False
+            rejections: list = []
+            if release.download_url:
+                try:
+                    log.info("Attempting push_release", download_url=_mask_url(release.download_url))
+                    result = await self.lidarr.push_release(
+                        title=release.title,
+                        download_url=release.download_url,
+                        protocol=release.protocol,
+                        publish_date=release.publish_date.isoformat() if release.publish_date else None,
+                    )
+                    log.info("Push release result", result=result)
+                    if result and result.get("approved") is True:
+                        action.success = True
+                        log.info("Release pushed successfully")
+                        return True, action, "Релиз отправлен на скачивание"
+                    rejections = result.get("rejections", []) if result else []
+                    release_rejected = True
+                    log.warning("Release was not approved", reason=str(rejections))
+                except APIError as e:
+                    log.warning("Push release failed, trying direct grab", error=str(e))
+
+            if release.indexer_id > 0 and not release_rejected:
+                try:
+                    await self.lidarr.grab_release(release.guid, release.indexer_id)
+                    action.success = True
+                    log.info("Release grabbed successfully")
+                    return True, action, "Релиз захвачен"
+                except APIError as e:
+                    log.warning("Direct grab failed", error=str(e))
+
+            if (release_rejected or force_download) and self.qbittorrent:
+                download_url = release.download_url or release.magnet_url
+                if download_url:
+                    if not await _validate_download_url(download_url):
+                        raise ValueError("Небезопасный URL для скачивания")
+                    try:
+                        success = await self.qbittorrent.add_torrent_url(
+                            download_url,
+                            category="music",
+                        )
+                        if success:
+                            action.success = True
+                            log.info("Downloaded via qBittorrent (bypassed profile rejection)")
+                            return True, action, "Загружено через qBittorrent"
+                        log.error("qBittorrent rejected torrent", download_url=_mask_url(download_url))
+                        raise QBittorrentError("Failed to add torrent to qBittorrent")
+                    except Exception as e:
+                        log.error("qBittorrent download failed", error=str(e))
+                        action.success = False
+                        action.error_message = f"qBittorrent fallback failed: {e}"
+                        return False, action, "Ошибка загрузки через qBittorrent"
+
+            if release_rejected:
+                action.success = False
+                rejection_msg = ", ".join(str(r) for r in rejections) if rejections else "Отклонено"
+                action.error_message = rejection_msg
+                return False, action, f"Релиз отклонён: {rejection_msg}"
+
+            if existing and existing.lidarr_id:
+                await self.lidarr.search_artist(existing.lidarr_id)
+                action.success = True
+                log.info("Triggered automatic search as fallback")
+                return True, action, "Запущен автопоиск по артисту"
+
+            action.success = False
+            action.error_message = "Could not grab release or trigger search"
+            return False, action, "Не удалось захватить релиз"
+
+        except Exception as e:
+            log.error("Failed to grab music release", error=str(e))
             action.success = False
             action.error_message = str(e)
             return False, action, "Ошибка захвата релиза"

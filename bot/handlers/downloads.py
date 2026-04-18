@@ -623,7 +623,7 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
         await callback.answer("Ошибка операции", show_alert=True)
 
 
-@router.callback_query(F.data.startswith("speed:"))
+@router.callback_query(F.data.startswith(CallbackData.SPEED_LIMIT))
 async def handle_speed_set(callback: CallbackQuery) -> None:
     """Set speed limits (download or upload)."""
     if not callback.data:
@@ -635,7 +635,7 @@ async def handle_speed_set(callback: CallbackQuery) -> None:
 
     try:
         # Format: speed:dl:1024 or speed:ul:1024
-        parts = callback.data.replace("speed:", "").split(":")
+        parts = callback.data.removeprefix(CallbackData.SPEED_LIMIT).split(":")
         if len(parts) != 2:
             return
 

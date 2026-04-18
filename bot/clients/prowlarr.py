@@ -14,6 +14,8 @@ logger = structlog.get_logger()
 # Category mappings for Prowlarr
 MOVIE_CATEGORIES = [2000, 2010, 2020, 2030, 2040, 2045, 2050, 2060, 2070, 2080]
 TV_CATEGORIES = [5000, 5010, 5020, 5030, 5040, 5045, 5050, 5060, 5070, 5080]
+# Audio: 3000 root, 3010 MP3, 3020 Video, 3030 Audiobook, 3040 Lossless, 3050 Other, 3060 Foreign
+MUSIC_CATEGORIES = [3000, 3010, 3020, 3030, 3040, 3050, 3060]
 
 
 class ProwlarrClient(BaseAPIClient):
@@ -54,6 +56,8 @@ class ProwlarrClient(BaseAPIClient):
             params["categories"] = MOVIE_CATEGORIES
         elif content_type == ContentType.SERIES:
             params["categories"] = TV_CATEGORIES
+        elif content_type == ContentType.MUSIC:
+            params["categories"] = MUSIC_CATEGORIES
 
         log = logger.bind(query=query, content_type=content_type.value)
         log.info("Searching Prowlarr")
@@ -158,6 +162,8 @@ class ProwlarrClient(BaseAPIClient):
             detected_type = ContentType.MOVIE
         elif any(cat in TV_CATEGORIES for cat in categories):
             detected_type = ContentType.SERIES
+        elif any(cat in MUSIC_CATEGORIES for cat in categories):
+            detected_type = ContentType.MUSIC
 
         # Parse year, season, episode from title
         detected_year = self._extract_year(title)

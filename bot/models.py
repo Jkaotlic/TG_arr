@@ -16,6 +16,7 @@ class ContentType(str, Enum):
 
     MOVIE = "movie"
     SERIES = "series"
+    MUSIC = "music"
     UNKNOWN = "unknown"
 
 
@@ -148,8 +149,65 @@ class SeriesInfo(BaseModel):
     seasons: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ArtistInfo(BaseModel):
+    """Artist information from Lidarr lookup."""
+
+    content_model_type: Literal["artist"] = "artist"
+    mb_id: str = Field(..., description="MusicBrainz ID (foreignArtistId)")
+    name: str = Field(..., description="Artist name")
+    sort_name: Optional[str] = Field(default=None)
+    overview: Optional[str] = Field(default=None)
+    disambiguation: Optional[str] = Field(default=None, description="MB disambiguation comment")
+    artist_type: Optional[str] = Field(default=None, description="Person, Group, Orchestra, etc.")
+    status: Optional[str] = Field(default=None, description="active, ended, etc.")
+    genres: list[str] = Field(default_factory=list)
+    poster_url: Optional[str] = Field(default=None)
+    fanart_url: Optional[str] = Field(default=None)
+    ratings: dict[str, Any] = Field(default_factory=dict)
+
+    album_count: int = Field(default=0)
+    track_count: int = Field(default=0)
+
+    # Lidarr-specific
+    lidarr_id: Optional[int] = Field(default=None, description="ID in Lidarr if already added")
+    quality_profile_id: Optional[int] = Field(default=None)
+    metadata_profile_id: Optional[int] = Field(default=None)
+    root_folder_path: Optional[str] = Field(default=None)
+
+
+class AlbumInfo(BaseModel):
+    """Album information from Lidarr lookup."""
+
+    content_model_type: Literal["album"] = "album"
+    mb_id: str = Field(..., description="MusicBrainz release-group ID (foreignAlbumId)")
+    artist_mb_id: Optional[str] = Field(default=None, description="Artist MusicBrainz ID")
+    title: str = Field(..., description="Album title")
+    artist_name: Optional[str] = Field(default=None)
+    disambiguation: Optional[str] = Field(default=None)
+    album_type: Optional[str] = Field(default=None, description="Album, Single, EP, Compilation, etc.")
+    release_date: Optional[datetime] = Field(default=None)
+    year: Optional[int] = Field(default=None)
+    overview: Optional[str] = Field(default=None)
+    genres: list[str] = Field(default_factory=list)
+    poster_url: Optional[str] = Field(default=None)
+    ratings: dict[str, Any] = Field(default_factory=dict)
+    track_count: int = Field(default=0)
+    duration_ms: int = Field(default=0, description="Total album duration in milliseconds")
+
+    # Lidarr-specific
+    lidarr_id: Optional[int] = Field(default=None, description="ID in Lidarr if already added")
+    has_file: bool = Field(default=False)
+
+
+class MetadataProfile(BaseModel):
+    """Lidarr metadata profile (controls what album types are grabbed)."""
+
+    id: int
+    name: str
+
+
 class QualityProfile(BaseModel):
-    """Quality profile from Radarr/Sonarr."""
+    """Quality profile from Radarr/Sonarr/Lidarr."""
 
     id: int
     name: str
@@ -177,6 +235,9 @@ class UserPreferences(BaseModel):
     radarr_root_folder_id: Optional[int] = None
     sonarr_quality_profile_id: Optional[int] = None
     sonarr_root_folder_id: Optional[int] = None
+    lidarr_quality_profile_id: Optional[int] = None
+    lidarr_metadata_profile_id: Optional[int] = None
+    lidarr_root_folder_id: Optional[int] = None
     preferred_resolution: Optional[str] = None  # 1080p, 2160p, etc.
     auto_grab_enabled: bool = False
     language: str = "en"
@@ -199,6 +260,8 @@ ContentInfo = Annotated[
     Union[
         Annotated[MovieInfo, Tag("movie")],
         Annotated[SeriesInfo, Tag("series")],
+        Annotated[ArtistInfo, Tag("artist")],
+        Annotated[AlbumInfo, Tag("album")],
     ],
     Discriminator("content_model_type"),
 ]

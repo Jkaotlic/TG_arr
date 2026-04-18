@@ -6,6 +6,7 @@ from bot.handlers.calendar import router as calendar_router
 from bot.handlers.downloads import router as downloads_router
 from bot.handlers.emby import router as emby_router
 from bot.handlers.history import router as history_router
+from bot.handlers.music import router as music_router
 from bot.handlers.search import router as search_router
 from bot.handlers.settings import router as settings_router
 from bot.handlers.start import router as start_router
@@ -17,8 +18,10 @@ def setup_routers() -> Router:
     """Setup and return the main router with all handlers."""
     main_router = Router()
 
-    # Include all sub-routers
+    # IMPORTANT: music_router is included BEFORE search_router so that its
+    # CONFIRM_GRAB handler gets a chance to run first for music sessions.
     main_router.include_router(start_router)
+    main_router.include_router(music_router)
     main_router.include_router(search_router)
     main_router.include_router(settings_router)
     main_router.include_router(status_router)

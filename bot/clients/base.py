@@ -62,7 +62,14 @@ class BaseAPIClient:
         self.service_name = service_name
         self._client: Optional[httpx.AsyncClient] = None
         self._client_lock = asyncio.Lock()
-        self._settings = get_settings()
+        # LOGIC-07: lazy settings lookup — don't touch env at import/construction time
+        # so tests can instantiate clients without a fully configured environment.
+        self._settings: Optional[object] = None
+
+    def _get_http_timeout(self) -> float:
+        if self._settings is None:
+            self._settings = get_settings()
+        return self._settings.http_timeout
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -71,7 +78,7 @@ class BaseAPIClient:
                 self._client = httpx.AsyncClient(
                     base_url=self.base_url,
                     headers=self._get_headers(),
-                    timeout=httpx.Timeout(self._settings.http_timeout),
+                    timeout=httpx.Timeout(self._get_http_timeout()),
                 )
         return self._client
 
@@ -90,10 +97,11 @@ class BaseAPIClient:
             await self._client.aclose()
             self._client = None
 
+    # BUG-19: shorten backoff so we stay within Telegram's ~15s callback window.
     @retry(
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError, RetryableAPIError)),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(2),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
         reraise=True,
     )
     async def _request(
@@ -144,7 +152,8 @@ class BaseAPIClient:
                     status_code=404,
                 )
 
-            if response.status_code in (429, 503, 504):
+            # BUG-04: treat transient 5xx (incl. 500/502 from reverse-proxies) as retryable.
+            if response.status_code in (429, 500, 502, 503, 504):
                 log.warning("Retryable HTTP error", status_code=response.status_code)
                 raise RetryableAPIError(
                     f"{self.service_name} временно недоступен ({response.status_code})",

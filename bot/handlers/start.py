@@ -29,10 +29,10 @@ async def cmd_start(message: Message) -> None:
 
     welcome_text = (
         f"<b>Привет, {safe_name}! 👋</b>\n\n"
-        "Я помогу найти и скачать фильмы и сериалы через Prowlarr/Radarr/Sonarr.\n\n"
+        "Я помогу найти и скачать фильмы, сериалы и музыку через Prowlarr/Radarr/Sonarr/Lidarr.\n\n"
         "<b>🚀 Быстрый старт:</b>\n"
-        "• Просто напишите название\n"
-        "• Или нажмите 🔍 <b>Поиск</b>\n\n"
+        "• Просто напишите название — найду фильм или сериал\n"
+        "• Или нажмите 🔍 <b>Поиск</b> / 🎵 <b>Музыка</b>\n\n"
         "Используйте /help для списка команд."
     )
 
@@ -53,7 +53,8 @@ async def cmd_help(message: Message) -> None:
         "<b>🔍 Поиск:</b>\n"
         "<code>/search</code> — фильмы и сериалы\n"
         "<code>/movie</code> — только фильмы\n"
-        "<code>/series</code> — только сериалы\n\n"
+        "<code>/series</code> — только сериалы\n"
+        "<code>/music</code> — артисты (Lidarr)\n\n"
         "<b>📥 Загрузки:</b>\n"
         "<code>/downloads</code> — список торрентов\n"
         "<code>/qstatus</code> — статус qBittorrent\n"

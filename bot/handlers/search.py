@@ -17,7 +17,7 @@ from bot.models import (
     SeriesInfo,
     User,
 )
-from bot.clients.registry import get_prowlarr, get_radarr, get_sonarr, get_qbittorrent
+from bot.clients.registry import get_lidarr, get_prowlarr, get_qbittorrent, get_radarr, get_sonarr
 from bot.services.add_service import AddService
 from bot.services.scoring import ScoringService
 from bot.services.search_service import SearchService
@@ -35,7 +35,7 @@ MENU_SEARCH = "🔍 Поиск"
 MENU_BUTTONS = {
     MENU_SEARCH,
     "📥 Загрузки", "📊 qBit", "📺 Emby", "🔌 Статус", "⚙️ Настройки", "📋 История",
-    "🔥 Топ", "📅 Календарь",
+    "🔥 Топ", "📅 Календарь", "🎵 Музыка",
 }
 
 
@@ -45,10 +45,11 @@ async def get_services() -> tuple[SearchService, AddService, ScoringService]:
     radarr = await get_radarr()
     sonarr = await get_sonarr()
     qbittorrent = await get_qbittorrent()  # Returns None if not configured
+    lidarr = await get_lidarr()  # Returns None if not configured
 
     scoring = ScoringService()
-    search_service = SearchService(prowlarr, radarr, sonarr, scoring)
-    add_service = AddService(prowlarr, radarr, sonarr, qbittorrent)
+    search_service = SearchService(prowlarr, radarr, sonarr, scoring, lidarr=lidarr)
+    add_service = AddService(prowlarr, radarr, sonarr, qbittorrent=qbittorrent, lidarr=lidarr)
 
     return search_service, add_service, scoring
 
@@ -134,11 +135,12 @@ async def process_search(
     settings = get_settings()
     search_service, add_service, scoring = await get_services()
 
-    try:
-        # Always use db_user.tg_id - message.from_user can be bot when called from callback
-        user_id = db_user.tg_id
-        log = logger.bind(user_id=user_id, query=query)
+    # BUG-01: bind log BEFORE try so the except handler never sees a NameError
+    # if message.answer() fails before log could be assigned inside try.
+    user_id = db_user.tg_id
+    log = logger.bind(user_id=user_id, query=query)
 
+    try:
         # Parse query for metadata
         parsed = search_service.parse_query(query)
         log.info("Parsed query", parsed=parsed)
@@ -293,7 +295,7 @@ async def handle_pagination(callback: CallbackQuery, db_user: User, db: Database
 
     # Parse page number
     try:
-        page = int(callback.data.replace(CallbackData.PAGE, ""))
+        page = int(callback.data.removeprefix(CallbackData.PAGE))
     except ValueError:
         await callback.answer("Неверная страница", show_alert=True)
         return
@@ -363,7 +365,7 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
 
     # Parse release index
     try:
-        idx = int(callback.data.replace(CallbackData.RELEASE, ""))
+        idx = int(callback.data.removeprefix(CallbackData.RELEASE))
     except ValueError:
         await callback.answer("Неверный выбор", show_alert=True)
         return

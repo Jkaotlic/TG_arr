@@ -4,7 +4,9 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from bot.models import (
+    ArtistInfo,
     ContentType,
+    MetadataProfile,
     MovieInfo,
     QualityProfile,
     RootFolder,
@@ -21,6 +23,7 @@ class CallbackData:
     # Content type selection
     TYPE_MOVIE = "type:movie"
     TYPE_SERIES = "type:series"
+    TYPE_MUSIC = "type:music"
 
     # Pagination
     PAGE = "page:"  # page:5
@@ -32,8 +35,7 @@ class CallbackData:
     GRAB_BEST = "grab_best"
 
     # Content selection (for add)
-    MOVIE = "movie:"  # movie:tmdb_id
-    SERIES = "series:"  # series:tvdb_id
+    ARTIST = "artist:"  # artist:idx (session results index)
     ADD_MOVIE = "add_movie:"  # add_movie:tmdb_id
     ADD_SERIES = "add_series:"  # add_series:tmdb_id
 
@@ -47,6 +49,9 @@ class CallbackData:
     SET_RADARR_FOLDER = "set:rf:"  # set:rf:1
     SET_SONARR_PROFILE = "set:sp:"  # set:sp:1
     SET_SONARR_FOLDER = "set:sf:"  # set:sf:1
+    SET_LIDARR_PROFILE = "set:lp:"  # set:lp:1
+    SET_LIDARR_META = "set:lm:"  # set:lm:1 (Lidarr metadata profile)
+    SET_LIDARR_FOLDER = "set:lf:"  # set:lf:1
     SET_RESOLUTION = "set:res:"  # set:res:1080p
     SET_AUTO_GRAB = "set:ag:"  # set:ag:1 or set:ag:0
 
@@ -80,8 +85,10 @@ class CallbackData:
     # Trending/Popular
     TRENDING_MOVIES = "trending_movies"  # Show trending movies
     TRENDING_SERIES = "trending_series"  # Show trending series
+    TRENDING_MUSIC = "trending_music"  # Show trending music (artists)
     TRENDING_MOVIE = "trend_m:"  # trend_m:tmdb_id - view movie details
     TRENDING_SERIES_ITEM = "trend_s:"  # trend_s:tmdb_id - view series details
+    TRENDING_ARTIST = "trend_a:"  # trend_a:idx - view trending artist from Deezer list
 
     # Calendar
     CALENDAR_7 = "cal_7"  # 7 days
@@ -98,28 +105,27 @@ class Keyboards:
         """Create main (reply) menu keyboard with the most used commands."""
         return ReplyKeyboardMarkup(
             keyboard=[
-                [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="🔥 Топ"), KeyboardButton(text="📅 Календарь")],
-                [KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit"), KeyboardButton(text="📺 Emby")],
-                [KeyboardButton(text="🔌 Статус"), KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📋 История")],
+                [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="🎵 Музыка"), KeyboardButton(text="🔥 Топ")],
+                [KeyboardButton(text="📅 Календарь"), KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit")],
+                [KeyboardButton(text="📺 Emby"), KeyboardButton(text="🔌 Статус"), KeyboardButton(text="⚙️ Настройки")],
+                [KeyboardButton(text="📋 История")],
             ],
             resize_keyboard=True,
             input_field_placeholder="Введите название для поиска...",
         )
 
     @staticmethod
-    def content_type_selection() -> InlineKeyboardMarkup:
-        """Create keyboard for selecting content type (movie/series)."""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="🎬 Фильм", callback_data=CallbackData.TYPE_MOVIE),
-                    InlineKeyboardButton(text="📺 Сериал", callback_data=CallbackData.TYPE_SERIES),
-                ],
-                [
-                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
-                ],
-            ]
-        )
+    def content_type_selection(show_music: bool = False) -> InlineKeyboardMarkup:
+        """Create keyboard for selecting content type (movie/series/music)."""
+        first_row = [
+            InlineKeyboardButton(text="🎬 Фильм", callback_data=CallbackData.TYPE_MOVIE),
+            InlineKeyboardButton(text="📺 Сериал", callback_data=CallbackData.TYPE_SERIES),
+        ]
+        rows = [first_row]
+        if show_music:
+            rows.append([InlineKeyboardButton(text="🎵 Музыка", callback_data=CallbackData.TYPE_MUSIC)])
+        rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
     def search_results(
@@ -316,29 +322,109 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
-    def settings_menu() -> InlineKeyboardMarkup:
+    def settings_menu(lidarr_enabled: bool = False) -> InlineKeyboardMarkup:
         """Create main settings menu keyboard."""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="🎬 Профиль Radarr", callback_data="settings:radarr_profile"),
-                    InlineKeyboardButton(text="📁 Папка Radarr", callback_data="settings:radarr_folder"),
-                ],
-                [
-                    InlineKeyboardButton(text="📺 Профиль Sonarr", callback_data="settings:sonarr_profile"),
-                    InlineKeyboardButton(text="📁 Папка Sonarr", callback_data="settings:sonarr_folder"),
-                ],
-                [
-                    InlineKeyboardButton(text="🎯 Качество", callback_data="settings:resolution"),
-                ],
-                [
-                    InlineKeyboardButton(text="⚡ Авто-граб", callback_data="settings:auto_grab"),
-                ],
-                [
-                    InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.CANCEL),
-                ],
-            ]
-        )
+        rows = [
+            [
+                InlineKeyboardButton(text="🎬 Профиль Radarr", callback_data="settings:radarr_profile"),
+                InlineKeyboardButton(text="📁 Папка Radarr", callback_data="settings:radarr_folder"),
+            ],
+            [
+                InlineKeyboardButton(text="📺 Профиль Sonarr", callback_data="settings:sonarr_profile"),
+                InlineKeyboardButton(text="📁 Папка Sonarr", callback_data="settings:sonarr_folder"),
+            ],
+        ]
+        if lidarr_enabled:
+            rows.append([
+                InlineKeyboardButton(text="🎵 Профиль Lidarr", callback_data="settings:lidarr_profile"),
+                InlineKeyboardButton(text="📁 Папка Lidarr", callback_data="settings:lidarr_folder"),
+            ])
+            rows.append([
+                InlineKeyboardButton(text="🎧 Lidarr metadata", callback_data="settings:lidarr_meta"),
+            ])
+        rows.append([InlineKeyboardButton(text="🎯 Качество", callback_data="settings:resolution")])
+        rows.append([InlineKeyboardButton(text="⚡ Авто-граб", callback_data="settings:auto_grab")])
+        rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.CANCEL)])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @staticmethod
+    def metadata_profiles(profiles: list[MetadataProfile], prefix: str) -> InlineKeyboardMarkup:
+        """Create keyboard for selecting Lidarr metadata profile."""
+        keyboard = []
+        for profile in profiles:
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=profile.name,
+                    callback_data=f"{prefix}{profile.id}",
+                )
+            ])
+        keyboard.append([
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.SETTINGS),
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def artist_list(
+        artists: list[ArtistInfo],
+        current_page: int = 0,
+        per_page: int = 5,
+    ) -> InlineKeyboardMarkup:
+        """Create keyboard for artist selection from lookup results."""
+        total_pages = max(1, (len(artists) + per_page - 1) // per_page)
+        start_idx = current_page * per_page
+        page_artists = artists[start_idx:start_idx + per_page]
+
+        keyboard = []
+        for i, a in enumerate(page_artists):
+            idx = start_idx + i
+            disamb = f" [{a.disambiguation}]" if a.disambiguation else ""
+            label = f"{a.name}{disamb}"
+            if len(label) > 40:
+                label = label[:37] + "..."
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"{CallbackData.ARTIST}{idx}",
+                )
+            ])
+
+        if total_pages > 1:
+            nav_buttons = []
+            if current_page > 0:
+                nav_buttons.append(
+                    InlineKeyboardButton(text="◀️", callback_data=f"{CallbackData.PAGE}{current_page - 1}")
+                )
+            nav_buttons.append(
+                InlineKeyboardButton(text=f"{current_page + 1}/{total_pages}", callback_data="noop")
+            )
+            if current_page < total_pages - 1:
+                nav_buttons.append(
+                    InlineKeyboardButton(text="▶️", callback_data=f"{CallbackData.PAGE}{current_page + 1}")
+                )
+            keyboard.append(nav_buttons)
+
+        keyboard.append([
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def artist_details(artist: ArtistInfo, already_in_library: bool = False) -> InlineKeyboardMarkup:
+        """Create keyboard for artist details (add/search)."""
+        keyboard = []
+        if already_in_library:
+            keyboard.append([
+                InlineKeyboardButton(text="🔍 Запустить поиск", callback_data=CallbackData.CONFIRM_GRAB),
+            ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton(text="➕ Добавить и искать", callback_data=CallbackData.CONFIRM_GRAB),
+            ])
+        keyboard.append([
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def resolution_selection() -> InlineKeyboardMarkup:
@@ -703,18 +789,37 @@ class Keyboards:
         )
 
     @staticmethod
-    def trending_menu() -> InlineKeyboardMarkup:
+    def trending_menu(show_music: bool = False) -> InlineKeyboardMarkup:
         """Create trending/popular content selection menu."""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="🎬 Популярные фильмы", callback_data=CallbackData.TRENDING_MOVIES),
-                ],
-                [
-                    InlineKeyboardButton(text="📺 Популярные сериалы", callback_data=CallbackData.TRENDING_SERIES),
-                ],
-            ]
-        )
+        rows = [
+            [InlineKeyboardButton(text="🎬 Популярные фильмы", callback_data=CallbackData.TRENDING_MOVIES)],
+            [InlineKeyboardButton(text="📺 Популярные сериалы", callback_data=CallbackData.TRENDING_SERIES)],
+        ]
+        if show_music:
+            rows.append([
+                InlineKeyboardButton(text="🎵 Популярные артисты", callback_data=CallbackData.TRENDING_MUSIC),
+            ])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @staticmethod
+    def trending_artists(artists: list[dict]) -> InlineKeyboardMarkup:
+        """Create keyboard for trending artists (Deezer chart)."""
+        keyboard = []
+        for i, a in enumerate(artists[:10]):
+            name = a.get("name", "Unknown")
+            label = f"{i + 1}. {name}"
+            if len(label) > 40:
+                label = label[:37] + "..."
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"{CallbackData.TRENDING_ARTIST}{i}",
+                )
+            ])
+        keyboard.append([
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def trending_movies(movies: list[MovieInfo]) -> InlineKeyboardMarkup:
