@@ -6,17 +6,18 @@ from typing import Optional
 
 import structlog
 
+from bot.clients.lidarr import LidarrClient
 from bot.clients.prowlarr import ProwlarrClient
 from bot.clients.radarr import RadarrClient
 from bot.clients.sonarr import SonarrClient
-from bot.models import ContentType, MovieInfo, SearchResult, SeriesInfo
+from bot.models import AlbumInfo, ArtistInfo, ContentType, MovieInfo, SearchResult, SeriesInfo
 from bot.services.scoring import ScoringService
 
 logger = structlog.get_logger()
 
 
 class SearchService:
-    """Service for searching content across Prowlarr, Radarr, and Sonarr."""
+    """Service for searching content across Prowlarr, Radarr, Sonarr, Lidarr."""
 
     def __init__(
         self,
@@ -24,15 +25,17 @@ class SearchService:
         radarr: RadarrClient,
         sonarr: SonarrClient,
         scoring: Optional[ScoringService] = None,
+        lidarr: Optional[LidarrClient] = None,
     ):
         self.prowlarr = prowlarr
         self.radarr = radarr
         self.sonarr = sonarr
+        self.lidarr = lidarr
         self.scoring = scoring or ScoringService()
 
     async def detect_content_type(self, query: str) -> ContentType:
         """
-        Try to detect if query is for a movie or series.
+        Try to detect if query is for a movie, series, or music.
 
         Args:
             query: User's search query
@@ -57,17 +60,36 @@ class SearchService:
             if re.search(pattern, query_lower):
                 return ContentType.SERIES
 
-        # Try to identify by looking up in both services in parallel
-        movie_task = asyncio.create_task(self.radarr.lookup_movie(query))
-        series_task = asyncio.create_task(self.sonarr.lookup_series(query))
-        movies_result, series_result = await asyncio.gather(movie_task, series_task, return_exceptions=True)
-        movies = movies_result if not isinstance(movies_result, Exception) else []
-        series = series_result if not isinstance(series_result, Exception) else []
+        # Try to identify by looking up in all services in parallel
+        tasks: list = [
+            asyncio.create_task(self.radarr.lookup_movie(query)),
+            asyncio.create_task(self.sonarr.lookup_series(query)),
+        ]
+        if self.lidarr is not None:
+            tasks.append(asyncio.create_task(self.lidarr.lookup_artist(query)))
+
+        gathered = await asyncio.gather(*tasks, return_exceptions=True)
+
+        movies_result = gathered[0]
+        series_result = gathered[1]
+        artists_result = gathered[2] if len(gathered) > 2 else []
+
+        movies = movies_result if isinstance(movies_result, list) else []
+        series = series_result if isinstance(series_result, list) else []
+        artists = artists_result if isinstance(artists_result, list) else []
 
         if isinstance(movies_result, Exception):
             logger.warning("Radarr lookup failed during type detection", error=str(movies_result))
         if isinstance(series_result, Exception):
             logger.warning("Sonarr lookup failed during type detection", error=str(series_result))
+        if isinstance(artists_result, Exception):
+            logger.warning("Lidarr lookup failed during type detection", error=str(artists_result))
+
+        # Music detection: exact artist name match (high precision, no year check)
+        if artists:
+            for a in artists[:3]:
+                if self._title_matches(query, a.name, None):
+                    return ContentType.MUSIC
 
         if movies:
             for movie in movies[:3]:
@@ -165,6 +187,28 @@ class SearchService:
             List of SeriesInfo objects
         """
         return await self.sonarr.lookup_series(query)
+
+    async def lookup_artist(self, query: str) -> list[ArtistInfo]:
+        """Look up artists in Lidarr (returns [] if Lidarr is not configured)."""
+        if self.lidarr is None:
+            return []
+        return await self.lidarr.lookup_artist(query)
+
+    async def lookup_album(self, query: str) -> list[AlbumInfo]:
+        """Look up albums in Lidarr (returns [] if Lidarr is not configured)."""
+        if self.lidarr is None:
+            return []
+        return await self.lidarr.lookup_album(query)
+
+    async def get_artist_by_mbid(self, mb_id: str) -> Optional[ArtistInfo]:
+        """Get artist info by MusicBrainz ID (library first, fallback to lookup)."""
+        if self.lidarr is None:
+            return None
+        artist = await self.lidarr.get_artist_by_mbid(mb_id)
+        if artist:
+            return artist
+        artists = await self.lidarr.lookup_artist(f"lidarr:{mb_id}")
+        return artists[0] if artists else None
 
     async def get_movie_by_tmdb(self, tmdb_id: int) -> Optional[MovieInfo]:
         """Get movie info by TMDB ID."""

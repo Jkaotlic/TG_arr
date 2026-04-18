@@ -11,3 +11,7 @@ docs/
 .pytest_cache
 .mypy_cache
 .ruff_cache
+.coverage
+analysis/
+.claude/
+.bg-shell/

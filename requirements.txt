@@ -1,3 +1,7 @@
+# Production runtime dependencies only.
+# Dev tools (pytest, ruff, mypy) live in pyproject.toml `dev` extra
+# — install with `pip install -e ".[dev]"`.
+
 # Telegram Bot
 aiogram==3.26.0
 
@@ -14,11 +18,3 @@ aiosqlite==0.22.1
 
 # Logging
 structlog==25.5.0
-
-# Utilities
-orjson==3.11.7
-
-# Testing
-pytest==9.0.2
-pytest-asyncio==1.3.0
-pytest-cov==7.1.0

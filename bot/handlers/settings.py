@@ -5,7 +5,13 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from bot.clients.registry import get_prowlarr, get_radarr, get_sonarr, get_qbittorrent
+from bot.clients.registry import (
+    get_lidarr,
+    get_prowlarr,
+    get_qbittorrent,
+    get_radarr,
+    get_sonarr,
+)
 from bot.config import get_settings
 from bot.db import Database
 from bot.models import User
@@ -26,7 +32,8 @@ async def _get_add_service() -> AddService:
         await get_prowlarr(),
         await get_radarr(),
         await get_sonarr(),
-        await get_qbittorrent(),
+        qbittorrent=await get_qbittorrent(),
+        lidarr=await get_lidarr(),
     )
 
 
@@ -53,7 +60,7 @@ async def cmd_settings(message: Message, db_user: User) -> None:
 
         await message.answer(
             text,
-            reply_markup=Keyboards.settings_menu(),
+            reply_markup=Keyboards.settings_menu(lidarr_enabled=get_settings().lidarr_enabled),
             parse_mode="HTML",
         )
 
@@ -86,7 +93,7 @@ async def handle_settings_back(callback: CallbackQuery, db_user: User) -> None:
 
         await callback.message.edit_text(
             text,
-            reply_markup=Keyboards.settings_menu(),
+            reply_markup=Keyboards.settings_menu(lidarr_enabled=get_settings().lidarr_enabled),
             parse_mode="HTML",
         )
         await callback.answer()
@@ -131,7 +138,7 @@ async def handle_set_radarr_profile(callback: CallbackQuery, db_user: User, db: 
 
 
     try:
-        profile_id = int(callback.data.replace(CallbackData.SET_RADARR_PROFILE, ""))
+        profile_id = int(callback.data.removeprefix(CallbackData.SET_RADARR_PROFILE))
 
         db_user.preferences.radarr_quality_profile_id = profile_id
         await db.update_user_preferences(db_user.tg_id, db_user.preferences)
@@ -183,7 +190,7 @@ async def handle_set_radarr_folder(callback: CallbackQuery, db_user: User, db: D
 
 
     try:
-        folder_id = int(callback.data.replace(CallbackData.SET_RADARR_FOLDER, ""))
+        folder_id = int(callback.data.removeprefix(CallbackData.SET_RADARR_FOLDER))
 
         db_user.preferences.radarr_root_folder_id = folder_id
         await db.update_user_preferences(db_user.tg_id, db_user.preferences)
@@ -234,7 +241,7 @@ async def handle_set_sonarr_profile(callback: CallbackQuery, db_user: User, db: 
 
 
     try:
-        profile_id = int(callback.data.replace(CallbackData.SET_SONARR_PROFILE, ""))
+        profile_id = int(callback.data.removeprefix(CallbackData.SET_SONARR_PROFILE))
 
         db_user.preferences.sonarr_quality_profile_id = profile_id
         await db.update_user_preferences(db_user.tg_id, db_user.preferences)
@@ -285,7 +292,7 @@ async def handle_set_sonarr_folder(callback: CallbackQuery, db_user: User, db: D
 
 
     try:
-        folder_id = int(callback.data.replace(CallbackData.SET_SONARR_FOLDER, ""))
+        folder_id = int(callback.data.removeprefix(CallbackData.SET_SONARR_FOLDER))
 
         db_user.preferences.sonarr_root_folder_id = folder_id
         await db.update_user_preferences(db_user.tg_id, db_user.preferences)
@@ -298,6 +305,126 @@ async def handle_set_sonarr_folder(callback: CallbackQuery, db_user: User, db: D
         await callback.answer("Неверная папка", show_alert=True)
     except Exception as e:
         logger.error("Failed to update folder", error=str(e))
+        await callback.answer("Ошибка обновления", show_alert=True)
+
+
+@router.callback_query(F.data == "settings:lidarr_profile")
+async def handle_lidarr_profile_menu(callback: CallbackQuery) -> None:
+    """Show Lidarr profile selection."""
+    if not callback.message:
+        return
+    add_service = await _get_add_service()
+    try:
+        profiles = await add_service.get_lidarr_profiles()
+        if not profiles:
+            await callback.answer("Профили качества в Lidarr не найдены", show_alert=True)
+            return
+        await callback.message.edit_text(
+            "<b>Выберите профиль качества Lidarr:</b>",
+            reply_markup=Keyboards.quality_profiles(profiles, CallbackData.SET_LIDARR_PROFILE),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error("Failed to load Lidarr profiles", error=str(e))
+        await callback.answer("Ошибка загрузки профилей", show_alert=True)
+
+
+@router.callback_query(F.data.startswith(CallbackData.SET_LIDARR_PROFILE))
+async def handle_set_lidarr_profile(callback: CallbackQuery, db_user: User, db: Database) -> None:
+    """Set Lidarr quality profile."""
+    if not callback.data or not callback.message:
+        return
+    try:
+        profile_id = int(callback.data.removeprefix(CallbackData.SET_LIDARR_PROFILE))
+        db_user.preferences.lidarr_quality_profile_id = profile_id
+        await db.update_user_preferences(db_user.tg_id, db_user.preferences)
+        await callback.answer("Профиль Lidarr обновлён!")
+        await handle_settings_back(callback, db_user)
+    except ValueError:
+        await callback.answer("Неверный профиль", show_alert=True)
+    except Exception as e:
+        logger.error("Failed to update Lidarr profile", error=str(e))
+        await callback.answer("Ошибка обновления", show_alert=True)
+
+
+@router.callback_query(F.data == "settings:lidarr_meta")
+async def handle_lidarr_meta_menu(callback: CallbackQuery) -> None:
+    """Show Lidarr metadata profile selection."""
+    if not callback.message:
+        return
+    add_service = await _get_add_service()
+    try:
+        profiles = await add_service.get_lidarr_metadata_profiles()
+        if not profiles:
+            await callback.answer("Metadata-профили в Lidarr не найдены", show_alert=True)
+            return
+        await callback.message.edit_text(
+            "<b>Выберите metadata-профиль Lidarr:</b>",
+            reply_markup=Keyboards.metadata_profiles(profiles, CallbackData.SET_LIDARR_META),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error("Failed to load Lidarr metadata profiles", error=str(e))
+        await callback.answer("Ошибка загрузки профилей", show_alert=True)
+
+
+@router.callback_query(F.data.startswith(CallbackData.SET_LIDARR_META))
+async def handle_set_lidarr_meta(callback: CallbackQuery, db_user: User, db: Database) -> None:
+    """Set Lidarr metadata profile."""
+    if not callback.data or not callback.message:
+        return
+    try:
+        profile_id = int(callback.data.removeprefix(CallbackData.SET_LIDARR_META))
+        db_user.preferences.lidarr_metadata_profile_id = profile_id
+        await db.update_user_preferences(db_user.tg_id, db_user.preferences)
+        await callback.answer("Metadata-профиль Lidarr обновлён!")
+        await handle_settings_back(callback, db_user)
+    except ValueError:
+        await callback.answer("Неверный профиль", show_alert=True)
+    except Exception as e:
+        logger.error("Failed to update Lidarr metadata profile", error=str(e))
+        await callback.answer("Ошибка обновления", show_alert=True)
+
+
+@router.callback_query(F.data == "settings:lidarr_folder")
+async def handle_lidarr_folder_menu(callback: CallbackQuery) -> None:
+    """Show Lidarr root folder selection."""
+    if not callback.message:
+        return
+    add_service = await _get_add_service()
+    try:
+        folders = await add_service.get_lidarr_root_folders()
+        if not folders:
+            await callback.answer("Корневые папки в Lidarr не найдены", show_alert=True)
+            return
+        await callback.message.edit_text(
+            "<b>Выберите корневую папку Lidarr:</b>",
+            reply_markup=Keyboards.root_folders(folders, CallbackData.SET_LIDARR_FOLDER),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error("Failed to load Lidarr folders", error=str(e))
+        await callback.answer("Ошибка загрузки папок", show_alert=True)
+
+
+@router.callback_query(F.data.startswith(CallbackData.SET_LIDARR_FOLDER))
+async def handle_set_lidarr_folder(callback: CallbackQuery, db_user: User, db: Database) -> None:
+    """Set Lidarr root folder."""
+    if not callback.data or not callback.message:
+        return
+    try:
+        folder_id = int(callback.data.removeprefix(CallbackData.SET_LIDARR_FOLDER))
+        db_user.preferences.lidarr_root_folder_id = folder_id
+        await db.update_user_preferences(db_user.tg_id, db_user.preferences)
+        await callback.answer("Папка Lidarr обновлена!")
+        await handle_settings_back(callback, db_user)
+    except ValueError:
+        await callback.answer("Неверная папка", show_alert=True)
+    except Exception as e:
+        logger.error("Failed to update Lidarr folder", error=str(e))
         await callback.answer("Ошибка обновления", show_alert=True)
 
 
@@ -323,7 +450,7 @@ async def handle_set_resolution(callback: CallbackQuery, db_user: User, db: Data
 
 
     try:
-        resolution = callback.data.replace(CallbackData.SET_RESOLUTION, "")
+        resolution = callback.data.removeprefix(CallbackData.SET_RESOLUTION)
         if resolution == "any":
             resolution = None
 
@@ -365,7 +492,7 @@ async def handle_set_auto_grab(callback: CallbackQuery, db_user: User, db: Datab
 
 
     try:
-        value = callback.data.replace(CallbackData.SET_AUTO_GRAB, "")
+        value = callback.data.removeprefix(CallbackData.SET_AUTO_GRAB)
         enabled = value == "1"
 
         db_user.preferences.auto_grab_enabled = enabled

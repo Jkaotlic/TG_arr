@@ -1,10 +1,10 @@
 """Application configuration using pydantic-settings."""
 
 from functools import lru_cache
-from typing import Optional
+from typing import Annotated, Optional
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -19,8 +19,15 @@ class Settings(BaseSettings):
 
     # Telegram
     telegram_bot_token: str = Field(..., min_length=1, description="Telegram bot token from @BotFather")
-    allowed_tg_ids: list[int] = Field(default_factory=list, description="Allowed Telegram user IDs")
-    admin_tg_ids: list[int] = Field(default_factory=list, description="Admin Telegram user IDs")
+    # NoDecode: skip pydantic-settings' JSON parsing so "1,2" stays a string
+    # for our comma-separated validator below (see BUG fix for ValidationError
+    # on pydantic-settings >= 2.13).
+    allowed_tg_ids: Annotated[list[int], NoDecode] = Field(
+        default_factory=list, description="Allowed Telegram user IDs"
+    )
+    admin_tg_ids: Annotated[list[int], NoDecode] = Field(
+        default_factory=list, description="Admin Telegram user IDs"
+    )
 
     # Prowlarr
     prowlarr_url: str = Field(..., min_length=1, description="Prowlarr base URL")
@@ -33,6 +40,13 @@ class Settings(BaseSettings):
     # Sonarr
     sonarr_url: str = Field(..., min_length=1, description="Sonarr base URL")
     sonarr_api_key: str = Field(..., min_length=1, description="Sonarr API key")
+
+    # Lidarr (optional, music)
+    lidarr_url: Optional[str] = Field(default=None, description="Lidarr base URL")
+    lidarr_api_key: Optional[str] = Field(default=None, description="Lidarr API key")
+
+    # Deezer (optional, public API for music trending/discovery — no key required)
+    deezer_enabled: bool = Field(default=True, description="Enable Deezer public API for music trending")
 
     # qBittorrent (optional)
     qbittorrent_url: Optional[str] = Field(default=None, description="qBittorrent Web UI URL")
@@ -100,7 +114,7 @@ class Settings(BaseSettings):
         """Remove trailing slash from URLs."""
         return v.rstrip("/")
 
-    @field_validator("qbittorrent_url", "emby_url", mode="after")
+    @field_validator("qbittorrent_url", "emby_url", "lidarr_url", mode="after")
     @classmethod
     def strip_trailing_slash_optional(cls, v: Optional[str]) -> Optional[str]:
         """Remove trailing slash from optional URLs."""
@@ -122,6 +136,11 @@ class Settings(BaseSettings):
     def tmdb_enabled(self) -> bool:
         """Check if TMDb integration is configured."""
         return self.tmdb_api_key is not None
+
+    @property
+    def lidarr_enabled(self) -> bool:
+        """Check if Lidarr integration is configured."""
+        return self.lidarr_url is not None and self.lidarr_api_key is not None
 
     def is_user_allowed(self, user_id: int) -> bool:
         """Check if user is in the allowlist."""

@@ -9,10 +9,14 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-@pytest.fixture
-def mock_env(monkeypatch):
-    """Set up mock environment variables for testing."""
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test_token_123")
+@pytest.fixture(autouse=True)
+def _default_env(monkeypatch):
+    """
+    Populate required env vars for every test so that any lazy get_settings()
+    call during a fixture/test doesn't fail with ValidationError.
+    BUG-23: also clear the lru_cache so each test sees its own env.
+    """
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test_token_123:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
     monkeypatch.setenv("ALLOWED_TG_IDS", "123456789,987654321")
     monkeypatch.setenv("ADMIN_TG_IDS", "123456789")
     monkeypatch.setenv("PROWLARR_URL", "http://localhost:9696")
@@ -23,6 +27,18 @@ def mock_env(monkeypatch):
     monkeypatch.setenv("SONARR_API_KEY", "test_sonarr_key")
     monkeypatch.setenv("DATABASE_PATH", ":memory:")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+
+    from bot.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def mock_env(_default_env):
+    """Kept for backward compatibility with tests that still request `mock_env`."""
+    return None
 
 
 @pytest.fixture

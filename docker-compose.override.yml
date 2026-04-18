@@ -2,8 +2,6 @@
 # This file is automatically loaded by docker compose
 # Use for local development settings
 
-version: "3.9"
-
 services:
   tg-arr-bot:
     build:
