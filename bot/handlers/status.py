@@ -7,7 +7,6 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from bot.clients.qbittorrent import QBittorrentClient
 from bot.clients.registry import (
     get_deezer,
     get_emby,
@@ -53,7 +52,7 @@ async def cmd_status(message: Message) -> None:
             service_checks.append(check_service(lidarr, "Lidarr"))
 
         if qbittorrent:
-            service_checks.append(check_qbittorrent(qbittorrent))
+            service_checks.append(check_service(qbittorrent, "qBittorrent"))
 
         if emby:
             service_checks.append(check_service(emby, "Emby"))
@@ -102,21 +101,3 @@ async def check_service(client, name: str) -> SystemStatus:
         )
 
 
-async def check_qbittorrent(client: QBittorrentClient) -> SystemStatus:
-    """Check qBittorrent status."""
-    try:
-        available, version, elapsed = await client.check_connection()
-        return SystemStatus(
-            service="qBittorrent",
-            available=available,
-            version=version,
-            response_time_ms=elapsed,
-        )
-
-    except Exception as e:
-        logger.warning("qBittorrent health check failed", error=str(e))
-        return SystemStatus(
-            service="qBittorrent",
-            available=False,
-            error=str(e)[:100],
-        )

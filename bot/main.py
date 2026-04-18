@@ -3,10 +3,23 @@
 import asyncio
 import logging
 import os
+import re
 import sys
 from typing import Optional
 
 import structlog
+
+
+# SEC-03: mask Telegram bot tokens in any log event value
+_TOKEN_PATTERN = re.compile(r'bot\d+:[A-Za-z0-9_-]{30,}')
+
+
+def _mask_tokens(logger, method_name, event_dict):
+    """Structlog processor that redacts bot tokens from log values."""
+    for k, v in list(event_dict.items()):
+        if isinstance(v, str):
+            event_dict[k] = _TOKEN_PATTERN.sub('bot***:***', v)
+    return event_dict
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -34,6 +47,7 @@ def setup_logging(log_level: str) -> None:
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
+            _mask_tokens,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.dev.ConsoleRenderer() if log_level.upper() == "DEBUG" else structlog.processors.JSONRenderer(),
         ],
@@ -192,6 +206,24 @@ async def main() -> None:
     dp.startup.register(_on_startup)
     dp.shutdown.register(_on_shutdown)
 
+    # SEC-14 / DEPLOY-04: liveness touch-file for Docker HEALTHCHECK.
+    # The Dockerfile healthcheck looks for /tmp/tgarr-alive modified within
+    # the last 2 minutes; we refresh it every 30s while the event loop is
+    # healthy. Verify manually with: `docker kill --signal=SIGSTOP <cid>` →
+    # container must flip to `unhealthy` within ~2 min.
+    async def _liveness_touch() -> None:
+        from pathlib import Path
+
+        while True:
+            try:
+                Path("/tmp/tgarr-alive").touch()
+            except Exception:
+                # swallow — touch failure must not kill the bot
+                pass
+            await asyncio.sleep(30)
+
+    liveness_task = asyncio.create_task(_liveness_touch())
+
     # Start polling
     try:
         logger.info("Starting polling...")
@@ -204,6 +236,7 @@ async def main() -> None:
         logger.error("Bot crashed", error=str(e))
         raise
     finally:
+        liveness_task.cancel()
         await bot.session.close()
 
 

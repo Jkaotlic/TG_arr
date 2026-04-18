@@ -41,6 +41,12 @@ services:
       RESULTS_PER_PAGE: ${RESULTS_PER_PAGE:-5}
     volumes:
       - bot-data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    stop_grace_period: 30s
     # Resource limits work in Swarm mode and Portainer Swarm stacks.
     # For standalone docker compose, use Portainer UI to set limits.
     deploy:

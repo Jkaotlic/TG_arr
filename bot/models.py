@@ -295,6 +295,7 @@ class ActionLog(BaseModel):
     release_title: Optional[str] = None
     success: bool = True
     error_message: Optional[str] = None
+    details: Optional[str] = Field(default=None, description="JSON blob: rejections, fallback_used, etc.")
     created_at: datetime = Field(default_factory=_utcnow)
 
 

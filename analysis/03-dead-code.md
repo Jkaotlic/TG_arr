@@ -1,169 +1,140 @@
-# Анализ dead code TG_arr
+# Dead Code Audit — TG_arr (Round 2)
 
-## Критические
+Дата: 2026-04-18.
 
-### DEAD-01: Устаревшие документы BUGFIX_REPORT.md и IMPROVEMENTS.md в корне
-- **Файл**: `BUGFIX_REPORT.md` (8 KB), `IMPROVEMENTS.md` (10 KB)
-- **Проблема**: Оба документа упоминают «решено», «добавлено» — это исторические отчёты из первых аудитов. Актуальные замечания перенесены в MEMORY.md пользователя. В репозитории они служат только «мусорным» источником (и отвлекают при поиске).
-- **Риск**: Low (qualidade).
-- **Решение**: Удалить оба файла, переместить в `docs/history/` или в ветку `archive`.
-- **Статус**: [ ] Не исправлено
+Закрыто: DEAD-01, 02, 03, 16, 17, 25.
 
-### DEAD-02: Устаревшие docs: `docs/FEATURE_QBITTORRENT.md` (35 KB), `docs/QUALITY_REPORT.md` (18 KB)
-- **Файл**: `docs/FEATURE_QBITTORRENT.md`, `docs/QUALITY_REPORT.md`
-- **Проблема**: FEATURE_QBITTORRENT.md — это план/спека на фичу, которая уже реализована (и многое отличается: там метод `_make_progress_bar`, в коде — `_progress_bar`). QUALITY_REPORT.md — план сейчас устарел.
-- **Риск**: Low.
-- **Решение**: Удалить или пометить как «historical design docs».
-- **Статус**: [ ] Не исправлено
+## DEAD-04 — `CallbackData.SERIES` / `MOVIE` / `RADARR_PROFILE` и т.п. — часть уже удалена (LOW)
 
-### DEAD-03: Build-артефакты `.coverage`, `.ruff_cache/`, `.pytest_cache/` в рабочей копии
-- **Файл**: корень
-- **Проблема**: В `.gitignore` указаны, но сами файлы/директории присутствуют локально (не закоммичены, но попадают в docker build context). В `.dockerignore` `.pytest_cache`, `.mypy_cache`, `.ruff_cache` указаны, но `.coverage` — нет.
-- **Риск**: Low (размер образа).
-- **Решение**: Добавить `.coverage` в `.dockerignore`; `make clean` чистит — рекомендовать в CI.
-- **Статус**: [ ] Не исправлено
+Файл: `bot/ui/keyboards.py:20-100`, `bot/handlers/*`
 
-## Высокие
+В `Keyboards.series_list` (line 256) есть ссылка на `CallbackData.SERIES` — но **этого атрибута в классе `CallbackData` больше нет**. Метод `series_list` вызывается только из `Keyboards`-самообразно — поиск показывает, что он **не вызывается нигде** в handlers. Скорее всего dead после рефакторинга. При попытке вызвать — `AttributeError`.
+**Решение:** удалить `Keyboards.series_list` (метод целиком).
 
-### DEAD-04: `EmbyClient.get_scheduled_tasks()` не используется нигде
-- **Файл**: `bot/clients/emby.py:192-195`
-- **Проблема**: Метод определён, но ни один handler/service его не вызывает.
-- **Решение**: Удалить либо добавить handler (например, `/emby_tasks`).
-- **Статус**: [ ] Не исправлено
+## DEAD-05 — `bot/clients/base.py: BaseAPIClient._get_http_timeout` дублирует logic (LOW)
 
-### DEAD-05: `NotificationService.force_check()` и `NotificationService.get_stats()` — не используются
-- **Файл**: `bot/services/notification_service.py:200-236, 238-248`
-- **Проблема**: Обе функции существуют и тестируются (test_qbittorrent.py), но не вызываются в продакшн-коде. Нет хендлера `/notify_check` или `/notify_stats`.
-- **Решение**: Либо добавить админ-команду для force_check/stats, либо удалить.
-- **Статус**: [ ] Не исправлено
+Файл: `bot/clients/base.py:69-72`
+Метод вызывается 1 раз в `_get_client()` (строка 81). Можно встроить. Минор.
 
-### DEAD-06: `NotificationService.unsubscribe_user()` — не вызывается
-- **Файл**: `bot/services/notification_service.py:52-55`
-- **Проблема**: Пользователи подписываются автоматически при старте (`main.py:71-72`), отписаться нельзя. Метод недостижим.
-- **Решение**: Добавить callback_data `notify:off` + settings-toggle, либо удалить.
-- **Статус**: [ ] Не исправлено
+## DEAD-06 — `bot/models.py:format_bytes/format_speed` не вынесены в helper-модуль (LOW)
 
-### DEAD-07: `Keyboards.series_list()` не используется
-- **Файл**: `bot/ui/keyboards.py:228-274`
-- **Проблема**: Метод есть, никто не вызывает (в search handler lookup_series возвращает list, но используется первый).
-- **Решение**: Либо использовать при нескольких совпадениях, либо удалить.
-- **Статус**: [ ] Не исправлено
+Файл: `bot/models.py:474-495`
+Утилитарные функции в файле моделей. Работает, но не идейно. Минор — не dead code, а архитектура.
 
-### DEAD-08: `Keyboards.confirm_delete_torrent()` — не используется в боевом коде
-- **Файл**: `bot/ui/keyboards.py:605-625`
-- **Проблема**: Метод есть и тестируется, но delete-кнопки в `torrent_details` идут напрямую на t_delete: без confirmation. Callback `t_delete:confirm:<hash>` нигде не обрабатывается.
-- **Решение**: Добавить confirmation flow либо удалить.
-- **Статус**: [ ] Не исправлено
+## DEAD-07 — `bot/services/scoring.py: ScoringService.filter_by_quality` не вызывается (MED)
 
-### DEAD-09: `TorrentState.COMPLETED` ставится только в `_parse_torrent` при progress>=1 — в `STATE_MAP` нет маппинга на «completed» (qBittorrent не отдаёт такого state)
-- **Файл**: `bot/clients/qbittorrent.py:22-43`
-- **Проблема**: Это не мёртвый код, но `STATE_MAP` не содержит «completed» — значит единственный путь установки — ручной override в `_parse_torrent:425`. OK, не баг.
-- **Статус**: Ложное срабатывание
+Файл: `bot/services/scoring.py:285-324`
+Метод `filter_by_quality` реализован, протестирован (test_scoring.py), но **не вызывается в production-коде** (grep: только `tests/test_scoring.py`). Пользователь `preferred_resolution` в `UserPreferences` сохраняется, но никогда не применяется. То есть настройка «Предпочитаемое разрешение» в UI **ничего не делает**.
+**Решение:** либо применять фильтр в `search_releases`, либо скрыть UI опцию.
 
-### DEAD-10: `EmbyLibrary.item_count` всегда 0 — комментарий объясняет, но поле бесполезно
-- **Файл**: `bot/clients/emby.py:33, 168`
-- **Проблема**: Поле всегда 0. Используется ли где? Проверка показала — не используется в Formatters.
-- **Решение**: Удалить поле.
-- **Статус**: [ ] Не исправлено
+## DEAD-08 — `bot/handlers/downloads.py:confirm_delete_torrent keyboard` не используется (LOW)
 
-### DEAD-11: Импорт `MovieInfo, SeriesInfo` в handlers/search.py — `SeriesInfo` используется только в isinstance
-- **Файл**: `bot/handlers/search.py:11-19`
-- **Проблема**: `SeriesInfo` импортирован, используется в `isinstance(series, SeriesInfo)`. OK.
-- **Статус**: Ложное
+Файл: `bot/ui/keyboards.py:692-711`
+Метод `confirm_delete_torrent` создаёт keyboard для подтверждения удаления. Grep: вызывается только в тестах. В handler'ах `handle_delete_torrent` сразу удаляет без confirmation. Очень опасно для `t_delf` (удаление с файлами). Либо реализовать confirmation flow, либо удалить keyboard.
 
-### DEAD-12: `from typing import Any` в `bot/handlers/trending.py:9` — используется только для type hint dict
-- **Файл**: `bot/handlers/trending.py:9`
-- **Проблема**: `_trending_movies_cache: dict[int, Any]`. OK, используется.
-- **Статус**: Ложное
+## DEAD-09 (НОВЫЙ) — `SearchService.get_artist_by_mbid` не вызывается (LOW)
 
-### DEAD-13: Неиспользуемый импорт `format_speed` в `bot/handlers/downloads.py:11`
-- **Файл**: `bot/handlers/downloads.py:11,599`
-- **Проблема**: `format_speed` используется в `handle_speed_menu` (строки 599-600). OK.
-- **Статус**: Ложное
+Файл: `bot/services/search_service.py:203-211`
+Метод есть, но в коде не используется. `music.py` вызывает `search_service.lookup_artist`, а не `get_artist_by_mbid`.
+**Решение:** либо использовать (при click на trending-artist запросить по mb_id для enrichment), либо удалить.
 
-### DEAD-14: `MovieInfo`, `RootFolder`, `QualityProfile`, `SearchResult` импортированы в `add_service.py`, но `RootFolder` и `SearchResult` тоже — используются (как аргументы). OK.
-- **Файл**: `bot/services/add_service.py:15-25`
-- **Статус**: Ложное
+## DEAD-10 (НОВЫЙ) — `SearchService.get_movie_by_tmdb`/`get_series_by_tvdb` не вызываются (LOW)
 
-## Средние
+Файл: `bot/services/search_service.py:213-231`
+Методы есть, но production-код вызывает `radarr.lookup_movie_by_tmdb` / `sonarr.lookup_series_by_tvdb` напрямую (trending handler). Дубликат слоя, не нужен.
 
-### DEAD-15: `SystemStatus` модель — `error`, `version`, `response_time_ms` могут быть None, есть использование
-- **Статус**: Все используются
+## DEAD-11 (НОВЫЙ) — `SearchService.lookup_album` не вызывается (LOW)
 
-### DEAD-16: `CallbackData.MOVIE = "movie:"` и `CallbackData.SERIES = "series:"` — не используются
-- **Файл**: `bot/ui/keyboards.py:35-36`
-- **Проблема**: Константы определены, но ни один handler не матчит `F.data.startswith(CallbackData.MOVIE)`. Вероятно остатки от предыдущего дизайна (сейчас используются `TRENDING_MOVIE`, `ADD_MOVIE`).
-- **Решение**: Удалить.
-- **Статус**: [ ] Не исправлено
+Файл: `bot/services/search_service.py:197-201`
+Album-lookup присутствует в API SearchService, но в handler'ах не используется (music_handler только artist-lookup).
+**Решение:** ok как публичный API для будущего; либо удалить.
 
-### DEAD-17: `CallbackData.SPEED_LIMIT = "speed:"` — используется в handle_speed_set, но handler матчит `F.data.startswith("speed:")` вручную, не через константу
-- **Файл**: `bot/handlers/downloads.py:626`, `bot/ui/keyboards.py:66`
-- **Проблема**: `@router.callback_query(F.data.startswith("speed:"))` — literal, не `CallbackData.SPEED_LIMIT`. Константа используется только при генерации в keyboards.py. Минорная несогласованность.
-- **Решение**: Использовать `F.data.startswith(CallbackData.SPEED_LIMIT)`.
-- **Статус**: [ ] Не исправлено
+## DEAD-12 (НОВЫЙ) — `bot/clients/deezer.py: search_artist` не вызывается (LOW)
 
-### DEAD-18: Закомментированный код в `.env.example` (строки 27-28, 32, 38, 55, 58)
-- **Файл**: `.env.example`
-- **Проблема**: `# QBITTORRENT_TIMEOUT=30.0` и пр. — документирующие, но избыточные.
-- **Решение**: Оставить либо документировать в README.
-- **Статус**: Не проблема
+Файл: `bot/clients/deezer.py:76-96`
+Метод `search_artist` реализован, но production-код использует только `get_trending_artists/albums`. Мёртв.
+**Решение:** удалить или использовать для enrichment.
 
-### DEAD-19: `MovieInfo.content_model_type: Literal["movie"] = "movie"` — вспомогательное поле для Pydantic discriminator
-- **Файл**: `bot/models.py:101, 126`
-- **Проблема**: Не мёртвый код, но увеличивает размер JSON в БД.
-- **Статус**: OK
+## DEAD-13 (НОВЫЙ) — `bot/clients/lidarr.py: get_all_artists` не вызывается (LOW)
 
-### DEAD-20: `_e(text)` в формате — обёртка над html.escape с проверкой на truthy
-- **Файл**: `bot/ui/formatters.py:26-30`
-- **Проблема**: Используется, нормально.
-- **Статус**: OK
+Файл: `bot/clients/lidarr.py:70-75`
+Не используется нигде. Dead.
 
-### DEAD-21: Variables `hours`/`minutes` unused в `bot/models.py:333` после days overflow
-- **Файл**: `bot/models.py:327-335`
-- **Проблема**: При `hours > 24` переопределяется hours, но `minutes, seconds = divmod(remainder, 60)` выше — `minutes`/`seconds` посчитаны, но в возврате `{days}d {hours}h` игнорируются.
-- **Решение**: См. BUG-13. Dead вычисление.
-- **Статус**: [ ] Не исправлено
+## DEAD-14 (НОВЫЙ) — `bot/clients/lidarr.py: push_release` не вызывается из handler flow (INFO)
 
-### DEAD-22: `_trending_movies_cache`, `_trending_series_cache` — module-level dict'ы с global rebinding
-- **Файл**: `bot/handlers/trending.py:27-28`
-- **Проблема**: Переопределение `global _trending_movies_cache = {}` при превышении — теряется локальное обращение к старому dict в других handlers.
-- **Решение**: Использовать `.clear()` вместо `= {}`.
-- **Статус**: [ ] Не исправлено (см. BUG-02)
+Файл: `bot/clients/lidarr.py:140-157`
+Используется только из `add_service.grab_music_release`, что ок. Не мёртв, просто отметка.
 
-## Низкие
+## DEAD-15 (НОВЫЙ) — `bot/clients/emby.py: install_update, restart_server, get_scheduled_tasks` — только admin, но UI есть не для всех
 
-### DEAD-23: `data/.gitkeep` в Dockerfile `COPY data/.gitkeep ./data/`
-- **Файл**: `Dockerfile:16`
-- **Проблема**: Копируется единственный файл `data/.gitkeep` — нужно для существования директории. Можно заменить на `RUN mkdir -p /app/data`.
-- **Статус**: Минорно
+Файл: `bot/clients/emby.py:192-218`
+`get_scheduled_tasks` **нигде не используется в handler**. UI нет. Dead.
 
-### DEAD-24: `asyncio_default_fixture_loop_scope = "function"` в pyproject.toml
-- **Файл**: `pyproject.toml:36`
-- **Проблема**: Настройка нужна для pytest-asyncio 1.x. OK.
-- **Статус**: OK
+## DEAD-18 (НОВЫЙ) — `bot/services/notification_service.py: force_check` возвращает список, никто не вызывает (MED)
 
-### DEAD-25: `version: "3.9"` в docker-compose.override.yml — depricated с compose v2
-- **Файл**: `docker-compose.override.yml:5`
-- **Проблема**: Compose v2 выдаёт warning. Устарело.
-- **Решение**: Удалить строку.
-- **Статус**: [ ] Не исправлено
+Файл: `bot/services/notification_service.py:200-236`
+Метод реализован (вернёт newly-completed torrents), но не вызывается — нет `/check`/`/notify-now` команды. Mожно удалить или добавить команду.
 
-### DEAD-26: Makefile target `install` vs `dev` — оба делают `pip install -r requirements.txt`, разница только в ruff+mypy
-- **Файл**: `Makefile:21-27`
-- **Проблема**: Достаточно одного, с опциональным `dev` через `pip install -e ".[dev]"`.
-- **Статус**: [ ] Не исправлено
+## DEAD-19 (НОВЫЙ) — `MENU_SEARCH` / `MENU_DOWNLOADS` etc. разбросаны по handler'ам (LOW)
 
-### DEAD-27: Dockerfile `RUN apt-get install -y ... gcc` — gcc нужен для компиляции native-модулей, но среди зависимостей (requirements.txt) их нет (orjson, aiosqlite, pydantic — все wheel). Gcc лишний, увеличивает образ.
-- **Файл**: `Dockerfile:6-8`
-- **Статус**: [ ] Не исправлено
+Файлы: `bot/handlers/start.py:15-20`, `bot/handlers/search.py:31`, `bot/handlers/downloads.py:22-23`, etc.
+Константы дублируются в каждом файле. Не dead, но consolidate в единый `bot/ui/menu.py`.
 
-### DEAD-28: Пустой `bot/ui/__init__.py` (1 строка комментарий)
-- **Файл**: `bot/ui/__init__.py`
-- **Проблема**: `"""UI components for Telegram bot."""` — единственная строка. Это нормально для пакета.
-- **Статус**: OK
+## DEAD-20 (НОВЫЙ) — `from bot.clients.registry import get_prowlarr, get_radarr, get_sonarr` в `music.py` (LOW)
 
-## Итоговый подсчёт
-- Критические: 3 (DEAD-01..03 — устаревшие отчёты и артефакты)
-- Высокие: 6 (DEAD-04..08, DEAD-10)
-- Средние: 5 (DEAD-16..22)
-- Низкие: 4 (DEAD-25..27)
+Файл: `bot/handlers/music.py:10`
+В `music.py` импортируется `get_prowlarr, get_radarr, get_sonarr`, но используются только в `_get_music_services`. Вынесены "на всякий случай", т.к. создаётся `AddService(prowlarr, radarr, sonarr, ...)`. ОК, но бросается в глаза.
+
+## DEAD-21 (НОВЫЙ) — `bot/services/search_service.py: parse_query` — quality удаляется из title, но не используется (LOW)
+
+Файл: `bot/services/search_service.py:279-284`
+`parsed["quality"]` извлекается, но после `parse_query` ничего с ним не делает — в `process_search` используется только `parsed["season"]` и `parsed["title"]`. Таким образом удаление `1080p` из title лишено смысла (позже всё равно запрос идёт в `search_releases(query, ...)`, а не `(parsed["title"], ...)`).
+**Решение:** передать `parsed["title"]` в Prowlarr вместо оригинального query (это уже LOGIC-issue).
+
+## DEAD-22 (НОВЫЙ) — `bot/clients/radarr.py: search_movie` не вызывается из handler напрямую (INFO)
+
+Файл: `bot/clients/radarr.py:178-185`
+Используется в `add_service.grab_movie_release` (fallback search). Не dead.
+
+## DEAD-27 — `gcc` в Dockerfile (LOW, из прошлого)
+
+Файл: `Dockerfile:6-8`
+`gcc` нужен **только** если кому-то из deps требуется сборка C-extension. В прошлом аудите отмечено что `aiosqlite` имеет wheels. На slim с Python 3.12 all deps имеют wheels. Можно убрать `gcc` → -150MB image size.
+**Решение:** проверить `pip install --only-binary :all:` на CI, если ок — удалить `gcc`.
+
+## DEAD-28 (НОВЫЙ) — `bot/ui/formatters.py: format_search_result` не используется (LOW)
+
+Файл: `bot/ui/formatters.py:38-76`
+`format_search_result` реализован и протестирован, но production вызывает `format_search_results_page`, который делает то же самое inline через `format_search_result`. Подождите, перепроверяю: `format_search_results_page` (line 92-95) вызывает `Formatters.format_search_result(result, ...)`. Не dead. Отзываю.
+
+## DEAD-29 (НОВЫЙ) — `bot/ui/formatters.py: format_torrent_compact` не используется (LOW)
+
+Файл: `bot/ui/formatters.py:603-608`
+Grep показывает использование только в тестах. В handler'ах — нет. Dead.
+
+## DEAD-30 (НОВЫЙ) — Лог-сообщение `"Deleted torrents"` в qbittorrent.py, но action не логируется в БД (INFO)
+
+Файл: `bot/clients/qbittorrent.py:343`
+`logger.info("Deleted torrents", ...)` — ok, но `handlers/downloads.py:handle_delete_torrent` не вызывает `db.log_action` — нет записи в action-log БД. Это feature gap, не dead.
+
+## DEAD-31 (НОВЫЙ) — `Keyboards.series_list` использует несуществующий `CallbackData.SERIES` (CRIT если вызвать)
+
+Файл: `bot/ui/keyboards.py:256`
+```python
+callback_data=f"{CallbackData.SERIES}{s.tvdb_id}",
+```
+`CallbackData.SERIES` не определён — `AttributeError` при вызове. `series_list` не вызывается нигде → dead code, но if someone reinstates — crash. Удалить метод (см. DEAD-04).
+
+## DEAD-32 (НОВЫЙ) — `bot/clients/base.py: _post_no_retry` возвращает `{"raw": response.text}` при не-JSON (INFO)
+
+Файл: `bot/clients/base.py:248-251`
+Не dead, но downstream-код в `radarr.grab_release` делает `result if isinstance(result, dict) else {}`. `{"raw": "..."}` — dict → пройдёт. Но такой результат никогда не проверяется на `approved` key, поэтому автоматически трактуется как rejected. Minor.
+
+## Итого
+
+Всего: ~19 уникальных находок.
+- CRIT-if-invoked: 1 (DEAD-31)
+- MED: 2 (DEAD-07, DEAD-18)
+- LOW/INFO: остальные 16
+
+Приоритет: DEAD-07 (preferred_resolution — user-visible broken feature), DEAD-31 (dead + crash-prone), DEAD-27 (Dockerfile slim).

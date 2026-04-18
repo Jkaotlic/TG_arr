@@ -19,6 +19,7 @@ from bot.models import (
 logger = structlog.get_logger()
 
 # State mapping from qBittorrent API to our enum
+# BUG-29: qBittorrent v5 renamed pausedDL/UP → stoppedDL/UP and added "running"
 STATE_MAP = {
     "allocating": TorrentState.CHECKING,
     "checkingDL": TorrentState.CHECKING,
@@ -38,6 +39,9 @@ STATE_MAP = {
     "queuedUP": TorrentState.QUEUED,
     "stalledDL": TorrentState.STALLED,
     "stalledUP": TorrentState.SEEDING,
+    "stoppedDL": TorrentState.PAUSED,
+    "stoppedUP": TorrentState.PAUSED,
+    "running": TorrentState.DOWNLOADING,
     "uploading": TorrentState.SEEDING,
     "unknown": TorrentState.UNKNOWN,
 }

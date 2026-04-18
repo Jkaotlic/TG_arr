@@ -249,6 +249,51 @@ async def handle_page(callback: CallbackQuery) -> None:
         await callback.answer("Ошибка операции", show_alert=True)
 
 
+async def _render_torrent_list(message: Message, qbt) -> None:
+    """Render the default (unfiltered, first-page) torrent list into ``message``.
+
+    BUG-15: extracted so mutating callbacks (delete/delete-with-files/pause-all
+    /resume-all) can redraw the list without re-invoking ``handle_refresh``,
+    which would ack the callback a second time.
+    """
+    all_torrents = await qbt.get_torrents()
+    total = len(all_torrents)
+    total_pages = max(1, (total + TORRENTS_PER_PAGE - 1) // TORRENTS_PER_PAGE)
+    torrents = all_torrents[:TORRENTS_PER_PAGE]
+
+    text = Formatters.format_torrent_list(torrents, 0, total_pages, TorrentFilter.ALL, total)
+    try:
+        await message.edit_text(
+            text,
+            reply_markup=Keyboards.torrent_list(torrents, 0, total_pages, TorrentFilter.ALL),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
+
+
+async def _render_torrent_details(message: Message, torrent) -> None:
+    """Render torrent details into ``message``.
+
+    BUG-15: Extracted helper so mutating callbacks (pause/resume/delete) can
+    redraw the details view after acknowledging the callback, without triggering
+    a recursive ``callback.answer`` via the full ``handle_torrent_details``
+    path. This helper does NOT call ``callback.answer`` — the caller owns the
+    single ack per callback.
+    """
+    text = Formatters.format_torrent_details(torrent)
+    try:
+        await message.edit_text(
+            text,
+            reply_markup=Keyboards.torrent_details(torrent),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
+
+
 @router.callback_query(F.data.startswith("t:"))
 async def handle_torrent_details(callback: CallbackQuery) -> None:
     """Show torrent details."""
@@ -267,17 +312,7 @@ async def handle_torrent_details(callback: CallbackQuery) -> None:
             await callback.answer("Торрент не найден", show_alert=True)
             return
 
-        text = Formatters.format_torrent_details(torrent)
-
-        try:
-            await callback.message.edit_text(
-                text,
-                reply_markup=Keyboards.torrent_details(torrent),
-                parse_mode="HTML",
-            )
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
+        await _render_torrent_details(callback.message, torrent)
         await callback.answer()
 
     except Exception as e:
@@ -306,8 +341,12 @@ async def handle_pause_torrent(callback: CallbackQuery) -> None:
         await qbt.pause([torrent.hash])
         await callback.answer(f"⏸️ Приостановлен: {torrent.name[:30]}")
 
-        # Refresh the view
-        await handle_torrent_details(callback)
+        # BUG-15: redraw details directly — do NOT call handle_torrent_details,
+        # which would ack the callback a second time.
+        if callback.message:
+            # Re-fetch to show updated state (speed=0, state=paused)
+            refreshed = await qbt.get_torrent_by_short_hash(short_hash)
+            await _render_torrent_details(callback.message, refreshed or torrent)
 
     except Exception as e:
         logger.error("Failed to pause", error=str(e))
@@ -335,8 +374,10 @@ async def handle_resume_torrent(callback: CallbackQuery) -> None:
         await qbt.resume([torrent.hash])
         await callback.answer(f"▶️ Возобновлён: {torrent.name[:30]}")
 
-        # Refresh the view
-        await handle_torrent_details(callback)
+        # BUG-15: redraw details directly — do NOT call handle_torrent_details.
+        if callback.message:
+            refreshed = await qbt.get_torrent_by_short_hash(short_hash)
+            await _render_torrent_details(callback.message, refreshed or torrent)
 
     except Exception as e:
         logger.error("Failed to resume", error=str(e))
@@ -368,8 +409,9 @@ async def handle_delete_torrent(callback: CallbackQuery, is_admin: bool = False)
         await qbt.delete([torrent.hash], delete_files=False)
         await callback.answer(f"🗑️ Удалён: {torrent.name[:30]}")
 
-        # Go back to list
-        await handle_refresh(callback)
+        # BUG-15: redraw list directly — do NOT call handle_refresh.
+        if callback.message:
+            await _render_torrent_list(callback.message, qbt)
 
     except Exception as e:
         logger.error("Failed to delete", error=str(e))
@@ -401,8 +443,9 @@ async def handle_delete_with_files(callback: CallbackQuery, is_admin: bool = Fal
         await qbt.delete([torrent.hash], delete_files=True)
         await callback.answer(f"🗑️💾 Удалён с файлами: {torrent.name[:25]}")
 
-        # Go back to list
-        await handle_refresh(callback)
+        # BUG-15: redraw list directly — do NOT call handle_refresh.
+        if callback.message:
+            await _render_torrent_list(callback.message, qbt)
 
     except Exception as e:
         logger.error("Failed to delete", error=str(e))

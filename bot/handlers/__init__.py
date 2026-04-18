@@ -18,11 +18,12 @@ def setup_routers() -> Router:
     """Setup and return the main router with all handlers."""
     main_router = Router()
 
-    # IMPORTANT: music_router is included BEFORE search_router so that its
-    # CONFIRM_GRAB handler gets a chance to run first for music sessions.
+    # search_router owns CONFIRM_GRAB and dispatches to music/movie/series by
+    # session.selected_content type (BUG-27). music_router is only for /music,
+    # artist selection, and TRENDING_MUSIC callbacks.
     main_router.include_router(start_router)
-    main_router.include_router(music_router)
     main_router.include_router(search_router)
+    main_router.include_router(music_router)
     main_router.include_router(settings_router)
     main_router.include_router(status_router)
     main_router.include_router(history_router)

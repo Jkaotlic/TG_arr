@@ -89,6 +89,13 @@ class ScoringWeights:
                 "chinese": -3,
             }
 
+        # Pre-compile word-boundary regex patterns for bad keywords (PERF-05)
+        # Using IGNORECASE so both upper/lower-cased titles match the same pattern.
+        self._bad_keyword_patterns: list[tuple[re.Pattern[str], int]] = [
+            (re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE), penalty)
+            for kw, penalty in self.bad_keywords.items()
+        ]
+
 
 class ScoringService:
     """Service for calculating release scores."""
@@ -222,12 +229,10 @@ class ScoringService:
             elif size_gb > max_size:
                 score += self.weights.size_too_large_penalty
 
-        # Bad keywords penalties
-        title_lower = result.title.lower()
-        for keyword, penalty in self.weights.bad_keywords.items():
-            # Use word boundary matching to avoid false positives
-            pattern = rf"\b{re.escape(keyword)}\b"
-            if re.search(pattern, title_lower):
+        # Bad keywords penalties — use pre-compiled patterns (PERF-05)
+        title = result.title
+        for pattern, penalty in self.weights._bad_keyword_patterns:
+            if pattern.search(title):
                 score += penalty
 
         # Ensure score stays within reasonable bounds

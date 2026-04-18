@@ -19,7 +19,6 @@ from bot.models import (
     User,
 )
 from bot.services.add_service import AddService
-from bot.services.scoring import ScoringService
 from bot.services.search_service import SearchService
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -28,6 +27,19 @@ logger = structlog.get_logger()
 router = Router()
 
 MENU_MUSIC = "🎵 Музыка"
+
+# PERF-04: Reuse the same ScoringService instance across music requests.
+# Import here rather than in search.py to avoid a circular import at module load.
+from bot.handlers.search import _SCORING_SERVICE  # noqa: E402
+
+# PERF-03: Hard cap for per-user in-memory caches — prevents unbounded memory growth.
+_MAX_ARTIST_CANDIDATES = 100
+
+
+def _cleanup_if_overflow(cache: dict) -> None:
+    """Drop all entries from an in-memory cache if it exceeds the size cap."""
+    if len(cache) > _MAX_ARTIST_CANDIDATES:
+        cache.clear()
 
 # Session key: store artist candidates list separately from SearchResult list
 # We reuse SearchSession.results (as search releases) and selected_content (ArtistInfo)
@@ -47,7 +59,7 @@ async def _get_music_services() -> tuple[SearchService, AddService] | None:
     sonarr = await get_sonarr()
     qbittorrent = await get_qbittorrent()
 
-    search_service = SearchService(prowlarr, radarr, sonarr, ScoringService(), lidarr=lidarr)
+    search_service = SearchService(prowlarr, radarr, sonarr, _SCORING_SERVICE, lidarr=lidarr)
     add_service = AddService(prowlarr, radarr, sonarr, qbittorrent=qbittorrent, lidarr=lidarr)
     return search_service, add_service
 
@@ -118,6 +130,7 @@ async def process_music_search(
         return
 
     # Cache for callback lookup by index
+    _cleanup_if_overflow(_artist_candidates)
     _artist_candidates[user_id] = artists[:25]
 
     # Persist a minimal session so /back/cancel consistently works
@@ -185,7 +198,7 @@ async def handle_artist_selection(callback: CallbackQuery, db_user: User, db: Da
     )
 
 
-async def _handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: Database) -> None:
+async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Confirm add artist to Lidarr."""
     user_id = db_user.tg_id
     session = await db.get_session(user_id)
@@ -254,14 +267,9 @@ async def _handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: 
             await callback.message.edit_text(Formatters.format_error("Операция временно недоступна"))
 
 
-# Register as secondary listener for CONFIRM_GRAB — music flow only triggers when selected_content is ArtistInfo
-@router.callback_query(F.data == CallbackData.CONFIRM_GRAB)
-async def handle_music_confirm(callback: CallbackQuery, db_user: User, db: Database) -> None:
-    """Route CONFIRM_GRAB to music add when the current session holds an ArtistInfo."""
-    user_id = db_user.tg_id
-    session = await db.get_session(user_id)
-    if session and isinstance(session.selected_content, ArtistInfo):
-        await _handle_confirm_music_add(callback, db_user, db)
+# BUG-27: CONFIRM_GRAB is now dispatched from handlers/search.py by session type.
+# music.py exposes handle_confirm_music_add; it is NOT registered as a separate
+# callback handler (aiogram does not cascade — would silently swallow movie/series).
 
 
 # =========================================================================
@@ -294,6 +302,7 @@ async def handle_trending_music(callback: CallbackQuery) -> None:
         return
 
     user_id = callback.from_user.id
+    _cleanup_if_overflow(_trending_artists_cache)
     _trending_artists_cache[user_id] = artists
 
     await callback.message.edit_text(

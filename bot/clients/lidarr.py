@@ -67,13 +67,6 @@ class LidarrClient(BaseAPIClient):
             return self._parse_artist(results[0])
         return None
 
-    async def get_all_artists(self) -> list[ArtistInfo]:
-        """Get all artists currently in the Lidarr library."""
-        results = await self.get("/api/v1/artist")
-        if not isinstance(results, list):
-            return []
-        return [a for a in (self._parse_artist(item) for item in results) if a]
-
     async def add_artist(
         self,
         artist: ArtistInfo,
@@ -111,7 +104,9 @@ class LidarrClient(BaseAPIClient):
             "metadataProfileId": metadata_profile_id,
             "rootFolderPath": root_folder_path,
             "monitored": monitored,
-            "monitorNewItems": "all",
+            # SEC-17: honour caller-supplied monitor policy rather than
+            # hard-coding "all" for new items.
+            "monitorNewItems": monitor,
             "addOptions": {
                 "monitor": monitor,
                 "searchForMissingAlbums": search_for_missing,

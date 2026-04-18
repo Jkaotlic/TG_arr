@@ -264,6 +264,61 @@ class TestActionLogOperations:
 
 
 @pytest.mark.asyncio
+class TestMigrations:
+    """Test schema migration framework (DB-01)."""
+
+    async def test_migration_v0_to_v1_idempotent(self, tmp_path):
+        """Migration framework (DB-01) is idempotent across re-connects.
+
+        PRAGMA user_version must be set after the first connect and must
+        not advance when re-opening an already-migrated DB.
+        """
+        db_path = str(tmp_path / "migrate.db")
+
+        db1 = Database(db_path)
+        await db1.connect()
+        async with db1.conn.execute("PRAGMA user_version") as c:
+            row = await c.fetchone()
+            v_first = row[0]
+        await db1.close()
+
+        db2 = Database(db_path)
+        await db2.connect()
+        async with db2.conn.execute("PRAGMA user_version") as c:
+            row = await c.fetchone()
+            v_second = row[0]
+        await db2.close()
+
+        assert v_first >= 1, "Schema version must be at least 1 after first connect"
+        assert v_second == v_first, "Schema version must not advance on reconnect"
+
+
+@pytest.mark.asyncio
+class TestCorruptPreferences:
+    """Test BUG-24 / SEC-19: corrupt preferences JSON → defaults."""
+
+    async def test_get_user_falls_back_on_corrupt_preferences(self, db):
+        """Invalid preferences JSON should yield default UserPreferences (not crash)."""
+        user = User(tg_id=7777777)
+        await db.create_user(user)
+
+        # Corrupt the preferences column directly
+        await db.conn.execute(
+            "UPDATE users SET preferences = ? WHERE tg_id = ?",
+            ("{not valid json", 7777777),
+        )
+        await db.conn.commit()
+
+        retrieved = await db.get_user(7777777)
+        assert retrieved is not None
+        assert retrieved.preferences is not None
+        # Default values should be present
+        defaults = UserPreferences()
+        assert retrieved.preferences.auto_grab_enabled == defaults.auto_grab_enabled
+        assert retrieved.preferences.preferred_resolution == defaults.preferred_resolution
+
+
+@pytest.mark.asyncio
 class TestCleanupOperations:
     """Test cleanup operations."""
 

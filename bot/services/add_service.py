@@ -338,26 +338,34 @@ class AddService:
             release_rejected = False
             rejections = []
             if release.download_url:
-                try:
-                    log.info("Attempting push_release", download_url=_mask_url(release.download_url))
-                    result = await self.radarr.push_release(
-                        title=release.title,
-                        download_url=release.download_url,
-                        protocol=release.protocol,
-                        publish_date=release.publish_date.isoformat() if release.publish_date else None,
+                # SEC-16: validate URL BEFORE handing it to Radarr to prevent
+                # SSRF via arr → private network.
+                if not await _validate_download_url(release.download_url):
+                    log.warning(
+                        "Skipping push_release: unsafe/private download URL (SEC-16)",
+                        download_url=_mask_url(release.download_url),
                     )
-                    log.info("Push release result", result=result)
-                    if result and result.get("approved") is True:
-                        action.success = True
-                        log.info("Release pushed successfully")
-                        return True, action, "Релиз отправлен на скачивание"
-                    else:
-                        rejections = result.get("rejections", []) if result else []
-                        release_rejected = True
-                        rejection_msg = f"rejections: {rejections}" if rejections else "no explicit approval from Radarr/Sonarr"
-                        log.warning("Release was not approved", reason=rejection_msg)
-                except APIError as e:
-                    log.warning("Push release failed, trying direct grab", error=str(e))
+                else:
+                    try:
+                        log.info("Attempting push_release", download_url=_mask_url(release.download_url))
+                        result = await self.radarr.push_release(
+                            title=release.title,
+                            download_url=release.download_url,
+                            protocol=release.protocol,
+                            publish_date=release.publish_date.isoformat() if release.publish_date else None,
+                        )
+                        log.info("Push release result", result=result)
+                        if result and result.get("approved") is True:
+                            action.success = True
+                            log.info("Release pushed successfully")
+                            return True, action, "Релиз отправлен на скачивание"
+                        else:
+                            rejections = result.get("rejections", []) if result else []
+                            release_rejected = True
+                            rejection_msg = f"rejections: {rejections}" if rejections else "no explicit approval from Radarr/Sonarr"
+                            log.warning("Release was not approved", reason=rejection_msg)
+                    except APIError as e:
+                        log.warning("Push release failed, trying direct grab", error=str(e))
 
             # Try direct grab through indexer
             if release.indexer_id > 0 and not release_rejected:
@@ -482,26 +490,34 @@ class AddService:
             release_rejected = False
             rejections = []
             if release.download_url:
-                try:
-                    log.info("Attempting push_release", download_url=_mask_url(release.download_url))
-                    result = await self.sonarr.push_release(
-                        title=release.title,
-                        download_url=release.download_url,
-                        protocol=release.protocol,
-                        publish_date=release.publish_date.isoformat() if release.publish_date else None,
+                # SEC-16: validate URL BEFORE handing it to Sonarr to prevent
+                # SSRF via arr → private network.
+                if not await _validate_download_url(release.download_url):
+                    log.warning(
+                        "Skipping push_release: unsafe/private download URL (SEC-16)",
+                        download_url=_mask_url(release.download_url),
                     )
-                    log.info("Push release result", result=result)
-                    if result and result.get("approved") is True:
-                        action.success = True
-                        log.info("Release pushed successfully")
-                        return True, action, "Релиз отправлен на скачивание"
-                    else:
-                        rejections = result.get("rejections", []) if result else []
-                        release_rejected = True
-                        rejection_msg = f"rejections: {rejections}" if rejections else "no explicit approval from Radarr/Sonarr"
-                        log.warning("Release was not approved", reason=rejection_msg)
-                except APIError as e:
-                    log.warning("Push release failed, trying direct grab", error=str(e))
+                else:
+                    try:
+                        log.info("Attempting push_release", download_url=_mask_url(release.download_url))
+                        result = await self.sonarr.push_release(
+                            title=release.title,
+                            download_url=release.download_url,
+                            protocol=release.protocol,
+                            publish_date=release.publish_date.isoformat() if release.publish_date else None,
+                        )
+                        log.info("Push release result", result=result)
+                        if result and result.get("approved") is True:
+                            action.success = True
+                            log.info("Release pushed successfully")
+                            return True, action, "Релиз отправлен на скачивание"
+                        else:
+                            rejections = result.get("rejections", []) if result else []
+                            release_rejected = True
+                            rejection_msg = f"rejections: {rejections}" if rejections else "no explicit approval from Radarr/Sonarr"
+                            log.warning("Release was not approved", reason=rejection_msg)
+                    except APIError as e:
+                        log.warning("Push release failed, trying direct grab", error=str(e))
 
             # Try direct grab
             if release.indexer_id > 0 and not release_rejected:
@@ -675,24 +691,32 @@ class AddService:
             release_rejected = False
             rejections: list = []
             if release.download_url:
-                try:
-                    log.info("Attempting push_release", download_url=_mask_url(release.download_url))
-                    result = await self.lidarr.push_release(
-                        title=release.title,
-                        download_url=release.download_url,
-                        protocol=release.protocol,
-                        publish_date=release.publish_date.isoformat() if release.publish_date else None,
+                # SEC-16: validate URL BEFORE handing it to Lidarr to prevent
+                # SSRF via arr → private network.
+                if not await _validate_download_url(release.download_url):
+                    log.warning(
+                        "Skipping push_release: unsafe/private download URL (SEC-16)",
+                        download_url=_mask_url(release.download_url),
                     )
-                    log.info("Push release result", result=result)
-                    if result and result.get("approved") is True:
-                        action.success = True
-                        log.info("Release pushed successfully")
-                        return True, action, "Релиз отправлен на скачивание"
-                    rejections = result.get("rejections", []) if result else []
-                    release_rejected = True
-                    log.warning("Release was not approved", reason=str(rejections))
-                except APIError as e:
-                    log.warning("Push release failed, trying direct grab", error=str(e))
+                else:
+                    try:
+                        log.info("Attempting push_release", download_url=_mask_url(release.download_url))
+                        result = await self.lidarr.push_release(
+                            title=release.title,
+                            download_url=release.download_url,
+                            protocol=release.protocol,
+                            publish_date=release.publish_date.isoformat() if release.publish_date else None,
+                        )
+                        log.info("Push release result", result=result)
+                        if result and result.get("approved") is True:
+                            action.success = True
+                            log.info("Release pushed successfully")
+                            return True, action, "Релиз отправлен на скачивание"
+                        rejections = result.get("rejections", []) if result else []
+                        release_rejected = True
+                        log.warning("Release was not approved", reason=str(rejections))
+                    except APIError as e:
+                        log.warning("Push release failed, trying direct grab", error=str(e))
 
             if release.indexer_id > 0 and not release_rejected:
                 try:

@@ -232,54 +232,6 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
-    def series_list(
-        series: list[SeriesInfo],
-        current_page: int = 0,
-        per_page: int = 5,
-    ) -> InlineKeyboardMarkup:
-        """Create keyboard for series selection from lookup results."""
-        total_pages = max(1, (len(series) + per_page - 1) // per_page)
-        start_idx = current_page * per_page
-        page_series = series[start_idx:start_idx + per_page]
-
-        keyboard = []
-
-        for s in page_series:
-            year_str = f" ({s.year})" if s.year else ""
-            label = f"{s.title}{year_str}"
-            if len(label) > 40:
-                label = label[:37] + "..."
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"{CallbackData.SERIES}{s.tvdb_id}",
-                )
-            ])
-
-        # Pagination
-        if total_pages > 1:
-            nav_buttons = []
-            if current_page > 0:
-                nav_buttons.append(
-                    InlineKeyboardButton(text="◀️", callback_data=f"{CallbackData.PAGE}{current_page - 1}")
-                )
-            nav_buttons.append(
-                InlineKeyboardButton(text=f"{current_page + 1}/{total_pages}", callback_data="noop")
-            )
-            if current_page < total_pages - 1:
-                nav_buttons.append(
-                    InlineKeyboardButton(text="▶️", callback_data=f"{CallbackData.PAGE}{current_page + 1}")
-                )
-            keyboard.append(nav_buttons)
-
-        keyboard.append([
-            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-    @staticmethod
     def quality_profiles(profiles: list[QualityProfile], prefix: str) -> InlineKeyboardMarkup:
         """Create keyboard for selecting quality profile."""
         keyboard = []

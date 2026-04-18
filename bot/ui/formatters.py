@@ -6,6 +6,7 @@ All output uses HTML parse_mode. User-provided content is escaped via html.escap
 import html
 from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bot.models import (
     ActionLog,
@@ -615,6 +616,38 @@ class Formatters:
         return "█" * filled + "░" * empty
 
     @staticmethod
+    def _safe_truncate(text: str, max_len: int = 3800) -> str:
+        """Truncate text without breaking HTML tags (BUG-12).
+
+        Strategy: if text fits, return as-is. Otherwise cut at the last
+        newline before ``max_len``. If no newline exists in the budget,
+        fall back to a safe character-boundary cut that avoids unclosed
+        ``<…>`` tags.
+        """
+        SUFFIX = "\n\n... (truncated)"
+        if len(text) <= max_len:
+            return text
+
+        # Reserve space for the suffix
+        budget = max_len - len(SUFFIX)
+        if budget <= 0:
+            return text[:max_len]
+
+        candidate = text[:budget]
+        cut_at = candidate.rfind("\n")
+        if cut_at == -1:
+            cut_at = budget
+
+        piece = candidate[:cut_at]
+        # Guard: if the piece ends inside an HTML tag ("<..." without ">"),
+        # walk back to the last safe position.
+        last_open = piece.rfind("<")
+        last_close = piece.rfind(">")
+        if last_open > last_close:
+            piece = piece[:last_open]
+        return piece + SUFFIX
+
+    @staticmethod
     def format_download_complete_notification(torrent: TorrentInfo) -> str:
         """Format notification message for completed download."""
         lines = ["✅ <b>Загрузка завершена!</b>\n"]
@@ -947,24 +980,32 @@ class Formatters:
                     lines.append(f"  {status} <b>{artist}</b> — {title}{type_str}")
 
         result = "\n".join(lines)
-
-        MAX_MSG_LEN = 3800
-        if len(result) > MAX_MSG_LEN:
-            truncated = result[:MAX_MSG_LEN].rsplit('\n', 1)[0]
-            result = truncated + "\n\n... и ещё записи (сообщение слишком длинное)"
-
-        return result
+        return Formatters._safe_truncate(result, max_len=3800)
 
     @staticmethod
     def _extract_date_key(date_str: str) -> str:
-        """Extract sortable date key (YYYY-MM-DD) from ISO date string."""
+        """Extract sortable date key (YYYY-MM-DD) from ISO date string.
+
+        BUG-11: parse as tz-aware and convert to the configured TIMEZONE
+        so the *local* calendar day is used for grouping.
+        """
         if not date_str:
-            return "9999-99-99"
+            return "9999-12-31"
         try:
             dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-            return dt.strftime("%Y-%m-%d")
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            try:
+                from bot.config import get_settings
+
+                tz_name = get_settings().timezone
+                tz = ZoneInfo(tz_name)
+            except (ZoneInfoNotFoundError, Exception):
+                tz = timezone.utc
+            local = dt.astimezone(tz)
+            return local.strftime("%Y-%m-%d")
         except (ValueError, IndexError):
-            return date_str[:10] if len(date_str) >= 10 else "9999-99-99"
+            return date_str[:10] if len(date_str) >= 10 else "9999-12-31"
 
     @staticmethod
     def _format_date_header(date_key: str, today) -> str:
