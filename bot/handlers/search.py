@@ -102,7 +102,9 @@ async def cmd_series(message: Message, db_user: User, db: Database) -> None:
 @router.message(F.text == MENU_SEARCH)
 async def handle_menu_search(message: Message) -> None:
     """Handle search menu button."""
-    await message.answer("🔍 Введите название фильма или сериала:")
+    settings = get_settings()
+    suffix = ", сериала или артиста" if settings.lidarr_enabled else " или сериала"
+    await message.answer(f"🔍 Введите название фильма{suffix}:")
 
 
 @router.message(F.text & ~F.text.startswith("/") & ~F.text.in_(MENU_BUTTONS))
@@ -155,11 +157,22 @@ async def process_search(
             else:
                 content_type = await search_service.detect_content_type(parsed["title"])
 
+            # Music auto-detected → delegate to music flow (Lidarr artist lookup)
+            if content_type == ContentType.MUSIC:
+                await status_msg.delete()
+                from bot.handlers.music import process_music_search
+
+                await process_music_search(message, query, db_user, db)
+                return
+
             if content_type == ContentType.UNKNOWN:
-                # Ask user to choose
+                show_music = settings.lidarr_enabled
+                question_suffix = (
+                    "фильм, сериал или музыка?" if show_music else "фильм или сериал?"
+                )
                 await status_msg.edit_text(
-                    f"🤔 <b>{query}</b> — это фильм или сериал?",
-                    reply_markup=Keyboards.content_type_selection(),
+                    f"🤔 <b>{html.escape(query)}</b> — это {question_suffix}",
+                    reply_markup=Keyboards.content_type_selection(show_music=show_music),
                     parse_mode="HTML",
                 )
 
@@ -248,7 +261,11 @@ async def process_search(
         await message.answer(Formatters.format_error("Поиск временно недоступен"))
 
 
-@router.callback_query(F.data.startswith(CallbackData.TYPE_MOVIE) | F.data.startswith(CallbackData.TYPE_SERIES))
+@router.callback_query(
+    F.data.startswith(CallbackData.TYPE_MOVIE)
+    | F.data.startswith(CallbackData.TYPE_SERIES)
+    | F.data.startswith(CallbackData.TYPE_MUSIC)
+)
 async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle content type selection."""
     if not callback.data or not callback.message:
@@ -259,6 +276,15 @@ async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Data
 
     if not session:
         await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+
+    # Music → hand off to Lidarr artist flow (different UX than torrent search)
+    if callback.data == CallbackData.TYPE_MUSIC:
+        await callback.answer()
+        from bot.handlers.music import process_music_search
+
+        await db.delete_session(user_id)  # music flow starts its own session
+        await process_music_search(callback.message, session.query, db_user, db)
         return
 
     content_type = ContentType.MOVIE if callback.data == CallbackData.TYPE_MOVIE else ContentType.SERIES
