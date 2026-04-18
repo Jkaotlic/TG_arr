@@ -27,6 +27,10 @@ from bot.ui.keyboards import CallbackData, Keyboards
 logger = structlog.get_logger()
 router = Router()
 
+# PERF-04: Singleton ScoringService shared across all requests.
+# ScoringService is stateless (only holds pre-compiled weights), so one instance is safe.
+_SCORING_SERVICE = ScoringService()
+
 # Russian menu button texts
 MENU_SEARCH = "🔍 Поиск"
 
@@ -47,7 +51,7 @@ async def get_services() -> tuple[SearchService, AddService, ScoringService]:
     qbittorrent = await get_qbittorrent()  # Returns None if not configured
     lidarr = await get_lidarr()  # Returns None if not configured
 
-    scoring = ScoringService()
+    scoring = _SCORING_SERVICE
     search_service = SearchService(prowlarr, radarr, sonarr, scoring, lidarr=lidarr)
     add_service = AddService(prowlarr, radarr, sonarr, qbittorrent=qbittorrent, lidarr=lidarr)
 
@@ -190,7 +194,11 @@ async def process_search(
         # Search for releases
         status_msg = await message.answer("🔍 Ищу релизы...")
 
-        results = await search_service.search_releases(query, content_type)
+        # LOGIC-09: pass the parsed clean title (without year / season-episode
+        # markers / quality tokens) to the indexer. Fall back to the raw
+        # query if parsing produced an empty title.
+        search_term = (parsed.get("title") or "").strip() or query
+        results = await search_service.search_releases(search_term, content_type)
 
         if not results:
             await status_msg.edit_text(
@@ -495,19 +503,39 @@ async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database)
 
 @router.callback_query(F.data == CallbackData.CONFIRM_GRAB)
 async def handle_confirm_grab(callback: CallbackQuery, db_user: User, db: Database) -> None:
-    """Handle grab confirmation."""
+    """
+    Handle grab confirmation — single dispatch point for movie/series/music.
+
+    BUG-27: music handler previously attached its own `F.data == CONFIRM_GRAB`
+    callback and was included before search_router, so it silently swallowed
+    the event for movies/series (aiogram does not cascade handlers after a
+    routed match). Now we dispatch by session.selected_content type here.
+    """
     if not callback.message:
         return
-
-    search_service, add_service, _ = await get_services()
 
     user_id = callback.from_user.id
     session = await db.get_session(user_id)
 
-    if not session or not session.selected_result:
+    if not session:
         await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
         return
 
+    # Music flow — delegate to music handler's add-artist logic.
+    from bot.models import ArtistInfo
+
+    if isinstance(session.selected_content, ArtistInfo):
+        from bot.handlers.music import handle_confirm_music_add
+
+        await handle_confirm_music_add(callback, db_user, db)
+        return
+
+    # Movie / series flow — requires a selected release.
+    if not session.selected_result:
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+
+    search_service, add_service, _ = await get_services()
     await callback.answer("Обработка...")
     await callback.message.edit_text("⏳ Обрабатываю запрос...")
 
@@ -613,13 +641,15 @@ async def _execute_grab(
             profile_id = prefs.sonarr_quality_profile_id or profiles[0].id
             folder_path = _resolve_folder(folders, prefs.sonarr_root_folder_id)
 
-            # Determine monitor type based on release
+            # Determine monitor type based on release (BUG-32)
             if force_download:
                 monitor_type = "all"
+            elif result.is_season_pack:
+                monitor_type = "all"
+            elif result.detected_season is not None:
+                monitor_type = "existing"
             else:
                 monitor_type = "all"
-                if result.detected_season is not None and not result.is_season_pack:
-                    monitor_type = "none"
 
             success, action, msg = await add_service.grab_series_release(
                 series=series,

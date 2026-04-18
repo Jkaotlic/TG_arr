@@ -1,30 +1,22 @@
-FROM python:3.12-slim
-
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements first for better caching
+FROM python:3.12-slim AS builder
+WORKDIR /build
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --user --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY bot/ ./bot/
-COPY data/.gitkeep ./data/
-
-# Create non-root user
-RUN useradd -m -u 1000 botuser && \
-    chown -R botuser:botuser /app
+FROM python:3.12-slim
+RUN useradd -m -u 1000 botuser
+WORKDIR /app
+COPY --from=builder /root/.local /home/botuser/.local
+ENV PATH=/home/botuser/.local/bin:$PATH \
+    PYTHONUNBUFFERED=1
+RUN mkdir -p /app/data && chown -R botuser:botuser /app
+COPY --chown=botuser:botuser bot/ ./bot/
 USER botuser
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD ["python", "-c", "from bot.config import get_settings; s=get_settings(); assert s.telegram_bot_token"]
+# SEC-14 / DEPLOY-04: true liveness — checks that /tmp/tgarr-alive has been
+# touched within the last 2 minutes by the bot's event loop. Manual verify:
+# `docker kill --signal=SIGSTOP <cid>` → unhealthy in < 2 min.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
+    CMD sh -c 'find /tmp/tgarr-alive -mmin -2 | grep -q alive'
 
 CMD ["python", "-m", "bot.main"]

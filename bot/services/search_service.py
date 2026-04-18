@@ -10,7 +10,7 @@ from bot.clients.lidarr import LidarrClient
 from bot.clients.prowlarr import ProwlarrClient
 from bot.clients.radarr import RadarrClient
 from bot.clients.sonarr import SonarrClient
-from bot.models import AlbumInfo, ArtistInfo, ContentType, MovieInfo, SearchResult, SeriesInfo
+from bot.models import ArtistInfo, ContentType, MovieInfo, SearchResult, SeriesInfo
 from bot.services.scoring import ScoringService
 
 logger = structlog.get_logger()
@@ -43,6 +43,11 @@ class SearchService:
         Returns:
             Detected ContentType
         """
+        # PERF-06: Skip expensive parallel lookups for very short queries
+        # where content detection is unreliable anyway.
+        if len(query.strip()) < 4:
+            return ContentType.UNKNOWN
+
         query_lower = query.lower()
 
         # Series indicators
@@ -193,42 +198,6 @@ class SearchService:
         if self.lidarr is None:
             return []
         return await self.lidarr.lookup_artist(query)
-
-    async def lookup_album(self, query: str) -> list[AlbumInfo]:
-        """Look up albums in Lidarr (returns [] if Lidarr is not configured)."""
-        if self.lidarr is None:
-            return []
-        return await self.lidarr.lookup_album(query)
-
-    async def get_artist_by_mbid(self, mb_id: str) -> Optional[ArtistInfo]:
-        """Get artist info by MusicBrainz ID (library first, fallback to lookup)."""
-        if self.lidarr is None:
-            return None
-        artist = await self.lidarr.get_artist_by_mbid(mb_id)
-        if artist:
-            return artist
-        artists = await self.lidarr.lookup_artist(f"lidarr:{mb_id}")
-        return artists[0] if artists else None
-
-    async def get_movie_by_tmdb(self, tmdb_id: int) -> Optional[MovieInfo]:
-        """Get movie info by TMDB ID."""
-        # First check if already in library
-        movie = await self.radarr.get_movie_by_tmdb(tmdb_id)
-        if movie:
-            return movie
-
-        # Otherwise lookup
-        return await self.radarr.lookup_movie_by_tmdb(tmdb_id)
-
-    async def get_series_by_tvdb(self, tvdb_id: int) -> Optional[SeriesInfo]:
-        """Get series info by TVDB ID."""
-        # First check if already in library
-        series = await self.sonarr.get_series_by_tvdb(tvdb_id)
-        if series:
-            return series
-
-        # Otherwise lookup
-        return await self.sonarr.lookup_series_by_tvdb(tvdb_id)
 
     def parse_query(self, query: str) -> dict:
         """

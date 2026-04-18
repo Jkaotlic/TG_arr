@@ -1,0 +1,21 @@
+"""Module-level constants used across the app."""
+
+# Telegram message limits
+MAX_MESSAGE_LENGTH = 4096
+SAFE_MESSAGE_LENGTH = 3800
+
+# Pagination
+TORRENTS_PER_PAGE = 5
+SEARCH_RESULTS_MAX = 500
+
+# Search
+MAX_QUERY_LENGTH = 200
+PROWLARR_SEARCH_LIMIT = 100
+TRENDING_LIMIT = 10
+
+# qBittorrent
+QBT_ETA_INFINITY = 8640000
+
+# Sessions
+SESSION_TTL_HOURS = 24
+SEARCH_HISTORY_DAYS = 7

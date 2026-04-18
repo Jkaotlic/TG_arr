@@ -189,11 +189,6 @@ class EmbyClient:
         await self._request("POST", "/Library/Refresh")
         logger.info("Library scan triggered")
 
-    async def get_scheduled_tasks(self) -> list[dict]:
-        """Get list of scheduled tasks."""
-        result = await self._request("GET", "/ScheduledTasks")
-        return result if isinstance(result, list) else []
-
     async def install_update(self) -> None:
         """Install available update (if supported)."""
         info = await self.get_server_info()

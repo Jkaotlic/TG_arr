@@ -73,28 +73,6 @@ class DeezerClient(BaseAPIClient):
             })
         return albums
 
-    async def search_artist(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        """Search Deezer for an artist (used to enrich context)."""
-        try:
-            result = await self.get("/search/artist", params={"q": query, "limit": limit})
-        except Exception as e:
-            logger.warning("Deezer search failed", error=str(e), query=query)
-            return []
-
-        if not isinstance(result, dict):
-            return []
-
-        items = result.get("data") or []
-        return [
-            {
-                "name": item.get("name", "Unknown"),
-                "deezer_id": item.get("id"),
-                "picture_url": item.get("picture_xl") or item.get("picture_big"),
-                "fans": item.get("nb_fan"),
-            }
-            for item in items
-        ]
-
     async def check_connection(self) -> tuple[bool, Optional[str], Optional[float]]:
         """Check if Deezer API is reachable."""
         start_time = time.monotonic()

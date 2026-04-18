@@ -46,7 +46,13 @@ class Database:
             self._connection = await aiosqlite.connect(self.db_path, isolation_level=None)
             self._connection.row_factory = aiosqlite.Row
 
+            # Performance & durability pragmas (DB-02, DB-04)
+            await self._connection.execute("PRAGMA journal_mode=WAL")
+            await self._connection.execute("PRAGMA foreign_keys=ON")
+            await self._connection.execute("PRAGMA synchronous=NORMAL")
+
             await self._create_tables()
+            await self._run_migrations()
             logger.info("Database connected", path=self.db_path)
 
     async def close(self) -> None:
@@ -104,6 +110,7 @@ class Database:
                 release_title TEXT,
                 success INTEGER NOT NULL DEFAULT 1,
                 error_message TEXT,
+                details TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(tg_id)
             );
@@ -124,6 +131,68 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
         """)
         await self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Schema migrations (DB-01)
+    #
+    # The schema version is stored in SQLite's built-in ``PRAGMA user_version``
+    # so no extra table is required. Each migration method is idempotent
+    # and bumps ``user_version`` to its target version.
+    #
+    # To add a new migration:
+    #   1. Create ``_migrate_to_v<N>`` that applies the schema changes.
+    #   2. Append ``if version < N: await self._migrate_to_v<N>()``
+    #      inside ``_run_migrations``.
+    #   3. ``_migrate_to_v<N>`` must call ``_set_schema_version(N)`` at the end.
+    # ------------------------------------------------------------------
+    async def _get_schema_version(self) -> int:
+        """Return the current schema version via PRAGMA user_version."""
+        async with self.conn.execute("PRAGMA user_version") as cursor:
+            row = await cursor.fetchone()
+            if row is None:
+                return 0
+            return int(row[0])
+
+    async def _set_schema_version(self, version: int) -> None:
+        """Persist schema version via PRAGMA user_version (cannot be parameterized)."""
+        # PRAGMA user_version does not accept placeholders; we coerce to int
+        # to keep this safe against injection.
+        v = int(version)
+        await self.conn.execute(f"PRAGMA user_version = {v}")
+        await self.conn.commit()
+
+    async def _run_migrations(self) -> None:
+        """Apply pending schema migrations in order."""
+        version = await self._get_schema_version()
+        if version < 1:
+            await self._migrate_to_v1()
+        if version < 2:
+            await self._migrate_to_v2()
+
+    async def _migrate_to_v1(self) -> None:
+        """
+        Baseline migration — establishes schema-version tracking.
+
+        For fresh databases this is a no-op because ``_create_tables`` has
+        already ensured every required table exists. For legacy databases
+        that pre-date the migration framework it simply records the version.
+        """
+        await self._set_schema_version(1)
+
+    async def _migrate_to_v2(self) -> None:
+        """
+        OBS-06: Add ``details`` TEXT column to the ``actions`` table so we can
+        store a JSON blob alongside each action (rejections, fallback_used, etc).
+
+        Safe for both fresh databases (where ``_create_tables`` already added
+        the column — ALTER is skipped) and legacy ones (ALTER adds it).
+        """
+        async with self.conn.execute("PRAGMA table_info(actions)") as cursor:
+            cols = {row[1] for row in await cursor.fetchall()}
+        if "details" not in cols:
+            await self.conn.execute("ALTER TABLE actions ADD COLUMN details TEXT")
+            await self.conn.commit()
+        await self._set_schema_version(2)
 
     # User methods
     async def get_user(self, tg_id: int) -> Optional[User]:
@@ -166,8 +235,25 @@ class Database:
         await self.conn.commit()
 
     def _row_to_user(self, row: aiosqlite.Row) -> User:
-        """Convert database row to User model."""
-        prefs_data = json.loads(row["preferences"]) if row["preferences"] else {}
+        """Convert database row to User model.
+
+        BUG-24 / SEC-19: tolerate corrupt preferences JSON — fall back to
+        defaults and log a warning instead of crashing the caller.
+        """
+        raw_prefs = row["preferences"]
+        try:
+            prefs = (
+                UserPreferences(**json.loads(raw_prefs))
+                if raw_prefs
+                else UserPreferences()
+            )
+        except Exception as e:
+            logger.warning(
+                "Corrupt user preferences, using defaults",
+                user_id=row["tg_id"],
+                error=str(e),
+            )
+            prefs = UserPreferences()
         try:
             role = UserRole(row["role"])
         except ValueError:
@@ -177,7 +263,7 @@ class Database:
             username=row["username"],
             first_name=row["first_name"],
             role=role,
-            preferences=UserPreferences(**prefs_data),
+            preferences=prefs,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -233,8 +319,14 @@ class Database:
 
     # Session methods
     async def save_session(self, user_id: int, session: SearchSession) -> None:
-        """Save or update user session."""
+        """Save or update user session.
+
+        BUG-14: cap ``session.results`` at 500 entries to avoid unbounded
+        growth of the stored session JSON (and Telegram's per-message limits).
+        """
         now = datetime.now(timezone.utc).isoformat()
+        if session.results and len(session.results) > 500:
+            session.results = session.results[:500]
         try:
             session_json = session.model_dump_json()
         except Exception as e:
@@ -302,9 +394,9 @@ class Database:
             """
             INSERT INTO actions (
                 user_id, action_type, content_type, query, content_title,
-                content_id, release_title, success, error_message, created_at
+                content_id, release_title, success, error_message, details, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 action.user_id,
@@ -316,6 +408,7 @@ class Database:
                 action.release_title,
                 1 if action.success else 0,
                 action.error_message,
+                action.details,
                 now,
             ),
         )
@@ -359,6 +452,11 @@ class Database:
             content_type = ContentType(row["content_type"])
         except ValueError:
             content_type = ContentType.UNKNOWN
+        # OBS-06: details column may be absent on legacy rows fetched before migration ran
+        try:
+            details = row["details"]
+        except (IndexError, KeyError):
+            details = None
         return ActionLog(
             id=row["id"],
             user_id=row["user_id"],
@@ -370,6 +468,7 @@ class Database:
             release_title=row["release_title"],
             success=bool(row["success"]),
             error_message=row["error_message"],
+            details=details,
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 

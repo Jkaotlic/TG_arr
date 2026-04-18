@@ -1,7 +1,6 @@
 """Trending/popular content handlers."""
 
 import asyncio
-import html
 
 import structlog
 from aiogram import F, Router
@@ -107,7 +106,8 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to fetch trending movies", error=str(e))
         await callback.message.edit_text(
-            f"❌ Ошибка при загрузке популярных фильмов:\n{html.escape(str(e))}"
+            Formatters.format_error("Не удалось загрузить популярные фильмы"),
+            parse_mode="HTML",
         )
 
 
@@ -157,7 +157,8 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
     except Exception as e:
         logger.error("Failed to fetch trending series", error=str(e))
         await callback.message.edit_text(
-            f"❌ Ошибка при загрузке популярных сериалов:\n{html.escape(str(e))}"
+            Formatters.format_error("Не удалось загрузить популярные сериалы"),
+            parse_mode="HTML",
         )
 
 
@@ -186,7 +187,10 @@ async def handle_movie_from_trending(callback: CallbackQuery) -> None:
             movie = await radarr.lookup_movie_by_tmdb(tmdb_id)
         except Exception as e:
             logger.error("Failed to lookup movie", tmdb_id=tmdb_id, error=str(e))
-            await callback.message.answer(f"❌ Ошибка: {html.escape(str(e))}")
+            await callback.message.answer(
+                Formatters.format_error("Не удалось найти фильм"),
+                parse_mode="HTML",
+            )
             return
 
     if not movie:
@@ -300,7 +304,10 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
             movie = await radarr.lookup_movie_by_tmdb(tmdb_id)
         except Exception as e:
             logger.error("Failed to lookup movie", tmdb_id=tmdb_id, error=str(e))
-            await callback.message.answer(f"❌ Ошибка: {html.escape(str(e))}")
+            await callback.message.answer(
+                Formatters.format_error("Не удалось найти фильм"),
+                parse_mode="HTML",
+            )
             return
 
     if not movie:
@@ -358,7 +365,10 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
 
     except Exception as e:
         logger.error("Failed to add movie from trending", tmdb_id=tmdb_id, error=str(e))
-        await status_msg.edit_text(f"❌ Ошибка при добавлении: {html.escape(str(e))}")
+        await status_msg.edit_text(
+            Formatters.format_error("Не удалось добавить фильм"),
+            parse_mode="HTML",
+        )
 
 
 @router.callback_query(F.data.startswith(CallbackData.ADD_SERIES))
@@ -464,4 +474,7 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
 
     except Exception as e:
         logger.error("Failed to add series from trending", tmdb_id=tmdb_id, error=str(e))
-        await status_msg.edit_text(f"❌ Ошибка при добавлении: {html.escape(str(e))}")
+        await status_msg.edit_text(
+            Formatters.format_error("Не удалось добавить сериал"),
+            parse_mode="HTML",
+        )

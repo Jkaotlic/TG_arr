@@ -1,142 +1,93 @@
-# Анализ security TG_arr
+# Security Audit — TG_arr (Round 2)
 
-Дата: 2026-04-18
-Объём: ~8300 строк Python, aiogram 3.26 + httpx 0.28 + aiosqlite 0.22.
+Дата: 2026-04-18. Фокус: SSRF, secrets, injection, auth, HTML injection, callback signature, rate-limit, resource-exhaustion.
 
-## Критические
+Закрыто в предыдущем аудите: SEC-01 (SSRF all addrinfo), SEC-04 (url masking), SEC-07, SEC-11 (DNS async).
 
-### SEC-01: SSRF-обход через URL с DNS-именем, которое резолвится в публичный IP, но затем в приватный (TOCTOU)
-- **Файл**: `bot/services/add_service.py:31-55` (`_validate_download_url`)
-- **Проблема**: Проверка выполняется однократно через `socket.gethostbyname` до отправки в qBittorrent. Между проверкой и последующим обращением клиента qBittorrent/Radarr/Sonarr к URL значение DNS-ответа может смениться на приватный IP (классический TOCTOU / DNS-rebinding). Кроме того используется только первый A-запись (`gethostbyname`), тогда как хост может иметь одновременно публичный и приватный адреса — сам загрузчик (qBittorrent) может выбрать второй.
-- **Риск**: Высокий — бот может быть использован как прокси для обращения к внутренним ресурсам сети (Radarr/Sonarr/Emby/Portainer/Keenetic в той же LAN).
-- **Решение**: 1) Использовать `socket.getaddrinfo` и отбрасывать при наличии хотя бы одного приватного адреса. 2) Валидацию пропускать только для схемы `magnet:` (у которой нет HTTP-фетча). 3) Для HTTP/HTTPS передавать в qBittorrent уже резолвленный публичный IP (или лучше — держать allowlist доменов доверенных индексеров).
-- **Статус**: [ ] Не исправлено
+## SEC-02 — Exception leak в тексте callback у trending (HIGH)
+Файл: `bot/handlers/trending.py:110-111, 159-160, 189, 303, 361`
+```python
+await callback.message.edit_text(
+    f"❌ Ошибка при загрузке популярных фильмов:\n{html.escape(str(e))}"
+)
+```
+Любая внутренняя ошибка (API-ключ, URL backend, stacktrace-like сообщение, httpx ConnectError с hostname) показывается пользователю. В whitelist-сценарии критичность умеренная, но вытаскивает internal hostnames и пути.
+**Решение:** логировать полный `str(e)`, а пользователю — дженерик через `Formatters.format_error(...)`.
 
-### SEC-02: Callback_data не подписан — подмена user_id/hash-префикса злоумышленником с доступом
-- **Файл**: `bot/ui/keyboards.py` + все обработчики callback_query
-- **Проблема**: В `callback_data` передаются: индексы `rel:N`, хэши `t:<16 hex>`, `tmdb_id` (`trend_m:...`, `add_movie:...`), `profile_id`/`folder_id` (`set:rp:N`). Любой авторизованный пользователь (из `ALLOWED_TG_IDS`) может вручную слать произвольные callback_data в бот — aiogram допускает прямую отправку через API. Это позволяет: а) использовать сессию другого пользователя нельзя (сессия привязана к `callback.from_user.id`), но б) `set:rp:N` позволяет подменить профиль на произвольный ID; в) `t_delete:<hash>` позволяет любому allowed-юзеру удалить чужой торрент (админ-проверка есть `bot/handlers/downloads.py:347,381`, но `t_pause/t_resume/t_recheck/t_prio` — нет); г) `add_movie:<tmdb_id>` позволяет добавить произвольный фильм (включая флуд-атаку).
-- **Риск**: Средний — только для whitelist-пользователей, но бот предполагает «ограниченное доверие» между ними.
-- **Решение**: Подпись HMAC/SHA256 + timestamp + user_id при формировании callback_data и проверка на приёме (либо использовать CallbackData factory в aiogram с моделью и валидацией).
-- **Статус**: [ ] Не исправлено
+## SEC-03 — Telegram token в aiogram DEBUG трейсах (MED)
+Файл: `bot/main.py:78-83`, `docker-compose.override.yml:15`
+При `bot.get_me()` aiogram в DEBUG пишет полный request URL с bot-token (`https://api.telegram.org/bot<token>/getMe`). Override выставляет `LOG_LEVEL=DEBUG` — в dev контейнере токен попадает в stdout (→ `docker logs`, Portainer UI, ELK).
+**Решение:** в `main.py` `setup_logging` добавить `structlog.processors.add_log_level` + filter, маскирующий `/bot[0-9]+:[A-Za-z0-9_-]+/`. Либо переключить override на INFO.
 
-### SEC-03: Хэш-коллизия в коротких префиксах торрентов (`hash[:16]` / `hash[:8]`)
-- **Файл**: `bot/ui/keyboards.py:417,462` (`hash[:16]`), `bot/clients/qbittorrent.py:292-298` (`get_torrent_by_short_hash`, фактически сравнение через `startswith`)
-- **Проблема**: Длина telegram callback_data ≤ 64 байт, поэтому используется только 16 hex-символов (64 бита) — этого недостаточно для криптографически строгого сравнения, но практически вероятность коллизии ничтожна. Но **`get_torrent_by_short_hash` также принимает 8-символьные префиксы из команд `/pause <hash>`** (через `bot/handlers/downloads.py:129`), где коллизия более реальна (32 бита), и при коллизии будет случайно удалён не тот торрент.
-- **Риск**: Средний (потеря данных при коллизии, не security в прямом смысле, но deterministic DoS возможен).
-- **Решение**: Хранить соответствие `short_hash → full_hash` в сессии пользователя (БД). При множественных совпадениях — возвращать список и просить уточнить.
-- **Статус**: [ ] Не исправлено
+## SEC-05 — Rate limit bypass across restart (MED)
+Файл: `bot/middleware/auth.py:136-188`
+`RateLimitMiddleware._user_requests` — in-memory dict, сброс при рестарте/редеплое. Злоумышленник-инсайдер может перезапустить контейнер для сброса лимита. Также лимит 30 req/min достаточно жёсткий: 1 search = 3 lookup + torrent fetch + session save.
+**Решение:** принять как ограничение (whitelist модель) + задокументировать. Либо вынести в SQLite (`rate_limit` таблица `user_id, ts`).
 
-## Высокие
+## SEC-06 — Callback actions без HMAC-подписи (MED)
+Файлы: `bot/handlers/trending.py:280-306`, `bot/handlers/search.py:*`, `bot/handlers/music.py:*`, `bot/handlers/downloads.py:346-408`
+- `add_movie:<tmdb_id>`, `trend_m:<tmdb_id>` — пользователь подставляет произвольный `tmdb_id` → добавляется произвольный фильм в Radarr. В whitelist это «только свои», но нет audit-trail о том, кто изначально запросил, и любой участник allowlist может нажать кнопку под сообщением другого.
+- `t_delete:<hash>`, `t_delf:<hash>` — проверка `is_admin` присутствует, но любой админ может деструктивно удалить любой торрент.
 
-### SEC-04: Логирование `download_url[:100]` может содержать API-key/токен индексера
-- **Файл**: `bot/services/add_service.py:272,318,416,462`
-- **Проблема**: Download URL от Prowlarr нередко содержит query-string с `apikey=...` (особенно для приватных трекеров). Запись первых 100 символов URL в лог попадёт и в Docker stdout, и в структурированный JSON-лог.
-- **Риск**: Высокий — утечка API-ключей приватных трекеров в логи.
-- **Решение**: Маскировать query-string (`url.split('?')[0]`) либо удалять чувствительные параметры (`apikey`, `token`, `passkey`).
-- **Статус**: [ ] Не исправлено
+**Решение:** для whitelist-бота HMAC оверкилл; минимум — rate-limit для деструктивных операций (`t_delete`, `t_delf`, `emby_restart`, `emby_update`) отдельный от общего; логировать с `actor_id` + `origin_message_user_id`.
 
-### SEC-05: `QBITTORRENT_PASSWORD` логируется при ошибке десериализации
-- **Файл**: `bot/db.py:284` (`session_preview=row_data[:200]`)
-- **Проблема**: При ошибке десериализации session в лог пишется первые 200 символов JSON. Сессия сама не содержит паролей, но в `SearchSession.selected_result` может быть `download_url` с apikey (см. SEC-04). Более широкая проблема: `logger.error("Failed to send notification", ..., error=str(e))` в `bot/main.py:159` — при ошибках aiogram `str(e)` может включать bot token.
-- **Риск**: Высокий.
-- **Решение**: Использовать structlog processor, фильтрующий строки по regex на токен/пароль.
-- **Статус**: [ ] Не исправлено
+## SEC-08 — Unbounded user_id кеши (LOW)
+- `bot/handlers/trending.py:27-28` — `_trending_movies_cache`, `_trending_series_cache` (есть защита `_MAX_CACHE_SIZE=200`)
+- `bot/handlers/calendar.py:23` — `_user_period` (есть защита 100)
+- `bot/handlers/music.py:35-36` — `_artist_candidates`, `_trending_artists_cache` — **защиты нет**
+- `bot/middleware/auth.py:142` — `_user_requests` (есть slot-cleanup при 10000)
 
-### SEC-06: Нет таймаута логина в qBittorrent — возможен DoS от медленного ответа
-- **Файл**: `bot/clients/qbittorrent.py:101-134`
-- **Проблема**: `login()` обёрнут в `@retry(..., stop_after_attempt(3))`, но внутри `client.post` не передаётся явный таймаут — используется дефолтный таймаут клиента (30 сек × 3 попытки = до 90 секунд блокировки). В `_ensure_authenticated` вызывается при каждом запросе — один медленный qBittorrent делает весь бот неотзывчивым.
-- **Риск**: Средний (доступность).
-- **Решение**: Для `login` использовать отдельный короткий таймаут (5-10 сек).
-- **Статус**: [ ] Не исправлено
+**Решение:** добавить LRU/TTL на music dict'ы; или использовать `bot.db.sessions` для артистов (сохранить список кандидатов в session).
 
-### SEC-07: HTML-инъекция через `str(e)` в сообщения пользователю с `parse_mode=HTML`
-- **Файл**: `bot/handlers/trending.py:109,160,188,302,360,466`; `bot/handlers/search.py:434`; `bot/handlers/emby.py:75,133,161,189,236,286` (частично `{e.message}` без escape)
-- **Проблема**: В сообщениях с `parse_mode="HTML"` используется `f"❌ Ошибка: {e.message}"` / `str(e)`. Если исключение генерирует текст с `<` или `&` (например, ответ сервера Radarr содержит HTML), Telegram вернёт 400 Bad Request и не доставит сообщение. Более серьёзно: если злоумышленник контролирует часть текста ошибки (например, через рекламный релиз-ответ, попадающий в error_message), возможна html-инъекция с `<a href='...'>`.
-- **Риск**: Средний.
-- **Решение**: Применять `html.escape(str(e))` везде, где `parse_mode=HTML` + выводится `str(e)`. В `trending.py:109,160` используется `html.escape(str(e))` — корректно, но в `emby.py:75` — нет.
-- **Статус**: [ ] Не исправлено
+## SEC-13 — HTML-escape не полный в ошибках trending (MED)
+Файл: `bot/handlers/trending.py` — использует inline `html.escape(str(e))` вместо `_e()` обёртки из `formatters.py`. Для обычных `str(e)` — ок, но стиль непоследовательный. Минор.
+**Решение:** унифицировать через `Formatters.format_error` (см. SEC-02).
 
-### SEC-08: Emby-клиент не валидирует API-ключ — только по факту первого запроса
-- **Файл**: `bot/clients/emby.py:112`
-- **Проблема**: При 401 бросается `EmbyAuthError`, но только после первого обращения. В отличие от base-клиента, здесь нет проверки ни timeout, ни retry на auth-ошибки — при перезапуске Emby все последующие запросы будут падать.
-- **Риск**: Низкий (UX, не security).
-- **Решение**: Добавить повторную проверку auth при 401.
-- **Статус**: [ ] Не исправлено
+## SEC-14 — Dockerfile HEALTHCHECK не проверяет liveness polling (HIGH)
+Файл: `Dockerfile:27-28`
+HEALTHCHECK только проверяет, что settings импортируются. Если polling-loop умер из-за deadlock в aiogram / Telegram timeout / исчерпания httpx-пула, контейнер `healthy`, Portainer/Swarm не перезапустит.
+**Решение:** `bot/main.py` touch-ит sentinel `/tmp/alive` каждые N секунд (асинк-таска); HEALTHCHECK проверяет `find /tmp/alive -mmin -2`.
 
-## Средние
+## SEC-15 — qBittorrent `follow_redirects=True` для sessions-cookie (LOW)
+Файл: `bot/clients/qbittorrent.py:72-81`
+Если qBit-URL редиректит на внешний хост (очень маловероятно, но возможно при misconfig reverse-proxy), сессионная cookie SID уходит наружу.
+**Решение:** `follow_redirects=False` для prod; логировать 30x явно.
 
-### SEC-09: `.claude/` и `.coverage` в git — потенциальная утечка локальных настроек
-- **Файл**: корень, `.gitignore:87`
-- **Проблема**: `.claude/` в `.gitignore`, но `.coverage` (53 KB) **присутствует в рабочей копии** и `.ruff_cache/`, `.pytest_cache/` — в `.gitignore`, но в рабочей копии есть (значит не закоммичены, но могут попасть в docker image, т.к. `.dockerignore` их включает, проверил — `.pytest_cache`, `.ruff_cache`, `.mypy_cache` указаны, но `.coverage` нет).
-- **Риск**: Низкий. `.coverage` — SQLite с путями локальной машины.
-- **Решение**: Добавить `.coverage` в `.dockerignore`, удалить файл из рабочей копии.
-- **Статус**: [ ] Не исправлено
+## SEC-16 — push_release отправляет download_url в Radarr/Sonarr/Lidarr без SSRF-валидации (HIGH)
+Файлы: `bot/services/add_service.py:343-348, 487-492, 680-685`
+`_validate_download_url` вызывается **только** перед `qbittorrent.add_torrent_url`. `radarr.push_release(download_url=...)` и аналоги отправляют URL напрямую *arr-сервисам, которые потом скачают его с их credentials внутри private-сети. Классический SSRF-via-downstream: `http://192.168.1.1/admin/api/...?apikey=...` из Radarr.
+**Решение:** валидировать `download_url` до любого `push_release`/`grab_release`, не только перед qBit fallback.
 
-### SEC-10: Docker — `docker-compose.override.yml` монтирует `./bot:/app/bot:ro` в проде
-- **Файл**: `docker-compose.override.yml:13`
-- **Проблема**: override.yml автоматически загружается `docker compose up` и в проде. Строка `volumes: - ./bot:/app/bot:ro` привязывает код бота к хостовому пути, что: а) ломает образ, если на хосте нет этой директории (хотя `:ro` спасает от записи); б) в Portainer-stack вариант плохо совместим с репликацией.
-- **Риск**: Низкий (стабильность).
-- **Решение**: Переименовать в `docker-compose.dev.yml` и использовать с `-f`.
-- **Статус**: [ ] Не исправлено
+## SEC-17 — Lidarr `add_artist` захардкоживает `monitorNewItems="all"` (MED)
+Файл: `bot/clients/lidarr.py:114`
+Даже если пользователь выбрал `monitor="none"`, бот всё равно ставит `monitorNewItems: "all"` → будущие альбомы автомониторятся. Нарушение намерения пользователя (не security в узком смысле, но access violation).
+**Решение:** использовать `monitor` из параметра или preferences.
 
-### SEC-11: `socket.gethostbyname` — блокирующий DNS-вызов в async-коде
-- **Файл**: `bot/services/add_service.py:49`
-- **Проблема**: Синхронный DNS в asyncio event loop блокирует всё. Выполняется каждый раз при force-grab.
-- **Риск**: Низкий (доступность).
-- **Решение**: `asyncio.get_event_loop().getaddrinfo(...)` или `await asyncio.to_thread(socket.getaddrinfo, ...)`.
-- **Статус**: [ ] Не исправлено
+## SEC-18 — `DATABASE_PATH` без path-validation (LOW)
+Файл: `bot/db.py:42-44`, `bot/config.py:74`
+`Path(db_dir).mkdir(parents=True, exist_ok=True)` создаст директорию по любому пути env'а, включая `../../etc/bot.db`. В контейнере под `botuser` ограничено правами, но validator не помешает.
+**Решение:** в `config.py` `@field_validator("database_path")` — reject `..` и abspath вне `/app/data`.
 
-### SEC-12: Rate-limit только in-memory — при рестарте сбрасывается
-- **Файл**: `bot/middleware/auth.py:137-188`
-- **Проблема**: При перезапуске бота счётчик обнуляется. Кроме того `_user_requests` растёт до 10000 записей; cleanup срабатывает только при превышении. Для whitelist-бота не критично, но повод.
-- **Риск**: Низкий.
-- **Решение**: Использовать sliding-window в БД или Redis при необходимости.
-- **Статус**: [ ] Не исправлено
+## SEC-19 (НОВЫЙ) — Session JSON не имеет схема-versioning (MED)
+Файл: `bot/db.py:235-289`, `bot/models.py:270-283`
+`SearchSession` хранится как JSON, десериализуется через `SearchSession.model_validate`. При изменении структуры модели (например, новое обязательное поле в UserPreferences или SearchSession) старая сессия развалится. Pydantic `ValidationError` ловится, сессия стирается (ОК), но потеряется UX и user-flow. Плюс если `selected_content` содержит один из 4 discriminated types (MovieInfo/SeriesInfo/ArtistInfo/AlbumInfo), добавление нового варианта сломает старые сессии.
+**Решение:** добавить `schema_version` в JSON payload; при mismatch — `delete_session`.
 
-### SEC-13: Middleware порядок потенциально пропускает rate-limit для неавторизованных
-- **Файл**: `bot/main.py:172-179`
-- **Проблема**: Порядок: `LoggingMiddleware → RateLimit → Auth`. Это верно для защиты от DoS, но получается, что rate-limit применяется до проверки `is_user_allowed`. Неавторизованный пользователь расходует лимит авторизованной системы (и memory dict), и логируется в каждом пакете. Плюс neuter side: автоматически все неавторизованные попытки проходят rate-check — значит злоумышленник с неавторизованного аккаунта может заполнить dict до 10000 записей и заблокировать cleanup.
-- **Риск**: Низкий-средний.
-- **Решение**: Поменять порядок на `Logging → Auth → RateLimit` или делать rate-limit отдельно для авторизованных/неавторизованных пулов.
-- **Статус**: [ ] Не исправлено
+## Итого
 
-### SEC-14: Docker — нет health check для `bot` при отсутствии токена не падает, а зависает
-- **Файл**: `Dockerfile:27-28`
-- **Проблема**: Healthcheck проверяет только наличие токена в env. Не проверяет подключение к Telegram API.
-- **Риск**: Низкий (мониторинг).
-- **Решение**: Добавить write-файл heartbeat в `/app/data/heartbeat` и читать его в healthcheck.
-- **Статус**: [ ] Не исправлено
+| ID      | Severity | Fix complexity |
+|---------|----------|----------------|
+| SEC-02  | HIGH     | S (4 места) |
+| SEC-03  | MED      | S |
+| SEC-05  | MED      | M |
+| SEC-06  | MED      | M (rate-limit) |
+| SEC-08  | LOW      | S |
+| SEC-13  | MED      | S |
+| SEC-14  | HIGH     | M |
+| SEC-15  | LOW      | S |
+| SEC-16  | HIGH     | S |
+| SEC-17  | MED      | S |
+| SEC-18  | LOW      | S |
+| SEC-19  | MED      | S |
 
-## Низкие
-
-### SEC-15: `logger.info("Bot started", ..., id=bot_info.id)` — bot_id в логе
-- **Файл**: `bot/main.py:79-83`
-- **Проблема**: Не чувствительно, но добавляет тэг.
-- **Решение**: Опционально.
-- **Статус**: [ ] Не исправлено
-
-### SEC-16: `ALLOWED_TG_IDS=123456789,987654321` пример с реалистичными ID в `.env.example`
-- **Файл**: `.env.example:6`
-- **Проблема**: Копипаст из примера может оставить реальные ID в проде (нет, 123456789 явно ненастоящий, но юзеры копируют).
-- **Решение**: Использовать `<your_id>` или префиксом `0`.
-- **Статус**: [ ] Не исправлено
-
-### SEC-17: `hashes = "|".join(hashes)` в qBittorrent — нет экранирования
-- **Файл**: `bot/clients/qbittorrent.py:303,318,333,348`
-- **Проблема**: Хэши валидные hex, так что инъекция невозможна. Но если API изменит схему, `|` в имени приведёт к багу.
-- **Решение**: Проверять regex `^[0-9a-fA-F]{40}$` перед join.
-- **Статус**: [ ] Не исправлено
-
-### SEC-18: Ошибка JSON-десериализации удаляет сессию без оповещения пользователя
-- **Файл**: `bot/db.py:287`
-- **Проблема**: `delete_session(user_id)` выполняется молча. Пользователь увидит «Сессия истекла» при следующем действии.
-- **Риск**: UX.
-- **Статус**: [ ] Не исправлено
-
-Итого: **0 критических + 3 высоких + 3 средних + (4 действительно критических, переклассифицированы)**. Перечитал — убираю SEC-01/02/03 с «критических»: они High, не Crit (бот для whitelist, нет пути к рут-доступу). Реальных критических нет.
-
-## Итоговый подсчёт
-- Критические: 0
-- Высокие: 8 (SEC-01..08)
-- Средние: 6 (SEC-09..14)
-- Низкие: 4 (SEC-15..18)
+HIGH: 3 (SEC-02, SEC-14, SEC-16), MED: 6, LOW: 3.
