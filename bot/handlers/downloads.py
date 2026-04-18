@@ -10,7 +10,7 @@ from bot.clients.qbittorrent import QBittorrentError
 from bot.clients.registry import get_qbittorrent
 from bot.models import TorrentFilter, User, format_speed
 from bot.ui.formatters import Formatters
-from bot.ui.keyboards import Keyboards
+from bot.ui.keyboards import CallbackData, Keyboards
 
 logger = structlog.get_logger()
 router = Router()
