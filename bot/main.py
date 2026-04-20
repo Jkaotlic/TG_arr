@@ -1,10 +1,14 @@
 """Main entry point for the TG_arr Telegram bot."""
 
 import asyncio
+import faulthandler
 import logging
 import os
 import re
 import sys
+import threading
+import time
+from pathlib import Path
 from typing import Optional
 
 import structlog
@@ -31,6 +35,34 @@ from bot.db import Database
 from bot.handlers import setup_routers
 from bot.middleware.auth import AuthMiddleware, LoggingMiddleware, RateLimitMiddleware
 from bot.services.notification_service import NotificationService
+
+
+def _liveness_watchdog(
+    alive_path: str = "/tmp/tgarr-alive",
+    max_silence_seconds: int = 120,
+    poll_interval_seconds: int = 15,
+) -> None:
+    # DEPLOY-05: OS-thread watchdog — kills the process when the asyncio loop
+    # stalls. Must run outside the event loop: a hung loop would silence any
+    # asyncio task (including _liveness_touch), so only an independent thread
+    # can escape. On stall we dump all thread stacks to stderr (captured by
+    # `docker logs`) before os._exit(1); `restart: unless-stopped` revives us.
+    time.sleep(max_silence_seconds)
+    p = Path(alive_path)
+    while True:
+        try:
+            age = time.time() - p.stat().st_mtime
+        except FileNotFoundError:
+            age = max_silence_seconds + 1
+        if age > max_silence_seconds:
+            sys.stderr.write(
+                f"[watchdog] liveness file stale for {age:.0f}s — "
+                f"dumping threads and exiting\n"
+            )
+            sys.stderr.flush()
+            faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+            os._exit(1)
+        time.sleep(poll_interval_seconds)
 
 
 def setup_logging(log_level: str) -> None:
@@ -212,8 +244,6 @@ async def main() -> None:
     # healthy. Verify manually with: `docker kill --signal=SIGSTOP <cid>` →
     # container must flip to `unhealthy` within ~2 min.
     async def _liveness_touch() -> None:
-        from pathlib import Path
-
         while True:
             try:
                 Path("/tmp/tgarr-alive").touch()
@@ -223,6 +253,13 @@ async def main() -> None:
             await asyncio.sleep(30)
 
     liveness_task = asyncio.create_task(_liveness_touch())
+
+    faulthandler.enable()
+    threading.Thread(
+        target=_liveness_watchdog,
+        daemon=True,
+        name="liveness-watchdog",
+    ).start()
 
     # Start polling
     try:
