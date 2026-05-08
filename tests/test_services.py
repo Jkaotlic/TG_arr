@@ -1,7 +1,7 @@
 """Tests for service layer."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 from bot.models import ContentType, MovieInfo, QualityInfo, SearchResult, SeriesInfo
 from bot.services.scoring import ScoringService

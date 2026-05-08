@@ -16,7 +16,9 @@ dependencies = [
     "aiogram>=3.20,<4",
     "httpx>=0.28,<1",
     "tenacity>=9.0,<10",
-    "pydantic>=2.9,<3",
+    # DEP-09: aiogram 3.27 requires pydantic<2.13. Cap so `pip install -e .`
+    # without requirements.txt cannot accidentally pull a breaking version.
+    "pydantic>=2.9,<2.13",
     "pydantic-settings>=2.6,<3",
     "aiosqlite>=0.20,<2",
     "structlog>=24.4,<26",

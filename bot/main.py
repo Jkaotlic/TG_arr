@@ -120,6 +120,10 @@ async def on_startup(
         await notification_service.start()
         logger.info("Notification service started")
 
+    # PERF-08: warm up *arr clients so the first user search doesn't pay
+    # DNS+TCP+TLS handshake (extra 0.5–1.5s on rpie4 over Wi-Fi).
+    await _warm_up_clients(logger)
+
     # Get bot info
     bot_info = await bot.get_me()
     logger.info(
@@ -127,6 +131,51 @@ async def on_startup(
         username=bot_info.username,
         id=bot_info.id,
     )
+
+
+async def _warm_up_clients(logger) -> None:
+    """Run health checks in parallel to prime singleton HTTP clients."""
+    from bot.clients.registry import get_lidarr, get_prowlarr, get_radarr, get_sonarr
+
+    async def _check(name, factory):
+        try:
+            client = await factory()
+            if client is None:
+                return name, None
+            ok, _ver, ms = await asyncio.wait_for(client.check_connection(), timeout=5.0)
+            return name, (ok, ms)
+        except Exception as e:
+            return name, ("error", str(e))
+
+    results = await asyncio.gather(
+        _check("prowlarr", get_prowlarr),
+        _check("radarr", get_radarr),
+        _check("sonarr", get_sonarr),
+        _check("lidarr", get_lidarr),
+        return_exceptions=True,
+    )
+    summary = {name: outcome for r in results if isinstance(r, tuple) for name, outcome in [r]}
+    logger.info("warmup_completed", summary=summary)
+
+
+async def _periodic_cleanup(db: Database, logger) -> None:
+    """DB-15: drop stale sessions/searches every 6h instead of only at startup."""
+    interval = 6 * 3600
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            sessions = await db.cleanup_old_sessions(hours=24)
+            searches = await db.cleanup_old_searches(days=7)
+            if sessions or searches:
+                logger.info(
+                    "periodic_cleanup",
+                    sessions_removed=sessions,
+                    searches_removed=searches,
+                )
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning("periodic_cleanup_failed", error=str(e))
 
 
 async def on_shutdown(
@@ -253,6 +302,7 @@ async def main() -> None:
             await asyncio.sleep(30)
 
     liveness_task = asyncio.create_task(_liveness_touch())
+    cleanup_task = asyncio.create_task(_periodic_cleanup(db, logger))
 
     faulthandler.enable()
     threading.Thread(
@@ -274,6 +324,7 @@ async def main() -> None:
         raise
     finally:
         liveness_task.cancel()
+        cleanup_task.cancel()
         await bot.session.close()
 
 

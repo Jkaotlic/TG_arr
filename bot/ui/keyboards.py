@@ -27,6 +27,11 @@ class CallbackData:
 
     # Pagination
     PAGE = "page:"  # page:5
+    # LOGIC-14: separate prefix for music artist pagination — search router
+    # was matching `page:` and replying "сессия истекла" on music sessions
+    # (which have empty results) before music router could handle it.
+    ARTIST_PAGE = "art_page:"  # art_page:N
+    MUSIC_BACK = "music_back"  # LOGIC-24: music-aware back button
     BACK = "back"
     CANCEL = "cancel"
 
@@ -344,14 +349,14 @@ class Keyboards:
             nav_buttons = []
             if current_page > 0:
                 nav_buttons.append(
-                    InlineKeyboardButton(text="◀️", callback_data=f"{CallbackData.PAGE}{current_page - 1}")
+                    InlineKeyboardButton(text="◀️", callback_data=f"{CallbackData.ARTIST_PAGE}{current_page - 1}")
                 )
             nav_buttons.append(
                 InlineKeyboardButton(text=f"{current_page + 1}/{total_pages}", callback_data="noop")
             )
             if current_page < total_pages - 1:
                 nav_buttons.append(
-                    InlineKeyboardButton(text="▶️", callback_data=f"{CallbackData.PAGE}{current_page + 1}")
+                    InlineKeyboardButton(text="▶️", callback_data=f"{CallbackData.ARTIST_PAGE}{current_page + 1}")
                 )
             keyboard.append(nav_buttons)
 
@@ -373,7 +378,9 @@ class Keyboards:
                 InlineKeyboardButton(text="➕ Добавить и искать", callback_data=CallbackData.CONFIRM_GRAB),
             ])
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
+            # LOGIC-24: dedicated music-back so search.handle_back doesn't reply
+            # "сессия истекла" on a music session (which has no .results).
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.MUSIC_BACK),
             InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)

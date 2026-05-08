@@ -1,6 +1,7 @@
 """Authentication middleware for Telegram bot."""
 
 import time
+import uuid
 from typing import Any, Awaitable, Callable, Dict
 
 import structlog
@@ -97,7 +98,12 @@ class AuthMiddleware(BaseMiddleware):
 
 
 class LoggingMiddleware(BaseMiddleware):
-    """Middleware for logging all incoming events."""
+    """Middleware for logging all incoming events.
+
+    OBS-01 / OBS-07: binds user_id, chat_id, request_id to structlog
+    contextvars so every downstream `logger.*` call (in handlers, services,
+    clients) automatically carries them. Cleared in `finally`.
+    """
 
     async def __call__(
         self,
@@ -106,23 +112,23 @@ class LoggingMiddleware(BaseMiddleware):
         data: Dict[str, Any],
     ) -> Any:
         """Log incoming events."""
-        log = logger.bind()
-
+        ctx: dict[str, Any] = {"request_id": uuid.uuid4().hex[:8]}
         if isinstance(event, Message):
-            log = log.bind(
-                event_type="message",
-                user_id=event.from_user.id if event.from_user else None,
-                chat_id=event.chat.id,
-                text=event.text[:50] if event.text else None,
-            )
+            ctx["event_type"] = "message"
+            ctx["user_id"] = event.from_user.id if event.from_user else None
+            ctx["chat_id"] = event.chat.id
+            ctx["text"] = event.text[:50] if event.text else None
         elif isinstance(event, CallbackQuery):
-            log = log.bind(
-                event_type="callback",
-                user_id=event.from_user.id if event.from_user else None,
-                data=event.data[:20] if event.data else None,
-            )
+            ctx["event_type"] = "callback"
+            ctx["user_id"] = event.from_user.id if event.from_user else None
+            ctx["data"] = event.data[:30] if event.data else None
 
-        log.debug("Incoming event")
+        structlog.contextvars.bind_contextvars(**ctx)
+        log = logger.bind(**ctx)
+
+        # OBS-19: surface incoming events at INFO so a "nothing happened" report
+        # is debuggable from prod logs (only message+callback, ~10 events/min).
+        log.info("incoming_event")
 
         try:
             result = await handler(event, data)
@@ -131,6 +137,8 @@ class LoggingMiddleware(BaseMiddleware):
         except Exception as e:
             log.error("Error processing event", error=str(e), exc_info=True)
             raise
+        finally:
+            structlog.contextvars.clear_contextvars()
 
 
 class RateLimitMiddleware(BaseMiddleware):

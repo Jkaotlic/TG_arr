@@ -4,11 +4,16 @@ COPY requirements.txt .
 RUN pip install --user --no-cache-dir -r requirements.txt
 
 FROM python:3.12-slim
+# DEPLOY-03: install tzdata so Python's datetime.now()/structlog timestamps
+# match TIMEZONE=Europe/Moscow instead of defaulting to UTC.
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
 RUN useradd -m -u 1000 botuser
 WORKDIR /app
 COPY --from=builder /root/.local /home/botuser/.local
 ENV PATH=/home/botuser/.local/bin:$PATH \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    TZ=Europe/Moscow
 RUN mkdir -p /app/data && chown -R botuser:botuser /app
 COPY --chown=botuser:botuser bot/ ./bot/
 USER botuser

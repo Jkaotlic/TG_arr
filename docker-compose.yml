@@ -35,6 +35,8 @@ services:
       NOTIFY_CHECK_INTERVAL: ${NOTIFY_CHECK_INTERVAL:-60}
       # Tuning
       TIMEZONE: ${TIMEZONE:-Europe/Moscow}
+      # DEPLOY-03: TZ feeds glibc; tzdata is installed in the image.
+      TZ: ${TIMEZONE:-Europe/Moscow}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       AUTO_GRAB_SCORE_THRESHOLD: ${AUTO_GRAB_SCORE_THRESHOLD:-80}
       HTTP_TIMEOUT: ${HTTP_TIMEOUT:-30.0}

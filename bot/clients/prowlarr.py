@@ -4,9 +4,11 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
+import httpx
 import structlog
 
-from bot.clients.base import BaseAPIClient
+from bot.clients.base import APIError, BaseAPIClient, ServiceConnectionError
+from bot.config import get_settings
 from bot.models import ContentType, QualityInfo, SearchResult
 
 logger = structlog.get_logger()
@@ -62,25 +64,65 @@ class ProwlarrClient(BaseAPIClient):
         log = logger.bind(query=query, content_type=content_type.value)
         log.info("Searching Prowlarr")
 
+        # PERF-02: search is expensive; do not retry — fail fast and let the
+        # user retry. Timeout is configurable (BUG-21) so admins on slow links
+        # can raise it without rebuilding the image.
+        timeout = get_settings().prowlarr_search_timeout
+
         try:
-            results = await self.get("/api/v1/search", params=params, timeout=60.0)
+            client = await self._get_client()
+            response = await client.request(
+                method="GET",
+                url="/api/v1/search",
+                params=params,
+                timeout=timeout,
+            )
+            if response.status_code >= 400:
+                raise APIError(
+                    f"Ошибка Prowlarr: {response.status_code}",
+                    status_code=response.status_code,
+                )
+            results = response.json()
 
             if not isinstance(results, list):
                 log.warning("Unexpected response type", response_type=type(results).__name__)
                 return []
 
             normalized = []
+            dropped_no_guid = 0
+            dropped_no_title = 0
             for item in results:
                 try:
+                    if not (item.get("guid") or item.get("downloadUrl") or item.get("infoUrl")):
+                        dropped_no_guid += 1
+                        continue
+                    if not (item.get("title") or item.get("fileName")):
+                        dropped_no_title += 1
+                        continue
                     result = self._normalize_result(item)
                     if result:
                         normalized.append(result)
                 except Exception as e:
                     log.warning("Failed to normalize result", error=str(e), item=item.get("title", "unknown"))
 
-            log.info("Search completed", result_count=len(normalized))
+            # OBS-21: surface dropped items so "few results" complaints can be debugged.
+            log.info(
+                "Search completed",
+                result_count=len(normalized),
+                raw_count=len(results),
+                dropped_no_guid=dropped_no_guid,
+                dropped_no_title=dropped_no_title,
+            )
             return normalized
 
+        except httpx.TimeoutException as e:
+            log.warning("Prowlarr search timeout", timeout_s=timeout)
+            raise ServiceConnectionError(f"Таймаут Prowlarr ({timeout:.0f}s)") from e
+        except httpx.ConnectError as e:
+            log.warning("Prowlarr connect error")
+            raise ServiceConnectionError("Не удалось подключиться к Prowlarr") from e
+        except APIError:
+            raise
         except Exception as e:
             log.error("Search failed", error=str(e))
             raise

@@ -42,24 +42,27 @@ async def _fetch_and_send_calendar(
     albums: list[dict] = []
     errors: list[str] = []
 
+    # SEC-21: text is sent with parse_mode=HTML — escape exception strings.
+    import html as _html
+
     try:
         episodes = await sonarr.get_calendar(days=days)
     except Exception as e:
         logger.error("Sonarr calendar error", error=str(e))
-        errors.append(f"Sonarr: {e}")
+        errors.append(f"Sonarr: {_html.escape(str(e))[:100]}")
 
     try:
         movies = await radarr.get_calendar(days=days)
     except Exception as e:
         logger.error("Radarr calendar error", error=str(e))
-        errors.append(f"Radarr: {e}")
+        errors.append(f"Radarr: {_html.escape(str(e))[:100]}")
 
     if lidarr is not None:
         try:
             albums = await lidarr.get_calendar(days=days)
         except Exception as e:
             logger.error("Lidarr calendar error", error=str(e))
-            errors.append(f"Lidarr: {e}")
+            errors.append(f"Lidarr: {_html.escape(str(e))[:100]}")
 
     text = Formatters.format_calendar(episodes, movies, days=days, albums=albums)
     if errors:

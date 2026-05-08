@@ -2,7 +2,9 @@
 
 import asyncio
 import re
-from typing import Optional
+import time
+from difflib import SequenceMatcher
+from typing import NamedTuple, Optional
 
 import structlog
 
@@ -14,6 +16,33 @@ from bot.models import ArtistInfo, ContentType, MovieInfo, SearchResult, SeriesI
 from bot.services.scoring import ScoringService
 
 logger = structlog.get_logger()
+
+
+# Pre-compiled patterns (PERF-22): avoid re.compile per detect call.
+_SERIES_PATTERNS = [
+    re.compile(r"\bs\d{1,2}\b", re.IGNORECASE),          # S01, S1 (BUG-11: \b)
+    re.compile(r"\bs\d{1,2}e\d{1,3}\b", re.IGNORECASE),  # S01E01
+    re.compile(r"\bseason\s*\d+", re.IGNORECASE),
+    re.compile(r"\bseries\s*\d+", re.IGNORECASE),
+    re.compile(r"\b\d{1,2}x\d{1,3}\b"),                  # 1x01
+    re.compile(r"сезон", re.IGNORECASE),
+    re.compile(r"серия", re.IGNORECASE),
+]
+
+_YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2}|21\d{2})\b")
+_SE_RE = re.compile(r"s(\d{1,2})(?:e(\d{1,3}))?", re.IGNORECASE)
+_SEASON_WORD_RE = re.compile(r"(?:season|сезон)\s*(\d+)", re.IGNORECASE)
+_QUALITY_TOKENS = ("2160p", "4k", "4к", "uhd", "1080p", "720p", "480p")
+_DETECT_TIMEOUT_S = 8.0  # PERF-01: cap parallel lookups
+_MUSIC_QUERY_HARD_FLOOR = 3   # ignore Lidarr matches when query <3 chars
+
+
+class DetectionResult(NamedTuple):
+    """Result of content type detection (LOGIC-28: confidence-based UX)."""
+    content_type: ContentType
+    confidence: float                       # 0.0..1.0
+    reason: str                             # short label for logs
+    candidates: dict[str, list[str]]        # {"movie": [...titles], "series": [...], "music": [...]}
 
 
 class SearchService:
@@ -34,104 +63,204 @@ class SearchService:
         self.scoring = scoring or ScoringService()
 
     async def detect_content_type(self, query: str) -> ContentType:
+        """Backward-compatible wrapper around detect_with_confidence."""
+        result = await self.detect_with_confidence(query)
+        return result.content_type
+
+    async def detect_with_confidence(self, query: str) -> DetectionResult:
         """
-        Try to detect if query is for a movie, series, or music.
+        Detect movie / series / music with confidence score.
 
-        Args:
-            query: User's search query
+        Year-aware priority (LOGIC-03): if query has a year, music is dropped —
+        artists don't have release-year semantics in user queries.
 
-        Returns:
-            Detected ContentType
+        Fuzzy match (BUG-01, LOGIC-02): SequenceMatcher.ratio() instead of
+        substring containment, so "Joker" doesn't match a random "Joker"-named
+        artist with 1-letter overlap.
+
+        Bounded latency (PERF-01): parallel lookups capped at 8s; on timeout
+        returns UNKNOWN with confidence 0 so the user gets the button choice.
+
+        Failure surfacing (BUG-05): exceptions during lookups don't silently
+        become empty arrays — they downgrade confidence and reason gets
+        "lookup_failures=N" so the user sees the type-question instead of a
+        wrong auto-pick.
         """
-        # PERF-06: Skip expensive parallel lookups for very short queries
-        # where content detection is unreliable anyway.
-        if len(query.strip()) < 4:
-            return ContentType.UNKNOWN
+        log = logger.bind(query=query)
+        clean_query = self._strip_quality_tokens(query.strip())
+        clean_query_no_year = _YEAR_RE.sub("", clean_query).strip()
+        query_year = self._extract_query_year(query)
 
-        query_lower = query.lower()
+        # Pre-filter (PERF-06): too short to meaningfully classify
+        if len(clean_query_no_year) < 2:
+            return DetectionResult(ContentType.UNKNOWN, 0.0, "too_short", {})
 
-        # Series indicators
-        series_patterns = [
-            r"s\d{1,2}",  # S01, S1
-            r"s\d{1,2}e\d{1,3}",  # S01E01
-            r"season\s*\d+",  # Season 1
-            r"series\s*\d+",  # Series 1 (UK style)
-            r"\d{1,2}x\d{1,3}",  # 1x01
-            r"сезон",  # Russian "season"
-            r"серия",  # Russian "episode"
-        ]
+        # Series indicators in query text — high-confidence shortcut
+        for pattern in _SERIES_PATTERNS:
+            if pattern.search(clean_query):
+                log.info("detect_content_type", winner="series", reason="series_pattern")
+                return DetectionResult(ContentType.SERIES, 0.9, "series_pattern", {})
 
-        for pattern in series_patterns:
-            if re.search(pattern, query_lower):
-                return ContentType.SERIES
-
-        # Try to identify by looking up in all services in parallel
+        # Parallel lookups with hard timeout (PERF-01)
+        # Use clean_query_no_year for Lidarr (LOGIC-01) — MusicBrainz returns garbage on year strings.
         tasks: list = [
-            asyncio.create_task(self.radarr.lookup_movie(query)),
-            asyncio.create_task(self.sonarr.lookup_series(query)),
+            asyncio.create_task(self.radarr.lookup_movie(clean_query)),
+            asyncio.create_task(self.sonarr.lookup_series(clean_query)),
         ]
-        if self.lidarr is not None:
-            tasks.append(asyncio.create_task(self.lidarr.lookup_artist(query)))
+        if self.lidarr is not None and len(clean_query_no_year) >= _MUSIC_QUERY_HARD_FLOOR:
+            tasks.append(asyncio.create_task(self.lidarr.lookup_artist(clean_query_no_year)))
 
-        gathered = await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            gathered = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=_DETECT_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            for t in tasks:
+                t.cancel()
+            log.warning("detect_content_type", winner="unknown", reason="lookup_timeout")
+            return DetectionResult(ContentType.UNKNOWN, 0.0, "lookup_timeout", {})
 
-        movies_result = gathered[0]
-        series_result = gathered[1]
+        movies_result, series_result = gathered[0], gathered[1]
         artists_result = gathered[2] if len(gathered) > 2 else []
 
         movies = movies_result if isinstance(movies_result, list) else []
         series = series_result if isinstance(series_result, list) else []
         artists = artists_result if isinstance(artists_result, list) else []
 
-        if isinstance(movies_result, Exception):
-            logger.warning("Radarr lookup failed during type detection", error=str(movies_result))
-        if isinstance(series_result, Exception):
-            logger.warning("Sonarr lookup failed during type detection", error=str(series_result))
-        if isinstance(artists_result, Exception):
-            logger.warning("Lidarr lookup failed during type detection", error=str(artists_result))
+        failure_count = sum(
+            1 for r in gathered if isinstance(r, BaseException)
+        )
 
-        # Music detection: exact artist name match (high precision, no year check)
-        if artists:
-            for a in artists[:3]:
-                if self._title_matches(query, a.name, None):
-                    return ContentType.MUSIC
+        if isinstance(movies_result, BaseException):
+            log.warning("Radarr lookup failed during detection", error=str(movies_result))
+        if isinstance(series_result, BaseException):
+            log.warning("Sonarr lookup failed during detection", error=str(series_result))
+        if len(gathered) > 2 and isinstance(artists_result, BaseException):
+            log.warning("Lidarr lookup failed during detection", error=str(artists_result))
 
-        if movies:
-            for movie in movies[:3]:
-                if self._title_matches(query, movie.title, movie.year):
-                    return ContentType.MOVIE
+        # If most lookups failed, can't decide → UNKNOWN (BUG-05).
+        if failure_count >= len(tasks):
+            return DetectionResult(ContentType.UNKNOWN, 0.0, "all_lookups_failed", {})
 
-        if series:
-            for s in series[:3]:
-                if self._title_matches(query, s.title, s.year):
-                    return ContentType.SERIES
-
-        return ContentType.UNKNOWN
-
-    def _title_matches(self, query: str, title: str, year: Optional[int]) -> bool:
-        """Check if a title matches the query reasonably well."""
-        query_lower = query.lower()
-        title_lower = title.lower()
-
-        # Extract year from query if present
-        year_match = re.search(r"(\d{4})", query)
-        query_year = int(year_match.group(1)) if year_match else None
-
-        # Remove year from query for title comparison
-        year_match_clean = re.search(r"[\(\[]?(\d{4})[\)\]]?", query_lower)
-        if year_match_clean and 1900 <= int(year_match_clean.group(1)) <= 2100:
-            query_clean = (query_lower[:year_match_clean.start()] + query_lower[year_match_clean.end():]).strip()
+        # Score top candidates from each service.
+        movie_score = self._best_match_score(clean_query_no_year, movies, query_year, prefer_year=True)
+        series_score = self._best_match_score(clean_query_no_year, series, query_year, prefer_year=True)
+        # Music: stricter — require year to be absent in query (artists aren't year-tagged).
+        if query_year is not None:
+            music_score = 0.0
         else:
-            query_clean = query_lower
+            music_score = self._best_match_score(clean_query_no_year, artists, None, prefer_year=False)
+            # Music demotion: only beat movie/series if query is unambiguous (>=0.92).
+            if music_score < 0.92:
+                music_score *= 0.7
 
-        # Check title similarity
-        if query_clean in title_lower or title_lower in query_clean:
-            # If years are specified, they should match
-            if query_year and year:
-                return abs(query_year - year) <= 1
-            return True
+        scored = [
+            (ContentType.MOVIE, movie_score, "movie_match", [getattr(m, "title", "?") for m in movies[:3]]),
+            (ContentType.SERIES, series_score, "series_match", [getattr(s, "title", "?") for s in series[:3]]),
+            (ContentType.MUSIC, music_score, "music_match", [getattr(a, "name", "?") for a in artists[:3]]),
+        ]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top_type, top_score, reason, _ = scored[0]
+        runner_up_score = scored[1][1]
 
-        return False
+        candidates = {
+            "movie": [getattr(m, "title", "?") for m in movies[:3]],
+            "series": [getattr(s, "title", "?") for s in series[:3]],
+            "music": [getattr(a, "name", "?") for a in artists[:3]],
+        }
+
+        # OBS-11: log the winner with all candidates
+        log.info(
+            "content_type_detected",
+            winner=top_type.value,
+            confidence=round(top_score, 3),
+            runner_up=round(runner_up_score, 3),
+            reason=reason,
+            failure_count=failure_count,
+            candidates=candidates,
+        )
+
+        # Confidence threshold: below 0.7 → UNKNOWN so user gets the question.
+        if top_score < 0.7:
+            return DetectionResult(ContentType.UNKNOWN, top_score, "low_confidence", candidates)
+
+        # Tie-break: if top and runner-up are within 0.05, ask the user.
+        if top_score - runner_up_score < 0.05 and runner_up_score > 0.6:
+            return DetectionResult(ContentType.UNKNOWN, top_score, "ambiguous", candidates)
+
+        return DetectionResult(top_type, top_score, reason, candidates)
+
+    @staticmethod
+    def _strip_quality_tokens(query: str) -> str:
+        """Drop noisy quality tokens before similarity-matching titles."""
+        out = query
+        for tok in _QUALITY_TOKENS:
+            out = re.sub(re.escape(tok), "", out, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", out).strip()
+
+    @staticmethod
+    def _extract_query_year(query: str) -> Optional[int]:
+        m = _YEAR_RE.search(query)
+        if not m:
+            return None
+        try:
+            year = int(m.group(1))
+        except ValueError:
+            return None
+        if 1900 <= year <= 2100:
+            return year
+        return None
+
+    def _best_match_score(
+        self,
+        query: str,
+        candidates: list,
+        query_year: Optional[int],
+        *,
+        prefer_year: bool,
+    ) -> float:
+        """
+        Score 0..1 for the best matching candidate using fuzzy ratio + year bonus.
+
+        - SequenceMatcher.ratio over normalised lower-cased strings.
+        - +0.15 bonus when years match within ±1 (only if prefer_year).
+        - -0.20 penalty if year present in query but candidate.year is far off.
+        """
+        if not candidates:
+            return 0.0
+
+        q = query.lower().strip()
+        if not q:
+            return 0.0
+
+        best = 0.0
+        for cand in candidates[:5]:
+            title = (
+                getattr(cand, "title", None)
+                or getattr(cand, "name", None)
+                or ""
+            )
+            if not title:
+                continue
+            cand_lower = title.lower().strip()
+            ratio = SequenceMatcher(None, q, cand_lower).ratio()
+
+            # Substring helper: very-long candidate that fully contains the query.
+            if len(q) >= 3 and q in cand_lower:
+                ratio = max(ratio, min(0.85, len(q) / max(len(cand_lower), len(q))))
+
+            cand_year = getattr(cand, "year", None)
+            if prefer_year and query_year is not None and cand_year:
+                if abs(query_year - cand_year) <= 1:
+                    ratio = min(1.0, ratio + 0.15)
+                else:
+                    ratio = max(0.0, ratio - 0.20)
+
+            if ratio > best:
+                best = ratio
+
+        return best
 
     async def search_releases(
         self,
@@ -139,58 +268,57 @@ class SearchService:
         content_type: ContentType = ContentType.UNKNOWN,
         sort_by_score: bool = True,
     ) -> list[SearchResult]:
-        """
-        Search for releases using Prowlarr.
+        """Search for releases using Prowlarr.
 
-        Args:
-            query: Search query
-            content_type: Type of content to search for
-            sort_by_score: Whether to sort results by score
-
-        Returns:
-            List of SearchResult objects
+        Important (LOGIC-04): we no longer drop results whose `detected_type`
+        disagrees with the requested type — Russian indexers regularly mis-tag
+        categories, and dropping cuts legitimate releases. Trust Prowlarr's
+        category filter (driven by `content_type`) and let scoring rank.
         """
         log = logger.bind(query=query, content_type=content_type.value)
         log.info("Searching for releases")
 
+        t0 = time.monotonic()
         results = await self.prowlarr.search(query, content_type)
+        prowlarr_ms = round((time.monotonic() - t0) * 1000, 1)
 
         if not results:
-            log.info("No results found")
+            log.info("No results found", prowlarr_ms=prowlarr_ms)
             return []
 
-        # Filter by detected type if we know it
-        if content_type != ContentType.UNKNOWN:
-            results = [r for r in results if r.detected_type == content_type or r.detected_type == ContentType.UNKNOWN]
+        raw_count = len(results)
 
         if sort_by_score:
             results = self.scoring.sort_results(results, content_type)
 
-        log.info("Search completed", result_count=len(results))
+        # OBS-13: log top-N for debug
+        top_preview = [
+            {
+                "title": (r.title or "?")[:80],
+                "score": getattr(r, "calculated_score", 0),
+                "indexer": r.indexer,
+                "seeders": r.seeders,
+                "size_gb": r.get_size_gb() if hasattr(r, "get_size_gb") else None,
+                "detected_type": r.detected_type.value if r.detected_type else None,
+                "detected_year": r.detected_year,
+            }
+            for r in results[:5]
+        ]
+        log.info(
+            "search_completed",
+            raw_count=raw_count,
+            result_count=len(results),
+            prowlarr_ms=prowlarr_ms,
+            top=top_preview,
+        )
         return results
 
     async def lookup_movie(self, query: str) -> list[MovieInfo]:
-        """
-        Look up movies in Radarr.
-
-        Args:
-            query: Movie title to search
-
-        Returns:
-            List of MovieInfo objects
-        """
+        """Look up movies in Radarr."""
         return await self.radarr.lookup_movie(query)
 
     async def lookup_series(self, query: str) -> list[SeriesInfo]:
-        """
-        Look up series in Sonarr.
-
-        Args:
-            query: Series title to search
-
-        Returns:
-            List of SeriesInfo objects
-        """
+        """Look up series in Sonarr."""
         return await self.sonarr.lookup_series(query)
 
     async def lookup_artist(self, query: str) -> list[ArtistInfo]:
@@ -203,11 +331,10 @@ class SearchService:
         """
         Parse search query to extract metadata.
 
-        Args:
-            query: Raw search query
-
-        Returns:
-            Dict with parsed components: title, year, season, episode, quality
+        Note: the `title` field has year/season/quality stripped — that's the
+        clean form for *lookup* APIs (Radarr/Sonarr lookup), not for Prowlarr
+        search. Prowlarr should receive the original query so trackers can
+        match against the year (LOGIC-05).
         """
         result = {
             "original": query,
@@ -220,39 +347,39 @@ class SearchService:
 
         query_lower = query.lower()
 
-        # Extract year
-        year_match = re.search(r"[\(\[]?(\d{4})[\)\]]?", query)
+        # Year — bounded with \b to avoid latching on 4-digit substrings (BUG-06).
+        year_match = _YEAR_RE.search(query)
         if year_match:
             year = int(year_match.group(1))
-            if 1900 <= year <= 2100:
-                result["year"] = year
-                # Remove year from title
-                result["title"] = re.sub(r"[\(\[]?\d{4}[\)\]]?", "", result["title"]).strip()
+            result["year"] = year
+            result["title"] = _YEAR_RE.sub("", result["title"]).strip()
 
-        # Extract season/episode
-        se_match = re.search(r"s(\d{1,2})(?:e(\d{1,3}))?", query_lower)
+        # Season/episode — SxxEyy
+        se_match = _SE_RE.search(query_lower)
         if se_match:
             result["season"] = int(se_match.group(1))
             if se_match.group(2):
                 result["episode"] = int(se_match.group(2))
-            # Remove from title
-            result["title"] = re.sub(r"s\d{1,2}(?:e\d{1,3})?", "", result["title"], flags=re.IGNORECASE).strip()
+            result["title"] = _SE_RE.sub("", result["title"]).strip()
 
-        # Check for season word
-        season_match = re.search(r"(?:season|сезон)\s*(\d+)", query_lower)
+        # "Season N" / "сезон N" wording
+        season_match = _SEASON_WORD_RE.search(query_lower)
         if season_match and result["season"] is None:
             result["season"] = int(season_match.group(1))
-            result["title"] = re.sub(r"(?:season|сезон)\s*\d+", "", result["title"], flags=re.IGNORECASE).strip()
+            result["title"] = _SEASON_WORD_RE.sub("", result["title"]).strip()
 
-        # Extract quality preference
-        quality_patterns = ["2160p", "4k", "1080p", "720p", "480p"]
-        for q in quality_patterns:
-            if q in query_lower:
-                result["quality"] = q if q != "4k" else "2160p"
+        # Quality — strip ALL recognised tokens (BUG-29) including Cyrillic "4К" (BUG-30).
+        first_quality: Optional[str] = None
+        for q in _QUALITY_TOKENS:
+            if q.lower() in query_lower:
+                token = q if q != "4k" else "2160p"
+                if first_quality is None:
+                    first_quality = token if token != "4к" else "2160p"
                 result["title"] = re.sub(re.escape(q), "", result["title"], flags=re.IGNORECASE).strip()
-                break
+        if first_quality:
+            result["quality"] = first_quality
 
-        # Clean up title
-        result["title"] = re.sub(r"\s+", " ", result["title"]).strip()
+        # Collapse whitespace — also drops dangling punctuation around stripped year.
+        result["title"] = re.sub(r"\s+", " ", result["title"]).strip(" -_:.()[]")
 
         return result

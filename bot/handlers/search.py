@@ -1,6 +1,8 @@
 """Search and content management handlers."""
 
 import html
+import time
+
 import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -58,6 +60,19 @@ async def get_services() -> tuple[SearchService, AddService, ScoringService]:
     return search_service, add_service, scoring
 
 
+def _strip_command(text: str, command: str) -> str:
+    """Strip a leading /command (BUG-10/33: replace with maxsplit=1, prefix-only)."""
+    text = text.strip()
+    if text.startswith(command):
+        rest = text[len(command):]
+        # Strip @bot_username suffix on the command itself.
+        if rest.startswith("@"):
+            parts = rest.split(maxsplit=1)
+            rest = parts[1] if len(parts) > 1 else ""
+        return rest.strip()
+    return text
+
+
 @router.message(Command("search"))
 async def cmd_search(message: Message, db_user: User, db: Database) -> None:
     """Handle /search <query> command - auto-detect content type."""
@@ -65,7 +80,7 @@ async def cmd_search(message: Message, db_user: User, db: Database) -> None:
         await message.answer("Укажите запрос: <code>/search Дюна 2021</code>")
         return
 
-    query = message.text.replace("/search", "").strip()
+    query = _strip_command(message.text, "/search")
     if not query:
         await message.answer("Укажите запрос: <code>/search Дюна 2021</code>")
         return
@@ -80,7 +95,7 @@ async def cmd_movie(message: Message, db_user: User, db: Database) -> None:
         await message.answer("Укажите название фильма: <code>/movie Дюна 2021</code>")
         return
 
-    query = message.text.replace("/movie", "").strip()
+    query = _strip_command(message.text, "/movie")
     if not query:
         await message.answer("Укажите название фильма: <code>/movie Дюна 2021</code>")
         return
@@ -95,7 +110,7 @@ async def cmd_series(message: Message, db_user: User, db: Database) -> None:
         await message.answer("Укажите название сериала: <code>/series Breaking Bad</code>")
         return
 
-    query = message.text.replace("/series", "").strip()
+    query = _strip_command(message.text, "/series")
     if not query:
         await message.answer("Укажите название сериала: <code>/series Breaking Bad</code>")
         return
@@ -120,6 +135,9 @@ async def handle_text_search(message: Message, db_user: User, db: Database) -> N
     await process_search(message, message.text.strip(), ContentType.UNKNOWN, db_user, db)
 
 
+MAX_QUERY_LENGTH = 200
+
+
 async def process_search(
     message: Message,
     query: str,
@@ -128,8 +146,6 @@ async def process_search(
     db: Database,
 ) -> None:
     """Process a search query."""
-    # Query length validation
-    MAX_QUERY_LENGTH = 200
     if len(query) > MAX_QUERY_LENGTH:
         await message.answer(f"❌ Запрос слишком длинный (макс. {MAX_QUERY_LENGTH} символов)")
         return
@@ -145,23 +161,39 @@ async def process_search(
     # if message.answer() fails before log could be assigned inside try.
     user_id = db_user.tg_id
     log = logger.bind(user_id=user_id, query=query)
+    t_start = time.monotonic()
 
     try:
-        # Parse query for metadata
         parsed = search_service.parse_query(query)
-        log.info("Parsed query", parsed=parsed)
+        clean_title = (parsed.get("title") or "").strip()
+        log.info(
+            "search_started",
+            parsed=parsed,
+            initial_content_type=content_type.value,
+        )
 
         # Detect content type if unknown
         if content_type == ContentType.UNKNOWN:
             status_msg = await message.answer("🔍 Определяю тип контента...")
 
-            # If season info in query, it's likely a series
+            # Strong signal: season-episode marker in query → SERIES.
             if parsed["season"] is not None:
                 content_type = ContentType.SERIES
+                detection = None
             else:
-                content_type = await search_service.detect_content_type(parsed["title"])
+                t_detect = time.monotonic()
+                detection = await search_service.detect_with_confidence(clean_title or query)
+                log.info(
+                    "stage_done",
+                    stage="detect_content_type",
+                    elapsed_ms=round((time.monotonic() - t_detect) * 1000, 1),
+                    winner=detection.content_type.value,
+                    confidence=round(detection.confidence, 3),
+                    reason=detection.reason,
+                )
+                content_type = detection.content_type
 
-            # Music auto-detected → delegate to music flow (Lidarr artist lookup)
+            # Music auto-detected → hand off to Lidarr flow.
             if content_type == ContentType.MUSIC:
                 await status_msg.delete()
                 from bot.handlers.music import process_music_search
@@ -169,48 +201,63 @@ async def process_search(
                 await process_music_search(message, query, db_user, db)
                 return
 
+            # Unknown OR low/ambiguous confidence → ask the user (BUG-04, LOGIC-28).
             if content_type == ContentType.UNKNOWN:
                 show_music = settings.lidarr_enabled
                 question_suffix = (
                     "фильм, сериал или музыка?" if show_music else "фильм или сериал?"
                 )
+                hint = ""
+                if detection and detection.candidates:
+                    hint_lines = []
+                    for kind, label in (("movie", "🎬"), ("series", "📺"), ("music", "🎵")):
+                        items = detection.candidates.get(kind) or []
+                        if items:
+                            shown = ", ".join(html.escape(t) for t in items[:2])
+                            hint_lines.append(f"{label} {shown}")
+                    if hint_lines:
+                        hint = "\n\n<i>Похоже на:</i>\n" + "\n".join(hint_lines)
                 await status_msg.edit_text(
-                    f"🤔 <b>{html.escape(query)}</b> — это {question_suffix}",
+                    f"🤔 <b>{html.escape(query)}</b> — это {question_suffix}{hint}",
                     reply_markup=Keyboards.content_type_selection(show_music=show_music),
                     parse_mode="HTML",
                 )
-
-                # Save partial session
                 session = SearchSession(
                     user_id=user_id,
                     query=query,
                     content_type=ContentType.UNKNOWN,
                 )
                 await db.save_session(user_id, session)
+                log.info("search_branch", branch="question_user")
                 return
 
             await status_msg.delete()
 
-        # Search for releases
         status_msg = await message.answer("🔍 Ищу релизы...")
 
-        # LOGIC-09: pass the parsed clean title (without year / season-episode
-        # markers / quality tokens) to the indexer. Fall back to the raw
-        # query if parsing produced an empty title.
-        search_term = (parsed.get("title") or "").strip() or query
+        # LOGIC-05: send the *raw* query (with year) to Prowlarr — many trackers
+        # match "Title 2049" against "Title.2049." in release names. The clean
+        # title is for Radarr/Sonarr lookup APIs, not for the indexer search.
+        search_term = query if (clean_title and parsed.get("year")) else (clean_title or query)
+        t_search = time.monotonic()
         results = await search_service.search_releases(search_term, content_type)
+        log.info(
+            "stage_done",
+            stage="search_releases",
+            elapsed_ms=round((time.monotonic() - t_search) * 1000, 1),
+            result_count=len(results),
+        )
 
         if not results:
             await status_msg.edit_text(
                 Formatters.format_warning(f"Ничего не найдено для <b>{html.escape(query)}</b>"),
                 parse_mode="HTML",
             )
+            log.info("search_branch", branch="no_results")
             return
 
-        # Save search to database
         await db.save_search(user_id, query, content_type, results)
 
-        # Create session
         session = SearchSession(
             user_id=user_id,
             query=query,
@@ -220,7 +267,6 @@ async def process_search(
         )
         await db.save_session(user_id, session)
 
-        # Check if we should show "grab best" button
         best_result = results[0] if results else None
         show_grab_best = (
             best_result
@@ -228,7 +274,6 @@ async def process_search(
             and db_user.preferences.auto_grab_enabled
         )
 
-        # Show results
         per_page = settings.results_per_page
         total_pages = (len(results) + per_page - 1) // per_page
         page_results = results[:per_page]
@@ -255,7 +300,6 @@ async def process_search(
             parse_mode="HTML",
         )
 
-        # Log action
         action = ActionLog(
             user_id=user_id,
             action_type=ActionType.SEARCH,
@@ -263,9 +307,15 @@ async def process_search(
             query=query,
         )
         await db.log_action(action)
+        log.info(
+            "search_branch",
+            branch="results_shown",
+            total_elapsed_ms=round((time.monotonic() - t_start) * 1000, 1),
+            content_type=content_type.value,
+        )
 
     except Exception as e:
-        log.error("Search failed", error=str(e))
+        log.error("Search failed", error=str(e), exc_info=True)
         await message.answer(Formatters.format_error("Поиск временно недоступен"))
 
 
@@ -424,12 +474,16 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
     # Check if force grab is available
     has_qbittorrent = add_service.qbittorrent is not None
 
-    # Look up content
+    # Look up content — match by detected_year when available (BUG-08, LOGIC-07)
+    # so a "Dune" query doesn't pick up the 1984 movie when the chosen release
+    # is the 2021 one (or vice-versa).
+    parsed = search_service.parse_query(session.query)
+    lookup_term = (parsed.get("title") or "").strip() or session.query
     try:
         if session.content_type == ContentType.MOVIE:
-            movies = await search_service.lookup_movie(session.query)
-            if movies:
-                movie = movies[0]
+            movies = await search_service.lookup_movie(lookup_term)
+            movie = _pick_by_year(movies, result.detected_year, parsed.get("year"))
+            if movie:
                 session.selected_content = movie
                 await db.save_session(user_id, session)
 
@@ -446,9 +500,9 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
                     parse_mode="HTML",
                 )
         else:
-            series_list = await search_service.lookup_series(session.query)
-            if series_list:
-                series = series_list[0]
+            series_list = await search_service.lookup_series(lookup_term)
+            series = _pick_by_year(series_list, result.detected_year, parsed.get("year"))
+            if series:
                 session.selected_content = series
                 await db.save_session(user_id, session)
 
@@ -465,14 +519,34 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
                     parse_mode="HTML",
                 )
     except Exception as e:
-        logger.warning("Failed to lookup content", error=str(e))
+        logger.warning("Failed to lookup content", error=str(e), exc_info=True)
+        # SEC-20: escape exception text — error messages can contain '<' from URLs.
         await callback.message.edit_text(
-            f"{text}\n\n⚠️ Ошибка загрузки информации: {str(e)}",
+            f"{text}\n\n⚠️ Ошибка загрузки информации: {html.escape(str(e))[:200]}",
             reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
             parse_mode="HTML",
         )
 
     await callback.answer()
+
+
+def _pick_by_year(items: list, release_year, query_year):
+    """Pick the candidate whose `year` matches release.detected_year (preferred)
+    or query year, falling back to the first candidate.
+
+    BUG-08 / LOGIC-07: Radarr/Sonarr `lookup_*` returns candidates ordered by
+    popularity, which is *not* what the user picked. The release the user
+    clicked has its own detected year — prefer the candidate matching that.
+    """
+    if not items:
+        return None
+    target_year = release_year or query_year
+    if target_year:
+        for it in items:
+            cand_year = getattr(it, "year", None)
+            if cand_year and abs(int(cand_year) - int(target_year)) <= 1:
+                return it
+    return items[0]
 
 
 @router.callback_query(F.data == CallbackData.GRAB_BEST)
@@ -584,14 +658,16 @@ async def _execute_grab(
         return
 
     try:
+        parsed = search_service.parse_query(session.query)
+        lookup_term = (parsed.get("title") or "").strip() or session.query
         if session.content_type == ContentType.MOVIE:
             movie = session.selected_content
             if not isinstance(movie, MovieInfo):
-                movies = await search_service.lookup_movie(session.query)
+                movies = await search_service.lookup_movie(lookup_term)
                 if not movies:
                     await message.edit_text(Formatters.format_error("Не удалось найти фильм в Radarr"))
                     return
-                movie = movies[0]
+                movie = _pick_by_year(movies, result.detected_year, parsed.get("year"))
 
             profiles = await add_service.get_radarr_profiles()
             folders = await add_service.get_radarr_root_folders()
@@ -625,11 +701,11 @@ async def _execute_grab(
         else:
             series = session.selected_content
             if not isinstance(series, SeriesInfo):
-                series_list = await search_service.lookup_series(session.query)
+                series_list = await search_service.lookup_series(lookup_term)
                 if not series_list:
                     await message.edit_text(Formatters.format_error("Не удалось найти сериал в Sonarr"))
                     return
-                series = series_list[0]
+                series = _pick_by_year(series_list, result.detected_year, parsed.get("year"))
 
             profiles = await add_service.get_sonarr_profiles()
             folders = await add_service.get_sonarr_root_folders()
@@ -674,8 +750,13 @@ async def _execute_grab(
 
         await db.delete_session(user_id)
 
+    except ValueError as ve:
+        # LOGIC-16: surface "no folders" / similar config errors with their text.
+        logger.warning("Grab config error", error=str(ve))
+        await message.edit_text(Formatters.format_error(html.escape(str(ve))[:200]))
+        await db.delete_session(user_id)
     except Exception as e:
-        logger.error("Grab failed", error=str(e))
+        logger.error("Grab failed", error=str(e), exc_info=True)
         await message.edit_text(Formatters.format_error("Операция временно недоступна"))
         await db.delete_session(user_id)
 

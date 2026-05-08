@@ -2,7 +2,6 @@
 
 import pytest
 import pytest_asyncio
-from datetime import datetime
 
 from bot.db import Database
 from bot.models import (
