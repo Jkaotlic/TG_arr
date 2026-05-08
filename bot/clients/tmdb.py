@@ -30,11 +30,20 @@ class TMDbClient(BaseAPIClient):
         """Get or create HTTP client with optional proxy."""
         async with self._client_lock:
             if self._client is None or self._client.is_closed:
+                # SEC-24 / PERF-13: _get_http_timeout() lazily initialises
+                # _settings — using self._settings.http_timeout directly raised
+                # AttributeError on the first cold call (settings is None until
+                # the first base-client request).
                 self._client = httpx.AsyncClient(
                     base_url=self.base_url,
                     headers=self._get_headers(),
-                    timeout=httpx.Timeout(self._settings.http_timeout),
+                    timeout=httpx.Timeout(self._get_http_timeout()),
                     proxy=self._proxy_url,
+                    limits=httpx.Limits(
+                        max_keepalive_connections=4,
+                        max_connections=10,
+                        keepalive_expiry=300.0,
+                    ),
                 )
         return self._client
 

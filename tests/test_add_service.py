@@ -71,6 +71,8 @@ async def test_grab_single_episode_sets_monitor_existing():
     # Mock services
     search_service = AsyncMock()
     search_service.lookup_series = AsyncMock(return_value=[series])
+    # parse_query is sync; AsyncMock would return a coroutine and break .get()
+    search_service.parse_query = MagicMock(return_value={"title": "Test Series", "year": 2020, "season": 1, "episode": 5, "quality": None})
 
     add_service = AsyncMock()
     add_service.get_sonarr_profiles = AsyncMock(
@@ -118,6 +120,7 @@ async def test_grab_season_pack_sets_monitor_all():
     db = AsyncMock()
 
     search_service = AsyncMock()
+    search_service.parse_query = MagicMock(return_value={"title": "Test Series", "year": 2020, "season": 1, "episode": None, "quality": None})
     add_service = AsyncMock()
     add_service.get_sonarr_profiles = AsyncMock(
         return_value=[MagicMock(id=1, name="HD-1080p")]

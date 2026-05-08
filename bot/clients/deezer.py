@@ -28,7 +28,7 @@ class DeezerClient(BaseAPIClient):
     async def get_trending_artists(self, limit: int = 20) -> list[dict[str, Any]]:
         """Get top trending artists from Deezer chart."""
         try:
-            result = await self.get(f"/chart/0/artists", params={"limit": limit})
+            result = await self.get("/chart/0/artists", params={"limit": limit})
         except Exception as e:
             logger.warning("Deezer trending artists failed", error=str(e))
             return []
@@ -51,7 +51,7 @@ class DeezerClient(BaseAPIClient):
     async def get_trending_albums(self, limit: int = 20) -> list[dict[str, Any]]:
         """Get top trending albums from Deezer chart."""
         try:
-            result = await self.get(f"/chart/0/albums", params={"limit": limit})
+            result = await self.get("/chart/0/albums", params={"limit": limit})
         except Exception as e:
             logger.warning("Deezer trending albums failed", error=str(e))
             return []

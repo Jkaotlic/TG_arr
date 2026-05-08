@@ -123,6 +123,9 @@ async def process_music_search(
         return
 
     if not artists:
+        # BUG-32: drop any stale session before returning so unrelated callbacks
+        # don't reactivate it later.
+        await db.delete_session(user_id)
         await status_msg.edit_text(
             Formatters.format_warning(f"Артист не найден: <b>{html.escape(query)}</b>"),
             parse_mode="HTML",
@@ -161,6 +164,80 @@ async def process_music_search(
         reply_markup=Keyboards.artist_list(_artist_candidates[user_id]),
         parse_mode="HTML",
     )
+
+
+@router.callback_query(F.data.startswith(CallbackData.ARTIST_PAGE))
+async def handle_artist_pagination(callback: CallbackQuery, db_user: User, db: Database) -> None:
+    """Paginate the artist-list keyboard (LOGIC-14: independent prefix from search)."""
+    if not callback.data or not callback.message:
+        return
+    user_id = callback.from_user.id
+
+    try:
+        page = int(callback.data.removeprefix(CallbackData.ARTIST_PAGE))
+    except ValueError:
+        await callback.answer("Неверная страница", show_alert=True)
+        return
+
+    artists = _artist_candidates.get(user_id) or []
+    if not artists:
+        await callback.answer("Список истёк. Начните новый поиск.", show_alert=True)
+        return
+
+    per_page = 5
+    total_pages = max(1, (len(artists) + per_page - 1) // per_page)
+    if page < 0 or page >= total_pages:
+        await callback.answer("Неверная страница", show_alert=True)
+        return
+
+    start_idx = page * per_page
+    page_artists = artists[start_idx:start_idx + per_page]
+
+    lines = [f"🎵 <b>Найдено артистов: {len(artists)}</b>\n"]
+    for i, a in enumerate(page_artists, start=start_idx):
+        disamb = f" <i>[{html.escape(a.disambiguation)}]</i>" if a.disambiguation else ""
+        in_lib = " ✅" if a.lidarr_id else ""
+        lines.append(f"{i + 1}. <b>{html.escape(a.name)}</b>{disamb}{in_lib}")
+
+    try:
+        await callback.message.edit_text(
+            "\n".join(lines),
+            reply_markup=Keyboards.artist_list(artists, current_page=page),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            raise
+    await callback.answer()
+
+
+@router.callback_query(F.data == CallbackData.MUSIC_BACK)
+async def handle_music_back(callback: CallbackQuery, db_user: User, db: Database) -> None:
+    """LOGIC-24: back from artist_details → return to artist_list."""
+    if not callback.message:
+        return
+    user_id = callback.from_user.id
+    artists = _artist_candidates.get(user_id) or []
+    if not artists:
+        await callback.answer("Список истёк. Начните новый поиск.", show_alert=True)
+        return
+
+    lines = [f"🎵 <b>Найдено артистов: {len(artists)}</b>\n"]
+    for i, a in enumerate(artists[:5]):
+        disamb = f" <i>[{html.escape(a.disambiguation)}]</i>" if a.disambiguation else ""
+        in_lib = " ✅" if a.lidarr_id else ""
+        lines.append(f"{i + 1}. <b>{html.escape(a.name)}</b>{disamb}{in_lib}")
+
+    try:
+        await callback.message.edit_text(
+            "\n".join(lines),
+            reply_markup=Keyboards.artist_list(artists, current_page=0),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            raise
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith(CallbackData.ARTIST))

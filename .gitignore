@@ -85,3 +85,4 @@ data/bot.db
 
 # Claude Code
 .claude/
+analysis_round2/

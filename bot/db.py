@@ -46,10 +46,18 @@ class Database:
             self._connection = await aiosqlite.connect(self.db_path, isolation_level=None)
             self._connection.row_factory = aiosqlite.Row
 
-            # Performance & durability pragmas (DB-02, DB-04)
+            # Performance & durability pragmas (DB-02, DB-04, DB-13, PERF-12)
             await self._connection.execute("PRAGMA journal_mode=WAL")
             await self._connection.execute("PRAGMA foreign_keys=ON")
             await self._connection.execute("PRAGMA synchronous=NORMAL")
+            # DB-13: SD-card on rpie4 sometimes blocks for >1s on fsync; without
+            # busy_timeout concurrent callbacks raise SQLITE_BUSY, surfacing as
+            # "поиск временно недоступен" to the user.
+            await self._connection.execute("PRAGMA busy_timeout=5000")
+            # PERF-12: cap WAL growth so checkpointing happens predictably.
+            await self._connection.execute("PRAGMA wal_autocheckpoint=200")
+            await self._connection.execute("PRAGMA temp_store=MEMORY")
+            await self._connection.execute("PRAGMA mmap_size=33554432")
 
             await self._create_tables()
             await self._run_migrations()

@@ -3,7 +3,7 @@
 import pytest
 
 from bot.clients.prowlarr import ProwlarrClient
-from bot.models import ContentType, QualityInfo
+from bot.models import ContentType
 
 
 class TestQualityParsing:

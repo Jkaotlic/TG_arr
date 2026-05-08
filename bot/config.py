@@ -78,6 +78,12 @@ class Settings(BaseSettings):
 
     # HTTP client settings
     http_timeout: float = Field(default=30.0, description="HTTP request timeout in seconds")
+    # BUG-21 / PERF-02: Prowlarr search aggregates many indexers, slow on rpie4
+    # Wi-Fi → VPS. Default 25s keeps us inside Telegram callback window (~15s
+    # for callbacks; messages have more room) but still tolerant of slow trackers.
+    prowlarr_search_timeout: float = Field(
+        default=25.0, ge=5.0, le=120.0, description="Prowlarr search timeout in seconds"
+    )
 
     # Pagination
     results_per_page: int = Field(default=5, ge=1, le=10, description="Search results per page")

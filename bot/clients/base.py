@@ -75,10 +75,18 @@ class BaseAPIClient:
         """Get or create HTTP client."""
         async with self._client_lock:
             if self._client is None or self._client.is_closed:
+                # PERF-07: keepalive_expiry=300s avoids paying TCP/TLS handshake
+                # again on rpie4 ↔ VPS for every search after a quiet minute.
+                # Trim defaults — we only talk to one server per client.
                 self._client = httpx.AsyncClient(
                     base_url=self.base_url,
                     headers=self._get_headers(),
                     timeout=httpx.Timeout(self._get_http_timeout()),
+                    limits=httpx.Limits(
+                        max_keepalive_connections=4,
+                        max_connections=10,
+                        keepalive_expiry=300.0,
+                    ),
                 )
         return self._client
 
@@ -97,11 +105,15 @@ class BaseAPIClient:
             await self._client.aclose()
             self._client = None
 
-    # BUG-19: shorten backoff so we stay within Telegram's ~15s callback window.
+    # BUG-28 / PERF-09: 3 attempts (1 + 2 retries) for slow Wi-Fi → VPS on rpie4.
+    # Retry only on transient *network* errors and 429 (server-asked).
+    # 5xx is no longer retried here: Prowlarr/Radarr 502/504 usually mean the
+    # downstream is overloaded — retrying compounds the wait. Surface the error
+    # so the user can retry manually.
     @retry(
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError, RetryableAPIError)),
-        stop=stop_after_attempt(2),
-        wait=wait_exponential(multiplier=1, min=1, max=5),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=4),
         reraise=True,
     )
     async def _request(
@@ -133,12 +145,21 @@ class BaseAPIClient:
                 timeout=timeout,
             )
             elapsed = (time.monotonic() - start_time) * 1000
+            elapsed_rounded = round(elapsed, 2)
 
             log.debug(
                 "API request completed",
                 status_code=response.status_code,
-                elapsed_ms=round(elapsed, 2),
+                elapsed_ms=elapsed_rounded,
             )
+            # OBS-16: surface slow API calls to INFO so latency-distribution can
+            # be reconstructed from prod logs without flipping LOG_LEVEL=DEBUG.
+            if elapsed > 2000:
+                log.warning(
+                    "slow_api_call",
+                    status_code=response.status_code,
+                    elapsed_ms=elapsed_rounded,
+                )
 
             if response.status_code == 401:
                 raise AuthenticationError(
@@ -152,10 +173,17 @@ class BaseAPIClient:
                     status_code=404,
                 )
 
-            # BUG-04: treat transient 5xx (incl. 500/502 from reverse-proxies) as retryable.
-            if response.status_code in (429, 500, 502, 503, 504):
-                log.warning("Retryable HTTP error", status_code=response.status_code)
+            # PERF-09: only 429 is retried (server asks to back off). 5xx fails
+            # immediately so the user can react instead of waiting another cycle.
+            if response.status_code == 429:
+                log.warning("Rate limited, will retry", status_code=429)
                 raise RetryableAPIError(
+                    f"{self.service_name} ограничивает запросы (429)",
+                    status_code=429,
+                )
+            if response.status_code in (500, 502, 503, 504):
+                log.warning("Server error", status_code=response.status_code)
+                raise APIError(
                     f"{self.service_name} временно недоступен ({response.status_code})",
                     status_code=response.status_code,
                 )
