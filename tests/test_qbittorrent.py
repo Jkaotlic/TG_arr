@@ -37,14 +37,26 @@ class TestQBittorrentClient:
         assert client.password == "password123"
         assert client._authenticated is False
 
-    @pytest.mark.asyncio
-    async def test_login_success(self, client):
-        """Test successful login."""
+    def _mock_http_with_cookie(self, status_code: int, text: str, cookie_name: str | None = "SID"):
+        """Build mock httpx client with optional session cookie in jar."""
         mock_http = AsyncMock()
         mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "Ok."
+        mock_response.status_code = status_code
+        mock_response.text = text
         mock_http.post.return_value = mock_response
+
+        cookies_jar = []
+        if cookie_name:
+            cookie_obj = MagicMock()
+            cookie_obj.name = cookie_name
+            cookies_jar.append(cookie_obj)
+        mock_http.cookies.jar = cookies_jar
+        return mock_http
+
+    @pytest.mark.asyncio
+    async def test_login_success_legacy_200_ok(self, client):
+        """qBit ≤5.1.x returns 200 + 'Ok.' + Set-Cookie."""
+        mock_http = self._mock_http_with_cookie(200, "Ok.", "SID")
 
         with patch.object(client, '_get_client', new_callable=AsyncMock, return_value=mock_http):
             result = await client.login()
@@ -53,17 +65,35 @@ class TestQBittorrentClient:
             assert client._authenticated is True
 
     @pytest.mark.asyncio
-    async def test_login_failure(self, client):
-        """Test failed login."""
-        mock_http = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "Fails."
-        mock_http.post.return_value = mock_response
+    async def test_login_success_qbit_5_2_204(self, client):
+        """qBit ≥5.2.0 returns 204 No Content + Set-Cookie (no body)."""
+        mock_http = self._mock_http_with_cookie(204, "", "QBT_SID_8080")
+
+        with patch.object(client, '_get_client', new_callable=AsyncMock, return_value=mock_http):
+            result = await client.login()
+
+            assert result is True
+            assert client._authenticated is True
+
+    @pytest.mark.asyncio
+    async def test_login_failure_fails_body(self, client):
+        """qBit returns 200 + 'Fails.' on bad credentials."""
+        mock_http = self._mock_http_with_cookie(200, "Fails.", cookie_name=None)
 
         with patch.object(client, '_get_client', new_callable=AsyncMock, return_value=mock_http):
             with pytest.raises(QBittorrentAuthError):
                 await client.login()
+
+    @pytest.mark.asyncio
+    async def test_login_failure_no_cookie(self, client):
+        """2xx response without session cookie should not be treated as success."""
+        mock_http = self._mock_http_with_cookie(204, "", cookie_name=None)
+
+        with patch.object(client, '_get_client', new_callable=AsyncMock, return_value=mock_http):
+            from bot.clients.qbittorrent import QBittorrentError
+            with pytest.raises(QBittorrentError):
+                await client.login()
+            assert client._authenticated is False
 
     @pytest.mark.asyncio
     async def test_add_torrent_url_success(self, client):
