@@ -1,8 +1,11 @@
 """Tests for API clients."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
 import pytest
 
-from bot.clients.base import BaseAPIClient
+from bot.clients.base import BaseAPIClient, ServiceConnectionError
 from bot.clients.prowlarr import ProwlarrClient
 from bot.clients.radarr import RadarrClient
 from bot.clients.sonarr import SonarrClient
@@ -160,6 +163,45 @@ class TestProwlarrClient:
 
         # Missing title
         assert client._normalize_result({"guid": "test"}) is None
+
+    @pytest.mark.asyncio
+    async def test_search_retries_on_timeout_then_succeeds(self, client):
+        """First attempt times out (RuTracker лагает), retry returns results."""
+        good_item = {"guid": "g1", "title": "Movie 2024 1080p", "size": 1, "indexer": "1337x"}
+
+        async def fake_do_search(params, timeout, log, attempt):
+            if attempt == 1:
+                raise httpx.TimeoutException("simulated indexer hang")
+            return [client._normalize_result(good_item)]
+
+        with patch.object(client, "_do_search", new=AsyncMock(side_effect=fake_do_search)), \
+             patch("bot.clients.prowlarr.asyncio.sleep", new=AsyncMock()):  # ускоряем тест
+            results = await client.search("Movie 2024", ContentType.MOVIE)
+
+        assert len(results) == 1
+        assert results[0].title == "Movie 2024 1080p"
+
+    @pytest.mark.asyncio
+    async def test_search_raises_when_all_attempts_timeout(self, client):
+        """All retries fail → ServiceConnectionError surfaces."""
+        with patch.object(
+            client, "_do_search",
+            new=AsyncMock(side_effect=httpx.TimeoutException("hang")),
+        ), patch("bot.clients.prowlarr.asyncio.sleep", new=AsyncMock()):
+            with pytest.raises(ServiceConnectionError) as ex:
+                await client.search("X", ContentType.MOVIE)
+
+        assert "попыток" in str(ex.value)
+
+    @pytest.mark.asyncio
+    async def test_search_no_retry_on_connect_error(self, client):
+        """ConnectError must not retry — fail fast (Prowlarr is down, not flaky)."""
+        do_search = AsyncMock(side_effect=httpx.ConnectError("boom"))
+        with patch.object(client, "_do_search", new=do_search):
+            with pytest.raises(ServiceConnectionError):
+                await client.search("X", ContentType.MOVIE)
+
+        assert do_search.call_count == 1
 
 
 class TestRadarrClient:

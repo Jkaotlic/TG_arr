@@ -1,5 +1,6 @@
 """Prowlarr API client."""
 
+import asyncio
 import re
 from datetime import datetime
 from typing import Any, Optional
@@ -64,68 +65,97 @@ class ProwlarrClient(BaseAPIClient):
         log = logger.bind(query=query, content_type=content_type.value)
         log.info("Searching Prowlarr")
 
-        # PERF-02: search is expensive; do not retry — fail fast and let the
-        # user retry. Timeout is configurable (BUG-21) so admins on slow links
-        # can raise it without rebuilding the image.
-        timeout = get_settings().prowlarr_search_timeout
+        settings = get_settings()
+        timeout = settings.prowlarr_search_timeout
+        max_attempts = 1 + max(0, settings.prowlarr_search_retries)
 
-        try:
-            client = await self._get_client()
-            response = await client.request(
-                method="GET",
-                url="/api/v1/search",
-                params=params,
-                timeout=timeout,
-            )
-            if response.status_code >= 400:
-                raise APIError(
-                    f"Ошибка Prowlarr: {response.status_code}",
-                    status_code=response.status_code,
+        # Один из индексеров (RuTracker через Cloudflare) периодически залипает на 30+с
+        # и приводит к таймауту, при этом тот же запрос секундами позже отрабатывает
+        # быстро (Prowlarr внутри помечает индексер как failing). Один retry превращает
+        # transient-fail в успех без участия пользователя. Pause короткий — чтобы
+        # суммарное ожидание не выходило за разумные рамки.
+        last_timeout: Optional[httpx.TimeoutException] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await self._do_search(params, timeout, log, attempt=attempt)
+            except httpx.TimeoutException as e:
+                last_timeout = e
+                log.warning(
+                    "Prowlarr search timeout",
+                    timeout_s=timeout,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
                 )
-            results = response.json()
+                if attempt < max_attempts:
+                    await asyncio.sleep(2.0)
+                    continue
+                break
+            except httpx.ConnectError as e:
+                log.warning("Prowlarr connect error")
+                raise ServiceConnectionError("Не удалось подключиться к Prowlarr") from e
+            except APIError:
+                raise
+            except Exception as e:
+                log.error("Search failed", error=str(e))
+                raise
 
-            if not isinstance(results, list):
-                log.warning("Unexpected response type", response_type=type(results).__name__)
-                return []
+        raise ServiceConnectionError(
+            f"Таймаут Prowlarr ({timeout:.0f}s, попыток: {max_attempts})"
+        ) from last_timeout
 
-            normalized = []
-            dropped_no_guid = 0
-            dropped_no_title = 0
-            for item in results:
-                try:
-                    if not (item.get("guid") or item.get("downloadUrl") or item.get("infoUrl")):
-                        dropped_no_guid += 1
-                        continue
-                    if not (item.get("title") or item.get("fileName")):
-                        dropped_no_title += 1
-                        continue
-                    result = self._normalize_result(item)
-                    if result:
-                        normalized.append(result)
-                except Exception as e:
-                    log.warning("Failed to normalize result", error=str(e), item=item.get("title", "unknown"))
-
-            # OBS-21: surface dropped items so "few results" complaints can be debugged.
-            log.info(
-                "Search completed",
-                result_count=len(normalized),
-                raw_count=len(results),
-                dropped_no_guid=dropped_no_guid,
-                dropped_no_title=dropped_no_title,
+    async def _do_search(
+        self,
+        params: dict[str, Any],
+        timeout: float,
+        log: Any,
+        attempt: int,
+    ) -> list[SearchResult]:
+        """One Prowlarr search attempt. Raises httpx.TimeoutException on timeout."""
+        client = await self._get_client()
+        response = await client.request(
+            method="GET",
+            url="/api/v1/search",
+            params=params,
+            timeout=timeout,
+        )
+        if response.status_code >= 400:
+            raise APIError(
+                f"Ошибка Prowlarr: {response.status_code}",
+                status_code=response.status_code,
             )
-            return normalized
+        results = response.json()
 
-        except httpx.TimeoutException as e:
-            log.warning("Prowlarr search timeout", timeout_s=timeout)
-            raise ServiceConnectionError(f"Таймаут Prowlarr ({timeout:.0f}s)") from e
-        except httpx.ConnectError as e:
-            log.warning("Prowlarr connect error")
-            raise ServiceConnectionError("Не удалось подключиться к Prowlarr") from e
-        except APIError:
-            raise
-        except Exception as e:
-            log.error("Search failed", error=str(e))
-            raise
+        if not isinstance(results, list):
+            log.warning("Unexpected response type", response_type=type(results).__name__)
+            return []
+
+        normalized = []
+        dropped_no_guid = 0
+        dropped_no_title = 0
+        for item in results:
+            try:
+                if not (item.get("guid") or item.get("downloadUrl") or item.get("infoUrl")):
+                    dropped_no_guid += 1
+                    continue
+                if not (item.get("title") or item.get("fileName")):
+                    dropped_no_title += 1
+                    continue
+                result = self._normalize_result(item)
+                if result:
+                    normalized.append(result)
+            except Exception as e:
+                log.warning("Failed to normalize result", error=str(e), item=item.get("title", "unknown"))
+
+        # OBS-21: surface dropped items so "few results" complaints can be debugged.
+        log.info(
+            "Search completed",
+            result_count=len(normalized),
+            raw_count=len(results),
+            dropped_no_guid=dropped_no_guid,
+            dropped_no_title=dropped_no_title,
+            attempt=attempt,
+        )
+        return normalized
 
     def _normalize_result(self, item: dict[str, Any]) -> Optional[SearchResult]:
         """Normalize Prowlarr search result to our model."""
