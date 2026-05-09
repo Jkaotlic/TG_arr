@@ -116,18 +116,25 @@ class QBittorrentClient:
                     "username": self.username,
                     "password": self.password,
                 },
+                headers={"Referer": self.base_url},
             )
-
-            if response.status_code == 200 and response.text == "Ok.":
-                self._authenticated = True
-                log.info("Successfully logged in to qBittorrent")
-                return True
 
             if response.status_code == 403 or "Fails" in response.text:
                 raise QBittorrentAuthError(
                     "Неверный логин или пароль",
                     status_code=response.status_code,
                 )
+
+            # qBit returns 200 + "Ok." (≤5.1.x) or 204 + Set-Cookie (≥5.2.0).
+            # Treat as success only when a session cookie is actually set.
+            session_cookie = any(
+                c.name.startswith("SID") or c.name.startswith("QBT_SID")
+                for c in client.cookies.jar
+            )
+            if response.status_code in (200, 204) and session_cookie:
+                self._authenticated = True
+                log.info("Successfully logged in to qBittorrent")
+                return True
 
             raise QBittorrentError(
                 "Ошибка авторизации в qBittorrent",
