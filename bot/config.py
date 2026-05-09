@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     prowlarr_search_timeout: float = Field(
         default=25.0, ge=5.0, le=120.0, description="Prowlarr search timeout in seconds"
     )
+    prowlarr_search_retries: int = Field(
+        default=1, ge=0, le=3,
+        description="Дополнительные попытки при таймауте Prowlarr (0=нет, 1=одна повторная). "
+                    "Отдельный flaky tracker (RuTracker через Cloudflare) часто отрабатывает со 2-й попытки.",
+    )
 
     # Pagination
     results_per_page: int = Field(default=5, ge=1, le=10, description="Search results per page")
