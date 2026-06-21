@@ -12,6 +12,17 @@ from pathlib import Path
 from typing import Optional
 
 import structlog
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
+from bot.clients.qbittorrent import QBittorrentClient
+from bot.clients.registry import close_all as close_all_clients
+from bot.config import get_settings
+from bot.db import Database
+from bot.handlers import setup_routers
+from bot.middleware.auth import AuthMiddleware, LoggingMiddleware, RateLimitMiddleware
+from bot.services.notification_service import NotificationService
 
 
 # SEC-03: mask Telegram bot tokens in any log event value
@@ -24,17 +35,6 @@ def _mask_tokens(logger, method_name, event_dict):
         if isinstance(v, str):
             event_dict[k] = _TOKEN_PATTERN.sub('bot***:***', v)
     return event_dict
-from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-
-from bot.clients.qbittorrent import QBittorrentClient
-from bot.clients.registry import close_all as close_all_clients
-from bot.config import get_settings
-from bot.db import Database
-from bot.handlers import setup_routers
-from bot.middleware.auth import AuthMiddleware, LoggingMiddleware, RateLimitMiddleware
-from bot.services.notification_service import NotificationService
 
 
 def _liveness_watchdog(

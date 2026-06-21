@@ -1,9 +1,19 @@
 """Client registry for connection pooling and reuse."""
 
 import asyncio
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from bot.config import get_settings
+
+if TYPE_CHECKING:
+    from bot.clients.deezer import DeezerClient
+    from bot.clients.emby import EmbyClient
+    from bot.clients.lidarr import LidarrClient
+    from bot.clients.prowlarr import ProwlarrClient
+    from bot.clients.qbittorrent import QBittorrentClient
+    from bot.clients.radarr import RadarrClient
+    from bot.clients.sonarr import SonarrClient
+    from bot.clients.tmdb import TMDbClient
 
 # Per-client locks to prevent race conditions in singleton creation
 _prowlarr_lock = asyncio.Lock()
