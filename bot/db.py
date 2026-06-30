@@ -31,6 +31,11 @@ class Database:
         self.db_path = db_path
         self._connection: Optional[aiosqlite.Connection] = None
         self._connect_lock = asyncio.Lock()
+        # RACE-02 / DB-01: ONE shared autocommit connection cannot hold two
+        # logical transactions at once. Serialize every writer (incl. single
+        # commits) so one coroutine's commit/rollback can't terminate another's
+        # explicit BEGIN..commit block. Must not be held across nested writes.
+        self._write_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         """Connect to the database and initialize tables."""
@@ -218,14 +223,15 @@ class Database:
         now = datetime.now(timezone.utc).isoformat()
         prefs_json = user.preferences.model_dump_json()
 
-        await self.conn.execute(
-            """
-            INSERT INTO users (tg_id, username, first_name, role, preferences, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (user.tg_id, user.username, user.first_name, user.role.value, prefs_json, now, now),
-        )
-        await self.conn.commit()
+        async with self._write_lock:
+            await self.conn.execute(
+                """
+                INSERT INTO users (tg_id, username, first_name, role, preferences, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user.tg_id, user.username, user.first_name, user.role.value, prefs_json, now, now),
+            )
+            await self.conn.commit()
 
         user.created_at = datetime.fromisoformat(now)
         user.updated_at = datetime.fromisoformat(now)
@@ -236,11 +242,12 @@ class Database:
         now = datetime.now(timezone.utc).isoformat()
         prefs_json = preferences.model_dump_json()
 
-        await self.conn.execute(
-            "UPDATE users SET preferences = ?, updated_at = ? WHERE tg_id = ?",
-            (prefs_json, now, tg_id),
-        )
-        await self.conn.commit()
+        async with self._write_lock:
+            await self.conn.execute(
+                "UPDATE users SET preferences = ?, updated_at = ? WHERE tg_id = ?",
+                (prefs_json, now, tg_id),
+            )
+            await self.conn.commit()
 
     def _row_to_user(self, row: aiosqlite.Row) -> User:
         """Convert database row to User model.
@@ -283,36 +290,37 @@ class Database:
         """Save a search and its results. Returns search ID."""
         now = datetime.now(timezone.utc).isoformat()
 
-        await self.conn.execute("BEGIN")
-        try:
-            # Insert search
-            cursor = await self.conn.execute(
-                """
-                INSERT INTO searches (user_id, query, content_type, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (user_id, query, content_type.value, now),
-            )
-            search_id = cursor.lastrowid
-            if search_id is None:
+        async with self._write_lock:
+            await self.conn.execute("BEGIN")
+            try:
+                # Insert search
+                cursor = await self.conn.execute(
+                    """
+                    INSERT INTO searches (user_id, query, content_type, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (user_id, query, content_type.value, now),
+                )
+                search_id = cursor.lastrowid
+                if search_id is None:
+                    await self.conn.rollback()
+                    raise RuntimeError("Failed to insert search record")
+
+                # Insert results
+                results_json = json.dumps([r.model_dump(mode="json") for r in results])
+                await self.conn.execute(
+                    """
+                    INSERT INTO search_results (search_id, results_json, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (search_id, results_json, now),
+                )
+
+                await self.conn.commit()
+            except Exception:
                 await self.conn.rollback()
-                raise RuntimeError("Failed to insert search record")
-
-            # Insert results
-            results_json = json.dumps([r.model_dump(mode="json") for r in results])
-            await self.conn.execute(
-                """
-                INSERT INTO search_results (search_id, results_json, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (search_id, results_json, now),
-            )
-
-            await self.conn.commit()
-        except Exception:
-            await self.conn.rollback()
-            raise
-        return search_id
+                raise
+            return search_id
 
     async def get_search_results(self, search_id: int) -> list[SearchResult]:
         """Get search results by search ID."""
@@ -341,17 +349,18 @@ class Database:
             logger.error("Failed to serialize session", user_id=user_id, error=str(e))
             raise
 
-        await self.conn.execute(
-            """
-            INSERT INTO sessions (user_id, session_data, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                session_data = excluded.session_data,
-                updated_at = excluded.updated_at
-            """,
-            (user_id, session_json, now, now),
-        )
-        await self.conn.commit()
+        async with self._write_lock:
+            await self.conn.execute(
+                """
+                INSERT INTO sessions (user_id, session_data, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    session_data = excluded.session_data,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, session_json, now, now),
+            )
+            await self.conn.commit()
         logger.debug("Session saved", user_id=user_id, results_count=len(session.results))
 
     async def get_session(self, user_id: int) -> Optional[SearchSession]:
@@ -390,38 +399,40 @@ class Database:
 
     async def delete_session(self, user_id: int) -> None:
         """Delete user session."""
-        await self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
-        await self.conn.commit()
+        async with self._write_lock:
+            await self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            await self.conn.commit()
 
     # Action log methods
     async def log_action(self, action: ActionLog) -> int:
         """Log an action. Returns action ID."""
         now = datetime.now(timezone.utc).isoformat()
 
-        cursor = await self.conn.execute(
-            """
-            INSERT INTO actions (
-                user_id, action_type, content_type, query, content_title,
-                content_id, release_title, success, error_message, details, created_at
+        async with self._write_lock:
+            cursor = await self.conn.execute(
+                """
+                INSERT INTO actions (
+                    user_id, action_type, content_type, query, content_title,
+                    content_id, release_title, success, error_message, details, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    action.user_id,
+                    action.action_type.value,
+                    action.content_type.value,
+                    action.query,
+                    action.content_title,
+                    action.content_id,
+                    action.release_title,
+                    1 if action.success else 0,
+                    action.error_message,
+                    action.details,
+                    now,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                action.user_id,
-                action.action_type.value,
-                action.content_type.value,
-                action.query,
-                action.content_title,
-                action.content_id,
-                action.release_title,
-                1 if action.success else 0,
-                action.error_message,
-                action.details,
-                now,
-            ),
-        )
-        await self.conn.commit()
-        return cursor.lastrowid
+            await self.conn.commit()
+            return cursor.lastrowid
 
     async def get_user_actions(self, user_id: int, limit: int = 20) -> list[ActionLog]:
         """Get recent actions for a user."""
@@ -485,33 +496,35 @@ class Database:
         """Delete sessions older than specified hours. Returns count deleted."""
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
-        cursor = await self.conn.execute(
-            "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
-        )
-        await self.conn.commit()
-        return cursor.rowcount
+        async with self._write_lock:
+            cursor = await self.conn.execute(
+                "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
+            )
+            await self.conn.commit()
+            return cursor.rowcount
 
     async def cleanup_old_searches(self, days: int = 7) -> int:
         """Delete searches older than specified days. Returns count deleted."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-        await self.conn.execute("BEGIN")
-        try:
-            # First delete related results
-            await self.conn.execute(
-                """
-                DELETE FROM search_results
-                WHERE search_id IN (SELECT id FROM searches WHERE created_at < ?)
-                """,
-                (cutoff,),
-            )
+        async with self._write_lock:
+            await self.conn.execute("BEGIN")
+            try:
+                # First delete related results
+                await self.conn.execute(
+                    """
+                    DELETE FROM search_results
+                    WHERE search_id IN (SELECT id FROM searches WHERE created_at < ?)
+                    """,
+                    (cutoff,),
+                )
 
-            # Then delete searches
-            cursor = await self.conn.execute(
-                "DELETE FROM searches WHERE created_at < ?", (cutoff,)
-            )
-            await self.conn.commit()
-        except Exception:
-            await self.conn.rollback()
-            raise
-        return cursor.rowcount
+                # Then delete searches
+                cursor = await self.conn.execute(
+                    "DELETE FROM searches WHERE created_at < ?", (cutoff,)
+                )
+                await self.conn.commit()
+            except Exception:
+                await self.conn.rollback()
+                raise
+            return cursor.rowcount

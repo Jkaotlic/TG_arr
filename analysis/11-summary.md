@@ -1,107 +1,75 @@
-# Сводка аудита TG_arr — раунд 3 (2026-05-08)
+# Сводка аудита TG_arr — раунд 4 (2026-06-30)
 
-## Жалобы пользователя
-- (Ж1) "Плохо ищет контент"
-- (Ж2) "Не даёт выбрать фильм/сериал/музыка"
-- (Ж3) "Не понимает фильм/сериал/музыка"
+Метод: 11 finder-агентов (по категориям) → состязательная верификация **каждой** находки независимым
+скептиком (refute-by-default). Из 68 заявленных находок выжило **61** (55 CONFIRMED + 6 PLAUSIBLE),
+**7 отклонено** как false positives и зафиксировано в отчётах (чтобы будущие раунды их не переоткрывали).
 
-## Корневые причины
+## Статистика (после верификации)
 
-| ID | Категория | Корень | Связь |
-|----|-----------|--------|-------|
-| BUG-01..03 | Bugs | detect_content_type приоритет MUSIC>MOVIE>SERIES + слабый substring `_title_matches` + year=None | Ж3 |
-| BUG-04 | Bugs | Если detect определил тип — кнопочный выбор НЕ показывается | Ж2 |
-| BUG-05 | Bugs | gather(return_exceptions=True) тихо превращает timeout в [] | Ж1, Ж3 |
-| BUG-06/07 + LOGIC-05 | Bugs/Logic | parse_query съедает год; в Prowlarr идёт title без года | Ж1 |
-| LOGIC-04 | Logic | Filter по `detected_type` отсеивает легитимные релизы русских трекеров | Ж1 |
-| BUG-08 + LOGIC-07 | Bugs/Logic | handle_release_selection берёт `[0]` без year-фильтра | Ж1 |
-| PERF-01..02 | Perf | detect без таймаута + Prowlarr 60s + retry → wait 30-125s | Ж1 |
-| LOGIC-14/24 | Logic | CallbackData.PAGE конфликт; handle_back ломан для music | Ж2 (music) |
+| Категория | Файл | crit | high | med | low | rejected |
+|-----------|------|:----:|:----:|:---:|:---:|:--------:|
+| Security | 01 | 0 | 2 | 1 | 0 | 0 |
+| Bugs + Race | 02 | 1 | 2 | 2 | 4 | 2 |
+| Dead code | 03 | 0 | 0 | 1 | 12 | 0 |
+| Dependencies | 04 | 0 | 0 | 1 | 3 | 0 |
+| Logic | 05 | 0 | 0 | 1 | 3 | 2 |
+| Performance | 06 | 0 | 0 | 4 | 3 | 0 |
+| Observability | 07 | 0 | 0 | 2 | 3 | 0 |
+| Testing | 08 | 0 | 0 | 4 | 3 | 0 |
+| Deployment | 09 | 0 | 0 | 1 | 3 | 1 |
+| Database | 10 | 0 | 1 | 1 | 3 | 2 |
+| **ИТОГО** | | **1** | **5** | **18** | **37** | **7** |
 
-## Статистика находок
+## Топ проблем (что чинить первым)
 
-| Категория | Critical/High | Med | Low | Deferred |
-|-----------|---------------|-----|-----|----------|
-| SEC | 0 | 6 | 5 | — |
-| BUG | 11 | 12 | 18 | — |
-| DEAD | 1 | 1 | 19 | — |
-| DEP | 1 | 4 | 5 | 4 |
-| LOGIC | 10 | 7 | 19 | 12 |
-| PERF | 6 | 6 | 8 | 7 |
-| OBS | 6 | 7 | 11 | — |
-| TEST | 5 | 6 | — | — |
-| DEPLOY | 4 | 7 | 6 | — |
-| DB | 3 | 5 | 4 | — |
-| **ИТОГО** | **47** | **61** | **95** | **23** |
+| ID | Sev | Суть | Эффект для пользователя |
+|----|-----|------|--------------------------|
+| **RACE-01** | crit | Нет защиты от двойного grab: двойной тап «Подтвердить/Лучший/Force» = двойной add/grab/download | Дубликаты в Radarr/qBittorrent, две записи в истории |
+| **RACE-02 / DB-01** | high | Гонка транзакций на **одном** соединении SQLite: `BEGIN…commit` одной корутины обрывает транзакцию другой | Молча теряется сохранённый поиск, иногда `OperationalError` |
+| **SEC-01** | high | `torrent.name` без `html.escape` в `/pause` `/resume` (HTML parse_mode) | `&`/`<` в имени релиза → 400, нет подтверждения; инъекция разметки |
+| **SEC-02** | high | TMDB-тайтл без escape в подтверждении add из «🔥 Топ» | `Fast & Furious` → «не удалось добавить», хотя реально добавлено |
+| **BUG-01** | high | Кнопка «◀️ Назад» в «🔥 Топ» перехватывается `search.handle_back` | Всегда «Сессия истекла» вместо возврата в меню |
+| **SEC-03** | med | Passkey приватного трекера утекает в логи (`result=` сырого push-ответа) | Кто читает логи — получает переиспользуемый credential |
 
-## Стратегия фиксов
+**Дубли-корни (один фикс закрывает оба):** RACE-02 = DB-01; LOGIC-05 = PERF-03 (календарь последовательно).
 
-**Этот цикл (default-full-fix без deferred рефакторинга):**
+## Сквозные темы раунда 4
 
-1. **Phase 1 — Корень жалоб** (поиск, детект, UX): BUG-01..09, LOGIC-02..05, LOGIC-07, LOGIC-14, LOGIC-24, LOGIC-28, PERF-01..04, PERF-08
-2. **Phase 2 — Observability** (для будущего дебага): OBS-01, OBS-07, OBS-11..15, OBS-02
-3. **Phase 3 — Performance/DB** (rpie4 specific): PERF-07, PERF-09, PERF-12, DB-13, DB-15, BUG-21, BUG-28
-4. **Phase 4 — Security регрессии**: SEC-20..24
-5. **Phase 5 — Deployment/Deps**: DEPLOY-03, DEP-09, DEPLOY-04 (backup script)
-6. **Phase 6 — Cleanup**: DEAD-01..21, BUG-10/29/33, LOGIC-30/36
+1. **Конкуренция — главная незакрытая зона.** Прошлые раунды чинили детект/поиск/UX; гонки на сессии и
+   соединении БД остались. Бот реально многозадачный (aiogram дёргает каждый callback отдельной task),
+   а сериализации общего состояния нет нигде, кроме singleton-локов клиентов.
+2. **HTML-escape применён непоследовательно.** `search.py`/`music.py`/`calendar.py` экранируют, а
+   `downloads.py` и `trending.py` — нет. Это конвенция, нарушенная в 2 модулях.
+3. **N+1 round-trips на Pi.** Календарь, Emby-статус, qBit-статус, pause/resume/delete — по 2–4
+   последовательных HTTP-запроса там, где хватило бы `asyncio.gather` или одного списка.
+4. **Мёртвый код накопился.** `constants.py` целиком осиротел (и дублируется магическими числами),
+   плюс целая album-ветка Lidarr (lookup_album/format_album_info) недостижима.
+5. **Тесты не покрывают критичный путь.** Auth/RateLimit, grab happy-path, qBit re-auth (403),
+   poller уведомлений — ноль тестов.
 
-**Deferred (отдельный PR):** все LOGIC-D1..D10, LOGIC-39/40 (god-file splits, ArrBaseClient, FSM миграция, guessit), DEP-15/16 (CI/CD, python 3.13), PERF-06/10/11 (qBit cache, sync API).
+## Отклонённые false positives (7)
 
-## Ожидаемый эффект на rpie4
+BUG-03 (📺 для music — недостижимо), RACE-06 (гонки RateLimit нет — секция без await),
+LOGIC-02 (size-penalty для music — ветка недостижима), LOGIC-04 (Prowlarr.grab_release «неверный» — на самом деле корректный),
+DEPLOY-01 (нет SIGTERM-хендлера — aiogram 3.27 его ставит сам), DB-05 (FK без CASCADE — нет DELETE родителей),
+DB-06 (мутация сессии в save_session — caller её больше не использует). Детали — в соответствующих отчётах.
 
-- Время поиска: 15-30s → 5-12s
-- "Не понимает контент": должно исчезнуть для популярных запросов с годом
-- "Не даёт выбрать": при confidence < 0.7 ВСЕГДА показывается кнопочный выбор
-- "Плохо ищет": Prowlarr получает оригинальный query с годом + не фильтруем результаты
+## Стратегия исправления — см. `12-fix-plan.md`
 
-## Применённые фиксы (раунд 3)
+По правилу default-full-fix чинится **всё** (любой severity), кроме чисто архитектурного рефакторинга,
+который вынесен в отдельный отложенный раздел плана.
 
-### Phase 1 — Корень жалоб
-- ✅ BUG-01..05, LOGIC-01..03, PERF-01: переписан `SearchService.detect_with_confidence` — fuzzy match через `difflib.SequenceMatcher`, year-aware приоритет (music дропается если в query есть год), exception → UNKNOWN, `asyncio.wait_for(timeout=8s)`. Возвращает `DetectionResult` с confidence.
-- ✅ BUG-04, LOGIC-28: `process_search` показывает кнопочный выбор при low/ambiguous confidence (с подсказкой кандидатов).
-- ✅ BUG-06, BUG-07, LOGIC-05: `parse_query` по-прежнему вычищает год для lookup, но `process_search` шлёт **оригинальный query** в Prowlarr (с годом) когда clean_title и year оба известны.
-- ✅ LOGIC-04: `search_releases` больше не фильтрует по `detected_type` — русские трекеры мис-тегируют категории, фильтр выкидывал валидные релизы.
-- ✅ BUG-08, LOGIC-07: `handle_release_selection` и `_execute_grab` используют `_pick_by_year(items, release.detected_year, query.year)` — выбирает кандидата с подходящим годом, не `[0]`.
-- ✅ PERF-01..04, PERF-08: warm-up в `on_startup` (DNS+TLS handshake заранее), prowlarr search timeout 60→25s конфигурируемый, tenacity 2→3 attempts только на сетевые/429.
+## Применённые фиксы (раунд 4) — Critical + High + Security
 
-### Phase 2 — Observability
-- ✅ OBS-01, OBS-07, OBS-19: `LoggingMiddleware` биндит `request_id`, `user_id`, `chat_id` в `contextvars` — все downstream логи автоматически имеют контекст. INFO для incoming.
-- ✅ OBS-11..15, OBS-21: `detect_content_type` логирует winner+candidates+confidence+reason, `search_releases` логирует raw_count + top-N со score, `process_search` пишет stage_done с elapsed_ms и search_branch на каждый return, `prowlarr.search` пишет dropped_no_guid/no_title.
-- ✅ OBS-16: `slow_api_call` WARNING в base.py при elapsed > 2s (видно в INFO-логах).
+Закрыто по согласованию с пользователем, все через TDD (RED→GREEN), без архитектурного рефакторинга:
 
-### Phase 3 — Performance/DB
-- ✅ DB-13: `PRAGMA busy_timeout=5000` — устраняет SQLITE_BUSY на rpie4 SD-card.
-- ✅ DB-15: периодический `_periodic_cleanup` каждые 6 часов в фоне (sessions/searches).
-- ✅ PERF-12: WAL autocheckpoint=200, temp_store=MEMORY, mmap_size=32M.
-- ✅ PERF-07: `httpx.Limits(max_keepalive=4, max_connections=10, keepalive_expiry=300s)` всем клиентам.
-- ✅ PERF-13: TMDb client использует `_get_http_timeout()` (lazy init), не падает AttributeError.
-- ✅ PERF-22: pre-compiled regex для series-patterns в search_service.
+- ✅ **RACE-01** (critical): per-user guard `_claim_grab`/`_release_grab` в `handle_grab_best`/`handle_confirm_grab`/`handle_force_grab` + music `handle_confirm_music_add`. Двойной тап → второй вызов отбивается «уже обрабатываю».
+- ✅ **RACE-02 / DB-01** (high): `Database._write_lock` сериализует все методы-писатели. Тест на конкурентные `save_search`+`cleanup` (падал `cannot start a transaction within a transaction`) теперь зелёный.
+- ✅ **SEC-01** (high): `html.escape(torrent.name)` в `/pause` `/resume`.
+- ✅ **SEC-02** (high): `html.escape(...)` тайтлов в add из трендов (movie+series).
+- ✅ **BUG-01** (high): новый `CallbackData.TRENDING_BACK` + `handle_trending_back` — «Назад» в трендах больше не перехватывается `search.handle_back`.
+- ✅ **SEC-03** (med): `_safe_push_result()` — в логи идут только `approved`/`rejections`, passkey из `downloadUrl` не утекает.
 
-### Phase 4 — Security
-- ✅ SEC-20: `handle_release_selection` exception → `html.escape` перед `parse_mode=HTML`.
-- ✅ SEC-21: calendar handler escape exception messages.
-- ✅ SEC-24: TMDb `_settings.http_timeout` AttributeError fix.
-- ✅ LOGIC-16: `_execute_grab` ловит `ValueError` отдельно от Exception — пользователь видит "нет папок в Radarr" вместо generic.
+**Проверка:** `pytest` — **291 passed** (было 280; +11 новых TDD-тестов в `tests/test_audit_r4_fixes.py`), `ruff check` — clean. (mypy в окружении аудита не установлен — не прогонялся.)
 
-### Phase 5 — Deployment/Deps
-- ✅ DEPLOY-03: `tzdata` в Dockerfile, `ENV TZ=Europe/Moscow`, `TZ` в docker-compose.yml.
-- ✅ DEP-09: `pyproject.toml` ужесточён до `pydantic>=2.9,<2.13`.
-
-### Phase 6 — Music UX
-- ✅ LOGIC-14: новый `CallbackData.ARTIST_PAGE` (`art_page:`) — не пересекается с search `page:`. Music pagination больше не ломается.
-- ✅ LOGIC-24: `MUSIC_BACK` callback — отдельный handler для возврата artist_details → artist_list.
-- ✅ BUG-32: при пустом результате music search — `db.delete_session` чтоб старая сессия не реактивировалась.
-
-### Phase 7 — Cleanup
-- ✅ BUG-10, BUG-33: новый `_strip_command()` helper — обрабатывает `/cmd@bot_username` и `replace(maxsplit=1)`.
-- ✅ BUG-11: word boundary `\b` в series-patterns regex.
-- ✅ BUG-29, BUG-30: parse_query чистит ВСЕ quality tokens, включая cyrillic `4К`.
-
-### Тесты
-- ✅ +14 новых тестов в `test_detect_content_type.py` и `test_year_aware_lookup.py` (TDD для BUG-01..08, LOGIC-04).
-- ✅ 275/275 проходят (было 261).
-
-### Deferred — отдельный PR
-- LOGIC-D1..D10: god-file splits, ArrBaseClient, FSM миграция, guessit
-- DEP-15/16: CI/CD pipeline, python 3.13
-- PERF-06/10/11: qBit cache, sync API, incremental sync
+Остальные находки (medium/low: dead code, perf, deps, observability, тесты, RACE-04/05) — в плане, в этот цикл не вносились.

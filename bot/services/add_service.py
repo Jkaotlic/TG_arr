@@ -55,6 +55,22 @@ def _mask_url(url: str, max_len: int = 100) -> str:
     return base[:max_len]
 
 
+def _safe_push_result(result: Optional[dict]) -> dict:
+    """SEC-03: extract only the safe fields from an *arr push-release response.
+
+    The raw response echoes the pushed release object including ``downloadUrl``,
+    which for private trackers embeds a reusable passkey/apikey. Logging the raw
+    dict leaks that credential to container logs, so we keep only the decision
+    fields (``approved``/``rejections``) that we actually act on.
+    """
+    if not isinstance(result, dict):
+        return {"approved": None, "rejections": []}
+    return {
+        "approved": result.get("approved"),
+        "rejections": result.get("rejections", []),
+    }
+
+
 def _is_internal_ip(addr: ipaddress._BaseAddress) -> bool:
     """Classify any non-public IP (private/loopback/link-local/reserved/multicast)."""
     return (
@@ -354,7 +370,7 @@ class AddService:
                             protocol=release.protocol,
                             publish_date=release.publish_date.isoformat() if release.publish_date else None,
                         )
-                        log.info("Push release result", result=result)
+                        log.info("Push release result", result=_safe_push_result(result))
                         if result and result.get("approved") is True:
                             action.success = True
                             log.info("Release pushed successfully")
@@ -506,7 +522,7 @@ class AddService:
                             protocol=release.protocol,
                             publish_date=release.publish_date.isoformat() if release.publish_date else None,
                         )
-                        log.info("Push release result", result=result)
+                        log.info("Push release result", result=_safe_push_result(result))
                         if result and result.get("approved") is True:
                             action.success = True
                             log.info("Release pushed successfully")
@@ -707,7 +723,7 @@ class AddService:
                             protocol=release.protocol,
                             publish_date=release.publish_date.isoformat() if release.publish_date else None,
                         )
-                        log.info("Push release result", result=result)
+                        log.info("Push release result", result=_safe_push_result(result))
                         if result and result.get("approved") is True:
                             action.success = True
                             log.info("Release pushed successfully")

@@ -1,408 +1,99 @@
-# Dead code TG_arr v1.0 (раунд 3)
+# Анализ — Мёртвый код · TG_arr (раунд 4, 2026-06-30)
 
-Дата: 2026-05-08. Корень: `f:/VScode/TG_arr/`. Обзор после round 2 (analysis_round2/03-dead-code.md). Многие R2-находки актуальны, появились новые.
+Подтверждено находок: **13** (critical=0, high=0, medium=1, low=12). Все прошли состязательную верификацию (CONFIRMED/PLAUSIBLE).
 
----
+## Средние
 
-## Очевидно мёртвое
+### DEAD-01: Entire bot/constants.py module is orphaned (never imported)
+- **Файл**: `bot/constants.py:1`
+- **Проблема**: No file in bot/ or tests/ imports bot.constants (grep for 'from.*constants import', 'import constants', and 'import *' returns zero hits). All 10 constants are unreachable. Worse, several are silently duplicated as magic numbers or local re-definitions: QBT_ETA_INFINITY=8640000 is dead while models.py:385 hardcodes the literal 8640000; MAX_QUERY_LENGTH=200 is redefined locally in handlers/search.py:138 and handlers/music.py:99; TORRENTS_PER_PAGE=5 is redefined in handlers/downloads.py:19. A future edit to constants.py (e.g. raising the page size) would have no effect, creating a correctness-drift trap.
+- **Риск**: Removing the file is safe (zero importers). If kept, wiring it in changes behavior only where literals currently diverge.
+- **Решение**: Either delete bot/constants.py entirely, or make it the single source of truth: import MAX_MESSAGE_LENGTH/SAFE_MESSAGE_LENGTH/TORRENTS_PER_PAGE/MAX_QUERY_LENGTH/QBT_ETA_INFINITY from it and remove the local redefinitions in downloads.py:19, search.py:138, music.py:99 and the literal 8640000 in models.py:385.
+- **Верификация**: CONFIRMED — Independently verified against current code. bot/constants.py (22 lines, 10 constants) is genuinely orphaned: grep for `from bot.constants`, `from .constants`, `from ..constants`, `import constants`, and `constants import` across the whole repo returns ZERO hits in bot/ or tests/ — the symbols appear only in their own definition file and in analysis/*.md docs. Of the 10 constants, 8 (MAX_MESSAGE_LENGTH, SAFE_MESSAGE_LENGTH, SEARCH_RESULTS_MAX, PROWLARR_SEARCH_LIMIT, TRENDING_LIMIT, QBT_ETA_INFINITY, SESSION_TTL_HOURS, SEARCH_HISTORY_DAYS) appear nowhere outside constants.py. All four cited dup
+- **Статус**: [ ] Не исправлено
 
-### DEAD-01: `bot/constants.py` — модуль не импортируется (HIGH, новый)
-- **Файл**: `bot/constants.py` (целиком, 22 строки)
-- **Проблема**: 10 констант — `MAX_MESSAGE_LENGTH`, `SAFE_MESSAGE_LENGTH`, `TORRENTS_PER_PAGE`, `SEARCH_RESULTS_MAX`, `MAX_QUERY_LENGTH`, `PROWLARR_SEARCH_LIMIT`, `TRENDING_LIMIT`, `QBT_ETA_INFINITY`, `SESSION_TTL_HOURS`, `SEARCH_HISTORY_DAYS`. Ни одна не импортируется (`from bot.constants` / `import constants` → 0 совпадений в `bot/`, `tests/`).
-- **Подтверждение**:
-  - `Grep "from bot.constants|import constants"` → пусто
-  - `MAX_QUERY_LENGTH = 200` объявляется ЛОКАЛЬНО в `bot/handlers/music.py:99` и `bot/handlers/search.py:132` (дубль).
-  - `TORRENTS_PER_PAGE = 5` объявляется ЛОКАЛЬНО в `bot/handlers/downloads.py:19` (дубль).
-  - `SAFE_MESSAGE_LENGTH = 3800` хардкодится в `bot/ui/formatters.py:619, 983` (дубль).
-  - `MAX_MESSAGE_LENGTH`, `SEARCH_RESULTS_MAX`, `PROWLARR_SEARCH_LIMIT`, `TRENDING_LIMIT`, `QBT_ETA_INFINITY` (8640000), `SESSION_TTL_HOURS` (24), `SEARCH_HISTORY_DAYS` (7) — ни разу не используются (но 8640000 есть inline в `bot/models.py:385` и 24/7 в `bot/main.py:104,109` — литералы вместо констант).
-- **Решение**: либо удалить файл и принять статус-кво (литералы inline), либо мигрировать на импорт из `bot/constants.py` все дубли. Рекомендую второе — это и DEAD-01 закроет, и DUP-01 (см. ниже).
-- **Статус**: [ ]
+## Низкие
 
-### DEAD-02: `ProwlarrClient.grab_release` не вызывается (LOW, новый)
-- **Файл**: `bot/clients/prowlarr.py:375-385`
-- **Проблема**: Метод реализован, но `prowlarr.grab_release` не вызывается нигде — production-код всегда идёт через `radarr/sonarr/lidarr.grab_release` или `push_release`. `Grep "prowlarr\.grab_release|self\.prowlarr\.grab"` → 0.
-- **Подтверждение**: `Grep` показывает только определение в `prowlarr.py:375` и упоминание в analysis_round2.
-- **Решение**: удалить метод. (8 строк)
-- **Статус**: [ ]
+### DEAD-02: ProwlarrClient.grab_release is never called
+- **Файл**: `bot/clients/prowlarr.py:447`
+- **Проблема**: ProwlarrClient.grab_release() (posts to /api/v1/search) has zero callers. Grabbing in production goes exclusively through radarr/sonarr/lidarr .grab_release (add_service.py:373/525/723). grep 'grab_release' against bot/services, bot/handlers, tests shows no Prowlarr caller and no internal self-call inside prowlarr.py.
+- **Решение**: Delete ProwlarrClient.grab_release (lines 447-end of method).
+- **Верификация**: CONFIRMED — I opened bot/clients/prowlarr.py:447-457 and confirmed ProwlarrClient.grab_release(guid, indexer_id) exists, posting to /api/v1/search via _post_no_retry. I then grepped the entire codebase for callers. Findings: (1) Every production .grab_release( call site routes through a *arr client, not Prowlarr — add_service.py:373 self.radarr.grab_release, :525 self.sonarr.grab_release, :723 self.lidarr.grab_release. (2) There is NO occurrence of prowlarr.grab_release, self.prowlarr.grab_release, or any Prowlarr-instance call to grab_release anywhere in bot/. (3) The only other grab_release symbol is th
+- **Статус**: [ ] Не исправлено
 
-### DEAD-03: `Keyboards.confirm_delete_torrent` — только в тестах (LOW, повтор R2 DEAD-08)
-- **Файл**: `bot/ui/keyboards.py:644-663`
-- **Проблема**: keyboard для confirm-flow удаления, но в `bot/handlers/downloads.py` `handle_delete_torrent`/`handle_delete_with_files` (строки 388, 422) делают delete сразу без подтверждения. Метод вызывается только из `tests/test_qbittorrent.py:476-485`.
-- **Подтверждение**: `Grep "confirm_delete_torrent"` → keyboards.py + tests + analysis_round2.
-- **Решение**: либо удалить keyboard и тесты, либо реализовать confirm-flow для `t_delf:` (опасный «удалить с файлами»). Рекомендую второе — продолжает быть UX-багом.
-- **Статус**: [ ]
+### DEAD-03: Lidarr album-lookup chain (lookup_album / format_album_info) is dead in production
+- **Файл**: `bot/clients/lidarr.py:42`
+- **Проблема**: LidarrClient.lookup_album (lidarr.py:42) has zero callers anywhere (not in bot/, not in tests). Its only consumer would be Formatters.format_album_info (formatters.py:275), which itself has zero references anywhere (no internal use, no handler use). So an entire album-search/display feature is wired up in the model layer (AlbumInfo), client layer (lookup_album, _parse_album), and UI layer (format_album_info) but never reachable: music handlers only do artist lookup/add (music.py).
+- **Решение**: Remove LidarrClient.lookup_album (lidarr.py:42-61) and Formatters.format_album_info (formatters.py:275ff). _parse_album is then only used by a unit test (test_lidarr.py:69); decide whether to keep _parse_album+AlbumInfo for the calendar path or drop them too.
+- **Верификация**: CONFIRMED — Verified in current code. Grep across the whole repo shows `lookup_album` (bot/clients/lidarr.py:42) is defined but has zero callers anywhere in bot/ or tests/ (only the definition + analysis/*.md doc mentions). `format_album_info` (bot/ui/formatters.py:275) likewise has zero references except its own definition. `_parse_album` is called only by the dead `lookup_album` (lidarr.py:54) and by the unit test test_lidarr.py:69. The music handler flow (bot/handlers/music.py) only ever uses `lookup_artist` (via search_service, line 119) and `add_artist` (line 314); `selected_content` is only ever an 
+- **Статус**: [ ] Не исправлено
 
-### DEAD-04: `Keyboards.series_list` отсутствует — было в R2-DEAD-04/31 (CLOSED)
-- **Файл**: `bot/ui/keyboards.py`
-- **Проблема**: В round-2 отчёте отмечен метод `series_list` со ссылкой на несуществующий `CallbackData.SERIES`. На текущем коде `Keyboards.series_list` уже отсутствует (видимо, удалён в round 2).
-- **Подтверждение**: `Grep "series_list"` в keyboards.py → нет.
-- **Решение**: подтверждение, что чистка состоялась.
-- **Статус**: [x]
+### DEAD-04: LidarrClient.search_album is never called
+- **Файл**: `bot/clients/lidarr.py:160`
+- **Проблема**: search_album() (triggers Lidarr AlbumSearch command) has zero callers in bot/ or tests. The artist-add path uses search_artist (add_service.py:759) only; there is no album-grain search flow.
+- **Решение**: Delete LidarrClient.search_album (lidarr.py:160-164).
+- **Верификация**: CONFIRMED — Independently verified. LidarrClient.search_album is defined at bot/clients/lidarr.py:160-164 (triggers the Lidarr "AlbumSearch" command). A repo-wide Grep for "search_album"/"AlbumSearch" across the whole tree returns only: (a) the definition in lidarr.py, and (b) the stale analysis/03-dead-code.md report — no callers in bot/ or tests/. A full enumeration of every "lidarr." method invocation in bot/ (search_service.py: lookup_artist; add_service.py: get_quality_profiles, get_metadata_profiles, get_root_folders, get_artist_by_mbid, add_artist, push_release, grab_release, search_artist; registr
+- **Статус**: [ ] Не исправлено
 
-### DEAD-05: `Formatters.format_torrent_compact` — только в тестах (LOW, повтор R2 DEAD-29)
-- **Файл**: `bot/ui/formatters.py:603-609`
-- **Проблема**: реализован, но в production-handler не вызывается.
-- **Подтверждение**: `Grep "format_torrent_compact"` → formatters.py + tests/test_qbittorrent.py + analysis_round2.
-- **Решение**: удалить функцию и тест `test_format_torrent_compact`.
-- **Статус**: [ ]
+### DEAD-05: SonarrClient.lookup_series_by_tvdb is never called
+- **Файл**: `bot/clients/sonarr.py:52`
+- **Проблема**: lookup_series_by_tvdb() has zero callers. The symmetric Radarr method lookup_movie_by_tmdb IS used in the trending flow (trending.py:187/304), but the Sonarr counterpart was never wired in: the trending series path instead calls sonarr.lookup_series(series.title) (trending.py:435). So this method is orphaned.
+- **Решение**: Delete SonarrClient.lookup_series_by_tvdb (sonarr.py:52ff), or wire it into the trending-series handler if a by-id lookup was intended.
+- **Верификация**: CONFIRMED — Verified directly. (1) `SonarrClient.lookup_series_by_tvdb` is defined at bot/clients/sonarr.py:52-59. (2) A repo-wide Grep for `lookup_series_by_tvdb` over bot/ returns ONLY the definition line — no call sites anywhere; tests/ has zero matches; no getattr/dynamic dispatch exists. (3) The trending series path (bot/handlers/trending.py:435) resolves a missing TVDB ID via `sonarr_client.lookup_series(series.title)` (by-title, then matched on tmdb_id at line 438), never using lookup_series_by_tvdb. (4) The symmetric Radarr method lookup_movie_by_tmdb IS used at trending.py:187 and 304, confirming
+- **Статус**: [ ] Не исправлено
 
-### DEAD-06: `Formatters.format_torrent_action` — только в тестах (LOW, новый)
-- **Файл**: `bot/ui/formatters.py:697-717`
-- **Проблема**: Возвращает форматированную строку для pause/resume/delete, но в `bot/handlers/downloads.py` все callback'и формируют alert-текст inline (например, `"⏸️ Приостановлен: {torrent.name[:30]}"` на строке 342). Используется только в `tests/test_qbittorrent.py:359-368`.
-- **Подтверждение**: `Grep "format_torrent_action"` → formatters.py + tests + analysis_round2.
-- **Решение**: удалить функцию и тест либо использовать в downloads.py.
-- **Статус**: [ ]
+### DEAD-06: DeezerClient.get_trending_albums is never called
+- **Файл**: `bot/clients/deezer.py:51`
+- **Проблема**: get_trending_albums() has zero references in bot/ or tests. The trending-music handler only fetches artists via get_trending_artists (music.py:371). The album-chart variant is dead.
+- **Решение**: Delete DeezerClient.get_trending_albums (deezer.py:51-74).
+- **Верификация**: CONFIRMED — Verified against current code. DeezerClient.get_trending_albums is defined at bot/clients/deezer.py:51-74. A repo-wide grep for "get_trending_albums" returns exactly one hit — its definition — with zero callers in bot/ or tests/. The trending-music handler (bot/handlers/music.py:365-371) obtains the Deezer client via get_deezer() and only calls get_trending_artists(limit=10); there is no album-chart path. Tests (tests/test_lidarr.py:144,152,159) only exercise get_trending_artists. So get_trending_albums is genuinely unreferenced dead code. Severity low is correct: it is pure maintainability de
+- **Статус**: [ ] Не исправлено
 
-### DEAD-07: `Formatters.format_no_torrents` не вызывается (LOW, новый)
-- **Файл**: `bot/ui/formatters.py:666-682`
-- **Проблема**: Реализован, но handler `cmd_downloads` показывает «📭 Торренты не найдены.» inline (строка 62), а пустые-фильтр-результаты вообще не формируют сообщение через эту функцию.
-- **Подтверждение**: `Grep "format_no_torrents"` → formatters.py + tests/test_qbittorrent.py.
-- **Решение**: удалить функцию (или использовать в `handle_filter_select`, где сейчас `format_torrent_list` вызывается даже на пустом списке).
-- **Статус**: [ ]
+### DEAD-07: Database.get_search_results and the search_results table reads are dead in production
+- **Файл**: `bot/db.py:317`
+- **Проблема**: save_search (db.py:280, called at search.py:259) writes results into the search_results table, but the only reader, Database.get_search_results (db.py:317), is referenced only in tests/test_db.py:119 — never in bot/. Production reloads result state from the sessions table (db.get_session). So the search_results table is write-only dead storage and get_search_results is dead production code. On a Raspberry Pi with SD-card I/O this also wastes a JSON-blob INSERT (full result set) on every search.
+- **Решение**: Remove Database.get_search_results, and either stop persisting into search_results (drop the INSERT in save_search plus the table/index) or document why the write is retained. If save_search no longer needs to return an id, simplify it.
+- **Верификация**: CONFIRMED — Verified against current code. bot/db.py:280-315 save_search does two INSERTs: into `searches` and into `search_results`, where it serializes the FULL result set as a JSON blob (results_json = json.dumps([r.model_dump(...) for r in results]) at line 302). bot/db.py:317-326 get_search_results is the only reader of search_results. A repo-wide Grep for get_search_results in bot/ returns exactly ONE hit — its own definition at db.py:317 — so it has zero production call sites; the only callers are tests/test_db.py:119 (reader) and test_db.py:350 (which only calls save_search). At the production cal
+- **Статус**: [ ] Не исправлено
 
-### DEAD-08: `Formatters.format_album_info` не вызывается (LOW, новый)
-- **Файл**: `bot/ui/formatters.py:275-304`
-- **Проблема**: Метод для отображения `AlbumInfo`, но `AlbumInfo` нигде в handler-flow не показывается — music-flow только artist (см. `handlers/music.py`).
-- **Подтверждение**: `Grep "format_album_info"` → только formatters.py.
-- **Решение**: удалить (30 строк) либо использовать при отображении календарных альбомов из Lidarr (сейчас `format_calendar` форматирует их inline на строках 974-980).
-- **Статус**: [ ]
+### DEAD-08: ScoringService.get_best_result and filter_by_quality are test-only
+- **Файл**: `bot/services/scoring.py:262`
+- **Проблема**: get_best_result (scoring.py:262) and filter_by_quality (scoring.py:290) are referenced only in tests/test_services.py (228, 238), never in bot/. Production picks the best release via results[0] after sort_results (search.py:270/403/567/791) and never filters by quality through this method. preferred_resolution (the only input filter_by_quality would consume) is also never passed to it in production.
+- **Решение**: Remove ScoringService.get_best_result and filter_by_quality (and their tests), or wire filter_by_quality into the grab flow if the preferred_resolution preference is meant to actually filter releases.
+- **Верификация**: CONFIRMED — Verified against current code. bot/services/scoring.py defines get_best_result at line 262 and filter_by_quality at line 290. A repo-wide grep for both names shows references ONLY in test files: tests/test_services.py:228/238 and tests/test_scoring.py:249-346 (including the only call sites passing preferred_resolution, e.g. test_scoring.py:303). No file under bot/ invokes either method. Production picks the best release via results[0] after sort_results: search_service.py:292 calls self.scoring.sort_results(...), and handlers select session.results[0]/results[0] at bot/handlers/search.py:270, 
+- **Статус**: [ ] Не исправлено
 
-### DEAD-09: `ScoringService.filter_by_quality` не вызывается в production (MED, повтор R2 DEAD-07)
-- **Файл**: `bot/services/scoring.py:290-329`
-- **Проблема**: Реализован и протестирован (`tests/test_scoring.py`), но в production вызовов нет — `process_search` не фильтрует по `preferred_resolution`. Соответственно настройка «Предпочитаемое разрешение» (UI: `Keyboards.resolution_selection`, handler `handle_set_resolution`) **не работает**: значение сохраняется в `db_user.preferences.preferred_resolution`, но никогда не читается.
-- **Подтверждение**: `Grep "filter_by_quality"` → scoring.py + tests/test_scoring.py + analysis_round2.
-  `Grep "preferred_resolution"` (только чтение, не присвоение) → 0 в production.
-- **Решение**: либо вызывать `scoring.filter_by_quality(results, preferred_resolution=prefs.preferred_resolution)` в `search_service.search_releases`, либо скрыть UI-опцию.
-- **Статус**: [ ]
+### DEAD-09: NotificationService.force_check / get_stats / unsubscribe_user are test-only
+- **Файл**: `bot/services/notification_service.py:200`
+- **Проблема**: force_check (notification_service.py:200), get_stats (238), and unsubscribe_user (52) are referenced only in tests/test_qbittorrent.py (580, 553, 547); no handler or command invokes them in production. force_check duplicates most of the _check_for_completions logic but is never reachable from the running bot (no /notify command, no admin endpoint).
+- **Решение**: Remove force_check and get_stats (and their tests). Keep unsubscribe_user only if a future unsubscribe command is planned; otherwise drop it too since subscribe_user is wired at main.py:118 but unsubscribe never is.
+- **Верификация**: CONFIRMED — I opened bot/services/notification_service.py and confirmed all three methods exist at the cited lines: unsubscribe_user (line 52), force_check (line 200), get_stats (line 238). I grepped the entire bot/ production tree for force_check|get_stats|unsubscribe and the ONLY hits are the definition sites themselves in notification_service.py — no handler, no main.py, no other service calls them. Grepping all references repo-wide, the sole non-definition callers are tests/test_qbittorrent.py: test_unsubscribe_user (line 547 calls service.unsubscribe_user), test_get_stats (line 553 calls service.get_
+- **Статус**: [ ] Не исправлено
 
-### DEAD-10: `NotificationService.force_check` / `unsubscribe_user` / `get_stats` не вызываются (LOW, повтор R2 DEAD-18)
-- **Файл**: `bot/services/notification_service.py:200-236, 52-55, 238-248`
-- **Проблема**: `force_check` — нет команды `/check`, никто не вызывает. `unsubscribe_user` — никто не вызывает (subscribe есть в `main.on_startup`, отписаться нельзя). `get_stats` — нет admin-команды.
-- **Подтверждение**: `Grep "force_check"` → notification_service.py + tests + analysis_round2. `Grep "unsubscribe_user|get_stats"` → notification_service.py + tests/test_qbittorrent.py.
-- **Решение**: либо добавить команды (`/check`, `/notif_stats`, `/notif_off`), либо удалить методы. Рекомендую первое — действительно полезные admin-инструменты.
-- **Статус**: [ ]
+### DEAD-10: UserPreferences.language field is never read or written
+- **Файл**: `bot/models.py:243`
+- **Проблема**: UserPreferences.language (default 'en') is never assigned or read anywhere. The only 'language' references are tmdb.py's unrelated self.language and config.py's tmdb_language. The field is serialized into the preferences JSON blob in the DB on every user update but has no effect (no i18n exists; all UI strings are hardcoded Russian).
+- **Решение**: Remove the language field from UserPreferences (models.py:243).
+- **Верификация**: CONFIRMED — Verified against current code. models.py:243 declares `language: str = "en"` on UserPreferences. An exhaustive grep for `preferences.language`, `prefs.language`, `.language =`, and getattr/setattr of "language" returned ZERO hits anywhere in bot/ or tests/ — the only `.language` write is tmdb.py:26 `self.language` on the unrelated TMDBClient class, and the only config reference is config.py:64 `tmdb_language` (a separate, functioning TMDB-content path used via registry.py:152 -> tmdb.py:17/71/102). Every OTHER UserPreferences field is actively read/written (settings.py:143-499, search.py:654-7
+- **Статус**: [ ] Не исправлено
 
-### DEAD-11: `LidarrClient.search_album` не вызывается (LOW, новый)
-- **Файл**: `bot/clients/lidarr.py:160-164`
-- **Проблема**: `search_album(album_id)` реализован, но в `add_service.grab_music_release` (line 759) триггерится только `search_artist`, не `search_album`. AlbumInfo нигде не используется как selected_content.
-- **Подтверждение**: `Grep "search_album"` → только lidarr.py.
-- **Решение**: удалить (5 строк) или использовать когда добавится album-flow (см. DEAD-08, DEAD-13).
-- **Статус**: [ ]
-
-### DEAD-12: `LidarrClient.lookup_album` / `SearchService.lookup_album` (если есть) не вызываются (LOW, повтор R2 DEAD-11)
-- **Файл**: `bot/clients/lidarr.py:42-61`
-- **Проблема**: метод реализован, но handler-flow никогда альбомы не lookup'ит.
-- **Подтверждение**: `Grep "lookup_album"` → только lidarr.py + analysis_round2. `bot/services/search_service.py` — нет `lookup_album`.
-- **Решение**: удалить (~20 строк) или использовать в album-flow.
-- **Статус**: [ ]
-
-### DEAD-13: `LidarrClient.get_artist_by_mbid`, `RadarrClient.get_movie_by_tmdb`, `SonarrClient.get_series_by_tvdb` (LOW, повтор R2 DEAD-09/10)
-- **Файлы**: `bot/clients/lidarr.py:63-68`, `bot/clients/radarr.py:63-70`, `bot/clients/sonarr.py:61-68`
-- **Проблема**: Используются ТОЛЬКО в `bot/services/add_service.py` (existence-check перед add). В handler'ах не вызываются. Не dead, но узкий scope.
-- **Подтверждение**: `Grep` подтверждает использование только в `add_service.py`.
-- **Решение**: оставить как есть (используются add_service) — отзываю как кандидата на удаление. INFO.
-- **Статус**: [x] (false positive)
-
-### DEAD-14: `EmbyClient.install_update` / `restart_server` — admin без UI guard в коде самого клиента (INFO, повтор R2 DEAD-15)
-- **Файлы**: `bot/clients/emby.py:192-203, 205-213, 215-218`
-- **Проблема**: `install_update` и `restart_server` используются в `handlers/emby.py:227, 277` (admin-only через `is_admin` параметр). `get_sessions` тоже используется. `get_scheduled_tasks` — отсутствует в текущем коде (R2-замечание устарело).
-- **Подтверждение**: `Grep "install_update|restart_server"` → emby.py + handlers/emby.py.
-- **Решение**: не dead — работают. Отзываю.
-- **Статус**: [x] (false positive)
-
-### DEAD-15: `Keyboards.torrent_filters(current_filter)` — параметр не используется (LOW, новый)
-- **Файл**: `bot/ui/keyboards.py:527`
-- **Проблема**: Сигнатура принимает `current_filter: TorrentFilter = TorrentFilter.ALL`, в теле используется для маркировки активного фильтра (строка 545: `display_label = f"• {label}" if filter_type == current_filter else label`). Но в handler `handle_filter_menu` (downloads.py:567) keyboard вызывается БЕЗ аргумента (`Keyboards.torrent_filters()`), поэтому всегда подсвечивается ALL.
-- **Подтверждение**: `Grep "torrent_filters\("` → keyboards.py:527 + downloads.py:575 + tests.
-- **Решение**: либо убрать параметр (если markers не нужны), либо передавать текущий фильтр (требует знать его на момент клика «Фильтр»). Минор, не строго dead.
-- **Статус**: [ ]
-
-### DEAD-16: `Keyboards.torrent_list(current_filter)` — параметр не используется в теле (LOW, новый)
-- **Файл**: `bot/ui/keyboards.py:425-494`
-- **Проблема**: Сигнатура принимает `current_filter: TorrentFilter = TorrentFilter.ALL` (строка 429), но в теле параметр никогда не читается (нет ни одного `current_filter` после декларации). Параметр носят с собой все вызовы (downloads.py:72, 198, 239, 268, 616), но без эффекта.
-- **Подтверждение**: чтение тела keyboards.py:425-494, ни одного `current_filter` после параметра.
-- **Решение**: удалить параметр или использовать (например, метку выбранного фильтра в footer keyboard).
-- **Статус**: [ ]
-
-### DEAD-17: `Keyboards.speed_limits_menu(current_dl_limit, current_ul_limit)` — параметры не передаются (LOW, новый)
-- **Файл**: `bot/ui/keyboards.py:566`
-- **Проблема**: Реализованы маркеры `✓` для текущего лимита (строки 590, 601, 617, 627), но handler `handle_speed_menu` (downloads.py:629-666) вызывает `Keyboards.speed_limits_menu()` БЕЗ передачи текущих значений. Маркер всегда на `0` (Без лимита).
-- **Подтверждение**: `Grep "speed_limits_menu"` → keyboards.py:566 + downloads.py:656 + tests.
-- **Решение**: передавать `current_dl_limit=status.download_limit, current_ul_limit=status.upload_limit` (status уже получен в строке 640).
-- **Статус**: [ ]
-
-### DEAD-18: Локальное `MENU_HISTORY` в `bot/handlers/start.py:20` не используется (LOW, повтор R2 DEAD-19)
-- **Файл**: `bot/handlers/start.py:20`
-- **Проблема**: `start.py` декларирует константу `MENU_HISTORY = "📋 История"`, но handler для неё лежит в `handlers/history.py:16` (тоже свою константу определяет). В start.py `MENU_HISTORY` нигде не читается.
-- **Подтверждение**: `start.py` — единичная декларация в строке 20, ни одного `F.text == MENU_HISTORY` или другого использования в этом файле.
-- **Решение**: удалить из start.py (как и `MENU_DOWNLOADS`, `MENU_QSTATUS`, `MENU_STATUS`, `MENU_SETTINGS` — все из строк 16-20 объявлены, но не используются в start.py — handler'ы для них в других модулях).
-- **Статус**: [ ]
-
-### DEAD-19: `bot/handlers/start.py:15-19` MENU_* — мёртвые константы (LOW, повтор R2 DEAD-19)
-- **Файл**: `bot/handlers/start.py:15-19`
-- **Проблема**: `MENU_SEARCH`, `MENU_DOWNLOADS`, `MENU_QSTATUS`, `MENU_STATUS`, `MENU_SETTINGS` — все объявлены, но в `start.py` НЕ используются (handler-фильтры в других модулях, каждый со своей копией). Только `MENU_HISTORY` дублируется. См. также DEAD-18.
-- **Подтверждение**: `Grep "MENU_(SEARCH|DOWNLOADS|QSTATUS|STATUS|SETTINGS|HISTORY)"` в start.py → только декларации.
-- **Решение**: удалить блок 15-20 из start.py. Опционально: вынести все MENU_* в `bot/ui/menu.py` (single source of truth).
-- **Статус**: [ ]
-
-### DEAD-20: `SearchSession.monitor_type` поле не используется (LOW, новый)
+### DEAD-11: SearchSession.monitor_type field is written but never read
 - **Файл**: `bot/models.py:282`
-- **Проблема**: Поле `monitor_type: Literal[...] = "all"` объявлено в модели, но в коде НИГДЕ не читается и не присваивается — `monitor_type` для add_series вычисляется заново в `bot/handlers/search.py:644-652` на каждый grab.
-- **Подтверждение**: `Grep "session\.monitor_type|\.monitor_type\b"` (исключая объявление) → 0 совпадений.
-- **Решение**: удалить поле либо использовать его (сохранять выбор пользователя в sessione).
-- **Статус**: [ ]
+- **Проблема**: SearchSession.monitor_type (models.py:282) is never read: grep for 'session.monitor_type' / '.monitor_type' (excluding kwarg assignments and model defs) returns nothing. The monitor_type values passed to grab_series_release/add_series are computed as fresh local variables in the handlers (e.g. search.py:725-728 sets monitor_type = 'existing'/'all') and never sourced from the session. The model field is dead.
+- **Решение**: Remove the monitor_type field from SearchSession (models.py:282), or populate and read it if per-session monitor policy was intended.
+- **Верификация**: CONFIRMED — Confirmed in current code. SearchSession.monitor_type is defined at bot/models.py:282 (Literal[...] = "all"). A grep for attribute access `\.monitor_type` over the entire bot/ tree returns ZERO matches, so the field is never read off any session. It is also never written: both SearchSession(...) constructors (bot/handlers/search.py:225-229 and 261-267) omit monitor_type, leaving it at its default. The monitor_type values actually used by the grab flow are computed as fresh local variables in the handler (search.py:721-728: force_download/is_season_pack -> "all", detected_season -> "existing") 
+- **Статус**: [ ] Не исправлено
 
-### DEAD-21: `MovieInfo.fanart_url` / `SeriesInfo.fanart_url` / `ArtistInfo.fanart_url` — записываются, не читаются (LOW, новый)
-- **Файлы**: `bot/models.py:113, 140, 165`
-- **Проблема**: Все три модели имеют поле `fanart_url`. Парсеры (`radarr.py:284`, `sonarr.py:325`, `lidarr.py:258`, `tmdb.py:123,159`) его заполняют, но **ни одного чтения** в коде нет — formatters используют только `poster_url` (через `answer_photo`).
-- **Подтверждение**: `Grep "\.fanart_url"` → 0 чтений (только присвоения в парсерах).
-- **Решение**: либо удалить поля и логику парсинга (упрощение), либо использовать (например, отправлять fanart как album-art в музыкальном flow).
-- **Статус**: [ ]
+### DEAD-12: SearchService.detect_content_type wrapper is test-only
+- **Файл**: `bot/services/search_service.py:65`
+- **Проблема**: detect_content_type (search_service.py:65) is a 'backward-compatible wrapper' around detect_with_confidence. Production calls detect_with_confidence directly (search.py:185). The wrapper is referenced only in tests (test_services.py:88/94, test_lidarr.py:284/298).
+- **Решение**: Either delete the wrapper and update the tests to call detect_with_confidence, or keep it but acknowledge it exists solely for tests.
+- **Верификация**: CONFIRMED — Independently verified in current code. bot/services/search_service.py:65-68 defines `async def detect_content_type(self, query)` whose docstring is literally "Backward-compatible wrapper around detect_with_confidence" — it calls self.detect_with_confidence(query) and returns only result.content_type, discarding confidence/reason/candidates. The sole production caller, bot/handlers/search.py:185, calls detect_with_confidence directly (it needs the full DetectionResult for stage_done logging at lines 190-192 and for content_type at 194), so it cannot and does not use the wrapper. Grepping `\.de
+- **Статус**: [ ] Не исправлено
 
-### DEAD-22: `TorrentInfo.tracker` не отображается (LOW, новый)
-- **Файл**: `bot/models.py:375`
-- **Проблема**: Поле tracker заполняется в `qbittorrent._parse_torrent` (строка 467), но `Formatters.format_torrent_details` его НЕ выводит (см. formatters.py:530-601).
-- **Подтверждение**: `Grep "torrent\.tracker"` → 0 в production.
-- **Решение**: удалить поле или добавить вывод в `format_torrent_details` (полезно для debug).
-- **Статус**: [ ]
-
----
-
-## Возможно мёртвое (требует проверки)
-
-### DEAD-23: `BaseAPIClient._get_http_timeout` — единственный вызов из единственного места (LOW, повтор R2 DEAD-05)
-- **Файл**: `bot/clients/base.py:69-72`
-- **Проблема**: Метод вызывается ТОЛЬКО из `_get_client()` (строка 81). Можно встроить.
-- **Подтверждение**: `Grep "_get_http_timeout"` → 2 совпадения (декларация + 1 вызов).
-- **Решение**: minor refactor — встроить.
-- **Статус**: [ ]
-
-### DEAD-24: `Settings.notify_check_interval` — параметр конфига, но валидация диапазона избыточна (INFO)
-- **Файл**: `bot/config.py:69`
-- **Проблема**: `notify_check_interval: int = Field(default=60, ge=10, le=3600, ...)`. Используется в `notification_service.py:101, 247`. Не dead.
-- **Подтверждение**: `Grep "notify_check_interval"` → config.py + notification_service.py + docker-compose.yml + .env.example.
-- **Решение**: не dead. INFO.
-- **Статус**: [x] (false positive)
-
-### DEAD-25: `Formatters._safe_truncate` — один вызов из одного места (INFO)
-- **Файл**: `bot/ui/formatters.py:619-648, 983`
-- **Проблема**: Вызывается только в `format_calendar` (строка 983). Можно встроить или сделать общим helper'ом.
-- **Подтверждение**: `Grep "_safe_truncate"` → 2 совпадения.
-- **Решение**: оставить как есть — generic-helper, уместен. INFO.
-- **Статус**: [x] (info only)
-
-### DEAD-26: `ScoringWeights.bad_keywords` — конструктор хардкода списка (INFO)
-- **Файл**: `bot/services/scoring.py:71-90`
-- **Проблема**: `bad_keywords` — параметр dataclass с `default=None` и `__post_init__` дефолтит словарь. Если у `ScoringWeights` нигде не передаются custom values (а grep показывает 1 use в test_scoring.py), эта гибкость не используется. Не dead, но over-engineered.
-- **Подтверждение**: `Grep "ScoringWeights"` → scoring.py + tests/test_scoring.py + analysis_round2 (only customization in test).
-- **Решение**: оставить — тесты опираются на этот API. INFO.
-- **Статус**: [x] (info only)
-
-### DEAD-27: `bot/handlers/music.py:33` — импорт `_SCORING_SERVICE` из `search.py` (циркуляр-избегание) (INFO, повтор R2 DEAD-20)
-- **Файл**: `bot/handlers/music.py:33`
-- **Проблема**: PERF-04 — импорт сделан внутри модуля (после блока imports), чтобы избежать циркуляра. Workaround, не dead.
-- **Решение**: рефактор — вынести `_SCORING_SERVICE` в отдельный `bot/services/_singletons.py`. Минор.
-- **Статус**: [ ]
-
-### DEAD-28: `bot/services/search_service.py: SearchService.parse_query` — `quality` извлекается, но не передаётся дальше (LOW, повтор R2 DEAD-21)
-- **Файл**: `bot/services/search_service.py:248-253`
-- **Проблема**: `parsed["quality"]` вычисляется, но в `process_search` (handlers/search.py:200) только `parsed["title"]` и `parsed["season"]` передаются дальше. После очистки title от quality-токена, поиск всё равно идёт без фильтра по `quality`.
-- **Подтверждение**: `Grep 'parsed\["quality"\]|parsed\.get\("quality"\)'` → 0 чтений вне самой parse_query.
-- **Решение**: либо использовать `parsed["quality"]` как `preferred_resolution` фильтр (см. DEAD-09), либо удалить block 247-253. Связан с DEAD-09.
-- **Статус**: [ ]
-
-### DEAD-29: `bot/services/search_service.py: SearchService.parse_query[year]` — извлекается, не используется (LOW, новый)
-- **Файл**: `bot/services/search_service.py:223-230`
-- **Проблема**: `parsed["year"]` извлекается из query, но в production-flow (`process_search`) не читается. Заметим что `parsed["episode"]` тоже извлекается (`s_match.group(2)`) и не читается.
-- **Подтверждение**: `Grep 'parsed\["year"\]|parsed\.get\("year"\)|parsed\["episode"\]'` → 0.
-- **Решение**: либо использовать (передавать в Prowlarr как фильтр), либо упростить parse_query до title+season.
-- **Статус**: [ ]
-
-### DEAD-30: `LidarrClient.push_release` — путь vs grab_release (INFO, повтор R2 DEAD-14)
-- **Файл**: `bot/clients/lidarr.py:135-152`
-- **Проблема**: `push_release` используется в `add_service.grab_music_release` (line 704). Не dead.
-- **Решение**: false positive. INFO.
-- **Статус**: [x] (false positive)
-
----
-
-## Дубликаты
-
-### DUP-01: `MAX_QUERY_LENGTH = 200` × 2 (LOW)
-- **Файлы**: `bot/handlers/search.py:132`, `bot/handlers/music.py:99`
-- **Проблема**: Литерал и одинаковая логика. В `bot/constants.py:12` уже есть `MAX_QUERY_LENGTH = 200` — но никто не импортирует.
-- **Решение**: вынести в `bot/constants.py` (или импортировать из существующего, см. DEAD-01).
-- **Статус**: [ ]
-
-### DUP-02: `TORRENTS_PER_PAGE = 5` × 2 (LOW)
-- **Файлы**: `bot/handlers/downloads.py:19`, `bot/constants.py:8`
-- **Проблема**: Дубль с константой в `constants.py`. handlers/downloads.py объявляет свою копию.
-- **Решение**: импортировать из `bot/constants.py`.
-- **Статус**: [ ]
-
-### DUP-03: `MENU_*` константы декларируются в каждом handler-модуле (LOW)
-- **Файлы**: `bot/handlers/start.py:15-20`, `search.py:35`, `downloads.py:22-23`, `emby.py:18`, `history.py:16`, `settings.py:26`, `status.py:26`, `calendar.py:19`, `music.py:29`, `trending.py:22`
-- **Проблема**: Каждый модуль свою копию соответствующего MENU-текста объявляет. Также в `search.py:39-43` есть `MENU_BUTTONS` set'ом, который должен быть единым source-of-truth для всех меню-кнопок и **не синхронизирован автоматически** при добавлении новых пунктов.
-- **Решение**: вынести в `bot/ui/menu.py` (или `bot/constants.py`).
-- **Статус**: [ ]
-
-### DUP-04: `_safe_truncate` macroconst `SAFE_MESSAGE_LENGTH = 3800` × 3 (LOW)
-- **Файлы**: `bot/constants.py:5`, `bot/ui/formatters.py:619 (default arg)`, `bot/ui/formatters.py:983 (max_len=3800)`
-- **Проблема**: Одинаковые литералы.
-- **Решение**: импортировать из constants.py.
-- **Статус**: [ ]
-
-### DUP-05: `_get_client()` / `_get_headers()` дублируются между `BaseAPIClient` (httpx с retry) и `EmbyClient`/`QBittorrentClient` (httpx без BaseAPIClient) (LOW)
-- **Файлы**: `bot/clients/base.py:74-92`, `bot/clients/emby.py:63-85`, `bot/clients/qbittorrent.py:76-92`
-- **Проблема**: Emby и qBittorrent наследуют не от `BaseAPIClient`, дублируют 90% логики (httpx-клиент, headers, login). Историческое — Emby/qBit имеют разные auth-механики (X-Emby-Token, cookie-session). Не dead, но архитектурный smell.
-- **Решение**: оставить как есть (deferred refactor — было LOGIC-02 в R2).
-- **Статус**: [ ] (deferred)
-
-### DUP-06: `parse_*` regex-логика частично дублируется между `Prowlarr._parse_quality` и `SearchService.parse_query` (LOW)
-- **Файлы**: `bot/clients/prowlarr.py:201-306` (полная парсинг качества из title), `bot/services/search_service.py:202-258` (упрощённая версия для query)
-- **Проблема**: Год, season-episode, quality — оба места реализуют свою версию regex. Одно для индексер-title, другое для user-query, но логика 70% одинакова.
-- **Решение**: общий `bot/services/title_parser.py`. Deferred (LOGIC).
-- **Статус**: [ ] (deferred)
-
-### DUP-07: `format_bytes` / `format_speed` лежат в `bot/models.py:475-496` (LOW, повтор R2 DEAD-06)
-- **Файлы**: `bot/models.py:475-496`
-- **Проблема**: Утилитарные функции в файле моделей. Архитектурно неудачное место.
-- **Решение**: `bot/utils/formatters.py`. Минор.
-- **Статус**: [ ]
-
----
-
-## Build-артефакты, мусорные файлы
-
-Проверены:
-- `*.pyc`, `__pycache__/` — игнорируются (`.gitignore` строки 1-3, 47).
-- `*.bak`, `.DS_Store`, `*_OLD.py` — нет (`Glob "**/*.bak"` → пусто, `**/*_OLD*` → пусто, `**/.DS_Store` → пусто).
-- `*.log`, `logs/` — нет (`.gitignore`).
-- `data/` — папка пустая (БД создаётся в runtime).
-- `analysis_round2/` — старые отчёты (исключены по запросу).
-
-**Итог**: build-артефактов нет. [x]
-
----
-
-## Закомментированный код блоками
-
-Сканирование показало:
-- `bot/handlers/music.py:270-273` — комментарий-нота про BUG-27 (актуальная документация, не dead).
-- `bot/handlers/search.py:506-513` — docstring CONFIRM_GRAB про BUG-27 (документация).
-- `bot/handlers/calendar.py:23-25` — комментарий про PERF-03 (документация).
-- В `.env.example` закомментированы опциональные ENV (`# LIDARR_URL=...`, `# DEEZER_ENABLED=true` и т.д.) — это нормально для шаблона.
-
-**Итог**: закомментированных блоков кода нет. [x]
-
----
-
-## TODO/FIXME которые висят больше года
-
-Сканирование `Grep "TODO|FIXME|XXX|HACK"` по `bot/`, `tests/`:
-
-```
-Нет ни одного TODO/FIXME в коде (по grep).
-```
-
-Только refer'ы на BUG-* / SEC-* / DEPLOY-* / PERF-* — это документация ранее закрытых аудитом находок, не TODO.
-
-**Итог**: stale TODO нет. [x]
-
----
-
-## Дубли логики (одно и то же реализовано в двух местах)
-
-См. DUP-01..DUP-07 выше.
-
-Дополнительно:
-### DUP-08: HTML-escape helper `_e` (formatters.py:29-33) дублирует `html.escape` (LOW)
-- **Файл**: `bot/ui/formatters.py:29-33`
-- **Проблема**: `_e(text)` оборачивает `html.escape(str(text))` с проверкой на falsy. Используется внутри formatters, но в handlers (`bot/handlers/music.py:127, 155, 219, 252, 338` и др.) напрямую вызывается `html.escape()` без обёртки. Не строго dead, но inconsistent.
-- **Решение**: либо экспортировать `_e` (сейчас `_e` приватный) и использовать везде, либо удалить.
-- **Статус**: [ ]
-
----
-
-## Неиспользуемые конфиг-параметры в `bot/config.py`
-
-Все поля `Settings` проверены через grep:
-
-| Поле | Используется? |
-|---|---|
-| `telegram_bot_token` | да (main.py:183) |
-| `allowed_tg_ids` | да (main.py:117, config.py:147) |
-| `admin_tg_ids` | да |
-| `prowlarr_url`, `prowlarr_api_key` | да (registry.py) |
-| `radarr_*` | да |
-| `sonarr_*` | да |
-| `lidarr_url`, `lidarr_api_key`, `lidarr_enabled` | да |
-| `deezer_enabled` | да |
-| `qbittorrent_*`, `qbittorrent_enabled` | да |
-| `emby_*`, `emby_enabled` | да |
-| `tmdb_*`, `tmdb_enabled` | да |
-| `notify_download_complete`, `notify_check_interval` | да |
-| `timezone` | да (main.py:166, formatters.py:1001) |
-| `log_level` | да |
-| `database_path` | да |
-| `auto_grab_score_threshold` | да |
-| `http_timeout` | да |
-| `results_per_page` | да |
-
-**Итог**: все поля используются. [x]
-
----
-
-## Неиспользуемые env-переменные в `.env.example` / `docker-compose.yml`
-
-Сравнение `.env.example` ↔ `Settings`:
-
-- ✅ Все required и documented в `.env.example` присутствуют в `Settings`.
-- В `docker-compose.yml` есть переменные `QBITTORRENT_TIMEOUT`, `EMBY_TIMEOUT`, `HTTP_TIMEOUT` — присутствуют в `Settings` (`qbittorrent_timeout`, `emby_timeout`, `http_timeout`). ✅
-- `RESULTS_PER_PAGE` в compose ✅, в env.example закомментирован.
-
-**Итог**: расхождений нет. [x]
-
----
-
-## Тесты, которые тестируют удалённый код
-
-### TEST-DEAD-01: `tests/test_qbittorrent.py:475-485 test_confirm_delete_torrent` — тестирует `Keyboards.confirm_delete_torrent` (см. DEAD-03)
-- Тест валиден, но keyboard в production не используется. Если удалить keyboard — удалить и тест.
-
-### TEST-DEAD-02: `tests/test_qbittorrent.py:334-339 test_format_torrent_compact` — тестирует `Formatters.format_torrent_compact` (см. DEAD-05)
-- Удалить вместе с функцией.
-
-### TEST-DEAD-03: `tests/test_qbittorrent.py:359-368 test_format_torrent_action` — тестирует `Formatters.format_torrent_action` (см. DEAD-06)
-- Удалить вместе с функцией.
-
-### TEST-DEAD-04: `tests/test_qbittorrent.py:341-347 test_format_no_torrents` — тестирует `Formatters.format_no_torrents` (см. DEAD-07)
-- Удалить вместе с функцией.
-
-### TEST-DEAD-05: `tests/test_scoring.py: test_filter_by_quality_*` — 3 теста (LOW)
-- **Файл**: `tests/test_scoring.py:283-348`
-- **Проблема**: 3 теста для `filter_by_quality`, который не вызывается в production (см. DEAD-09).
-- **Решение**: оставить тесты пока решение по DEAD-09 не принято; если функция активируется — тесты нужны. Если удаляется — удалить и тесты.
-
----
-
-## Итого
-
-| Категория | Кол-во |
-|---|---|
-| HIGH | 1 (DEAD-01 — `bot/constants.py` целиком dead) |
-| MED | 1 (DEAD-09 — `filter_by_quality` + UI broken) |
-| LOW | 19 (DEAD-02, 03, 05-08, 10-12, 15-22, 27-29 + DUP-01..04, 07, 08) |
-| INFO/false positive | 5 (DEAD-04, 13, 14, 24-26, 30) |
-| Deferred refactor | 2 (DUP-05, 06) |
-| Test-only dead | 5 (TEST-DEAD-01..05) |
-
-**Топ-3 приоритета:**
-1. **DEAD-01** — удалить `bot/constants.py` или мигрировать на импорты (избавит от DUP-01, 02, 04 заодно).
-2. **DEAD-09** — починить или скрыть `preferred_resolution` UI (user-visible broken feature: настройка ничего не меняет).
-3. **DEAD-17** — `speed_limits_menu` теряет визуальные маркеры текущего лимита (UX-bug).
-
-**Архитектурные указатели (не dead, но связанные):**
-- DUP-03 — централизовать MENU_*. Очевидный win.
-- DUP-05/06 — отложенный рефакторинг (LOGIC).
-- DEAD-21 / DEAD-22 — поля моделей, которые заполняются, но не показываются → либо использовать (UX-улучшение), либо чистить.
+### DEAD-13: Dead defensive guard: hasattr(r, 'get_size_gb') on a typed SearchResult
+- **Файл**: `bot/services/search_service.py:301`
+- **Проблема**: In search_releases, top_preview computes 'size_gb': r.get_size_gb() if hasattr(r, 'get_size_gb') else None. r is always a SearchResult (results come from self.prowlarr.search / scoring.sort_results, both typed list[SearchResult]), and SearchResult always defines get_size_gb (models.py:92). The hasattr branch can never be False, so the 'else None' arm is unreachable.
+- **Решение**: Replace with a plain r.get_size_gb() (search_service.py:301).
+- **Верификация**: CONFIRMED — Verified in current code. bot/services/search_service.py:301 reads `"size_gb": r.get_size_gb() if hasattr(r, "get_size_gb") else None`. The variable `r` iterates over `results[:5]` (line 305). `results` originates from `self.prowlarr.search(...)` which is typed `-> list[SearchResult]` (bot/clients/prowlarr.py:36) and may be reassigned by `self.scoring.sort_results(...)` which is also typed `-> list[SearchResult]` (bot/services/scoring.py:245). `SearchResult` defines `get_size_gb` as a plain unconditional instance method at bot/models.py:92-94. Therefore every `r` is a `SearchResult` and `hasat
+- **Статус**: [ ] Не исправлено

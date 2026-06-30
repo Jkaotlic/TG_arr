@@ -1,210 +1,62 @@
-# Database TG_arr v1.0 (раунд 3)
+# Анализ — База данных · TG_arr (раунд 4, 2026-06-30)
 
-Дата: 2026-05-08.
-Файл: `bot/db.py` (510 строк, ~16 KB), aiosqlite 0.22.1, single-file SQLite в `/app/data/bot.db`.
+Подтверждено находок: **5** (critical=0, high=1, medium=1, low=3). Все прошли состязательную верификацию (CONFIRMED/PLAUSIBLE).
 
-Контекст: жалоба юзера «бот плохо ищет». Ниже разбираю, является ли БД причиной.
-
-Прошлый отчёт (`analysis_round2/10-database.md`): из 12 находок зафиксировано: DB-01 (миграции через `PRAGMA user_version`), DB-02 (`journal_mode=WAL`), DB-04 (`foreign_keys=ON`), DB-05 (частично — `synchronous=NORMAL` стоит, но `isolation_level=None` остался), DB-11/DB-06/DB-07/DB-10/DB-12 — НЕ исправлены.
-
----
-
-## Связь с жалобой «бот плохо ищет»
-
-**Краткий вывод:** БД **не основная причина** медленного поиска.
-
-`process_search` (handlers/search.py:170-265) делает только: `save_search` → `save_session` → `log_action`. Это 3 коротких INSERT'а уже **после** долгого `search_releases()` (Prowlarr HTTP, ~секунды). Объём — десятки KB JSON, никаких JOIN.
-
-Однако три точки в БД могут давать **видимую задержку** на rpie4 SD-card:
-1. **DB-14 (новый, MED)** — `save_session` со 100-500 SearchResult → большой JSON в одном UPSERT, при `synchronous=NORMAL+WAL` всё равно sync на каждый commit.
-2. **DB-15 (новый, MED)** — каждое нажатие пагинации/выбора релиза делает `get_session` + `save_session` (две serial round-trip к одному `_connection`). Их 4-7 на user-flow.
-3. **DB-16 (новый, MED)** — нет `busy_timeout` PRAGMA. На SD-card при WAL checkpoint можно поймать `SQLITE_BUSY` → исключение всплывёт в handler как «поиск временно недоступен».
-
-Реальный bottleneck поиска — Prowlarr / scoring / TMDb (см. `analysis_round2/06-performance.md`). Но если SD-card деградирует, БД станет co-cause.
-
----
-
-## Критические
-
-(нет)
-
----
+SQLite/aiosqlite, единое соединение, износ SD-карты.
 
 ## Высокие
 
-### DB-13: Отсутствует `PRAGMA busy_timeout` (HIGH на rpie4)
-- **Файл**: `bot/db.py:46-52`
-- **Проблема**: после `aiosqlite.connect(..., isolation_level=None)` ставятся только `journal_mode=WAL`, `foreign_keys=ON`, `synchronous=NORMAL`. **`busy_timeout` не задан** → дефолт 0 ms. На SD-карте rpie4 при WAL-checkpoint или конкурентном чтении (тесты, бэкап-скрипт через `sqlite3` CLI) любой write может вылететь с `OperationalError: database is locked`. Эта ошибка всплывёт в handler'ы как generic «поиск временно недоступен» (search.py:267-269) — пользователь увидит таймаут.
-- **Решение**: после строки 52 добавить `await self._connection.execute("PRAGMA busy_timeout=5000")` (5 секунд). Дёшево, идемпотентно, ноль рисков.
-- **Статус**: [ ]
-
-### DB-14: `save_session` UPSERT-ит JSON 100-500 SearchResult'ов на каждый клик
-- **Файл**: `bot/db.py:321-347`, вызовы — `bot/handlers/search.py:189,221,302,346,413,434,453,495,700` (10 точек!) и `music.py:142,191`.
-- **Проблема**: на 500 результатов `session.model_dump_json()` ~300-700 KB; UPSERT на rpie4 SD-card может занять 50-150 ms. После `search_releases` сохранение делается **единожды** (211→221) — это норма. Но **handle_pagination** (324-346) делает `get_session` + `save_session` на каждый клик пагинации, чтобы записать только `current_page`. Для пользователя это +50-150 ms latency на каждой странице. **handle_release_selection** делает 2-3 `save_session` подряд (412, 434, 453).
-- **Подтверждение**: BUG-14 уже трункейтит до 500 (строка 328-329). Но 500 — всё равно много.
-- **Решение**:
-  1. Хранить `current_page` в callback_data (`page:N`), а не в session — pagination станет read-only. (Большой рефакторинг.)
-  2. Минимально: разбить `sessions.session_data` на `session_meta` (query, content_type, current_page, selected) и `session_results_json` — UPDATE только meta при пагинации.
-  3. Альтернатива: вернуть `isolation_level=""` (deferred) и батчить save в одну транзакцию, либо асинхронно `asyncio.create_task(db.save_session(...))` (fire-and-forget) после обновления UI — terminal handlers (grab) уже завершают операцию.
-- **Статус**: [ ]
-
-### DB-15: `cleanup_old_sessions` запускается только при startup (HIGH перенесено из DB-06)
-- **Файл**: `bot/main.py:104,109`, `bot/db.py:476-509`
-- **Проблема**: `on_startup` вызывает `cleanup_old_sessions(hours=24)` и `cleanup_old_searches(days=7)` единственный раз. В долгоживущем процессе (бот не рестартится неделями) `sessions` и `searches` копятся бесконечно. Жалоба round2 (DB-06) не закрыта.
-- **Анализ роста**: 1 пользователь × 5 поисков/день × 200 KB JSON = 1 MB/день мёртвых сессий. На 5 пользователей × 30 дней = 150 MB. На SD-card — ощутимо.
-- **Решение**: запустить периодический taskasyncio в `on_startup`:
-  ```python
-  async def cleanup_loop():
-      while True:
-          await asyncio.sleep(3600)
-          await db.cleanup_old_sessions(hours=24)
-          await db.cleanup_old_searches(days=7)
-  asyncio.create_task(cleanup_loop())
-  ```
-  Storing handle для cancel в `on_shutdown`.
-- **Статус**: [ ]
-
----
+### DB-01: Explicit BEGIN/commit transactions race on the shared autocommit connection across concurrent coroutines
+- **Файл**: `bot/db.py:286`
+- **Проблема**: The Database holds ONE shared aiosqlite connection opened with isolation_level=None (autocommit, line 46). save_search (lines 286-314) and cleanup_old_searches (lines 498-516) issue an explicit `await self.conn.execute("BEGIN")` and then `await` several more statements before `commit()`. aiogram's start_polling (main.py:317) processes updates concurrently AND _periodic_cleanup (main.py:305) runs as its own task, so multiple coroutines share this single connection. Concrete failure: user A's handler runs save_search and is suspended at the `await` after BEGIN; the event loop runs user B's handler which calls log_action -> `await self.conn.commit()` (line 423). That commit fires on the same connection and commits user A's still-incomplete transaction early (the search row is committed before/without its search_results row). Worse case: two BEGIN-using paths overlap (save_search during the periodic cleanup_old_searches) and the second `BEGIN` raises sqlite3.OperationalError: 'cannot start a transaction within a transaction', which bubbles up as a generic failure to the user. The rollback in the except block (lines 313, 515) can also roll back another coroutine's work. There is no application-level write lock serializing these multi-statement units.
+- **Риск**: Premature commits causing partial/inconsistent writes, or OperationalError surfacing to users as a failed search/cleanup under concurrency.
+- **Решение**: Serialize all multi-statement writes (and ideally all writes) under an asyncio.Lock held by the Database instance, e.g. add `self._write_lock = asyncio.Lock()` and wrap save_search / cleanup_old_searches / log_action / save_session bodies in `async with self._write_lock:`. Alternatively drop the manual BEGIN/commit and isolation_level=None, let aiosqlite manage deferred transactions, and still guard concurrent writers with the lock. The cleanest is a single lock so no two coroutines ever interleave statements on the shared connection.
+- **Верификация**: CONFIRMED — Verified against current bot/db.py. There is exactly ONE shared aiosqlite connection opened with isolation_level=None (autocommit) at line 46; the `conn` property (lines 74-78) returns that single `_connection` — no pool. Both save_search (line 286) and cleanup_old_searches (line 498) issue an explicit `await self.conn.execute("BEGIN")` and then `await` further INSERT/DELETE statements before `await self.conn.commit()` (lines 311 / 513). Grep confirms the ONLY lock in db.py is `_connect_lock` (line 33), used solely inside connect(); there is no write lock serializing save_search / cleanup_old_
+- **Статус**: [x] Исправлено (раунд 4, TDD)
 
 ## Средние
 
-### DB-16: `isolation_level=None` (autocommit) делает каждый execute() отдельной транзакцией
-- **Файл**: `bot/db.py:46`
-- **Проблема**: aiosqlite passes это в sqlite3 — отключается auto-BEGIN. Каждый `execute(INSERT)` → один fsync (даже при `synchronous=NORMAL` — fsync в WAL). На SD-card fsync = 5-30 ms. `log_action` (один INSERT + commit) = 1 fsync = 10-30 ms. Plus `save_session` = ещё 1. На каждый клик = 20-60 ms скрытой latency.
-- **Текущие явные `BEGIN`/`COMMIT`** в `save_search` (278-307) и `cleanup_old_searches` (490-508) работают, потому что autocommit прерывается явным `BEGIN` — это OK. Но 90% операций (`log_action`, `save_session`, `update_user_preferences`, `delete_session`) — single-statement autocommit.
-- **Решение**: убрать `isolation_level=None` (вернуть `""` deferred). aiosqlite будет авто-обёртывать INSERT/UPDATE в транзакцию и коммитить при `await conn.commit()` явном вызове — что уже есть в коде. Это **меняет поведение** `save_search`/`cleanup_old_searches` — там стоит `BEGIN` явно, может стать ошибкой «cannot start a transaction within a transaction». Нужно прогнать тесты.
-- **Альтернатива (безопаснее)**: оставить как есть, но засунуть в `save_session` пакетный `BEGIN`...`COMMIT` — будет один fsync вместо одного на каждое нажатие.
-- **Статус**: [ ]
-
-### DB-17: `search_results.search_id` FK без `ON DELETE CASCADE`
-- **Файл**: `bot/db.py:99` (`FOREIGN KEY (search_id) REFERENCES searches(id)`)
-- **Проблема**: DB-07 из раунда 2 не закрыто. С учётом включённого `PRAGMA foreign_keys=ON` (DB-04 fixed) **DELETE на parent теперь ВЫЛЕТИТ с `FOREIGN KEY constraint failed`** если есть child. `cleanup_old_searches` (490-508) обходит это вручную (сначала чистит `search_results`, потом `searches`) — работает, но хрупко: любой будущий `DELETE FROM searches` забыв про child упадёт.
-- **Решение**: пересоздать FK с `ON DELETE CASCADE`. Через миграцию v3:
-  ```sql
-  -- SQLite не умеет ALTER FK; нужен new table + copy + drop + rename
-  ```
-  Либо проще: оставить ручной cleanup, но **тестом** зафиксировать инвариант.
-- **Статус**: [ ]
-
-### DB-18: `actions.user_id` FK без `ON DELETE CASCADE/SET NULL`
-- **Файл**: `bot/db.py:115`
-- **Проблема**: при удалении user'а (которого, впрочем, нет в коде) FK свалится. Нет admin-команды remove user — пока теоретическая.
-- **Решение**: при добавлении remove-user-команды — `ON DELETE CASCADE` для actions/searches/sessions; либо `ON DELETE SET NULL` (но user_id NOT NULL).
-- **Статус**: [ ]
-
-### DB-19: `search_results` хранит monolithic JSON — `get_search_results` парсит всё
-- **Файл**: `bot/db.py:294,309-318`
-- **Проблема**: DB-11 из раунда 2 не закрыто. `results_json` ~500 KB на 500 результатов. **`get_search_results` нигде не используется в handlers'ах** (Grep подтверждает: только `tests/test_db.py:120`). Эта таблица — write-only (история, никем не читается). 7 дней × N поисков × 500 KB = десятки MB мёртвого пространства.
-- **Решение**:
-  1. Если history-feature не реализуется — убрать INSERT в `search_results` из `save_search` (хранить только metadata в `searches`).
-  2. Если планируется `/history` со снапшотом результатов — лимитировать `results[:20]` перед сериализацией.
-- **Статус**: [ ]
-
-### DB-20: Нет `PRAGMA wal_autocheckpoint` тюнинга и `wal_checkpoint(TRUNCATE)` при shutdown
-- **Файл**: `bot/db.py:54-56`, `bot/db.py:58-63`
-- **Проблема**: WAL включён (DB-02 fixed), но дефолтный autocheckpoint = 1000 страниц (~4 MB). На rpie4 SD-card неконтролируемые checkpoint'ы во время user-action создают latency-spike. При shutdown `close()` не делает `wal_checkpoint(TRUNCATE)` — `bot.db-wal` файл может остаться в десятки MB.
-- **Решение**:
-  - В `connect()`: `PRAGMA wal_autocheckpoint=200` (~800 KB чаще, но короче).
-  - В `close()` перед `await self._connection.close()`: `await self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")`.
-- **Статус**: [ ]
-
----
+### DB-02: actions table grows without bound — no cleanup task exists
+- **Файл**: `bot/db.py:397`
+- **Проблема**: log_action (line 397) inserts a row into `actions` on every search, add, grab and error (called from search.py:309/691/740, music.py:154/323, trending.py:354/462). There is NO DELETE/cleanup for `actions` anywhere: _periodic_cleanup (main.py:161-178) and on_startup only call cleanup_old_sessions and cleanup_old_searches; a grep for 'DELETE FROM actions' finds nothing. On a long-lived bot (the project explicitly notes it 'не рестартится неделями') the table accumulates one row per user action forever, growing the DB file and the index idx_actions_created indefinitely on the rpie4 SD-card.
+- **Риск**: Unbounded DB growth / SD-card wear and slowly degrading query/index performance over weeks of uptime.
+- **Решение**: Add `async def cleanup_old_actions(self, days: int = 90)` doing `DELETE FROM actions WHERE created_at < ?` and call it from _periodic_cleanup alongside the session/search cleanup. Choose a retention window that still satisfies the /history admin view.
+- **Верификация**: CONFIRMED — Independently verified in current code. bot/db.py:397 log_action() unconditionally INSERTs into the `actions` table with no cap, trigger, or row-count limit, and commits. The table and its idx_actions_created index are defined at bot/db.py:110/137-138. log_action is called on 7 common user-action paths: music.py:154, music.py:323, search.py:309, search.py:691, search.py:740, trending.py:354, trending.py:462 (searches, adds/grabs, and errors). The ONLY cleanup methods in db.py are cleanup_old_sessions (484) and cleanup_old_searches (494) — there is no cleanup_old_actions and no `DELETE FROM act
+- **Статус**: [ ] Не исправлено
 
 ## Низкие
 
-### DB-21: Нет database backup стратегии (DB-12 не закрыто)
-- **Файл**: контекст — Docker volume `bot-data`, `compose.yml`
-- **Проблема**: при отказе SD-card теряются `users.preferences`, `actions` (history). `searches`/`sessions` не критичны — voluntary. DB-21 = legacy DB-12.
-- **Решение**:
-  1. Cron на хосте: `sqlite3 bot.db ".backup /backup/bot-$(date +%F).db"` раз в день, ротация 7 дней.
-  2. Либо admin-команда `/backup` отправляющая файл в Telegram (учесть лимит 50 MB Telegram bot upload).
-- **Статус**: [ ]
+### DB-03: search_results stores large monolithic JSON blobs that production never reads (write-only table)
+- **Файл**: `bot/db.py:303`
+- **Проблема**: save_search (lines 303-309) inserts the full results list as a single JSON blob into search_results (up to 500 SearchResult objects, hundreds of KB). The only reader, get_search_results (line 317), is invoked nowhere in the application — a grep finds it only in tests/test_db.py:119. So this table is write-only in production: every search writes a large blob that is kept for 7 days (cleanup_old_searches) and never consumed, wasting SD-card writes (wear) and space.
+- **Риск**: Excessive SD-card write amplification and dead storage for data no code path ever reads.
+- **Решение**: Either stop persisting full results — drop the search_results INSERT from save_search and keep only the lightweight `searches` metadata row — or, if a history-with-snapshot feature is planned, cap the serialized list (e.g. results[:20]) before json.dumps to bound blob size.
+- **Верификация**: CONFIRMED — Reproduced the exact write-only path in current code. WRITE: save_search (bot/db.py:280-315) is invoked on every successful search (bot/handlers/search.py:259) and at line 302 serializes the full results list via json.dumps([r.model_dump(mode="json") for r in results]) into search_results.results_json (INSERT at lines 303-309). The searches metadata row is a separate lightweight insert. READER DEAD: the sole consumer get_search_results (bot/db.py:317-326) returns from a project-wide grep restricted to bot/ as ONLY its own definition line (bot/db.py:317); an all-repo grep finds an actual call o
+- **Статус**: [ ] Не исправлено
 
-### DB-22: Нет recovery при corruption SQLite файла
-- **Файл**: `bot/db.py:35-56` (`connect`)
-- **Проблема**: если `bot.db` corrupt (unclean shutdown, SD-bitrot), `aiosqlite.connect` либо упадёт, либо `_create_tables` упадёт на `executescript`. Бот не стартует, нет fallback. Также `PRAGMA integrity_check` не вызывается.
-- **Решение**: в `connect()` после открытия добавить `PRAGMA integrity_check`; на ошибку — переименовать файл в `bot.db.corrupt-<ts>` и стартовать со свежей. Логировать `error` уровнем.
-- **Статус**: [ ]
+### DB-04: close() never checkpoints/truncates the WAL — bot.db-wal can persist and grow on SD-card ⚠️PLAUSIBLE
+- **Файл**: `bot/db.py:66`
+- **Проблема**: WAL mode is enabled (PRAGMA journal_mode=WAL, line 50) with wal_autocheckpoint=200 (line 58). close() (lines 66-71) only calls `await self._connection.close()` without `PRAGMA wal_checkpoint(TRUNCATE)`. On an unclean or even clean shutdown the -wal file is not truncated, so bot.db-wal can remain at hundreds of KB to several MB across restarts on the rpie4 SD-card, and the synchronous=NORMAL setting means a checkpoint may be deferred. There is also no PRAGMA integrity_check on connect, so a corrupt file (SD bitrot / unclean power loss) just crashes connect() with no recovery path.
+- **Риск**: WAL file bloat and no graceful handling of a corrupt DB file on a wear-prone SD card.
+- **Решение**: In close(), before connection.close(), run `try: await self._connection.execute('PRAGMA wal_checkpoint(TRUNCATE)') except Exception: pass`. Optionally add a `PRAGMA quick_check` in connect() and, on failure, rename the file to bot.db.corrupt-<ts> and start fresh while logging at error level.
+- **Верификация**: PLAUSIBLE — I opened bot/db.py and confirmed the literal code claims: WAL is enabled (line 50 `PRAGMA journal_mode=WAL`), synchronous=NORMAL (line 52), wal_autocheckpoint=200 (line 58), and close() (lines 66-71) only does `await self._connection.close()` with no explicit checkpoint. A repo-wide grep shows NO `wal_checkpoint` and NO `integrity_check`/`quick_check` anywhere. So the structural gaps the finding names are factually present in the current code.
 
-### DB-23: Нет VACUUM (DB-10 не закрыто)
-- **Файл**: `bot/db.py:58-63`
-- **Проблема**: после `cleanup_old_searches` файл не уменьшается. Не критично, но вредит, когда диск кончается.
-- **Решение**: при shutdown — необязательно (VACUUM медленный). Сделать admin-команду `/vacuum`.
-- **Статус**: [ ]
+However, the finding's core impact claim is overstated/inaccurate, so it does not rise to a medium defect:
 
-### DB-24: `INSERT INTO sessions` в `save_session` использует `ON CONFLICT(user_id) DO UPDATE` — корректно (OK)
-- **Файл**: `bot/db.py:336-345`
-- **Анализ**: правильный UPSERT, без race-window. PK на `user_id` гарантирует. OK.
-- **Статус**: [x] OK
+1) Clean shutdown: bot/main.py on_shutdown 
+- **Статус**: [ ] Не исправлено
 
-### DB-25: `created_at`/`updated_at` хранятся как ISO TEXT — UTC consistency OK
-- **Файл**: `bot/db.py:210, 228, 276, 327, 391, 478, 488`
-- **Анализ**: везде `datetime.now(timezone.utc).isoformat()`. Корректно. Сортировка ISO работает лексикографически. OK.
-- **Статус**: [x] OK
+### DB-07: log_action declares -> int but returns cursor.lastrowid which can be None ⚠️PLAUSIBLE
+- **Файл**: `bot/db.py:424`
+- **Проблема**: log_action is annotated `-> int` (line 397) and returns `cursor.lastrowid` (line 424). aiosqlite's lastrowid is Optional[int] and is None when no rowid was produced; callers/type checkers treating the result as a non-optional int could later index/format a None as an action id. Although the INSERT normally yields a rowid, the type contract is violated and a None would silently propagate.
+- **Риск**: A None action id propagating to callers/logging, violating the declared return type.
+- **Решение**: Guard the result: `if cursor.lastrowid is None: raise RuntimeError('Failed to insert action record')` then `return cursor.lastrowid`, mirroring the lastrowid check already done in save_search (lines 296-299).
+- **Верификация**: PLAUSIBLE — The static facts in the finding are all accurate in the current code: bot/db.py:397 declares `async def log_action(self, action: ActionLog) -> int:`, bot/db.py:424 does `return cursor.lastrowid` with no None guard, and aiosqlite's `cursor.lastrowid` is typed `Optional[int]`, so the `-> int` annotation is violated. The comparison anchor is also real: save_search at bot/db.py:296-299 already does `search_id = cursor.lastrowid; if search_id is None: await self.conn.rollback(); raise RuntimeError("Failed to insert search record")`, so the proposed fix matches an existing convention and is consiste
+- **Статус**: [ ] Не исправлено
 
-### DB-26: SQL injection — все запросы parameterized (OK)
-- **Файл**: весь `bot/db.py`
-- **Анализ**: я просмотрел всё — **нет ни одного f-string в SQL с user input**. Только `_set_schema_version` использует f-string, но коэрсит через `int(version)` (строка 160-161) — безопасно. OK.
-- **Статус**: [x] OK
+## Отклонено верификацией (false positives — не чинить)
 
-### DB-27: Connection management — single persistent connection (OK)
-- **Файл**: `bot/db.py:32-71`
-- **Анализ**: `_connection` создаётся один раз на startup, используется до shutdown. `_connect_lock` защищает init. aiosqlite сериализует операции внутри одной connection через свою очередь. Threadsafe, no leak. OK.
-- **Статус**: [x] OK
+- **DB-05** FKs declared without ON DELETE CASCADE while foreign_keys=ON makes any future DELETE on parent rows fail — _The schema facts are accurate but no current code path triggers the claimed failure. I read bot/db.py in full and grepped the whole repo for DELETE statements and user-management handlers.
 
-### DB-28: Migration framework — есть, идемпотентно (OK, DB-01 closed)
-- **Файл**: `bot/db.py:135-195`
-- **Анализ**: `PRAGMA user_version`, версия 2 текущая (`details` колонка в `actions`). Покрыто `tests/test_db.py:267-293`. OK. Минор: при добавлении нового файла v3 нужно добавить `if version < 3:` в `_run_migrations` — есть docstring-инструкция.
-- **Статус**: [x] OK
-
-### DB-29: `searches.user_id` индекс есть, но composite `(user_id, created_at)` отсутствует
-- **Файл**: `bot/db.py:126-128`
-- **Проблема**: для гипотетического `/history`-запроса по конкретному user'у с сортировкой по дате — текущие индексы вынуждают планировщик делать filter→sort. На малых данных не больно. Но `get_user_actions` (418-430) делает `WHERE user_id=? ORDER BY created_at DESC LIMIT 20` — работает на `idx_actions_user`, но затем sort. Composite `idx_actions_user_created` дал бы O(log n).
-- **Решение**: `CREATE INDEX idx_actions_user_created ON actions(user_id, created_at DESC)`. На текущем объёме (десятки тысяч строк) выгода ничтожна.
-- **Статус**: [ ]
-
-### DB-30: row_factory = aiosqlite.Row (OK)
-- Файл: `bot/db.py:47`. OK.
-- **Статус**: [x] OK
-
-### DB-31: SearchSession сериализация — OK с лимитом 500
-- **Файл**: `bot/db.py:328-329`, `models.py:276`
-- **Анализ**: `Field(default_factory=list, max_length=500)` + ручной trim — две защиты. OK. (См. DB-14 для perf-аспекта.)
-- **Статус**: [x] OK
-
----
-
-## Информационные
-
-### DB-32: `PRAGMA temp_store=MEMORY` и `PRAGMA cache_size` не настроены
-- **Файл**: `bot/db.py:50-52`
-- **Проблема**: дефолт SQLite — temp_store=DEFAULT (file), cache_size=-2000 (~2MB). На rpie4 8 GB RAM можно расщедриться.
-- **Решение**: `PRAGMA temp_store=MEMORY`, `PRAGMA cache_size=-20000` (20 MB). Микро-optim.
-- **Статус**: [ ]
-
-### DB-33: `PRAGMA mmap_size` не настроен
-- **Проблема**: mmap может ускорить read, но на SD-card может быть нестабилен.
-- **Решение**: оставить дефолт. Не трогать.
-- **Статус**: [x] OK
-
----
-
-## Итог
-
-**HIGH (3):** DB-13 (busy_timeout), DB-14 (save_session JSON spam), DB-15 (cleanup_loop)
-**MED (5):** DB-16 (autocommit fsync), DB-17 (CASCADE), DB-18 (CASCADE), DB-19 (monolithic JSON), DB-20 (WAL checkpoint)
-**LOW (4):** DB-21 (backup), DB-22 (corruption recovery), DB-23 (VACUUM), DB-29 (composite index)
-**INFO (1):** DB-32 (cache tuning)
-**OK (5):** DB-24, DB-25, DB-26, DB-27, DB-28, DB-30, DB-31, DB-33
-
-### Приоритет исправлений (топ-5)
-
-1. **DB-13** — одна строка `PRAGMA busy_timeout=5000`. Big win on SD-card. Делай первым.
-2. **DB-15** — periodic cleanup_loop. ~10 строк в `main.py:on_startup`.
-3. **DB-14** — refactor `save_session` чтобы pagination не переписывала весь JSON. Самый ощутимый perf-win для пользователя.
-4. **DB-20** — `wal_autocheckpoint=200` + `wal_checkpoint(TRUNCATE)` на close.
-5. **DB-21** — admin `/backup` — 30 минут работы.
-
-### Связь с жалобой «бот плохо ищет»
-
-БД сама по себе **не делает поиск медленным** — реальный bottleneck в Prowlarr/scoring (см. round2/06-performance). Но **DB-14 + DB-16 вместе** добавляют ~100-300 ms видимой latency на каждый клик пагинации/выбора релиза, что ощущается как «тормозит». **DB-13** уберёт спорадические `database is locked` исключения, которые маскируются под «поиск временно недоступен».
+Confirmed true: foreign_keys=ON is set (bot/db.py:51); and the four FKs have no ON DELETE _
+- **DB-06** save_session mutates the caller's SearchSession object as a side effect when truncating results — _The finding correctly quotes the in-place mutation at bot/db.py:336-337 (`if session.results and len(session.results) > 500: session.results = session.results[:500]`), but its claimed concrete failure (truncation silently shortens the handler's in-memory results, breaking paginat_
