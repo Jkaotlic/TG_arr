@@ -10,7 +10,7 @@
 - **Риск**: Wrong credentials or a qBit version mismatch on the Pi produce only a vague repeated downstream error, slowing prod diagnosis.
 - **Решение**: In login(), before raising in both failure branches, emit a structured warning, e.g. `log.warning("qbittorrent_login_failed", status_code=response.status_code, reason="auth" if 403/Fails else "unexpected")`. This puts a single, greppable event with base_url on the wrong-password / unexpected-status paths.
 - **Верификация**: CONFIRMED — Opened bot/clients/qbittorrent.py. login() (lines 105-145) binds `log = logger.bind(url=self.base_url)` at 109 and emits only `log.debug` (110) and, on success, `log.info("Successfully logged in to qBittorrent")` (136). Both failure branches raise with NO log: line 122 `if response.status_code == 403 or "Fails" in response.text:` -> raises QBittorrentAuthError (123-126); line 139 -> raises QBittorrentError("Ошибка авторизации в qBittorrent", ...) (139-142). Grep for log/logger calls in the file confirms no warning/error/info between lines 122 and 142. Traced the runtime flow: notification_serv
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### OBS-02: Non-retry POST path (grab/push) has no timing or slow-call instrumentation that the retry path has
 - **Файл**: `bot/clients/base.py:256`
@@ -18,7 +18,7 @@
 - **Риск**: Slow grab/push calls (the user-facing critical action) leave no latency trace, hindering performance triage on the Pi.
 - **Решение**: Mirror _request's instrumentation in _post_no_retry: bind `service`/`endpoint`, capture start_time, log a DEBUG completion with elapsed_ms and a WARNING slow_api_call when elapsed>2000ms.
 - **Верификация**: CONFIRMED — Opened bot/clients/base.py. The retried path _request() (lines 119-210) binds a structlog logger with service/method/endpoint (lines 131-135), captures start_time = time.monotonic() (line 137), computes elapsed, logs DEBUG "API request completed" with elapsed_ms (lines 150-154), and emits WARNING "slow_api_call" when elapsed > 2000ms (lines 157-162). By contrast _post_no_retry() (lines 256-283) has ZERO of this: no logger.bind, no start_time, no elapsed computation, no completion DEBUG log, and no slow_api_call WARNING. It only raises on errors. This is the exact asymmetry the finding describe
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ## Низкие
 
@@ -30,7 +30,7 @@
 - **Верификация**: CONFIRMED — Verified against current code. The ActionLog.details field exists and is explicitly documented for this purpose: models.py:298 `details: Optional[str] = Field(default=None, description="JSON blob: rejections, fallback_used, etc.")`. The DB layer fully supports it: db.py:405/419 inserts action.details into the `details` column, and db.py:464-479 reads it back in _row_to_action (with a legacy-row guard, OBS-06). So the column round-trips and any populated value would be available to /history.
 
 However, a Grep for `\.details` across bot/ returns exactly ONE hit — db.py:419, the read of action.det
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### OBS-04: qBittorrent pause/resume API-version fallback (404 -> old endpoint) is not logged
 - **Файл**: `bot/clients/qbittorrent.py:316`
@@ -38,7 +38,7 @@ However, a Grep for `\.details` across bot/ returns exactly ONE hit — db.py:41
 - **Риск**: qBittorrent API-version drift is invisible; a future legacy-endpoint removal would surface only as user-facing failures with no prior breadcrumb.
 - **Решение**: Add a `logger.debug("qbt_endpoint_fallback", op="pause"/"resume")` (or warning) inside the 404 branch before issuing the legacy call.
 - **Верификация**: CONFIRMED — Opened bot/clients/qbittorrent.py. pause() (lines 311-324) and resume() (lines 326-339) match the finding exactly. pause() at line 318 tries POST /api/v2/torrents/stop; the except block (lines 319-323) catches QBittorrentError and, when e.status_code == 404, issues POST /api/v2/torrents/pause (line 321) with NO logging in that branch (only re-raises for non-404). resume() (lines 332-338) mirrors this: tries /torrents/start, falls back to /torrents/resume on 404 with no log. The only logging is logger.info("Paused torrents", hashes=...) at line 324 and logger.info("Resumed torrents", ...) at li
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### OBS-05: qBittorrent session-expiry re-auth (403 mid-request) is not logged
 - **Файл**: `bot/clients/qbittorrent.py:167`
@@ -46,4 +46,4 @@ However, a Grep for `\.details` across bot/ returns exactly ONE hit — db.py:41
 - **Риск**: Auth-churn or intermittent re-auth failures against qBittorrent are not observable, masking a degrading session-handling condition.
 - **Решение**: Log a debug event when entering the 403 re-auth branch (e.g. `logger.debug("qbt_session_expired_reauth", endpoint=endpoint)`), and a warning if the re-issued request also fails.
 - **Верификация**: CONFIRMED — Opened bot/clients/qbittorrent.py. The 403 re-auth branch in _request() spans lines 167-186: line 167 `# Session expired`, line 168 `if response.status_code == 403:`, line 169 `self._authenticated = False`, lines 170-173 re-auth via _ensure_authenticated() (re-raises on QBittorrentAuthError/QBittorrentError), lines 175-185 re-issue the request. This entire branch contains zero logging calls — no log.debug/info/warning marking that the session expired and was renewed. The only signal produced during a forced re-auth comes from login() at line 136, `log.info("Successfully logged in to qBittorren
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)

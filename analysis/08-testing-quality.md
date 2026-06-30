@@ -10,7 +10,7 @@
 - **Риск**: Unauthorized users could gain access or admins be misidentified with no test to catch it; this is the project's only access-control gate.
 - **Решение**: Add tests/test_middleware.py and tests/test_config_auth.py: (1) config.is_user_allowed(id) True for allowed, False for unknown id, and verify behavior on empty/whitespace ALLOWED_TG_IDS; is_admin True only for ADMIN_TG_IDS. (2) AuthMiddleware.__call__ with a mock event from a disallowed user calls event.answer with the rejection and returns None without calling handler; allowed-but-new user triggers db.create_user and sets data['is_admin']; simulate create_user raising IntegrityError then get_user returning the user (conflict path) and assert handler still runs; simulate create_user raising and get_user returning None and assert it re-raises. (3) RateLimitMiddleware blocks the 31st request inside the window and resets after window_seconds.
 - **Верификация**: CONFIRMED — The coverage gap is real and reproducible. tests/ (listed via Bash) contains NO test_middleware.py or test_config_auth.py and no file exercising AuthMiddleware/RateLimitMiddleware. Grep over tests/ for `is_user_allowed|is_admin|AuthMiddleware|RateLimit` returns only tests/test_handlers_downloads.py:94 and :113, which pass `is_admin=True` as a kwarg into downloads.handle_delete_torrent/handle_delete_with_files — they neither call nor assert config.is_user_allowed/is_admin. The one "Auth" hit in test_qbittorrent.py is QBittorrentAuthError, unrelated. The cited code exists and matches the descrip
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### TEST-02: qBittorrent _request() 403 session-expiry re-auth state machine is untested
 - **Файл**: `bot/clients/qbittorrent.py:167`
@@ -20,7 +20,7 @@
 - **Верификация**: CONFIRMED — Verified against the actual files. bot/clients/qbittorrent.py:147-206 contains _request(), and lines 167-191 implement the 403 session-expiry re-auth state machine exactly as described: on a 403 it sets _authenticated=False, calls _ensure_authenticated() (-> login()); if re-auth raises QBittorrentAuthError/QBittorrentError it re-raises without reissuing (lines 172-173), otherwise it reissues the request once (lines 175-181) and maps TimeoutException/ConnectError on the reissue to QBittorrentError (lines 182-185). This is genuine multi-branch control flow.
 
 Coverage check across the whole suite
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### TEST-03: NotificationService monitor poller (_monitor_loop/_initial_sync/_check_for_completions/_notify_completion) is untested
 - **Файл**: `bot/services/notification_service.py:136`
@@ -28,7 +28,7 @@ Coverage check across the whole suite
 - **Риск**: The user-facing notification feature could spam or silently drop completion alerts on regression with nothing to detect it.
 - **Решение**: Add async tests using a mock qbittorrent.get_torrents returning controlled sequences: (a) initial_sync then a torrent flips to complete on the next check → send_notification awaited exactly once with that user; (b) torrent complete at first sight (new) → no notification; (c) _notify_completion with two subscribers where the first send raises → second still receives it; (d) a torrent removed from the list is dropped from _tracked_torrents. Drive _check_for_completions directly rather than the sleep loop to avoid timing flakiness.
 - **Верификация**: CONFIRMED — Verified directly against current code. tests/test_qbittorrent.py:518 TestNotificationService contains exactly four tests: test_subscribe_user (539), test_unsubscribe_user (544), test_get_stats (550), test_force_check (560). A repo-wide grep for _check_for_completions / _initial_sync / _notify_completion / _monitor_loop in tests/ returns zero matches, and there is no separate tests/test_notification*.py. So the production completion-notification path is genuinely untested. The cited logic exists as described in bot/services/notification_service.py: _initial_sync sets 'notified': True at line 1
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### TEST-04: Grab flow happy paths (push-approved, direct grab, qBittorrent force_download fallback) are untested
 - **Файл**: `bot/services/add_service.py:381`
@@ -36,7 +36,7 @@ Coverage check across the whole suite
 - **Риск**: The primary download/grab workflow has no positive-path tests; category mis-routing or fallback breakage would not be caught.
 - **Решение**: Add async tests with AsyncMock radarr/sonarr/lidarr+qbittorrent: (1) push_release returns {'approved': True} → (True, success message). (2) push returns {'approved': False,'rejections':[...]} and grab_release succeeds → 'Релиз захвачен'. (3) push rejected, indexer_id=0, force_download=True, qbittorrent.add_torrent_url returns True → assert add_torrent_url called once with category='radarr'/'tv-sonarr'/'music' and a public download_url. (4) same but add_torrent_url returns False → success False and 'Ошибка загрузки через qBittorrent'. (5) rejected with no qbittorrent → message contains the rejection text.
 - **Верификация**: CONFIRMED — I opened tests/test_add_service.py, tests/test_lidarr.py, tests/test_qbittorrent.py and bot/services/add_service.py and grepped the whole tests/ tree. The grab-flow tests in test_add_service.py only assert SSRF rejection (radarr/sonarr/lidarr push_release.assert_not_called for private/loopback URLs at lines 204/233/261) plus one magnet sanity test (lines 264-291). _build_add_service has a `qbt` param (line 168/173) but NO test ever passes a non-None qbittorrent; every SSRF release uses indexer_id=0, so the fallback gate `if (release_rejected or force_download) and self.qbittorrent:` at add_ser
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ## Низкие
 
@@ -69,4 +69,4 @@ Coverage assessment per sub-claim:
 - **Риск**: A persisted-session schema drift could crash returning users on the corrupt-session path that is currently unverified.
 - **Решение**: Add a test that writes invalid JSON (or JSON missing required SearchSession fields) into sessions.session_data for a user, then asserts get_session(user) returns None AND that a subsequent SELECT shows the row was deleted. Optionally add a rollback test for save_search by patching the second execute to raise and asserting no orphan rows remain.
 - **Верификация**: CONFIRMED — Verified directly in current code. bot/db.py get_session (lines 357-389) has the described recovery path: on json.loads/model_validate failure it logs (line 380), calls await self.delete_session(user_id) (line 387) and returns None (line 388). The finding's cited line range (367-389) is slightly off — the method starts at 357 — but the error-handling block it emphasizes (379-389) is exactly correct. In tests/test_db.py the ONLY corruption test is TestCorruptPreferences (line 296), which exercises corrupt USER-PREFERENCES JSON via get_user, not the session path. A grep across tests/ for corrupt
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)

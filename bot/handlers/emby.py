@@ -1,5 +1,7 @@
 """Emby Media Server handler."""
 
+import asyncio
+
 import structlog
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -32,9 +34,15 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
         return
 
     try:
-        info = await emby.get_server_info()
-        libraries = await emby.get_libraries()
-        sessions = await emby.get_sessions()
+        # PERF-04: fetch server info, libraries and sessions concurrently
+        # instead of three sequential round-trips. asyncio.gather (without
+        # return_exceptions) preserves the original behaviour: the first
+        # failure propagates and is handled by the except blocks below.
+        info, libraries, sessions = await asyncio.gather(
+            emby.get_server_info(),
+            emby.get_libraries(),
+            emby.get_sessions(),
+        )
 
         text = Formatters.format_emby_status(
             server_name=info.server_name,

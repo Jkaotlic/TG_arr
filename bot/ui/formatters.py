@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from bot.models import (
     ActionLog,
-    AlbumInfo,
     ArtistInfo,
     ContentType,
     MovieInfo,
@@ -268,38 +267,6 @@ class Formatters:
 
         if artist.lidarr_id:
             lines.append("\n✅ В библиотеке")
-
-        return "\n".join(lines)
-
-    @staticmethod
-    def format_album_info(album: AlbumInfo, compact: bool = False) -> str:
-        """Format album information."""
-        artist_str = f" — {_e(album.artist_name)}" if album.artist_name else ""
-        year_str = f" ({album.year})" if album.year else ""
-        header = f"💿 <b>{_e(album.title)}</b>{artist_str}{year_str}"
-
-        if compact:
-            return header
-
-        lines = [header]
-        if album.album_type:
-            lines.append(f"📂 Тип: {_e(album.album_type)}")
-        if album.track_count:
-            duration_min = album.duration_ms // 60000
-            if duration_min:
-                lines.append(f"🎵 Треков: {album.track_count} | ⏱ {duration_min} мин")
-            else:
-                lines.append(f"🎵 Треков: {album.track_count}")
-        if album.genres:
-            lines.append(f"🎭 Жанры: {_e(', '.join(album.genres[:5]))}")
-        if album.overview:
-            overview = album.overview[:300]
-            if len(album.overview) > 300:
-                overview += "..."
-            lines.append(f"\n📝 {_e(overview)}")
-
-        if album.has_file:
-            lines.append("\n✅ Скачан")
 
         return "\n".join(lines)
 

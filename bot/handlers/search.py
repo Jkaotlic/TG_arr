@@ -412,9 +412,11 @@ async def handle_pagination(callback: CallbackQuery, db_user: User, db: Database
         await callback.answer("Неверная страница", show_alert=True)
         return
 
-    # Update session
-    session.current_page = page
-    await db.save_session(user_id, session)
+    # PERF-06: persist current_page only when it actually changed. Re-tapping the
+    # current page (or a no-op nav) must not re-serialize the whole session to SQLite.
+    if page != session.current_page:
+        session.current_page = page
+        await db.save_session(user_id, session)
 
     # Get page results
     start_idx = page * per_page
@@ -506,7 +508,11 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
             movie = _pick_by_year(movies, result.detected_year, parsed.get("year"))
             if movie:
                 session.selected_content = movie
-                await db.save_session(user_id, session)
+                # RACE-04: UPDATE-only — if Cancel/grab deleted the session during
+                # the (slow) lookup, don't resurrect it; abort instead.
+                if not await db.update_session(user_id, session):
+                    await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+                    return
 
                 movie_text = Formatters.format_movie_info(movie)
                 await callback.message.edit_text(
@@ -525,7 +531,10 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
             series = _pick_by_year(series_list, result.detected_year, parsed.get("year"))
             if series:
                 session.selected_content = series
-                await db.save_session(user_id, session)
+                # RACE-04: UPDATE-only — don't resurrect a session deleted mid-lookup.
+                if not await db.update_session(user_id, session):
+                    await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+                    return
 
                 series_text = Formatters.format_series_info(series)
                 await callback.message.edit_text(
@@ -819,10 +828,13 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
         await callback.answer("Сессия истекла", show_alert=True)
         return
 
-    # Clear selection and go back to results
-    session.selected_result = None
-    session.selected_content = None
-    await db.save_session(user_id, session)
+    # Clear selection and go back to results.
+    # PERF-06: only re-serialize the session when there is actually a selection
+    # to clear — pressing Back with nothing selected is a no-op write.
+    if session.selected_result is not None or session.selected_content is not None:
+        session.selected_result = None
+        session.selected_content = None
+        await db.save_session(user_id, session)
 
     # Show results page
     per_page = settings.results_per_page

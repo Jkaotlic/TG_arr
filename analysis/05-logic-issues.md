@@ -28,7 +28,7 @@
 - **Риск**: Calendar view latency = sum of 3 backends; slow/timeouts compound.
 - **Решение**: Wrap the three get_calendar calls in asyncio.gather(..., return_exceptions=True) and partition successes/failures into episodes/movies/albums/errors, mirroring the gather pattern in search_service.detect_with_confidence.
 - **Верификация**: CONFIRMED — CONFIRMED at code level. In bot/handlers/calendar.py, _fetch_and_send_calendar awaits the three calendar fetches strictly sequentially: `episodes = await sonarr.get_calendar(days=days)` (line 49), then `movies = await radarr.get_calendar(days=days)` (line 55), then `albums = await lidarr.get_calendar(days=days)` (line 62), each in its own try/except. Each await fully completes before the next starts. Each get_calendar is one independent read-only HTTP GET — verified in sonarr.py:254 `await self.get("/api/v3/calendar", params=params)`; radarr.py:187 and lidarr.py:166 are structurally identical 
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### LOGIC-06: Duplicated grab/push/qBittorrent-fallback flow copied 3x across movie/series/music with drifting behavior
 - **Файл**: `bot/services/add_service.py:278`

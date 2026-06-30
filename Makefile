@@ -23,8 +23,7 @@ install:
 
 # Install development dependencies
 dev:
-	pip install -r requirements.txt
-	pip install ruff mypy
+	pip install -e ".[dev]"
 
 # Run tests
 test:

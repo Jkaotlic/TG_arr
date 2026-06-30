@@ -2,6 +2,7 @@
 
 import asyncio
 import ipaddress
+import json
 import socket
 import urllib.parse
 from typing import Optional
@@ -422,6 +423,8 @@ class AddService:
                 action.success = False
                 rejection_msg = ", ".join(rejections) if rejections else "Отклонено"
                 action.error_message = rejection_msg
+                # OBS-03: keep the structured rejection reasons in details for history forensics.
+                action.details = json.dumps({"rejections": rejections}, ensure_ascii=False)
                 return False, action, f"Релиз отклонён: {rejection_msg}"
 
             # Fallback: trigger search
@@ -574,6 +577,8 @@ class AddService:
                 action.success = False
                 rejection_msg = ", ".join(rejections) if rejections else "Отклонено"
                 action.error_message = rejection_msg
+                # OBS-03: keep the structured rejection reasons in details for history forensics.
+                action.details = json.dumps({"rejections": rejections}, ensure_ascii=False)
                 return False, action, f"Релиз отклонён: {rejection_msg}"
 
             # Fallback: trigger appropriate search
@@ -769,6 +774,8 @@ class AddService:
                 action.success = False
                 rejection_msg = ", ".join(str(r) for r in rejections) if rejections else "Отклонено"
                 action.error_message = rejection_msg
+                # OBS-03: keep the structured rejection reasons in details for history forensics.
+                action.details = json.dumps({"rejections": rejections}, ensure_ascii=False)
                 return False, action, f"Релиз отклонён: {rejection_msg}"
 
             if existing and existing.lidarr_id:

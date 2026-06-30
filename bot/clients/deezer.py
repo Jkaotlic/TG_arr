@@ -48,31 +48,6 @@ class DeezerClient(BaseAPIClient):
             })
         return artists
 
-    async def get_trending_albums(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Get top trending albums from Deezer chart."""
-        try:
-            result = await self.get("/chart/0/albums", params={"limit": limit})
-        except Exception as e:
-            logger.warning("Deezer trending albums failed", error=str(e))
-            return []
-
-        if not isinstance(result, dict):
-            return []
-
-        items = result.get("data") or []
-        albums: list[dict[str, Any]] = []
-        for item in items:
-            artist_data = item.get("artist") or {}
-            albums.append({
-                "title": item.get("title", "Unknown"),
-                "deezer_id": item.get("id"),
-                "artist_name": artist_data.get("name"),
-                "cover_url": item.get("cover_xl") or item.get("cover_big") or item.get("cover"),
-                "release_date": item.get("release_date"),
-                "link": item.get("link"),
-            })
-        return albums
-
     async def check_connection(self) -> tuple[bool, Optional[str], Optional[float]]:
         """Check if Deezer API is reachable."""
         start_time = time.monotonic()

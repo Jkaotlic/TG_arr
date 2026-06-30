@@ -45,24 +45,33 @@ async def _fetch_and_send_calendar(
     # SEC-21: text is sent with parse_mode=HTML — escape exception strings.
     import html as _html
 
-    try:
-        episodes = await sonarr.get_calendar(days=days)
-    except Exception as e:
-        logger.error("Sonarr calendar error", error=str(e))
-        errors.append(f"Sonarr: {_html.escape(str(e))[:100]}")
-
-    try:
-        movies = await radarr.get_calendar(days=days)
-    except Exception as e:
-        logger.error("Radarr calendar error", error=str(e))
-        errors.append(f"Radarr: {_html.escape(str(e))[:100]}")
-
+    # PERF-03/LOGIC-05: fetch the Sonarr/Radarr/Lidarr calendars concurrently.
+    # return_exceptions=True keeps the same per-source error tolerance: a
+    # failing source contributes an empty list + a warning entry while the
+    # others still render.
+    fetchers: list[tuple[str, Any]] = [
+        ("Sonarr", sonarr.get_calendar(days=days)),
+        ("Radarr", radarr.get_calendar(days=days)),
+    ]
     if lidarr is not None:
-        try:
-            albums = await lidarr.get_calendar(days=days)
-        except Exception as e:
-            logger.error("Lidarr calendar error", error=str(e))
-            errors.append(f"Lidarr: {_html.escape(str(e))[:100]}")
+        fetchers.append(("Lidarr", lidarr.get_calendar(days=days)))
+
+    results = await asyncio.gather(
+        *(coro for _, coro in fetchers),
+        return_exceptions=True,
+    )
+
+    payloads: dict[str, list[dict]] = {}
+    for (source, _), result in zip(fetchers, results, strict=True):
+        if isinstance(result, Exception):
+            logger.error(f"{source} calendar error", error=str(result))
+            errors.append(f"{source}: {_html.escape(str(result))[:100]}")
+        else:
+            payloads[source] = result
+
+    episodes = payloads.get("Sonarr", [])
+    movies = payloads.get("Radarr", [])
+    albums = payloads.get("Lidarr", [])
 
     text = Formatters.format_calendar(episodes, movies, days=days, albums=albums)
     if errors:

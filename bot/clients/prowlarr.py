@@ -448,15 +448,3 @@ class ProwlarrClient(BaseAPIClient):
             return True
 
         return False
-
-    async def grab_release(self, guid: str, indexer_id: int) -> dict[str, Any]:
-        """
-        Grab a release directly through Prowlarr.
-        This sends the release to the download client.
-        """
-        payload = {
-            "guid": guid,
-            "indexerId": indexer_id,
-        }
-        result = await self._post_no_retry("/api/v1/search", json_data=payload)
-        return result if isinstance(result, dict) else {}

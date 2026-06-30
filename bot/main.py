@@ -16,8 +16,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from bot.clients.qbittorrent import QBittorrentClient
 from bot.clients.registry import close_all as close_all_clients
+from bot.clients.registry import get_qbittorrent
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers import setup_routers
@@ -166,11 +166,14 @@ async def _periodic_cleanup(db: Database, logger) -> None:
             await asyncio.sleep(interval)
             sessions = await db.cleanup_old_sessions(hours=24)
             searches = await db.cleanup_old_searches(days=7)
-            if sessions or searches:
+            # DB-02: prune the otherwise unbounded actions table too.
+            actions = await db.cleanup_old_actions(days=90)
+            if sessions or searches or actions:
                 logger.info(
                     "periodic_cleanup",
                     sessions_removed=sessions,
                     searches_removed=searches,
+                    actions_removed=actions,
                 )
         except asyncio.CancelledError:
             break
@@ -182,7 +185,6 @@ async def on_shutdown(
     bot: Bot,
     db: Database,
     notification_service: Optional[NotificationService],
-    qbittorrent: Optional[QBittorrentClient],
 ) -> None:
     """Shutdown handler."""
     logger = structlog.get_logger()
@@ -193,10 +195,8 @@ async def on_shutdown(
         await notification_service.stop()
         logger.info("Notification service stopped")
 
-    # Close qBittorrent client (for notification service)
-    if qbittorrent:
-        await qbittorrent.close()
-
+    # RACE-05: the qBittorrent client used by the notification service is the
+    # registry singleton, so close_all_clients() below closes it exactly once.
     # Close all singleton clients from registry
     await close_all_clients()
 
@@ -234,17 +234,15 @@ async def main() -> None:
     )
 
     # Initialize qBittorrent client and notification service if configured
-    qbittorrent: Optional[QBittorrentClient] = None
     notification_service: Optional[NotificationService] = None
 
     if settings.qbittorrent_enabled:
         logger.info("qBittorrent integration enabled", url=settings.qbittorrent_url)
-        qbittorrent = QBittorrentClient(
-            settings.qbittorrent_url,
-            settings.qbittorrent_username,
-            settings.qbittorrent_password,
-            timeout=settings.qbittorrent_timeout,
-        )
+        # RACE-05: reuse the registry's qBittorrent singleton (the same client
+        # the download handlers use) instead of constructing a second one, so
+        # there is ONE qBittorrent client / auth session. Its lifecycle is owned
+        # by the registry — close_all() handles shutdown.
+        qbittorrent = await get_qbittorrent()
 
         # Create notification sender function
         async def send_notification(user_id: int, message: str) -> None:
@@ -257,7 +255,8 @@ async def main() -> None:
                     error=str(e),
                 )
 
-        notification_service = NotificationService(qbittorrent, send_notification)
+        if qbittorrent is not None:
+            notification_service = NotificationService(qbittorrent, send_notification)
     else:
         logger.info("qBittorrent integration disabled")
 
@@ -282,7 +281,7 @@ async def main() -> None:
         await on_startup(bot, db, notification_service)
 
     async def _on_shutdown(*_: object, **__: object) -> None:
-        await on_shutdown(bot, db, notification_service, qbittorrent)
+        await on_shutdown(bot, db, notification_service)
 
     dp.startup.register(_on_startup)
     dp.shutdown.register(_on_shutdown)

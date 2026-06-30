@@ -298,7 +298,7 @@ class SearchService:
                 "score": getattr(r, "calculated_score", 0),
                 "indexer": r.indexer,
                 "seeders": r.seeders,
-                "size_gb": r.get_size_gb() if hasattr(r, "get_size_gb") else None,
+                "size_gb": r.get_size_gb(),
                 "detected_type": r.detected_type.value if r.detected_type else None,
                 "detected_year": r.detected_year,
             }

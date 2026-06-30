@@ -263,10 +263,31 @@ class BaseAPIClient:
         """POST without retry — for non-idempotent operations like grab/push."""
         client = await self._get_client()
         url = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+        log = logger.bind(
+            service=self.service_name,
+            method="POST",
+            endpoint=endpoint,
+        )
+        start_time = time.monotonic()
         try:
             response = await client.request(
                 method="POST", url=url, params=params, json=json_data, timeout=timeout,
             )
+            # OBS-02: mirror _request — time the call and surface slow ones to
+            # WARNING so push/grab latency is reconstructable from prod logs.
+            elapsed = (time.monotonic() - start_time) * 1000
+            elapsed_rounded = round(elapsed, 2)
+            log.debug(
+                "API request completed",
+                status_code=response.status_code,
+                elapsed_ms=elapsed_rounded,
+            )
+            if elapsed > 2000:
+                log.warning(
+                    "slow_api_call",
+                    status_code=response.status_code,
+                    elapsed_ms=elapsed_rounded,
+                )
             if response.status_code == 401:
                 raise AuthenticationError(f"Ошибка авторизации в {self.service_name}", status_code=401)
             if response.status_code >= 400:

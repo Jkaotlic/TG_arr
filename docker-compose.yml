@@ -30,6 +30,10 @@ services:
       TMDB_API_KEY: ${TMDB_API_KEY:-}
       TMDB_LANGUAGE: ${TMDB_LANGUAGE:-ru-RU}
       TMDB_PROXY_URL: ${TMDB_PROXY_URL:-}
+      # DEPLOY-02: Lidarr / music (optional) — set these to enable /music & Deezer
+      LIDARR_URL: ${LIDARR_URL:-}
+      LIDARR_API_KEY: ${LIDARR_API_KEY:-}
+      DEEZER_ENABLED: ${DEEZER_ENABLED:-true}
       # Notifications
       NOTIFY_DOWNLOAD_COMPLETE: ${NOTIFY_DOWNLOAD_COMPLETE:-true}
       NOTIFY_CHECK_INTERVAL: ${NOTIFY_CHECK_INTERVAL:-60}
@@ -49,8 +53,10 @@ services:
         max-size: "10m"
         max-file: "3"
     stop_grace_period: 30s
-    # Resource limits work in Swarm mode and Portainer Swarm stacks.
-    # For standalone docker compose, use Portainer UI to set limits.
+    # DEPLOY-04: under Compose V2 (`docker compose`), deploy.resources.limits
+    # IS enforced for standalone containers — no Swarm required. (Only the
+    # legacy v1 `docker-compose` binary ignored it outside Swarm.) Swarm and
+    # Portainer Swarm stacks honour it too.
     deploy:
       resources:
         limits:

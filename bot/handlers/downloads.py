@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message
 
 from bot.clients.qbittorrent import QBittorrentError
 from bot.clients.registry import get_qbittorrent
-from bot.models import TorrentFilter, User, format_speed
+from bot.models import TorrentFilter, TorrentInfo, User, format_speed
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 
@@ -275,6 +275,26 @@ async def _render_torrent_list(message: Message, qbt) -> None:
             raise
 
 
+async def _refetch_one(qbt, torrent, short_hash: str):
+    """Re-fetch a single torrent after a mutating action (PERF-01).
+
+    Prefers ``qbt.get_torrent(full_hash)`` which uses qBittorrent's server-side
+    ``hashes`` filter (one targeted row) instead of pulling and parsing the whole
+    list. Falls back to the short-hash lookup when the targeted fetch is
+    unavailable or yields a non-``TorrentInfo`` result, so the redraw always has
+    a usable torrent.
+    """
+    get_one = getattr(qbt, "get_torrent", None)
+    if get_one is not None:
+        try:
+            refreshed = await get_one(torrent.hash)
+        except Exception:  # pragma: no cover - defensive
+            refreshed = None
+        if isinstance(refreshed, TorrentInfo):
+            return refreshed
+    return await qbt.get_torrent_by_short_hash(short_hash)
+
+
 async def _render_torrent_details(message: Message, torrent) -> None:
     """Render torrent details into ``message``.
 
@@ -346,8 +366,11 @@ async def handle_pause_torrent(callback: CallbackQuery) -> None:
         # BUG-15: redraw details directly — do NOT call handle_torrent_details,
         # which would ack the callback a second time.
         if callback.message:
-            # Re-fetch to show updated state (speed=0, state=paused)
-            refreshed = await qbt.get_torrent_by_short_hash(short_hash)
+            # PERF-01: re-fetch only this torrent (server-side ``hashes`` filter)
+            # to show the updated state (speed=0, state=paused) instead of
+            # pulling and parsing the whole list again. Fall back to a
+            # short-hash lookup if the targeted fetch returns nothing.
+            refreshed = await _refetch_one(qbt, torrent, short_hash)
             await _render_torrent_details(callback.message, refreshed or torrent)
 
     except Exception as e:
@@ -378,7 +401,8 @@ async def handle_resume_torrent(callback: CallbackQuery) -> None:
 
         # BUG-15: redraw details directly — do NOT call handle_torrent_details.
         if callback.message:
-            refreshed = await qbt.get_torrent_by_short_hash(short_hash)
+            # PERF-01: targeted single-torrent re-fetch (see _refetch_one).
+            refreshed = await _refetch_one(qbt, torrent, short_hash)
             await _render_torrent_details(callback.message, refreshed or torrent)
 
     except Exception as e:
