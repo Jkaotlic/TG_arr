@@ -662,6 +662,23 @@ async def grab_release(
     await _execute_grab(message, session, db_user, db, search_service, add_service)
 
 
+def _decide_monitor_type(result, force_download: bool) -> str:
+    """BUG-04: choose the Sonarr monitor scope for a grabbed series release.
+
+    A single targeted season (non-pack) must NOT be added with a type that
+    monitors every season — Sonarr's "existing" returns True for all seasons of a
+    brand-new series, so grabbing one season would silently monitor the whole
+    show. Use "none" so only the explicitly grabbed release is pulled.
+    """
+    if force_download:
+        return "all"
+    if result.is_season_pack:
+        return "all"
+    if result.detected_season is not None:
+        return "none"
+    return "all"
+
+
 def _resolve_folder(folders: list, preferred_id: int | None) -> str:
     """Resolve root folder path from user preference or first available."""
     if not folders:
@@ -751,15 +768,8 @@ async def _execute_grab(
             profile_id = prefs.sonarr_quality_profile_id or profiles[0].id
             folder_path = _resolve_folder(folders, prefs.sonarr_root_folder_id)
 
-            # Determine monitor type based on release (BUG-32)
-            if force_download:
-                monitor_type = "all"
-            elif result.is_season_pack:
-                monitor_type = "all"
-            elif result.detected_season is not None:
-                monitor_type = "existing"
-            else:
-                monitor_type = "all"
+            # Determine monitor type based on release (BUG-04/BUG-32)
+            monitor_type = _decide_monitor_type(result, force_download)
 
             success, action, msg = await add_service.grab_series_release(
                 series=series,

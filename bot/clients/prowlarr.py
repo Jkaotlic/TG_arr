@@ -181,7 +181,12 @@ class ProwlarrClient(BaseAPIClient):
         if "seeders" in item:
             seeders = int(item["seeders"]) if item["seeders"] is not None else None
         if "leechers" in item or "peers" in item:
-            leechers = int(item.get("leechers") or item.get("peers") or 0) if item.get("leechers") or item.get("peers") else None
+            # BUG-02: 0 leechers is a valid value — use explicit None checks so a
+            # fully-seeded torrent shows "Личи: 0" instead of hiding the field.
+            raw_leechers = item.get("leechers")
+            if raw_leechers is None:
+                raw_leechers = item.get("peers")
+            leechers = int(raw_leechers) if raw_leechers is not None else None
 
         # Parse indexer info
         indexer = "Unknown"

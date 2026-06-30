@@ -10,7 +10,7 @@
 - **Риск**: Best-result auto-grab and result ordering pick a lower-quality release over a REMUX.
 - **Решение**: Move the remux check out of the 'if quality.source:' guard: add a standalone 'if quality.is_remux: score += self.weights.source_remux' (independent of source token), and turn the bluray/web-dl/... checks into elif of a non-remux branch so it is not double-counted when source already contains 'bluray'.
 - **Верификация**: CONFIRMED — Verified directly in current code and by execution. In bot/services/scoring.py the source block opens with `if quality.source:` (line 138) and the remux bonus `if quality.is_remux: score += self.weights.source_remux` is nested inside it (lines 140-141). In bot/clients/prowlarr.py, `is_remux = "remux" in title_lower` (line 362) is set independently of `source`, and the source-detection branches (lines 291-307) only match bluray/blu-ray/bdrip, web-dl/webdl, webrip, hdtv, dvdrip, cam, ts, tc — none of which the substring 'remux' satisfies. So a title like `Movie.2021.2160p.REMUX.DTS-HD.MA` parses
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, TDD)
 
 ## Низкие
 
@@ -20,7 +20,7 @@
 - **Риск**: Releases whose real title contains a nationality word are unfairly down-ranked by a few points.
 - **Решение**: Either drop the broad language-name penalties, or only apply them when the token appears as an audio/dub marker (e.g. require an adjacent delimiter pattern like '[.\s-](french|german|...)[.\s-](dub|audio|ac3|aac)' or restrict to the trailing tag region of the title rather than the whole string).
 - **Верификация**: CONFIRMED — Opened bot/services/scoring.py. The bad_keywords dict (lines 72-90) currently contains the language tags 'ita':-3 (line 83), 'french':-3 (84), 'spanish':-3 (85), 'german':-3 (86), 'hindi':-3 (87), 'korean':-3 (88), 'chinese':-3 (89). These are compiled at lines 94-97 as re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE) — i.e. word-boundary, case-insensitive. In calculate_score (lines 232-236) the patterns are run via pattern.search(title) against the FULL release title (title = result.title, line 233), with no restriction to a trailing tag region and no dub/audio-marker adjacency requirement.
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, TDD)
 
 ### LOGIC-05: Calendar fetches Sonarr/Radarr/Lidarr sequentially instead of in parallel
 - **Файл**: `bot/handlers/calendar.py:48`

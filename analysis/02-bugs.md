@@ -58,21 +58,21 @@ DUAL CLIENT (always true): main.py:242-247 builds a dedicated QBittorrentClient 
 - **Проблема**: In _normalize_result, `leechers = int(item.get("leechers") or item.get("peers") or 0) if item.get("leechers") or item.get("peers") else None`. When an indexer returns leechers=0 (a valid, common value) and no "peers" field, the guard `item.get("leechers") or item.get("peers")` evaluates `0 or None` = None (falsy), so leechers is set to None instead of 0. The release-details view (formatters.format_release_details) then omits the "Личи" line entirely, so the user cannot distinguish "0 leechers" from "unknown".
 - **Решение**: Use explicit None checks: `raw = item.get("leechers"); raw = item.get("peers") if raw is None else raw; leechers = int(raw) if raw is not None else None`.
 - **Верификация**: CONFIRMED — Verified in current code at bot/clients/prowlarr.py:183-184. Line 184 reads: `leechers = int(item.get("leechers") or item.get("peers") or 0) if item.get("leechers") or item.get("peers") else None`. The guard `item.get("leechers") or item.get("peers")` is a truthiness check, so for a release with `leechers=0` and no peers it evaluates `0 or None` = None (falsy) -> else branch -> leechers=None. I reproduced this with a standalone script: {'leechers':0} -> None, {'peers':0} -> None, {'leechers':5} -> 5. The branch IS reached because line 183 `if "leechers" in item or "peers" in item:` is a key-pr
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, TDD)
 
 ### BUG-04: Single-season grab fallback uses monitor_type 'existing', which monitors ALL seasons
 - **Файл**: `bot/handlers/search.py:726`
 - **Проблема**: In _execute_grab, a non-season-pack release with result.detected_season set and not force_download yields monitor_type="existing". When the series is new to Sonarr, add_series forwards this and Sonarr._should_monitor_season returns True for every season under "existing" (sonarr.py:156-158). So grabbing one episode/season of a brand-new series monitors every season instead of only the targeted one.
 - **Решение**: For a single targeted season, add with monitor_type="none" and set only the targeted season's monitored=True in the seasons payload, or thread the detected season into _should_monitor_season so it restricts to that season.
 - **Верификация**: CONFIRMED — Traced the full path in current code. bot/handlers/search.py:723-728: a non-season-pack release with result.detected_season is not None and not force_download yields monitor_type="existing". search.py:730-737 passes that into add_service.grab_series_release. In bot/services/add_service.py:473-482, when get_series_by_tvdb returns nothing (series new to Sonarr), it calls self.add_series(..., monitor_type="existing", search_for_missing=False). In bot/clients/sonarr.py:104-111, add_series iterates series.seasons and computes _should_monitor_season(season_num, "existing", season_count) per season. 
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, TDD)
 
 ### BUG-05: qBittorrent add_torrent_url treats empty/non-'Ok.' 2xx body as failure ⚠️PLAUSIBLE
 - **Файл**: `bot/clients/qbittorrent.py:422`
 - **Проблема**: add_torrent_url returns True only when the response body equals exactly "Ok.". _request returns None for an empty body (qbittorrent.py:194-195). If a qBittorrent build or reverse proxy returns HTTP 200 with an empty body (or differing whitespace) for /api/v2/torrents/add, add_torrent_url returns False even though the torrent was queued. In the force/qBit-fallback grab path (add_service.grab_*_release) this surfaces to the user as "qBittorrent rejected torrent" / download error while the download actually started.
 - **Решение**: Treat any non-error (2xx) result as success unless the body explicitly contains "Fails": e.g. `if result is None or (isinstance(result, str) and result.strip().lower() != "fails."): return True`. HTTP status >=400 already raises in _request.
 - **Верификация**: PLAUSIBLE — Code-level mechanics confirmed exactly as claimed. qbittorrent.py:418-427: add_torrent_url returns True only when `isinstance(result, str) and result.strip() == "Ok."`; everything else (including result is None) hits the else branch and returns False. qbittorrent.py:193-195: _request returns None when response.text is empty, and qbittorrent.py:187-191 raises on status >= 400, so the else branch is reachable on a 2xx response with an empty or non-"Ok." body. The impact path is real: add_service.py:386-402 (Radarr force/qBit-fallback grab; identical blocks at lines 539 and 736 for series/music) 
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, TDD)
 
 ### RACE-03: QBittorrentClient client/auth state mutated without a lock — concurrent handlers race on _client and re-login ⚠️PLAUSIBLE
 - **Файл**: `bot/clients/qbittorrent.py:76`

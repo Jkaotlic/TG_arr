@@ -89,12 +89,23 @@ class ScoringWeights:
                 "chinese": -3,
             }
 
-        # Pre-compile word-boundary regex patterns for bad keywords (PERF-05)
-        # Using IGNORECASE so both upper/lower-cased titles match the same pattern.
-        self._bad_keyword_patterns: list[tuple[re.Pattern[str], int]] = [
-            (re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE), penalty)
-            for kw, penalty in self.bad_keywords.items()
-        ]
+        # Pre-compile bad-keyword regex patterns (PERF-05), IGNORECASE.
+        #
+        # LOGIC-03: language tags (FRENCH, ITA, KOREAN, ...) are scene markers
+        # like "Movie.2021.FRENCH.1080p". A plain \bword\b also matches legit
+        # titles ("The French Dispatch", "The Italian Job") and wrongly penalises
+        # them. For language keywords, require a scene separator (. - _) right
+        # before the token so only release tags — not title words — are hit.
+        language_kw = {"ita", "french", "spanish", "german", "hindi", "korean", "chinese"}
+        patterns: list[tuple[re.Pattern[str], int]] = []
+        for kw, penalty in self.bad_keywords.items():
+            esc = re.escape(kw)
+            if kw in language_kw:
+                pat = re.compile(rf"(?<=[.\-_]){esc}\b", re.IGNORECASE)
+            else:
+                pat = re.compile(rf"\b{esc}\b", re.IGNORECASE)
+            patterns.append((pat, penalty))
+        self._bad_keyword_patterns = patterns
 
 
 class ScoringService:
@@ -134,12 +145,14 @@ class ScoringService:
             elif quality.resolution == "480p":
                 score += self.weights.resolution_480p
 
-        # Source scoring
-        if quality.source:
+        # Source scoring — LOGIC-01: REMUX is independent of whether a source
+        # token was parsed (a "Title.2160p.REMUX" with no BluRay/WEB token still
+        # deserves the remux bonus), so check it before the source ladder.
+        if quality.is_remux:
+            score += self.weights.source_remux
+        elif quality.source:
             source = quality.source.lower()
-            if quality.is_remux:
-                score += self.weights.source_remux
-            elif "bluray" in source:
+            if "bluray" in source:
                 score += self.weights.source_bluray
             elif "web-dl" in source or "webdl" in source:
                 score += self.weights.source_webdl

@@ -44,8 +44,12 @@ def _make_result(**over) -> SearchResult:
 
 
 @pytest.mark.asyncio
-async def test_grab_single_episode_sets_monitor_existing():
-    """BUG-32: single-episode grab must pass monitor_type='existing', not 'none'."""
+async def test_grab_single_episode_sets_monitor_none():
+    """BUG-04 (overrides BUG-32): a single-episode/season grab must NOT monitor
+    every season. Sonarr's 'existing' returns True for all seasons of a brand-new
+    series, so grabbing one episode would silently auto-monitor the whole show.
+    Use 'none' — the picked release is still grabbed via push; we just don't
+    auto-pull unwanted seasons later."""
     from bot.handlers.search import _execute_grab
 
     series = _make_series()
@@ -95,7 +99,7 @@ async def test_grab_single_episode_sets_monitor_existing():
 
     await _execute_grab(message, session, user, db, search_service, add_service)
 
-    assert captured.get("monitor_type") == "existing"
+    assert captured.get("monitor_type") == "none"
 
 
 @pytest.mark.asyncio

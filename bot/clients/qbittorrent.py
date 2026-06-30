@@ -417,14 +417,15 @@ class QBittorrentClient:
 
         result = await self._request("POST", "/api/v2/torrents/add", data=data)
 
-        # Check if torrent was added successfully
-        # qBittorrent API returns "Ok." on success or "Fails." on failure
-        if isinstance(result, str) and result.strip() == "Ok.":
-            logger.info("Added torrent from URL", category=category)
-            return True
-        else:
+        # BUG-05: _request already raises on HTTP >= 400, so reaching here means a
+        # 2xx. qBittorrent returns "Ok." (<=5.1.x) or an empty body (>=5.2.0) on
+        # success, and "Fails." only when it actually rejects the torrent. Treat
+        # anything that is not an explicit "Fails." as success.
+        if isinstance(result, str) and "fails" in result.strip().lower():
             logger.error("Failed to add torrent", result=result, category=category)
             return False
+        logger.info("Added torrent from URL", category=category)
+        return True
 
     def _parse_torrent(self, item: dict) -> TorrentInfo:
         """Parse qBittorrent torrent response to TorrentInfo."""
