@@ -345,12 +345,11 @@ pytest --cov=bot --cov-report=html
 | Компонент | Технология |
 |-----------|------------|
 | Язык | Python 3.12 |
-| Telegram | aiogram 3.26.0 |
+| Telegram | aiogram 3.27.0 |
 | HTTP | httpx + tenacity (retry) |
 | Конфигурация | pydantic-settings v2 |
 | БД | SQLite (aiosqlite) |
 | Логирование | structlog |
-| Сериализация | orjson |
 | Контейнеризация | Docker (python:3.12-slim) |
 | Тесты | pytest + pytest-asyncio |
 

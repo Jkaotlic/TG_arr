@@ -39,27 +39,6 @@ class LidarrClient(BaseAPIClient):
         log.info("Artist lookup completed", artist_count=len(artists))
         return artists
 
-    async def lookup_album(self, query: str) -> list[AlbumInfo]:
-        """Search for albums by title via MusicBrainz (through Lidarr)."""
-        log = logger.bind(query=query)
-        log.info("Looking up album in Lidarr")
-
-        results = await self.get("/api/v1/album/lookup", params={"term": query})
-        if not isinstance(results, list):
-            return []
-
-        albums = []
-        for item in results:
-            try:
-                album = self._parse_album(item)
-                if album:
-                    albums.append(album)
-            except Exception as e:
-                log.warning("Failed to parse album", error=str(e))
-
-        log.info("Album lookup completed", album_count=len(albums))
-        return albums
-
     async def get_artist_by_mbid(self, mb_id: str) -> Optional[ArtistInfo]:
         """Get artist from library by MusicBrainz ID."""
         results = await self.get("/api/v1/artist", params={"mbId": mb_id})
@@ -154,12 +133,6 @@ class LidarrClient(BaseAPIClient):
     async def search_artist(self, artist_id: int) -> dict[str, Any]:
         """Trigger a search for all albums of an artist."""
         payload = {"name": "ArtistSearch", "artistId": artist_id}
-        result = await self.post("/api/v1/command", json_data=payload)
-        return result if isinstance(result, dict) else {}
-
-    async def search_album(self, album_id: int) -> dict[str, Any]:
-        """Trigger a search for a specific album."""
-        payload = {"name": "AlbumSearch", "albumIds": [album_id]}
         result = await self.post("/api/v1/command", json_data=payload)
         return result if isinstance(result, dict) else {}
 

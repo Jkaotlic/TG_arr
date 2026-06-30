@@ -240,7 +240,6 @@ class UserPreferences(BaseModel):
     lidarr_root_folder_id: Optional[int] = None
     preferred_resolution: Optional[str] = None  # 1080p, 2160p, etc.
     auto_grab_enabled: bool = False
-    language: str = "en"
 
 
 class User(BaseModel):
@@ -278,8 +277,6 @@ class SearchSession(BaseModel):
     selected_result: Optional[SearchResult] = None
     selected_content: Optional[ContentInfo] = None
     created_at: datetime = Field(default_factory=_utcnow)
-
-    monitor_type: Literal["all", "future", "missing", "existing", "pilot", "firstSeason", "latestSeason", "none"] = "all"
 
 
 class ActionLog(BaseModel):

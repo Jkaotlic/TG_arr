@@ -468,6 +468,11 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
                 matched = lookup_results[0]
             if matched and matched.tvdb_id:
                 series = matched
+                # PERF-07: write the resolved series (now carrying a real
+                # tvdb_id) back into the cache so a subsequent add/detail view
+                # reuses it instead of re-running the Sonarr lookup.
+                async with _cache_lock:
+                    _trending_series_cache[tmdb_id] = series
             else:
                 await status_msg.edit_text(
                     "❌ Не удалось определить TVDB ID для сериала.\n"

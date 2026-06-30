@@ -69,8 +69,18 @@ class Database:
             logger.info("Database connected", path=self.db_path)
 
     async def close(self) -> None:
-        """Close database connection."""
+        """Close database connection.
+
+        DB-04: checkpoint the WAL with TRUNCATE before closing so the
+        bot.db-wal sidecar file doesn't persist/grow across restarts (SD-card
+        wear on rpie4). Best-effort — a checkpoint failure must not prevent
+        the connection from closing.
+        """
         if self._connection:
+            try:
+                await self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception as e:
+                logger.warning("WAL checkpoint on close failed", error=str(e))
             await self._connection.close()
             self._connection = None
             logger.info("Database connection closed")
@@ -363,6 +373,32 @@ class Database:
             await self.conn.commit()
         logger.debug("Session saved", user_id=user_id, results_count=len(session.results))
 
+    async def update_session(self, user_id: int, session: SearchSession) -> bool:
+        """RACE-04: persist a session edit WITHOUT recreating it.
+
+        Unlike ``save_session`` (INSERT ... ON CONFLICT), this is UPDATE-only —
+        if the row was deleted by a concurrent Cancel/grab while a slow callback
+        was running its lookups, the update affects 0 rows and we return False so
+        the caller can abort instead of resurrecting a session the user dropped.
+        Returns True when the session row still existed and was updated.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        if session.results and len(session.results) > 500:
+            session.results = session.results[:500]
+        try:
+            session_json = session.model_dump_json()
+        except Exception as e:
+            logger.error("Failed to serialize session", user_id=user_id, error=str(e))
+            raise
+
+        async with self._write_lock:
+            cursor = await self.conn.execute(
+                "UPDATE sessions SET session_data = ?, updated_at = ? WHERE user_id = ?",
+                (session_json, now, user_id),
+            )
+            await self.conn.commit()
+            return cursor.rowcount > 0
+
     async def get_session(self, user_id: int) -> Optional[SearchSession]:
         """Get user session."""
         row_data = None
@@ -432,7 +468,12 @@ class Database:
                 ),
             )
             await self.conn.commit()
-            return cursor.lastrowid
+            # DB-07: cursor.lastrowid is Optional per DB-API; the contract here
+            # is an int action id, so guard against None instead of lying.
+            row_id = cursor.lastrowid
+            if row_id is None:
+                raise RuntimeError("Failed to insert action record")
+            return row_id
 
     async def get_user_actions(self, user_id: int, limit: int = 20) -> list[ActionLog]:
         """Get recent actions for a user."""
@@ -499,6 +540,22 @@ class Database:
         async with self._write_lock:
             cursor = await self.conn.execute(
                 "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
+            )
+            await self.conn.commit()
+            return cursor.rowcount
+
+    async def cleanup_old_actions(self, days: int = 90) -> int:
+        """Delete actions older than specified days. Returns count deleted.
+
+        DB-02: the ``actions`` table otherwise grows unbounded (every search /
+        download appends a row). 90 days keeps the /history admin view useful
+        while bounding SD-card usage.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        async with self._write_lock:
+            cursor = await self.conn.execute(
+                "DELETE FROM actions WHERE created_at < ?", (cutoff,)
             )
             await self.conn.commit()
             return cursor.rowcount

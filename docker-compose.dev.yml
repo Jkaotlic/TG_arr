@@ -15,3 +15,10 @@ services:
       - LOG_LEVEL=DEBUG
     # For development, you might want to use host network
     # network_mode: host
+
+# DEPLOY-05: define bot-data here too so `docker compose -f docker-compose.dev.yml up`
+# works standalone (the named volume is otherwise only declared in docker-compose.yml,
+# which isn't loaded when -f points at this file alone).
+volumes:
+  bot-data:
+    driver: local

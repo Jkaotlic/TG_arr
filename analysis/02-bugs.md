@@ -39,7 +39,7 @@
 - **Риск**: A cancelled/finished session reappears, letting the user grab a stale release or showing a results page after cancel.
 - **Решение**: Make session mutations conditional/atomic: have save_session only UPDATE when the row still exists for in-progress edits (or re-check existence inside the same write lock from RACE-02), and/or add a monotonically increasing session version/token that callbacks pass back so a stale callback's write is rejected. At minimum, in handlers that delete (cancel/grab) also clear the in-memory caches and ignore writes for a just-deleted user within the same logical flow.
 - **Верификация**: CONFIRMED — The race is real in the current code. (1) No serialization of same-user callbacks: grep found no FSMContext/StatesGroup/MemoryStorage usage anywhere — state lives in a custom SQLite `sessions` table, not aiogram FSM, so aiogram's per-chat FSM lock does NOT apply. Dispatcher() (main.py:265) uses defaults and start_polling processes updates as concurrent independent tasks. The only asyncio.Lock (db.py:33 `_connect_lock`) guards connection setup, not session read/write — there is no per-user app-level lock. (2) save_session (db.py:344-353) uses `INSERT INTO sessions ... ON CONFLICT(user_id) DO UP
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### RACE-05: Notification poller singleton qBittorrent is distinct from the handler singleton — duplicate sessions and warm-up waste; subscribe set populated only at startup
 - **Файл**: `bot/main.py:242`
@@ -49,7 +49,7 @@
 - **Верификация**: CONFIRMED — Both halves of the finding are present in the current code.
 
 DUAL CLIENT (always true): main.py:242-247 builds a dedicated QBittorrentClient and passes it to NotificationService (main.py:260). Every handler instead resolves qBittorrent through the registry singleton get_qbittorrent() — registry.py:103-119 returns a SEPARATE global `_qbittorrent` instance. Grep confirms downloads.py (15+ call sites), search.py:53, music.py:60, trending.py:325/412, status.py:39, settings.py:35 all use get_qbittorrent(). So two independent QBittorrentClient objects exist, each with its own login/cookie state and 
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ## Низкие
 

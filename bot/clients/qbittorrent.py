@@ -1,5 +1,6 @@
 """qBittorrent Web API client."""
 
+import asyncio
 import json
 import time
 from datetime import datetime, timezone
@@ -120,6 +121,12 @@ class QBittorrentClient:
             )
 
             if response.status_code == 403 or "Fails" in response.text:
+                # OBS-01: surface the failure before raising so the cause is
+                # visible in logs (bad credentials / banned IP).
+                log.warning(
+                    "qBittorrent login rejected (bad credentials or banned IP)",
+                    status_code=response.status_code,
+                )
                 raise QBittorrentAuthError(
                     "Неверный логин или пароль",
                     status_code=response.status_code,
@@ -136,6 +143,12 @@ class QBittorrentClient:
                 log.info("Successfully logged in to qBittorrent")
                 return True
 
+            # OBS-01: a 2xx without a session cookie (or any other unexpected
+            # status) is an auth failure too — log it before raising.
+            log.error(
+                "qBittorrent login failed: no session cookie set",
+                status_code=response.status_code,
+            )
             raise QBittorrentError(
                 "Ошибка авторизации в qBittorrent",
                 status_code=response.status_code,
@@ -166,6 +179,12 @@ class QBittorrentClient:
 
             # Session expired
             if response.status_code == 403:
+                # OBS-05: the mid-request re-auth was previously silent; log it
+                # so session churn is observable.
+                logger.info(
+                    "qBittorrent session expired, re-authenticating",
+                    endpoint=endpoint,
+                )
                 self._authenticated = False
                 try:
                     await self._ensure_authenticated()
@@ -221,18 +240,16 @@ class QBittorrentClient:
         log.debug("Getting qBittorrent status")
 
         try:
-            # Get version
-            version = await self.get_version()
-
-            # Get transfer info
-            transfer = await self.get_transfer_info()
-
-            # Get maindata for additional info
-            maindata = await self._request("GET", "/api/v2/sync/maindata")
+            # PERF-05: the four endpoints are independent, so fetch them
+            # concurrently instead of serially (4 round-trips → 1 wall-clock
+            # round-trip). The aggregated result is identical.
+            version, transfer, maindata, torrents = await asyncio.gather(
+                self.get_version(),
+                self.get_transfer_info(),
+                self._request("GET", "/api/v2/sync/maindata"),
+                self.get_torrents(),
+            )
             server_state = maindata.get("server_state", {}) if maindata else {}
-
-            # Get torrent counts
-            torrents = await self.get_torrents()
 
             active_downloads = sum(
                 1 for t in torrents if t.state == TorrentState.DOWNLOADING
@@ -308,6 +325,33 @@ class QBittorrentClient:
                 return t
         return None
 
+    async def get_torrent(self, full_hash: str) -> Optional[TorrentInfo]:
+        """Fetch a single torrent by its full hash.
+
+        PERF-01: uses qBittorrent's server-side ``hashes`` filter on
+        ``/torrents/info`` so callers needing one torrent (e.g. the post-action
+        redraw after pause/resume) do not pull and parse the entire list.
+        """
+        result = await self._request(
+            "GET",
+            "/api/v2/torrents/info",
+            params={"hashes": full_hash},
+        )
+
+        if not isinstance(result, list) or not result:
+            return None
+
+        for item in result:
+            if str(item.get("hash", "")).lower() == full_hash.lower():
+                try:
+                    return self._parse_torrent(item)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to parse torrent", error=str(e), name=item.get("name")
+                    )
+                    return None
+        return None
+
     async def pause(self, hashes: list[str] | str = "all") -> None:
         """Pause torrent(s). Use 'all' to pause all."""
         if isinstance(hashes, list):
@@ -318,6 +362,11 @@ class QBittorrentClient:
             await self._request("POST", "/api/v2/torrents/stop", data={"hashes": hashes})
         except QBittorrentError as e:
             if e.status_code == 404:
+                # OBS-04: make the legacy-endpoint fallback visible.
+                logger.info(
+                    "qBittorrent /torrents/stop unavailable (404), "
+                    "falling back to legacy /torrents/pause",
+                )
                 await self._request("POST", "/api/v2/torrents/pause", data={"hashes": hashes})
             else:
                 raise
@@ -333,6 +382,11 @@ class QBittorrentClient:
             await self._request("POST", "/api/v2/torrents/start", data={"hashes": hashes})
         except QBittorrentError as e:
             if e.status_code == 404:
+                # OBS-04: make the legacy-endpoint fallback visible.
+                logger.info(
+                    "qBittorrent /torrents/start unavailable (404), "
+                    "falling back to legacy /torrents/resume",
+                )
                 await self._request("POST", "/api/v2/torrents/resume", data={"hashes": hashes})
             else:
                 raise

@@ -22,7 +22,7 @@ SQLite/aiosqlite, единое соединение, износ SD-карты.
 - **Риск**: Unbounded DB growth / SD-card wear and slowly degrading query/index performance over weeks of uptime.
 - **Решение**: Add `async def cleanup_old_actions(self, days: int = 90)` doing `DELETE FROM actions WHERE created_at < ?` and call it from _periodic_cleanup alongside the session/search cleanup. Choose a retention window that still satisfies the /history admin view.
 - **Верификация**: CONFIRMED — Independently verified in current code. bot/db.py:397 log_action() unconditionally INSERTs into the `actions` table with no cap, trigger, or row-count limit, and commits. The table and its idx_actions_created index are defined at bot/db.py:110/137-138. log_action is called on 7 common user-action paths: music.py:154, music.py:323, search.py:309, search.py:691, search.py:740, trending.py:354, trending.py:462 (searches, adds/grabs, and errors). The ONLY cleanup methods in db.py are cleanup_old_sessions (484) and cleanup_old_searches (494) — there is no cleanup_old_actions and no `DELETE FROM act
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ## Низкие
 
@@ -44,7 +44,7 @@ SQLite/aiosqlite, единое соединение, износ SD-карты.
 However, the finding's core impact claim is overstated/inaccurate, so it does not rise to a medium defect:
 
 1) Clean shutdown: bot/main.py on_shutdown 
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### DB-07: log_action declares -> int but returns cursor.lastrowid which can be None ⚠️PLAUSIBLE
 - **Файл**: `bot/db.py:424`
@@ -52,7 +52,7 @@ However, the finding's core impact claim is overstated/inaccurate, so it does no
 - **Риск**: A None action id propagating to callers/logging, violating the declared return type.
 - **Решение**: Guard the result: `if cursor.lastrowid is None: raise RuntimeError('Failed to insert action record')` then `return cursor.lastrowid`, mirroring the lastrowid check already done in save_search (lines 296-299).
 - **Верификация**: PLAUSIBLE — The static facts in the finding are all accurate in the current code: bot/db.py:397 declares `async def log_action(self, action: ActionLog) -> int:`, bot/db.py:424 does `return cursor.lastrowid` with no None guard, and aiosqlite's `cursor.lastrowid` is typed `Optional[int]`, so the `-> int` annotation is violated. The comparison anchor is also real: save_search at bot/db.py:296-299 already does `search_id = cursor.lastrowid; if search_id is None: await self.conn.rollback(); raise RuntimeError("Failed to insert search record")`, so the proposed fix matches an existing convention and is consiste
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ## Отклонено верификацией (false positives — не чинить)
 

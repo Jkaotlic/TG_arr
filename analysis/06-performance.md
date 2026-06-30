@@ -12,7 +12,7 @@
 - **Риск**: Low — behavior-preserving; only removes redundant full-list fetches.
 - **Решение**: qBittorrent /api/v2/torrents/info accepts a 'hashes' parameter, but short_hash is only the first 8 chars so an exact lookup needs the full hash. Cache the last-rendered (short_hash -> full_hash) map from the list render, or fetch once and pass the resolved full hash to pause/resume/delete and skip the second re-fetch (reuse the already-parsed torrent and locally flip its state for the redraw). At minimum, do NOT re-call get_torrent_by_short_hash after the mutate — reuse the torrent object already in hand.
 - **Верификация**: CONFIRMED — Verified directly in the current code. bot/clients/qbittorrent.py:266-301 get_torrents() builds params with only filter/sort/reverse (+optional category/limit/offset) and NEVER a 'hashes' parameter; it GETs /api/v2/torrents/info and returns the full parsed list. get_torrent_by_short_hash() (lines 303-309) calls get_torrents() with no args, pulling the entire payload, then filters in Python via t.hash.lower().startswith(short_hash). In bot/handlers/downloads.py the per-tap cost is exactly as claimed: handle_pause_torrent fetches the full list twice (line 335 lookup + line 348 re-fetch 'to show 
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### PERF-03: Calendar fetches Sonarr+Radarr+Lidarr sequentially instead of in parallel
 - **Файл**: `bot/handlers/calendar.py:48`
@@ -20,7 +20,7 @@
 - **Риск**: Low — gather with return_exceptions preserves current per-service error handling.
 - **Решение**: Run the three get_calendar calls concurrently with asyncio.gather(..., return_exceptions=True) and unpack results/exceptions per service (preserving the per-service error messages already appended to `errors`).
 - **Верификация**: CONFIRMED — Opened bot/handlers/calendar.py. _fetch_and_send_calendar performs three independent, sequential awaits: line 49 `episodes = await sonarr.get_calendar(days=days)`, line 55 `movies = await radarr.get_calendar(days=days)`, line 62 `albums = await lidarr.get_calendar(days=days)`. Each writes a distinct variable (episodes/movies/albums) with no data dependency between them, and each is a separate HTTP round-trip to a different *arr service. Because each `await` blocks until completion before the next begins, the handler's latency is the SUM of the three calls rather than the MAX — exactly as claim
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### PERF-04: Emby status does 3 sequential round-trips (server_info, libraries, sessions)
 - **Файл**: `bot/handlers/emby.py:35`
@@ -28,7 +28,7 @@
 - **Риск**: Low — independent reads, no ordering dependency.
 - **Решение**: Gather the three independent reads with asyncio.gather(emby.get_server_info(), emby.get_libraries(), emby.get_sessions()). For scan handlers, the libraries list is already fetched in status — pass it through or cache briefly instead of re-fetching.
 - **Верификация**: CONFIRMED — Opened bot/handlers/emby.py and bot/clients/emby.py. show_emby_status awaits three independent reads serially: emby.get_server_info() (line 35), emby.get_libraries() (line 36), emby.get_sessions() (line 37). In bot/clients/emby.py these map to three independent HTTP GETs with no inter-dependency: get_server_info -> GET /System/Info (line 137), get_libraries -> GET /Library/VirtualFolders (line 156), get_sessions -> GET /Sessions (line 217). The results are only combined afterward in Formatters.format_emby_status (line 39), so nothing forces sequencing. The user therefore waits the SUM of three
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### PERF-05: qBittorrent get_status() makes 4 sequential API calls per /qstatus and per speed menu
 - **Файл**: `bot/clients/qbittorrent.py:218`
@@ -36,7 +36,7 @@
 - **Риск**: Low — counts derivable from maindata; gather is behavior-preserving.
 - **Решение**: version + transfer + counts can come largely from a single /api/v2/sync/maindata call (server_state includes dl/up speeds, free_space, dht_nodes, and per-torrent states for counting). Fetch version once and cache it (it never changes within a session). At minimum gather the independent calls with asyncio.gather instead of awaiting serially.
 - **Верификация**: CONFIRMED — Opened bot/clients/qbittorrent.py:218-264 and reproduced the exact path. get_status() awaits four serial HTTP round-trips with no concurrency: get_version() at line 225 (/api/v2/app/version), get_transfer_info() at line 228 (/api/v2/transfer/info), _request GET /api/v2/sync/maindata at line 231, and get_torrents() at line 235 (/api/v2/torrents/info). Each await blocks on the prior. The full torrent list from call #4 is used only to compute three counts (active_downloads/active_uploads/paused_count at lines 237-245) and len() at line 257. Confirmed no version caching exists: grep for _version/s
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ## Низкие
 
@@ -54,7 +54,7 @@
 - **Риск**: Low — current_page is reconstructable from callback data; results blob is unchanged across page taps.
 - **Решение**: For page-only changes, persist just the page number (a tiny UPDATE of a separate column) rather than re-dumping the whole results blob, or skip persisting current_page entirely and recompute the page from the callback each time (the page index is already encoded in the callback data). Avoid re-serializing 500 results to change one int.
 - **Верификация**: CONFIRMED — Verified against current code. bot/handlers/search.py:394-396 (handle_pagination) sets only session.current_page = page (a single int parsed from callback.data at line 382) and then calls db.save_session(user_id, session). bot/db.py:329-354 (save_session) unconditionally calls session.model_dump_json() over the ENTIRE SearchSession — including session.results, a list of up to 500 SearchResult models (models.py:276 max_length=500). Each SearchResult (models.py:53-96) is a heavy ~20-field model with nested QualityInfo and several list fields, so the dump is multi-KB. save_session then does an IN
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)
 
 ### PERF-07: Trending detail/add re-runs full content-type-aware lookups; series re-lookup on every add
 - **Файл**: `bot/handlers/trending.py:433`
@@ -62,4 +62,4 @@
 - **Риск**: Low — profiles/folders rarely change; TTL bounds staleness.
 - **Решение**: Cache quality profiles and root folders per-service with a short TTL (e.g. 5 min) in the registry or AddService, since they are near-static. This removes 2 extra HTTP round-trips from every add/grab across trending.py and search.py.
 - **Верификация**: CONFIRMED — Verified against current code. (1) bot/clients/tmdb.py:182 hardcodes tvdb_id=0 for TMDB trending series (comment: "Will be looked up via Sonarr"), so the lookup branch always triggers for trending series. (2) bot/handlers/trending.py:433-435 — handle_add_series_from_trending checks `if not series.tvdb_id:` (line 433) and calls `sonarr_client.lookup_series(series.title)` (line 435) on every add; cited lines match exactly. (3) Profiles/root-folders are fetched fresh on every add: trending.py:417-418 (sonarr) and 330-331 (radarr movie path), and the same pattern in search.py:672-673/710-711 and m
-- **Статус**: [ ] Не исправлено
+- **Статус**: [x] Исправлено (раунд 4, мультиагент)

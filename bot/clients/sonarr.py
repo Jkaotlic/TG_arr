@@ -49,15 +49,6 @@ class SonarrClient(BaseAPIClient):
         log.info("Lookup completed", series_count=len(series_list))
         return series_list
 
-    async def lookup_series_by_tvdb(self, tvdb_id: int) -> Optional[SeriesInfo]:
-        """Look up a series by TVDB ID."""
-        params = {"term": f"tvdb:{tvdb_id}"}
-        results = await self.get("/api/v3/series/lookup", params=params)
-
-        if isinstance(results, list) and results:
-            return self._parse_series(results[0])
-        return None
-
     async def get_series_by_tvdb(self, tvdb_id: int) -> Optional[SeriesInfo]:
         """Get series from library by TVDB ID."""
         params = {"tvdbId": tvdb_id}
