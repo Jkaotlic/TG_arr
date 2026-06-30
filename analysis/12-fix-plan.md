@@ -2,7 +2,9 @@
 
 Формат — `superpowers:writing-plans`: фазы, чекбоксы, пометка TDD для поведенческих фиксов.
 Правило `default-full-fix`: чинится всё, кроме архитектурного рефакторинга (вынесен в отложенный раздел).
-> ✅ **Раунд 4 — применено (TDD):** SEC-01, SEC-02, SEC-03, BUG-01, RACE-01, RACE-02/DB-01. Тесты: 291 passed, ruff clean.
+> ✅ **Раунд 4 — применено (TDD):** SEC-01..03, BUG-01, RACE-01, RACE-02/DB-01 (батч 1); BUG-02, BUG-04, BUG-05, LOGIC-01, LOGIC-03 (батч 2). Тесты: 296 passed, ruff clean.
+>
+> ⚠️ BUG-04 переопределяет BUG-32: одиночный эпизод/сезон → `monitor_type="none"` (не «existing», который монил все сезоны). Мониторинг только целевого сезона — будущее улучшение (требует per-season payload + проверку на живом Sonarr).
 
 
 Дедупликация корней:
@@ -58,11 +60,11 @@ Observability (только логи, визуальная проверка):
 - [x] **RACE-02 / DB-01** (high): `asyncio.Lock` на запись в `Database`; обернуть `save_search` и `cleanup_old_searches` (и желательно все write-блоки). *(TDD: конкурентные `save_search` + `cleanup` не падают, ничего не теряется)*
 - [x] **BUG-01** (high): отдельный `CallbackData.TRENDING_BACK` + хендлер в trending.py, ИЛИ `handle_back` пропускает (return без answer) при пустой сессии. *(TDD)*
 - [ ] **RACE-04** (med): атомарность мутаций сессии — version-токен или UPDATE-only-if-exists, чтобы slow-callback не воскрешал удалённую сессию. *(TDD; зависит от RACE-02 lock)*
-- [ ] **BUG-04** (low): одиночный сезон — `monitor_type="none"` + monitored только на целевом сезоне ([search.py:726](../bot/handlers/search.py#L726)). *(TDD)*
-- [ ] **BUG-05 / TEST-05** (low, PLAUSIBLE): `add_torrent_url` — считать любой 2xx без `Fails.` успехом ([qbittorrent.py:422](../bot/clients/qbittorrent.py#L422)). *(TDD: пустое тело 200 → True)*
-- [ ] **BUG-02** (low): leechers=0 не должен превращаться в None ([prowlarr.py:183](../bot/clients/prowlarr.py#L183)) — явная проверка `is not None`. *(TDD)*
-- [ ] **LOGIC-01** (med): REMUX-бонус (+30) недостижим без source-токена — учитывать `is_remux` независимо от `quality.source` ([scoring.py:138](../bot/services/scoring.py#L138)). *(TDD)*
-- [ ] **LOGIC-03** (low): язык-пенальти (`ita`/`french`/…) ложно срабатывает на легитимных тайтлах — ограничить контекстом релиз-тегов. *(TDD)*
+- [x] **BUG-04** (low): одиночный сезон — `monitor_type="none"` + monitored только на целевом сезоне ([search.py:726](../bot/handlers/search.py#L726)). *(TDD)*
+- [x] **BUG-05 / TEST-05** (low, PLAUSIBLE): `add_torrent_url` — считать любой 2xx без `Fails.` успехом ([qbittorrent.py:422](../bot/clients/qbittorrent.py#L422)). *(TDD: пустое тело 200 → True)*
+- [x] **BUG-02** (low): leechers=0 не должен превращаться в None ([prowlarr.py:183](../bot/clients/prowlarr.py#L183)) — явная проверка `is not None`. *(TDD)*
+- [x] **LOGIC-01** (med): REMUX-бонус (+30) недостижим без source-токена — учитывать `is_remux` независимо от `quality.source` ([scoring.py:138](../bot/services/scoring.py#L138)). *(TDD)*
+- [x] **LOGIC-03** (low): язык-пенальти (`ita`/`french`/…) ложно срабатывает на легитимных тайтлах — ограничить контекстом релиз-тегов. *(TDD)*
 
 ### Phase 3 — Производительность и БД (rpie4)
 
