@@ -1,5 +1,6 @@
 """Search and content management handlers."""
 
+import asyncio
 import html
 import time
 
@@ -32,6 +33,26 @@ router = Router()
 # PERF-04: Singleton ScoringService shared across all requests.
 # ScoringService is stateless (only holds pre-compiled weights), so one instance is safe.
 _SCORING_SERVICE = ScoringService()
+
+# RACE-01: guard against double-grab. aiogram dispatches each callback as its own
+# task, so a rapid double-tap (or Confirm→Force) would run the grab twice. A
+# per-user in-progress claim makes the second concurrent grab a no-op.
+_grab_in_progress: set[int] = set()
+_grab_guard_lock = asyncio.Lock()
+
+
+async def _claim_grab(user_id: int) -> bool:
+    """Claim the grab slot for a user. Returns False if one is already in flight."""
+    async with _grab_guard_lock:
+        if user_id in _grab_in_progress:
+            return False
+        _grab_in_progress.add(user_id)
+        return True
+
+
+def _release_grab(user_id: int) -> None:
+    """Release a user's grab slot (safe to call even if not held)."""
+    _grab_in_progress.discard(user_id)
 
 # Russian menu button texts
 MENU_SEARCH = "🔍 Поиск"
@@ -555,24 +576,30 @@ async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database)
     if not callback.message:
         return
 
-    search_service, add_service, _ = await get_services()
-
     user_id = callback.from_user.id
-    session = await db.get_session(user_id)
-
-    if not session or not session.results:
-        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+    if not await _claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
+    try:
+        search_service, add_service, _ = await get_services()
 
-    result = session.results[0]  # Best result
-    session.selected_result = result
-    await db.save_session(user_id, session)
+        session = await db.get_session(user_id)
 
-    await callback.answer("Скачиваю лучший релиз...")
-    await callback.message.edit_text("⏳ Скачиваю лучший релиз...")
+        if not session or not session.results:
+            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+            return
 
-    # Lookup and grab
-    await grab_release(callback.message, session, db_user, db, search_service, add_service)
+        result = session.results[0]  # Best result
+        session.selected_result = result
+        await db.save_session(user_id, session)
+
+        await callback.answer("Скачиваю лучший релиз...")
+        await callback.message.edit_text("⏳ Скачиваю лучший релиз...")
+
+        # Lookup and grab
+        await grab_release(callback.message, session, db_user, db, search_service, add_service)
+    finally:
+        _release_grab(user_id)
 
 
 @router.callback_query(F.data == CallbackData.CONFIRM_GRAB)
@@ -609,11 +636,18 @@ async def handle_confirm_grab(callback: CallbackQuery, db_user: User, db: Databa
         await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
         return
 
-    search_service, add_service, _ = await get_services()
-    await callback.answer("Обработка...")
-    await callback.message.edit_text("⏳ Обрабатываю запрос...")
+    # RACE-01: reject a concurrent second grab for this user.
+    if not await _claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
+        return
+    try:
+        search_service, add_service, _ = await get_services()
+        await callback.answer("Обработка...")
+        await callback.message.edit_text("⏳ Обрабатываю запрос...")
 
-    await grab_release(callback.message, session, db_user, db, search_service, add_service)
+        await grab_release(callback.message, session, db_user, db, search_service, add_service)
+    finally:
+        _release_grab(user_id)
 
 
 async def grab_release(
@@ -839,24 +873,30 @@ async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database
     if not callback.message:
         return
 
-    await callback.answer("Загружаю напрямую...")
-
-    message = callback.message
     user_id = db_user.tg_id
-
-    session = await db.get_session(user_id)
-    if not session or not session.selected_result:
-        await message.edit_text(Formatters.format_error("Сессия истекла. Повторите поиск."))
+    # RACE-01: reject a concurrent second grab (e.g. Confirm then Force) for this user.
+    if not await _claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
+    try:
+        await callback.answer("Загружаю напрямую...")
 
-    search_service, add_service, _ = await get_services()
+        message = callback.message
+        session = await db.get_session(user_id)
+        if not session or not session.selected_result:
+            await message.edit_text(Formatters.format_error("Сессия истекла. Повторите поиск."))
+            return
 
-    if not add_service.qbittorrent:
-        await message.edit_text(Formatters.format_error("qBittorrent не настроен"))
-        await db.delete_session(user_id)
-        return
+        search_service, add_service, _ = await get_services()
 
-    await _execute_grab(message, session, db_user, db, search_service, add_service, force_download=True)
+        if not add_service.qbittorrent:
+            await message.edit_text(Formatters.format_error("qBittorrent не настроен"))
+            await db.delete_session(user_id)
+            return
+
+        await _execute_grab(message, session, db_user, db, search_service, add_service, force_download=True)
+    finally:
+        _release_grab(user_id)
 
 
 @router.callback_query(F.data == "noop")

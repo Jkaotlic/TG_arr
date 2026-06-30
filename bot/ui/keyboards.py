@@ -94,6 +94,7 @@ class CallbackData:
     TRENDING_MOVIE = "trend_m:"  # trend_m:tmdb_id - view movie details
     TRENDING_SERIES_ITEM = "trend_s:"  # trend_s:tmdb_id - view series details
     TRENDING_ARTIST = "trend_a:"  # trend_a:idx - view trending artist from Deezer list
+    TRENDING_BACK = "trending_back"  # BUG-01: back to trending menu (not search's BACK)
 
     # Calendar
     CALENDAR_7 = "cal_7"  # 7 days
@@ -776,7 +777,7 @@ class Keyboards:
                 )
             ])
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_BACK),
         ])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -797,7 +798,7 @@ class Keyboards:
             ])
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_BACK),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -819,7 +820,7 @@ class Keyboards:
             ])
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
+            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_BACK),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)

@@ -277,71 +277,82 @@ async def handle_artist_selection(callback: CallbackQuery, db_user: User, db: Da
 
 async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Confirm add artist to Lidarr."""
+    # RACE-01: share the per-user grab guard with the movie/series flow so a
+    # double-tap can't add the artist twice. Lazy import avoids a module cycle.
+    from bot.handlers.search import _claim_grab, _release_grab
+
     user_id = db_user.tg_id
     session = await db.get_session(user_id)
     if not session or not isinstance(session.selected_content, ArtistInfo):
         return  # Not a music flow — fall through to other CONFIRM_GRAB handlers
 
-    services = await _get_music_services()
-    if services is None:
-        await callback.answer("Lidarr не настроен", show_alert=True)
+    if not await _claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
-    _search_service, add_service = services
-
-    artist: ArtistInfo = session.selected_content
-    prefs = db_user.preferences
-
-    await callback.answer("Добавляю...")
-    if callback.message:
-        await callback.message.edit_text(f"⏳ Добавляю <b>{html.escape(artist.name)}</b> в Lidarr...", parse_mode="HTML")
 
     try:
-        profiles = await add_service.get_lidarr_profiles()
-        metadata_profiles = await add_service.get_lidarr_metadata_profiles()
-        folders = await add_service.get_lidarr_root_folders()
-
-        if not profiles or not folders or not metadata_profiles:
-            if callback.message:
-                await callback.message.edit_text(
-                    Formatters.format_error("Нет профилей качества / папок / metadata-профилей в Lidarr"),
-                )
+        services = await _get_music_services()
+        if services is None:
+            await callback.answer("Lidarr не настроен", show_alert=True)
             return
+        _search_service, add_service = services
 
-        profile_id = prefs.lidarr_quality_profile_id or profiles[0].id
-        metadata_profile_id = prefs.lidarr_metadata_profile_id or metadata_profiles[0].id
-        folder = next((f for f in folders if f.id == prefs.lidarr_root_folder_id), None) or folders[0]
+        artist: ArtistInfo = session.selected_content
+        prefs = db_user.preferences
 
-        added, action = await add_service.add_artist(
-            artist=artist,
-            quality_profile_id=profile_id,
-            metadata_profile_id=metadata_profile_id,
-            root_folder_path=folder.path,
-            monitor="all",
-            search_for_missing=True,
-        )
-        action.user_id = user_id
-        await db.log_action(action)
-
+        await callback.answer("Добавляю...")
         if callback.message:
-            if added:
-                await callback.message.edit_text(
-                    Formatters.format_success(
-                        f"<b>{html.escape(added.name)}</b>\n\n"
-                        f"Добавлен в Lidarr. Запущен автопоиск по всем альбомам."
-                    ),
-                    parse_mode="HTML",
-                )
-            else:
-                await callback.message.edit_text(
-                    Formatters.format_error(action.error_message or "Не удалось добавить артиста"),
-                )
+            await callback.message.edit_text(f"⏳ Добавляю <b>{html.escape(artist.name)}</b> в Lidarr...", parse_mode="HTML")
 
-        await db.delete_session(user_id)
-        _artist_candidates.pop(user_id, None)
-    except Exception as e:
-        logger.error("Add artist failed", error=str(e))
-        if callback.message:
-            await callback.message.edit_text(Formatters.format_error("Операция временно недоступна"))
+        try:
+            profiles = await add_service.get_lidarr_profiles()
+            metadata_profiles = await add_service.get_lidarr_metadata_profiles()
+            folders = await add_service.get_lidarr_root_folders()
+
+            if not profiles or not folders or not metadata_profiles:
+                if callback.message:
+                    await callback.message.edit_text(
+                        Formatters.format_error("Нет профилей качества / папок / metadata-профилей в Lidarr"),
+                    )
+                return
+
+            profile_id = prefs.lidarr_quality_profile_id or profiles[0].id
+            metadata_profile_id = prefs.lidarr_metadata_profile_id or metadata_profiles[0].id
+            folder = next((f for f in folders if f.id == prefs.lidarr_root_folder_id), None) or folders[0]
+
+            added, action = await add_service.add_artist(
+                artist=artist,
+                quality_profile_id=profile_id,
+                metadata_profile_id=metadata_profile_id,
+                root_folder_path=folder.path,
+                monitor="all",
+                search_for_missing=True,
+            )
+            action.user_id = user_id
+            await db.log_action(action)
+
+            if callback.message:
+                if added:
+                    await callback.message.edit_text(
+                        Formatters.format_success(
+                            f"<b>{html.escape(added.name)}</b>\n\n"
+                            f"Добавлен в Lidarr. Запущен автопоиск по всем альбомам."
+                        ),
+                        parse_mode="HTML",
+                    )
+                else:
+                    await callback.message.edit_text(
+                        Formatters.format_error(action.error_message or "Не удалось добавить артиста"),
+                    )
+
+            await db.delete_session(user_id)
+            _artist_candidates.pop(user_id, None)
+        except Exception as e:
+            logger.error("Add artist failed", error=str(e))
+            if callback.message:
+                await callback.message.edit_text(Formatters.format_error("Операция временно недоступна"))
+    finally:
+        _release_grab(user_id)
 
 
 # BUG-27: CONFIRM_GRAB is now dispatched from handlers/search.py by session type.

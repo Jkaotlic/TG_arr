@@ -1,5 +1,7 @@
 """Download management handlers for qBittorrent integration."""
 
+import html
+
 import structlog
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -129,7 +131,7 @@ async def cmd_pause(message: Message, db_user: User) -> None:
             torrent = await qbt.get_torrent_by_short_hash(args)
             if torrent:
                 await qbt.pause([torrent.hash])
-                await message.answer(f"⏸️ Приостановлен: {torrent.name}")
+                await message.answer(f"⏸️ Приостановлен: {html.escape(torrent.name)}")
             else:
                 await message.answer(f"❌ Торрент не найден: {args}")
 
@@ -157,7 +159,7 @@ async def cmd_resume(message: Message, db_user: User) -> None:
             torrent = await qbt.get_torrent_by_short_hash(args)
             if torrent:
                 await qbt.resume([torrent.hash])
-                await message.answer(f"▶️ Возобновлён: {torrent.name}")
+                await message.answer(f"▶️ Возобновлён: {html.escape(torrent.name)}")
             else:
                 await message.answer(f"❌ Торрент не найден: {args}")
 

@@ -1,6 +1,7 @@
 """Trending/popular content handlers."""
 
 import asyncio
+import html
 
 import structlog
 from aiogram import F, Router
@@ -54,6 +55,31 @@ async def handle_trending_menu(message: Message) -> None:
     )
 
     await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=Keyboards.trending_menu(show_music=show_music),
+    )
+
+
+@router.callback_query(F.data == CallbackData.TRENDING_BACK)
+async def handle_trending_back(callback: CallbackQuery) -> None:
+    """BUG-01: return to the trending menu.
+
+    Trending lists previously used the shared CallbackData.BACK, which
+    search.handle_back (registered first) swallowed with "Сессия истекла".
+    A dedicated callback + handler re-renders the menu instead.
+    """
+    await callback.answer()
+    if not callback.message:
+        return
+
+    settings = get_settings()
+    show_music = settings.deezer_enabled and settings.lidarr_enabled
+    text = (
+        "🔥 <b>Популярное сейчас</b>\n\n"
+        "Выберите категорию для просмотра топа:"
+    )
+    await callback.message.edit_text(
         text,
         parse_mode="HTML",
         reply_markup=Keyboards.trending_menu(show_music=show_music),
@@ -355,7 +381,7 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
 
         if action.success and added_movie:
             await status_msg.edit_text(
-                f"✅ <b>{added_movie.title}</b> ({added_movie.year})\n\n"
+                f"✅ <b>{html.escape(added_movie.title)}</b> ({added_movie.year})\n\n"
                 f"Фильм добавлен в Radarr. Начат поиск релизов.",
                 parse_mode="HTML",
             )
@@ -464,7 +490,7 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
         if action.success and added_series:
             year_str = f" ({added_series.year})" if added_series.year else ""
             await status_msg.edit_text(
-                f"✅ <b>{added_series.title}</b>{year_str}\n\n"
+                f"✅ <b>{html.escape(added_series.title)}</b>{year_str}\n\n"
                 f"Сериал добавлен в Sonarr. Начат поиск релизов.",
                 parse_mode="HTML",
             )

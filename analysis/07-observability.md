@@ -1,264 +1,49 @@
-# Observability TG_arr v1.0 (раунд 3)
+# Анализ — Наблюдаемость · TG_arr (раунд 4, 2026-06-30)
 
-Дата: 2026-05-08. Reviewer: Claude (Opus 4.7).
-Контекст: жалоба юзера «плохо ищет, не понимает контент» — главный вопрос: **можно ли по prod-логам отдиагностировать конкретный инцидент поиска?**
-
-Stack: structlog 25.5.0, Python 3.12, JSON-renderer (INFO+), Docker `json-file` (max-size 10m, max-file 3). Metrics нет, tracing нет, error-sampling нет. Healthcheck — touch-file `/tmp/tgarr-alive` + OS-thread watchdog (`bot/main.py:40-65`).
-
-> Прошлый отчёт (`analysis_round2/07-observability.md`) зафиксировал OBS-01 .. OBS-10. Перепроверка показала: **ни одна из находок не исправлена в коде.** Все статусы ниже это подтверждают и фокусируются на сценарии «плохо ищет».
-
----
-
-## Главный вывод по жалобе юзера
-
-**Сценарий «плохо ищет, не понимает контент» по текущим логам отлаживается на 30%.**
-
-Что есть в JSON-логе INFO для одного поискового цикла (`process_search`):
-1. `LoggingMiddleware: Incoming event` — `event_type=message, user_id, chat_id, text=<query[:50]>` — но **только на DEBUG** (`auth.py:125`), в prod (LOG_LEVEL=INFO) полностью отсутствует.
-2. `Parsed query parsed={...}` — `search.py:152`, есть.
-3. `detect_content_type` — параллельные lookup'ы Radarr/Sonarr/Lidarr логируются на INFO внутри клиентов (`Looking up movie/series/artist in <X>` + `Lookup completed <type>_count=N`). Но **итоговый winner НЕ логируется** — `search_service.detect_content_type` (`search_service.py:36-109`) возвращает `ContentType` молча. Если detection ошибся (movie вместо series или UNKNOWN), по логам не видно, какие кандидаты были и почему не сматчилось через `_title_matches`.
-4. `Searching Prowlarr query=… content_type=…` (`prowlarr.py:63`) + `Search completed result_count=N` (`prowlarr.py:81`).
-5. `Search completed result_count=N` второй раз из service (`search_service.py:169`) — после фильтрации по `detected_type`, но **без сохранения "до фильтра"**. Если Prowlarr вернул 50 результатов, а после фильтра 0 — видно «50 → 0», но не видно почему: какие `detected_type` были у отброшенных.
-
-Что **не** логируется и нужно для диагностики:
-- Финальный winner `detect_content_type` (movie/series/music/unknown).
-- Какие кандидаты Radarr/Sonarr/Lidarr вернули в `detect_content_type` (`movies[:3]`, `series[:3]`, `artists[:3]` — их title/year, прошёл ли `_title_matches`).
-- Сколько результатов было до и после фильтра по `detected_type` (`search_service.py:163-164`).
-- Top-N результатов с их `calculated_score` после ранжирования (для дебага «почему этот релиз первый»).
-- `parsed["title"]` (cleaned) vs `query` — что реально полетело в Prowlarr.
-
-В `parsed=parsed` есть `title`, но это сырой dict — в JSON-логе видно, но без явных bind'ов.
-
----
-
-## Критические пробелы
-
-### OBS-11 (HIGH) — `detect_content_type` не логирует winner и кандидатов
-- **Файл**: `bot/services/search_service.py:36-109`.
-- **Проблема**: функция возвращает `ContentType.MOVIE/SERIES/MUSIC/UNKNOWN` без логирования (а) что она решила и (б) почему. Lookup'ы в Radarr/Sonarr/Lidarr логируются, но это «N штук вернули». Нет лога:
-  - Какие top-3 кандидата проверялись через `_title_matches`.
-  - Какой кандидат сматчился (или ни один).
-  - Какой regex-pattern сработал (если series detected by pattern на :64-66).
-- **Влияние на дебаг**: главная причина невозможности отладить «не понимает контент». Юзер ввёл «Дюна 2021» — бот ответил «фильм или сериал?». По логам видно `Lookup completed movie_count=20`, но **не видно**, что ни один из 20 не прошёл `_title_matches('дюна 2021', 'Dune', 2021)` из-за кириллица-vs-латиница (это реальный баг, см. LOGIC категорию).
-- **Решение**: в начале и в конце `detect_content_type` `log = logger.bind(query=query)`; перед каждым `return` — `log.info("content_type_detected", winner=..., reason=..., movie_titles=[...], series_titles=[...], artist_titles=[...])`; в `_title_matches` опционально DEBUG-лог на каждый сравниваемый кандидат.
-- **Статус**: [ ]
-
-### OBS-12 (HIGH) — `search_releases` теряет данные о фильтрации по detected_type
-- **Файл**: `bot/services/search_service.py:163-170`.
-- **Проблема**: 
-  ```python
-  if content_type != ContentType.UNKNOWN:
-      results = [r for r in results if r.detected_type == content_type or r.detected_type == ContentType.UNKNOWN]
-  ```
-  Молча отбрасывает результаты. Финальный лог `Search completed result_count=N` (`:169`) показывает только число **после** фильтра. Если Prowlarr вернул 50, а фильтр оставил 5 — невозможно понять почему без отдельного логирования.
-- **Влияние на дебаг**: при жалобе «мало результатов» нужно знать, отбросил ли фильтр (тогда баг в `_normalize_result.detected_type`) или Prowlarr реально мало вернул.
-- **Решение**: добавить `log.info("filtered_by_type", before=N_raw, after=N_filtered, dropped_types=Counter([r.detected_type for r in raw if r not in results]))`.
-- **Статус**: [ ]
-
-### OBS-13 (HIGH) — Top-результаты с score не логируются перед показом юзеру
-- **Файл**: `bot/handlers/search.py:201-256`.
-- **Проблема**: `results = await search_service.search_releases(...)` → `scoring.sort_results` (внутри service) → выводится юзеру. Промежуточно нет лога вида `top_3_results=[{title, score, indexer, seeders}, ...]`. При жалобе «опять плохой релиз первый» — невозможно проверить ранжирование.
-- **Влияние на дебаг**: scoring (`bot/services/scoring.py`) — 30+ правил. Без top-N в логе оператор не может решить, баг ли это в `_parse_quality` (определил `source=CAM` неправильно) или в weights.
-- **Решение**: после `search_releases` — `log.info("top_results", top=[{"title": r.title[:80], "score": r.calculated_score, "indexer": r.indexer, "seeders": r.seeders, "size_gb": r.get_size_gb(), "detected_type": r.detected_type.value} for r in results[:5]])`.
-- **Статус**: [ ]
-
-### OBS-14 (HIGH) — `process_search` не логирует ключевые ветки
-- **Файл**: `bot/handlers/search.py:123-269`.
-- **Проблема**: 
-  - На входе нет `log.info("search_started", query=...)` — есть только `Parsed query parsed=...`.
-  - Ветка «question_suffix» (`:172-190`) — show_music decision, partial session save — **ничего не логирует**. Юзер сообщает «бот спросил фильм/сериал», по логам не понять, что это была эта ветка.
-  - Ветка `if not results` (`:203-208`) — «Ничего не найдено» — тоже без INFO-лога. У SearchService логируется `No results found`, но без user_id/query_clean.
-  - Музыка handoff (`:165-170`) — `process_music_search` вызывается, но фактический «тип определён MUSIC» не логируется.
-- **Влияние на дебаг**: невозможно по логам прочитать «состояние» поиска у конкретного юзера. Нет ни start-event, ни branch-event.
-- **Решение**: `log.info("search_branch", branch="auto_detect_unknown" / "question_user" / "search_releases" / "music_handoff" / "no_results", ...)` на каждом `return`.
-- **Статус**: [ ]
-
-### OBS-01 (HIGH, сохраняется с раунда 2) — handlers вызывают module-level `logger` без bind'ов
-- **Файлы**: 60+ строк (см. `Grep log\.error|logger\.error` выше).
-- **Проблема**: `LoggingMiddleware` (`auth.py:99-133`) делает `log = logger.bind(user_id=...)`, но это **локальная** переменная — handler'ы обращаются к module-level `logger = structlog.get_logger()` и пишут без user_id/chat_id.
-  - Примеры: `downloads.py:77,80,104,107,206,248,319,352,...`; `trending.py:107,158,189,212,266,306,367,476`; `calendar.py:48,54,61`; `settings.py:68,102,...`; `emby.py:75,87,134,138,...`; `history.py:42`; `music.py:265,296`; `search.py:268,468,678`.
-  - Из ~60 error-логов в handlers только ~5 (search.py:152, 268; music.py:121; добавлены в раунде 2) имеют bind с user_id/query.
-- **Влияние на дебаг**: при инциденте «X не работает у юзера Y» в логе видно `Failed to refresh error="..."` без user_id. Невозможно ответить «затронуло одного юзера или всех».
-- **Решение**: добавить `structlog.contextvars.bind_contextvars(user_id=..., chat_id=..., request_id=uuid4().hex[:8])` в `LoggingMiddleware.__call__` (perosessor `merge_contextvars` уже подключён в `main.py:80`); `clear_contextvars()` в finally. Тогда **любой** `logger.error` подхватит контекст автоматически.
-- **Статус**: [ ] (зафиксирован в раунде 2 как fix-plan, но не выполнен)
-
-### OBS-06 (HIGH, сохраняется) — невозможно отладить grab-инцидент
-- **Файлы**: `bot/services/add_service.py:278-426 (movie)`, `:428-584 (series)`, `:640-772 (music)`.
-- **Проблема**: при «не добавился фильм X» в ActionLog (`bot/models.py`) сохраняется `release_title`, `error_message`, но **нет**: 
-  - rejections-list от Radarr/Sonarr/Lidarr (есть в `log.warning("Release was not approved", reason=...)` — но это в stdout-log, а не в БД).
-  - Какой fallback использовался (push → grab → qBit → search). Логи есть в коде (`add_service.py:350,373,393,415`), но скоррелировать их с конкретной user-action из БД нельзя без request_id.
-  - download_url masked-вариант для post-mortem.
-- **Влияние на дебаг**: оператор смотрит ActionLog, видит `success=false, error_message="Релиз отклонён: Quality not wanted"` — но не видит, что было до этого: попыток push было N, какой именно release был выбран, был ли fallback к qBit.
-- **Решение**: расширить `ActionLog` полем `details: dict` (TEXT JSON в SQLite). Туда складывать `{"rejections": [...], "fallback_chain": ["push", "grab", "qbit"], "download_url_masked": "...", "indexer": "..."}`. Уже описано в раунде 2 — не сделано.
-- **Статус**: [ ]
-
-### OBS-15 (HIGH, NEW) — нет latency-логирования по этапам поиска
-- **Файлы**: `bot/handlers/search.py:123-269`, `bot/services/search_service.py:36-170`.
-- **Проблема**: BaseAPIClient логирует `elapsed_ms` per HTTP call, но **только на DEBUG** (`base.py:137-141`). На INFO (prod) — **ноль timing-данных**. Невозможно понять, какой этап тормозит:
-  - parse_query (CPU, обычно <1ms — ок)
-  - detect_content_type (3 параллельных API call — может быть 500ms-30s)
-  - search_releases → prowlarr.search (timeout=60s — самое медленное)
-  - scoring.sort_results (CPU, 100 results × 30 правил)
-  - DB save_search/save_session/log_action
-  - Telegram edit_text
-- **Влияние на дебаг**: жалоба «бот тупит» — не отличить «Prowlarr 30s» от «scoring 5s» от «Telegram timeout». User-visible latency только в watchdog-stale event (но это уже catastrophe).
-- **Решение**: на верхнем уровне `process_search` обернуть каждый этап `t0 = time.monotonic(); ...; log.info("stage_done", stage="detect_content_type", elapsed_ms=...)`. Либо `log.bind` накапливающий dict timings + один итоговый event.
-- **Статус**: [ ]
-
----
+Подтверждено находок: **5** (critical=0, high=0, medium=2, low=3). Все прошли состязательную верификацию (CONFIRMED/PLAUSIBLE).
 
 ## Средние
 
-### OBS-02 (MED, сохраняется) — exc_info=True используется только в middleware
-- **Файл**: только `bot/middleware/auth.py:132`.
-- **Проблема**: 60+ `logger.error("...", error=str(e))` без `exc_info=True`. JSON-renderer теряет traceback. При production-инциденте оператор видит `error="'NoneType' object has no attribute 'tg_id'"` без линии и call-stack.
-- **Решение**: для всех `except Exception as e: logger.error(...)` добавить `exc_info=True`. Либо сделать ProcessorL `structlog.processors.format_exc_info` + автоподхват из `event_dict["exc_info"]`.
-- **Статус**: [ ]
+### OBS-01: qBittorrent login failure is never logged at the client; only the success path logs
+- **Файл**: `bot/clients/qbittorrent.py:122`
+- **Проблема**: In login() the success branch logs `log.info("Successfully logged in...")` (line 136), but both failure branches raise without any log: line 122-126 raises QBittorrentAuthError when status==403 or "Fails" in response.text, and line 139-142 raises QBittorrentError for any other non-success status. The bound context `log = logger.bind(url=self.base_url)` (line 109) is only emitted at DEBUG (line 110) and on success. Scenario: operator sets a wrong QBITTORRENT_PASSWORD on the Pi. The notification service's _check_for_completions loop calls get_torrents -> _ensure_authenticated -> login(), which raises QBittorrentAuthError; the only trace is the generic `logger.error("Error checking for completions", error="Неверный логин или пароль")` (notification_service.py:175) emitted every cycle, with no base_url and no auth-vs-network classification. The qBittorrent login failure (an explicitly critical path) has no dedicated log event, so distinguishing 'wrong password' from 'qBit unreachable' requires reading Russian error strings.
+- **Риск**: Wrong credentials or a qBit version mismatch on the Pi produce only a vague repeated downstream error, slowing prod diagnosis.
+- **Решение**: In login(), before raising in both failure branches, emit a structured warning, e.g. `log.warning("qbittorrent_login_failed", status_code=response.status_code, reason="auth" if 403/Fails else "unexpected")`. This puts a single, greppable event with base_url on the wrong-password / unexpected-status paths.
+- **Верификация**: CONFIRMED — Opened bot/clients/qbittorrent.py. login() (lines 105-145) binds `log = logger.bind(url=self.base_url)` at 109 and emits only `log.debug` (110) and, on success, `log.info("Successfully logged in to qBittorrent")` (136). Both failure branches raise with NO log: line 122 `if response.status_code == 403 or "Fails" in response.text:` -> raises QBittorrentAuthError (123-126); line 139 -> raises QBittorrentError("Ошибка авторизации в qBittorrent", ...) (139-142). Grep for log/logger calls in the file confirms no warning/error/info between lines 122 and 142. Traced the runtime flow: notification_serv
+- **Статус**: [ ] Не исправлено
 
-### OBS-03 (MED, сохраняется) — нет метрик
-- **Файлы**: проект в целом.
-- **Проблема**: ни prometheus-client, ни statsd. Нельзя получить:
-  - QPS по handler'у
-  - p50/p95/p99 latency для Prowlarr/Radarr/Sonarr
-  - error rate
-  - search no_results rate (важно для жалобы юзера — если процент >20%, query-detection не работает)
-- **Решение**: для 10-20-юзерного бота prometheus избыточен, но **минимум** — структурный JSON c `event="search_metric", outcome="no_results"|"results"|"music_handoff"|"question"` + offline-парсер `jq` или `goaccess`. Альтернатива: prometheus exporter на :9090 (image +5 MB).
-- **Статус**: [ ] (deferred в раунде 2, OK)
-
-### OBS-07 (MED, сохраняется) — нет request_id
-- **Файл**: `bot/middleware/auth.py:99-133`.
-- **Проблема**: один user-event = handler → service → 2-5 client'ов → DB. В логах десятки строк без корреляции. При двух одновременных запросах одного юзера логи перемешиваются.
-- **Решение**: `bind_contextvars(request_id=uuid4().hex[:8])` в LoggingMiddleware (см. OBS-01).
-- **Статус**: [ ]
-
-### OBS-04 (MED, сохраняется) — qBittorrent client использует только `error`, нет WARNING для retry
-- **Файл**: `bot/clients/qbittorrent.py:255-256, 419, 479`.
-- **Проблема**: `BaseAPIClient` различает WARNING (retry) vs ERROR (final) — `base.py:157,177,181`. qBittorrent client (отдельная иерархия) кладёт всё в `error`, даже временные ошибки. В реальности retry tenacity работает (line 99-104), но логи не отличают «временно» от «финально».
-- **Решение**: в `qbittorrent.py:_request` после exception — `log.warning(..., will_retry=True)` если попытка не последняя; `log.error(...)` только на финальном fail.
-- **Статус**: [ ]
-
-### OBS-16 (MED, NEW) — `BaseAPIClient.elapsed_ms` живёт только на DEBUG
-- **Файл**: `bot/clients/base.py:137-141`.
-- **Проблема**: timing per HTTP call залогирован, но `log.debug` — в prod (INFO) не виден. При этом API-latency — ключевая метрика для observability arr-стека (Radarr/Sonarr/Lidarr/Prowlarr медленные при тормозящем диске).
-- **Влияние**: невозможно построить latency-distribution без переключения LOG_LEVEL=DEBUG (что небезопасно — SEC-03 token-leak уже один раз был).
-- **Решение**: вынести в INFO с порогом: `if elapsed > 1000: log.warning("slow_api_call", elapsed_ms=...)` или дедуплицированный INFO ровно для health-summary каждые 60s.
-- **Статус**: [ ]
-
-### OBS-17 (MED, NEW) — `parse_query` не логирует, что было «съедено» из запроса
-- **Файл**: `bot/services/search_service.py:202-258`.
-- **Проблема**: parse_query экстрактит year/season/quality и оставляет cleaned title. `process_search:152` логирует `parsed=<dict>`, но **дальше используется** `parsed.get("title")` для Prowlarr (`search.py:200`). Если parser «съел» лишнее (например, число `2021` интерпретирует как год даже из «Top 2021 list»), реальный поисковый term будет другим. В логе видно `parsed.title="Top  list"` — но `query="Top 2021 list"` уже не сохранён в одном bind'е с этим title.
-- **Решение**: `log.info("search_term", original=query, cleaned=parsed["title"], extracted={"year": ..., "season": ..., "quality": ...})`.
-- **Статус**: [ ]
-
-### OBS-18 (MED, NEW) — Жертва маскировки: `_mask_url` обрезает URL до 100 символов и теряет path
-- **Файл**: `bot/services/add_service.py:38-55`.
-- **Проблема**: `_mask_url(url, max_len=100)` обрезает до 100 байт **после** замены sensitive query params. Длинные magnet-URL и URL с tracker-path `https://tracker.example.org/path/with/many/segments?passkey=***&...` обрезаются — в логе видно начало, но **не tracker-path** (важен для определения «какой private tracker сглючил»).
-- **Решение**: увеличить max_len до 200, или хранить в БД (ActionLog.details) полный masked URL без обрезания.
-- **Статус**: [ ]
-
----
+### OBS-02: Non-retry POST path (grab/push) has no timing or slow-call instrumentation that the retry path has
+- **Файл**: `bot/clients/base.py:256`
+- **Проблема**: _request() (the retried GET/POST path) records start_time, logs `API request completed` at DEBUG with elapsed_ms, and warns `slow_api_call` when elapsed>2000ms (lines 137-162). But _post_no_retry() — used for the most critical non-idempotent operations grab_release and push_release in radarr/sonarr/lidarr/prowlarr clients — has zero instrumentation: no log binding, no start_time, no slow-call warning, no completion log (lines 264-283). Scenario: a user taps 'Grab' and Radarr's /api/v3/release/push takes 9s on the Pi because the indexer is slow. The base client emits nothing; only the add_service layer logs the final 'Push release result', so per-call latency of the slow grab/push leg is invisible and cannot be reconstructed from logs without DEBUG, and there is no slow_api_call signal for grab/push at all.
+- **Риск**: Slow grab/push calls (the user-facing critical action) leave no latency trace, hindering performance triage on the Pi.
+- **Решение**: Mirror _request's instrumentation in _post_no_retry: bind `service`/`endpoint`, capture start_time, log a DEBUG completion with elapsed_ms and a WARNING slow_api_call when elapsed>2000ms.
+- **Верификация**: CONFIRMED — Opened bot/clients/base.py. The retried path _request() (lines 119-210) binds a structlog logger with service/method/endpoint (lines 131-135), captures start_time = time.monotonic() (line 137), computes elapsed, logs DEBUG "API request completed" with elapsed_ms (lines 150-154), and emits WARNING "slow_api_call" when elapsed > 2000ms (lines 157-162). By contrast _post_no_retry() (lines 256-283) has ZERO of this: no logger.bind, no start_time, no elapsed computation, no completion DEBUG log, and no slow_api_call WARNING. It only raises on errors. This is the exact asymmetry the finding describe
+- **Статус**: [ ] Не исправлено
 
 ## Низкие
 
-### OBS-05 (LOW, сохраняется) — нет error sampling/rate-limit
-- **Файл**: `bot/middleware/auth.py:132`.
-- **Проблема**: spam: при Prowlarr down каждый search → `exc_info=True` в logging-middleware → стек на каждый запрос. 5-10 юзеров × 30 req/min × full traceback = переполнение `max-size: 10m` за минуты, потеря старых событий.
-- **Решение**: `structlog`-processor дедупликации по hash(event+error_type) с TTL 60s; для критичных оставить как есть.
-- **Статус**: [ ]
+### OBS-03: Release-rejection details are logged but never persisted to ActionLog.details for history/forensics
+- **Файл**: `bot/services/add_service.py:407`
+- **Проблема**: When a release is rejected by Radarr/Sonarr/Lidarr, the per-reason `rejections` list is logged via `log.warning("Release was not approved", reason=...)` (e.g. add_service.py:366, 518, 717) but only a flattened string is stored in action.error_message (lines 407-408, 559-560, 754-755). The dedicated ActionLog.details column (persisted in db.log_action -> column `details`, db.py:419) is never populated anywhere in the codebase (grep shows no assignment to action.details). Scenario: a user complains a grab silently 'failed'; the history view and DB only show a truncated reason string and there is no structured per-rejection record to correlate which quality rule rejected it. Debugging a rejection from stored data (not live logs, which rotate) is impossible.
+- **Риск**: Post-hoc debugging of 'why was my grab rejected' relies on ephemeral logs; the persisted action row lacks the structured reason.
+- **Решение**: Populate action.details with the structured rejection data (e.g. json.dumps({"rejections": rejections})) when release_rejected is set, so the persisted action row retains the full reason set for later debugging via /history.
+- **Верификация**: CONFIRMED — Verified against current code. The ActionLog.details field exists and is explicitly documented for this purpose: models.py:298 `details: Optional[str] = Field(default=None, description="JSON blob: rejections, fallback_used, etc.")`. The DB layer fully supports it: db.py:405/419 inserts action.details into the `details` column, and db.py:464-479 reads it back in _row_to_action (with a legacy-row guard, OBS-06). So the column round-trips and any populated value would be available to /history.
 
-### OBS-08 (LOW, сохраняется) — `notification_service._monitor_loop` без heartbeat
-- **Файл**: `bot/services/notification_service.py:92-111`.
-- **Проблема**: 60s loop. Если `qbt.get_torrents()` зависнет на 50s, watchdog-thread (`main.py:40`) отстрелит процесс через 120s — но в логе будет тишина 50s. heartbeat `tick {iter, duration_ms}` помог бы post-mortem.
-- **Решение**: `log.debug("monitor_tick", ...)` каждые N итераций или `log.info("monitor_summary", checks=..., notifications_sent=..., elapsed_ms=...)` каждые 5 минут.
-- **Статус**: [ ]
+However, a Grep for `\.details` across bot/ returns exactly ONE hit — db.py:419, the read of action.det
+- **Статус**: [ ] Не исправлено
 
-### OBS-09 (LOW, сохраняется) — `AuthMiddleware` создание-конфликт на DEBUG
-- **Файл**: `bot/middleware/auth.py:84-89`.
-- **Проблема**: race-condition при первом /start от двух concurrent updates. Conflict логируется DEBUG → не виден в prod. Если конфликт частит (>1/мин), это симптом DB-locking.
-- **Решение**: WARNING + counter.
-- **Статус**: [ ]
+### OBS-04: qBittorrent pause/resume API-version fallback (404 -> old endpoint) is not logged
+- **Файл**: `bot/clients/qbittorrent.py:316`
+- **Проблема**: pause() and resume() try the v5 endpoints (/torrents/stop, /torrents/start) and on a QBittorrentError with status_code==404 silently fall back to the legacy endpoints (/torrents/pause, /torrents/resume) without logging the fallback (qbittorrent.py:317-323 and 332-338). Only the eventual success is logged (`logger.info("Paused torrents", ...)`). Scenario: after a qBittorrent downgrade/upgrade, every pause/resume quietly takes the fallback branch; there is no signal in logs that the primary endpoint 404s, so an operator cannot tell which API surface is actually in use or that the bot is compensating for a version mismatch.
+- **Риск**: qBittorrent API-version drift is invisible; a future legacy-endpoint removal would surface only as user-facing failures with no prior breadcrumb.
+- **Решение**: Add a `logger.debug("qbt_endpoint_fallback", op="pause"/"resume")` (or warning) inside the 404 branch before issuing the legacy call.
+- **Верификация**: CONFIRMED — Opened bot/clients/qbittorrent.py. pause() (lines 311-324) and resume() (lines 326-339) match the finding exactly. pause() at line 318 tries POST /api/v2/torrents/stop; the except block (lines 319-323) catches QBittorrentError and, when e.status_code == 404, issues POST /api/v2/torrents/pause (line 321) with NO logging in that branch (only re-raises for non-404). resume() (lines 332-338) mirrors this: tries /torrents/start, falls back to /torrents/resume on 404 with no log. The only logging is logger.info("Paused torrents", hashes=...) at line 324 and logger.info("Resumed torrents", ...) at li
+- **Статус**: [ ] Не исправлено
 
-### OBS-10 (LOW, сохраняется) — `TelegramBadRequest "message is not modified"` глотается без счётчика
-- **Файл**: `bot/handlers/downloads.py:202,243,272,293,578,619,660`.
-- **Проблема**: 7+ повторений `if "message is not modified" not in str(e): raise`. Никаких counter/log. Если новый тип BadRequest появится (`message too long`, `entity not found`), будет crash без диагностики, что именно произошло.
-- **Решение**: helper `_safe_edit(callback, ...)` с единым `log.warning("telegram_bad_request_handled", reason=str(e))` для не-fatal случаев.
-- **Статус**: [ ]
-
-### OBS-19 (LOW, NEW) — `LoggingMiddleware: Incoming event` на DEBUG, в prod невидимо
-- **Файл**: `bot/middleware/auth.py:125`.
-- **Проблема**: `log.debug("Incoming event")` — на INFO (prod) **полностью отсутствует** факт прихода update'а. Если кто-то сделал /search и **ничего не произошло** (handler-routing промахнулся), по логам этого не видно. Только если handler сам что-то логирует.
-- **Решение**: повысить до INFO для message с command/text + callback_query (~10 событий/мин в whitelisted-боте — норм). Либо INFO для command+text events, DEBUG для всего остального.
-- **Статус**: [ ]
-
-### OBS-20 (LOW, NEW) — нет slow-query log для SQLite
-- **Файлы**: `bot/db.py` (полный модуль).
-- **Проблема**: SQLite в Docker volume на rpie4 (microSD/external HDD). При фрагментации/I/O-stall запросы к `searches`, `search_results`, `actions_log` могут идти 1-5s. Никакого timing.
-- **Решение**: декоратор `@_timed_query` для критичных методов (`get_session`, `save_session`, `log_action`) → WARNING если >500ms.
-- **Статус**: [ ]
-
-### OBS-21 (LOW, NEW) — `prowlarr._normalize_result` молча отбрасывает items
-- **Файл**: `bot/clients/prowlarr.py:88-99`.
-- **Проблема**: 
-  ```python
-  guid = item.get("guid") or item.get("downloadUrl") or item.get("infoUrl") or ""
-  if not guid: return None
-  title = item.get("title") or item.get("fileName") or ""
-  if not title: return None
-  ```
-  Если indexer вернул items без guid (бывает у некоторых private-trackers), они **молча** теряются. `Search completed result_count=N` — после фильтрации, без счётчика отброшенных.
-- **Влияние**: жалоба «мало результатов» — может быть из-за этого, но в логе невидимо.
-- **Решение**: счётчик `dropped_no_guid`, `dropped_no_title` → один summary-log на конце поиска.
-- **Статус**: [ ]
-
-### OBS-22 (LOW, NEW) — Telegram-команды не пишутся в БД ActionLog (только SEARCH/GRAB/ADD)
-- **Файлы**: `bot/handlers/*.py`, `bot/models.py:ActionLog`.
-- **Проблема**: ActionLog содержит SEARCH/GRAB/ADD типы. Действия `pause/resume/delete torrent`, `force_grab`, `cancel`, `back`, `change_settings` — **не логируются в БД**. В случае инцидента «у меня всё пропало» (юзер случайно сделал delete-with-files) restoration-аудит невозможен.
-- **Решение**: расширить `ActionType` enum + `db.log_action` вызовы в `downloads.py:t_delete:, t_delf:, t_pause_all`. Достаточно `user_id, action_type, target=hash[:8]`.
-- **Статус**: [ ]
-
-### OBS-23 (LOW, NEW) — `_mask_tokens` processor работает только на string-values 1-го уровня
-- **Файл**: `bot/main.py:21-26`.
-- **Проблема**: 
-  ```python
-  for k, v in list(event_dict.items()):
-      if isinstance(v, str): event_dict[k] = ...sub(v)
-  ```
-  Не обходит вложенные dict/list (например, `parsed={...}` в `search.py:152`, `result=result` в `add_service.py:357,509,710`). Если внутри nested dict окажется bot-token (теоретически — TG webhook URL), маска не сработает.
-- **Влияние**: minimal на сегодня (TG-токен в nested структурах не появляется), но в любой момент кто-то залогирует `tmdb_response={"results": [..., url: "https://api.tg.../botXXX:..."]}` и токен потечёт.
-- **Решение**: рекурсивный обход event_dict.
-- **Статус**: [ ]
-
-### OBS-24 (LOW, NEW) — Watchdog-stale dump в stderr теряется в Docker-rotation
-- **Файл**: `bot/main.py:58-64`.
-- **Проблема**: `faulthandler.dump_traceback(file=sys.stderr, all_threads=True)` — отлично. Но stderr идёт через `json-file` driver с `max-size 10m, max-file 3` = 30MB rolling. Если хеш-инцидент → дамп ~50KB stack-traces; через 10 минут активного бота они уйдут в ротацию.
-- **Решение**: отдельный mount `/var/log/tgarr-watchdog.log` для критичных дампов. Опционально: persistent volume.
-- **Статус**: [ ]
-
----
-
-## Сводка
-
-| Категория | OBS-01 | 02 | 03 | 04 | 05 | 06 | 07 | 08 | 09 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 24 |
-|-----------|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Severity  | H | M | M | M | L | H | M | L | L | L | H | H | H | H | H | M | M | M | L | L | L | L | L | L |
-| Round     | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 2 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 | 3 |
-| Status    | ✗ | ✗ | ⏸ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-
-✗ = open. ⏸ = deferred (OBS-03 metrics).
-
-HIGH: 6 (3 из раунда 2 не сделаны + 3 новых). MED: 7. LOW: 11.
-
-## Главные actionable выводы
-
-1. **Жалоба «плохо ищет, не понимает контент» НЕ диагностируется по логам.** Нужны OBS-11 (winner detect_content_type), OBS-12 (фильтр по типу), OBS-13 (top-N с score), OBS-14 (branch-events в process_search) — всё HIGH-severity.
-2. **Корень problemy раунда 2 — OBS-01** (handlers без bind'ов) — не исправлен, хотя fix описан и тривиален: 3 строки в `LoggingMiddleware`. Это блокирует все остальные observability-улучшения, потому что без user_id/request_id даже хорошие логи бесполезны.
-3. **Latency полностью невидим в prod** (OBS-15, OBS-16). При жалобе «бот тупит» нет данных — где затык. Минимум: повысить `BaseAPIClient.elapsed_ms` в DEBUG → INFO с порогом slow.
-4. **Metrics остаются deferred** — для 10-20-юзера ОК, но в случае массового инцидента восстановить картину «сколько юзеров затронуто» нельзя без grep-counter по логам.
-5. **Прямой путь к 80% диагностируемости**: реализовать OBS-01 + OBS-11 + OBS-13 + OBS-15 = 4 правки, ~80 строк кода. Это закроет 90% жалоб типа «не работает поиск».
-
-Файлы, требующие правок (все HIGH):
-- `f:/VScode/TG_arr/bot/middleware/auth.py` (OBS-01, OBS-07)
-- `f:/VScode/TG_arr/bot/services/search_service.py` (OBS-11, OBS-12, OBS-17)
-- `f:/VScode/TG_arr/bot/handlers/search.py` (OBS-13, OBS-14, OBS-15)
-- `f:/VScode/TG_arr/bot/services/add_service.py` (OBS-06)
-- `f:/VScode/TG_arr/bot/clients/base.py` (OBS-16, OBS-02)
+### OBS-05: qBittorrent session-expiry re-auth (403 mid-request) is not logged
+- **Файл**: `bot/clients/qbittorrent.py:167`
+- **Проблема**: In _request(), a 403 on an authenticated call resets _authenticated and re-logs-in then re-issues the request (qbittorrent.py:167-186), but nothing is logged about the session having expired and been renewed. Scenario: qBittorrent's session cookie expires periodically; every Nth /downloads or notification poll silently re-authenticates. If re-auth starts failing intermittently (e.g. cookie/Referer policy change), there is no log distinguishing 'normal session refresh' from 'repeated forced re-auth', so a slow auth-churn problem on the Pi is undiagnosable.
+- **Риск**: Auth-churn or intermittent re-auth failures against qBittorrent are not observable, masking a degrading session-handling condition.
+- **Решение**: Log a debug event when entering the 403 re-auth branch (e.g. `logger.debug("qbt_session_expired_reauth", endpoint=endpoint)`), and a warning if the re-issued request also fails.
+- **Верификация**: CONFIRMED — Opened bot/clients/qbittorrent.py. The 403 re-auth branch in _request() spans lines 167-186: line 167 `# Session expired`, line 168 `if response.status_code == 403:`, line 169 `self._authenticated = False`, lines 170-173 re-auth via _ensure_authenticated() (re-raises on QBittorrentAuthError/QBittorrentError), lines 175-185 re-issue the request. This entire branch contains zero logging calls — no log.debug/info/warning marking that the session expired and was renewed. The only signal produced during a forced re-auth comes from login() at line 136, `log.info("Successfully logged in to qBittorren
+- **Статус**: [ ] Не исправлено
