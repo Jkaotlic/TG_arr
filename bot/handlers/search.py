@@ -24,6 +24,7 @@ from bot.clients.registry import get_emby, get_lidarr, get_prowlarr, get_qbittor
 from bot.services.add_service import AddService
 from bot.services.scoring import ScoringService
 from bot.services.search_service import SearchService
+from bot.ui.callbacks import PageCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 
@@ -384,10 +385,12 @@ async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Data
     )
 
 
-@router.callback_query(F.data.startswith(CallbackData.PAGE))
-async def handle_pagination(callback: CallbackQuery, db_user: User, db: Database) -> None:
-    """Handle pagination buttons."""
-    if not callback.data or not callback.message:
+@router.callback_query(PageCB.filter(F.scope == "search"))
+async def handle_pagination(
+    callback: CallbackQuery, callback_data: PageCB, db_user: User, db: Database
+) -> None:
+    """Handle pagination buttons (#1: typed PageCB, no string parsing)."""
+    if not callback.message:
         return
 
     settings = get_settings()
@@ -398,12 +401,7 @@ async def handle_pagination(callback: CallbackQuery, db_user: User, db: Database
         await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
         return
 
-    # Parse page number
-    try:
-        page = int(callback.data.removeprefix(CallbackData.PAGE))
-    except ValueError:
-        await callback.answer("Неверная страница", show_alert=True)
-        return
+    page = callback_data.page
 
     per_page = settings.results_per_page
     total_pages = (len(session.results) + per_page - 1) // per_page
