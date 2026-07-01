@@ -217,6 +217,46 @@ class EmbyClient:
         result = await self._request("GET", "/Sessions")
         return result if isinstance(result, list) else []
 
+    async def item_exists(
+        self,
+        name: str,
+        year: Optional[int] = None,
+        item_type: str = "Movie",
+    ) -> bool:
+        """Feature #4: is a title already present in the Emby library?
+
+        Best-effort: any error (or a name match with a mismatched year) returns
+        False so this can never block a grab — it is a soft dedup hint only.
+        """
+        if not name:
+            return False
+        params = {
+            "Recursive": "true",
+            "SearchTerm": name,
+            "IncludeItemTypes": item_type,
+            "Fields": "ProductionYear",
+            "Limit": 10,
+        }
+        try:
+            result = await self._request("GET", "/Items", params=params)
+        except Exception as e:
+            logger.warning("emby_item_exists_failed", name=name, error=str(e))
+            return False
+
+        items = result.get("Items", []) if isinstance(result, dict) else []
+        if not items:
+            return False
+        if year is None:
+            return True
+        for it in items:
+            py = it.get("ProductionYear")
+            try:
+                if py and abs(int(py) - int(year)) <= 1:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
     async def check_connection(self) -> tuple[bool, Optional[str], Optional[float]]:
         """Check if Emby is available."""
         start_time = time.monotonic()

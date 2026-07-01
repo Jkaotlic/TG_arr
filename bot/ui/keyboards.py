@@ -48,6 +48,10 @@ class CallbackData:
     CONFIRM_GRAB = "confirm_grab"
     FORCE_GRAB = "force_grab"  # Force download via qBittorrent
 
+    # Season monitoring (#2)
+    SEASON_MENU = "season_menu"     # open the season-monitoring preset picker
+    SEASON_PRESET = "season_set:"   # season_set:all / future / firstSeason / latestSeason
+
     # Settings
     SETTINGS = "settings"
     SET_RADARR_PROFILE = "set:rp:"  # set:rp:1
@@ -240,12 +244,30 @@ class Keyboards:
                 InlineKeyboardButton(text="⚡ Принудительно (qBit)", callback_data=CallbackData.FORCE_GRAB),
             ])
 
+        # #2: let the user choose which seasons Sonarr monitors (series only).
+        if content_type == ContentType.SERIES:
+            keyboard.append([
+                InlineKeyboardButton(text="📺 Мониторинг сезонов", callback_data=CallbackData.SEASON_MENU),
+            ])
+
         keyboard.append([
             InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
             InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def season_presets() -> InlineKeyboardMarkup:
+        """Feature #2: Sonarr season-monitoring preset picker."""
+        rows = [
+            [InlineKeyboardButton(text="📺 Все сезоны", callback_data=f"{CallbackData.SEASON_PRESET}all")],
+            [InlineKeyboardButton(text="🔮 Только будущие", callback_data=f"{CallbackData.SEASON_PRESET}future")],
+            [InlineKeyboardButton(text="1️⃣ Первый сезон", callback_data=f"{CallbackData.SEASON_PRESET}firstSeason")],
+            [InlineKeyboardButton(text="🔚 Последний сезон", callback_data=f"{CallbackData.SEASON_PRESET}latestSeason")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK)],
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
     def quality_profiles(profiles: list[QualityProfile], prefix: str) -> InlineKeyboardMarkup:

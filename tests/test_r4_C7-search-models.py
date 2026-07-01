@@ -40,25 +40,25 @@ def test_user_preferences_ignores_legacy_language_in_stored_json():
 
 
 # ---------------------------------------------------------------------------
-# DEAD-11: SearchSession.monitor_type removed
+# Feature #2 (supersedes DEAD-11): SearchSession.monitor_type re-added and is now
+# actually READ by search._decide_monitor_type as the user-chosen season preset.
 # ---------------------------------------------------------------------------
-def test_search_session_has_no_monitor_type_field():
-    assert "monitor_type" not in SearchSession.model_fields
+def test_search_session_monitor_type_defaults_none():
+    assert "monitor_type" in SearchSession.model_fields
     session = SearchSession(user_id=1, query="x", content_type=ContentType.MOVIE)
-    assert not hasattr(session, "monitor_type")
+    assert session.monitor_type is None
 
 
-def test_search_session_ignores_legacy_monitor_type_in_stored_json():
+def test_search_session_monitor_type_roundtrips_from_stored_json():
     session = SearchSession.model_validate(
         {
             "user_id": 1,
             "query": "x",
             "content_type": "movie",
-            "monitor_type": "existing",
+            "monitor_type": "future",
         }
     )
-    assert session.user_id == 1
-    assert not hasattr(session, "monitor_type")
+    assert session.monitor_type == "future"
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ from bot.models import (
     SeriesInfo,
     User,
 )
-from bot.clients.registry import get_lidarr, get_prowlarr, get_qbittorrent, get_radarr, get_sonarr
+from bot.clients.registry import get_emby, get_lidarr, get_prowlarr, get_qbittorrent, get_radarr, get_sonarr
 from bot.services.add_service import AddService
 from bot.services.scoring import ScoringService
 from bot.services.search_service import SearchService
@@ -515,8 +515,9 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
                     return
 
                 movie_text = Formatters.format_movie_info(movie)
+                emby_note = await _emby_library_note(movie)
                 await callback.message.edit_text(
-                    f"{text}\n\n---\n{movie_text}",
+                    f"{text}\n\n---\n{movie_text}{emby_note}",
                     reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent, content=movie),
                     parse_mode="HTML",
                 )
@@ -537,8 +538,9 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
                     return
 
                 series_text = Formatters.format_series_info(series)
+                emby_note = await _emby_library_note(series)
                 await callback.message.edit_text(
-                    f"{text}\n\n---\n{series_text}",
+                    f"{text}\n\n---\n{series_text}{emby_note}",
                     reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent, content=series),
                     parse_mode="HTML",
                 )
@@ -558,6 +560,24 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
         )
 
     await callback.answer()
+
+
+async def _emby_library_note(content) -> str:
+    """Feature #4: best-effort '<title> already in Emby' hint for the release card.
+
+    Never raises and never blocks — on any error/timeout/absence returns "".
+    """
+    try:
+        emby = await get_emby()
+        if emby is None:
+            return ""
+        item_type = "Series" if isinstance(content, SeriesInfo) else "Movie"
+        name = getattr(content, "title", None) or ""
+        year = getattr(content, "year", None)
+        exists = await asyncio.wait_for(emby.item_exists(name, year, item_type), timeout=5.0)
+        return "\n\n✅ <i>Уже в библиотеке Emby</i>" if exists else ""
+    except Exception:
+        return ""
 
 
 def _pick_by_year(items: list, release_year, query_year):
@@ -671,14 +691,18 @@ async def grab_release(
     await _execute_grab(message, session, db_user, db, search_service, add_service)
 
 
-def _decide_monitor_type(result, force_download: bool) -> str:
-    """BUG-04: choose the Sonarr monitor scope for a grabbed series release.
+def _decide_monitor_type(result, force_download: bool, override: str | None = None) -> str:
+    """Choose the Sonarr monitor scope for a grabbed series release.
 
-    A single targeted season (non-pack) must NOT be added with a type that
-    monitors every season — Sonarr's "existing" returns True for all seasons of a
-    brand-new series, so grabbing one season would silently monitor the whole
-    show. Use "none" so only the explicitly grabbed release is pulled.
+    Feature #2: an explicit user preset (``override``) always wins.
+
+    BUG-04: otherwise, a single targeted season (non-pack) must NOT be added with
+    a type that monitors every season — Sonarr's "existing" returns True for all
+    seasons of a brand-new series, so grabbing one season would silently monitor
+    the whole show. Use "none" so only the explicitly grabbed release is pulled.
     """
+    if override:
+        return override
     if force_download:
         return "all"
     if result.is_season_pack:
@@ -686,6 +710,10 @@ def _decide_monitor_type(result, force_download: bool) -> str:
     if result.detected_season is not None:
         return "none"
     return "all"
+
+
+# Feature #2: season-monitoring presets exposed on the series release card.
+_SEASON_PRESETS = {"all", "future", "latestSeason", "firstSeason", "none"}
 
 
 def _resolve_folder(folders: list, preferred_id: int | None) -> str:
@@ -777,8 +805,8 @@ async def _execute_grab(
             profile_id = prefs.sonarr_quality_profile_id or profiles[0].id
             folder_path = _resolve_folder(folders, prefs.sonarr_root_folder_id)
 
-            # Determine monitor type based on release (BUG-04/BUG-32)
-            monitor_type = _decide_monitor_type(result, force_download)
+            # Determine monitor type: user preset (#2) wins, else auto (BUG-04/BUG-32)
+            monitor_type = _decide_monitor_type(result, force_download, override=session.monitor_type)
 
             success, action, msg = await add_service.grab_series_release(
                 series=series,
@@ -919,6 +947,62 @@ async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database
         await _execute_grab(message, session, db_user, db, search_service, add_service, force_download=True)
     finally:
         _release_grab(user_id)
+
+
+@router.callback_query(F.data == CallbackData.SEASON_MENU)
+async def handle_season_menu(callback: CallbackQuery, db_user: User, db: Database) -> None:
+    """Feature #2: show the season-monitoring preset picker for a series."""
+    if not callback.message:
+        return
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    if not session or not session.selected_result:
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+    await callback.answer()
+    current = session.monitor_type or "auto"
+    await callback.message.edit_text(
+        f"📺 <b>Мониторинг сезонов</b>\n\nТекущий: <code>{current}</code>\n\nВыберите, какие сезоны отслеживать:",
+        reply_markup=Keyboards.season_presets(),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith(CallbackData.SEASON_PRESET))
+async def handle_season_preset(callback: CallbackQuery, db_user: User, db: Database) -> None:
+    """Feature #2: store the chosen monitoring preset and return to the release card."""
+    if not callback.data or not callback.message:
+        return
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    if not session or not session.selected_result:
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+
+    preset = callback.data.removeprefix(CallbackData.SEASON_PRESET)
+    if preset not in _SEASON_PRESETS:
+        await callback.answer("Неверный выбор", show_alert=True)
+        return
+
+    session.monitor_type = preset
+    if not await db.update_session(user_id, session):
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+
+    await callback.answer(f"Мониторинг: {preset}")
+    _, add_service, _ = await get_services()
+    has_qbittorrent = add_service.qbittorrent is not None
+    result = session.selected_result
+    text = Formatters.format_release_details(result)
+    await callback.message.edit_text(
+        f"{text}\n\n📺 Мониторинг: <b>{preset}</b>",
+        reply_markup=Keyboards.release_details(
+            result, session.content_type,
+            show_force_grab=has_qbittorrent,
+            content=session.selected_content,
+        ),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data == "noop")
