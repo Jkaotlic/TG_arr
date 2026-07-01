@@ -216,9 +216,19 @@ class Keyboards:
         content_type: ContentType,
         can_grab: bool = True,
         show_force_grab: bool = False,
+        content: object = None,
     ) -> InlineKeyboardMarkup:
-        """Create keyboard for release details view."""
+        """Create keyboard for release details view.
+
+        When the resolved movie/series (``content``) is available, prepend a row
+        of external-metadata link buttons (feature #5).
+        """
         keyboard = []
+
+        if content is not None:
+            links = Keyboards._external_links(content)
+            if links:
+                keyboard.append(links)
 
         if can_grab:
             keyboard.append([
@@ -826,21 +836,46 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
+    def _external_links(content: object) -> list[InlineKeyboardButton]:
+        """Feature #5: URL buttons opening the title in external metadata sites.
+
+        Zero-backend (Telegram URL buttons). TVDB is series-only; TMDB uses the
+        tv/movie path depending on the content model.
+        """
+        buttons: list[InlineKeyboardButton] = []
+        is_series = isinstance(content, SeriesInfo)
+        tmdb_id = getattr(content, "tmdb_id", None)
+        imdb_id = getattr(content, "imdb_id", None)
+        tvdb_id = getattr(content, "tvdb_id", None)
+        if tmdb_id:
+            kind = "tv" if is_series else "movie"
+            buttons.append(InlineKeyboardButton(text="🎬 TMDB", url=f"https://www.themoviedb.org/{kind}/{tmdb_id}"))
+        if imdb_id:
+            buttons.append(InlineKeyboardButton(text="🎞 IMDb", url=f"https://www.imdb.com/title/{imdb_id}/"))
+        if is_series and tvdb_id:
+            buttons.append(InlineKeyboardButton(text="📺 TVDB", url=f"https://thetvdb.com/dereferrer/series/{tvdb_id}"))
+        return buttons
+
+    @staticmethod
     def movie_details(movie: MovieInfo) -> InlineKeyboardMarkup:
         """Create keyboard for movie details from trending."""
-        keyboard = [
-            [InlineKeyboardButton(text="➕ Добавить в Radarr", callback_data=f"{CallbackData.ADD_MOVIE}{movie.tmdb_id}")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_MOVIES)],
-        ]
+        keyboard = []
+        links = Keyboards._external_links(movie)
+        if links:
+            keyboard.append(links)
+        keyboard.append([InlineKeyboardButton(text="➕ Добавить в Radarr", callback_data=f"{CallbackData.ADD_MOVIE}{movie.tmdb_id}")])
+        keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_MOVIES)])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def series_details(series: SeriesInfo) -> InlineKeyboardMarkup:
         """Create keyboard for series details from trending."""
-        keyboard = [
-            [InlineKeyboardButton(text="➕ Добавить в Sonarr", callback_data=f"{CallbackData.ADD_SERIES}{series.tmdb_id}")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_SERIES)],
-        ]
+        keyboard = []
+        links = Keyboards._external_links(series)
+        if links:
+            keyboard.append(links)
+        keyboard.append([InlineKeyboardButton(text="➕ Добавить в Sonarr", callback_data=f"{CallbackData.ADD_SERIES}{series.tmdb_id}")])
+        keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_SERIES)])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     # =========================================================================

@@ -517,7 +517,7 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
                 movie_text = Formatters.format_movie_info(movie)
                 await callback.message.edit_text(
                     f"{text}\n\n---\n{movie_text}",
-                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
+                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent, content=movie),
                     parse_mode="HTML",
                 )
             else:
@@ -539,7 +539,7 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
                 series_text = Formatters.format_series_info(series)
                 await callback.message.edit_text(
                     f"{text}\n\n---\n{series_text}",
-                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
+                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent, content=series),
                     parse_mode="HTML",
                 )
             else:
