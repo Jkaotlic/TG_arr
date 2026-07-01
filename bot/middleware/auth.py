@@ -24,6 +24,16 @@ class AuthMiddleware(BaseMiddleware):
         self.db = db
         super().__init__()
 
+    async def _is_authorized(self, user_id: int) -> bool:
+        """Feature #6: authorized if in the env allowlist OR the runtime DB allowlist."""
+        if self.settings.is_user_allowed(user_id):
+            return True
+        try:
+            return await self.db.is_allowed_in_db(user_id)
+        except Exception as e:
+            logger.warning("db_allowlist_check_failed", user_id=user_id, error=str(e))
+            return False
+
     async def __call__(
         self,
         handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
@@ -47,8 +57,8 @@ class AuthMiddleware(BaseMiddleware):
             logger.warning("Could not extract user ID from event")
             return None
 
-        # Check if user is allowed
-        if not self.settings.is_user_allowed(user_id):
+        # Check if user is allowed (env allowlist OR runtime DB allowlist, #6)
+        if not await self._is_authorized(user_id):
             logger.warning(
                 "Unauthorized access attempt",
                 user_id=user_id,
