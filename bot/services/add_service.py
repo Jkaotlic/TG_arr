@@ -10,6 +10,7 @@ from typing import Optional
 import structlog
 
 from bot.clients.base import APIError
+from bot.config import get_settings
 from bot.clients.lidarr import LidarrClient
 from bot.clients.prowlarr import ProwlarrClient
 from bot.clients.qbittorrent import QBittorrentClient, QBittorrentError
@@ -84,6 +85,32 @@ def _is_internal_ip(addr: ipaddress._BaseAddress) -> bool:
     )
 
 
+def _trusted_service_hosts() -> set[str]:
+    """Hostnames/IPs of the user's OWN configured services.
+
+    A self-hosted single-household stack runs Prowlarr/*arr/qBit on a private
+    LAN, and Prowlarr proxies every ``downloadUrl`` through itself — so the grab
+    download URL legitimately points at a private IP. Trust download URLs aimed
+    at a configured service host, otherwise the SSRF guard blocks every real
+    grab. Other internal addresses stay blocked.
+    """
+    s = get_settings()
+    hosts: set[str] = set()
+    for url in (
+        s.prowlarr_url,
+        s.radarr_url,
+        s.sonarr_url,
+        s.lidarr_url,
+        s.qbittorrent_url,
+        s.emby_url,
+    ):
+        if url:
+            host = urllib.parse.urlparse(url).hostname
+            if host:
+                hosts.add(host.lower())
+    return hosts
+
+
 async def _validate_download_url(url: str) -> bool:
     """
     Validate URL is safe for download (not SSRF).
@@ -91,6 +118,9 @@ async def _validate_download_url(url: str) -> bool:
     Async to avoid blocking the event loop on DNS (SEC-11) and to inspect every
     A/AAAA record returned by getaddrinfo so a hostname with both public and
     private addresses is rejected (SEC-01).
+
+    Exception: a URL pointing at one of the user's OWN configured services
+    (Prowlarr's download proxy etc.) is trusted even on a private LAN.
     """
     if not url:
         return False
@@ -101,6 +131,9 @@ async def _validate_download_url(url: str) -> bool:
         return url.startswith("magnet:?xt=urn:btih:")
     if not parsed.hostname:
         return False
+    # Trust the user's own configured services (Prowlarr proxies downloadUrls).
+    if parsed.hostname.lower() in _trusted_service_hosts():
+        return True
     try:
         addr = ipaddress.ip_address(parsed.hostname)
         return not _is_internal_ip(addr)
