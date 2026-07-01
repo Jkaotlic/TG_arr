@@ -12,6 +12,7 @@ from bot.handlers.settings import router as settings_router
 from bot.handlers.start import router as start_router
 from bot.handlers.status import router as status_router
 from bot.handlers.trending import router as trending_router
+from bot.handlers.users import router as users_router
 
 
 def setup_routers() -> Router:
@@ -25,6 +26,7 @@ def setup_routers() -> Router:
     main_router.include_router(search_router)
     main_router.include_router(music_router)
     main_router.include_router(settings_router)
+    main_router.include_router(users_router)
     main_router.include_router(status_router)
     main_router.include_router(history_router)
     main_router.include_router(downloads_router)

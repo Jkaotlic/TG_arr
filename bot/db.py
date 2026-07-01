@@ -146,6 +146,12 @@ class Database:
                 FOREIGN KEY (user_id) REFERENCES users(tg_id)
             );
 
+            CREATE TABLE IF NOT EXISTS allowed_users (
+                tg_id INTEGER PRIMARY KEY,
+                added_by INTEGER,
+                created_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_searches_user ON searches(user_id);
             CREATE INDEX IF NOT EXISTS idx_searches_created ON searches(created_at);
             CREATE INDEX IF NOT EXISTS idx_search_results_search ON search_results(search_id);
@@ -292,6 +298,38 @@ class Database:
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
+
+    # Runtime allowlist methods (feature #6)
+    async def add_allowed_user(self, tg_id: int, added_by: int) -> None:
+        """Grant a user runtime access (persisted, survives restarts)."""
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._write_lock:
+            await self.conn.execute(
+                "INSERT INTO allowed_users (tg_id, added_by, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(tg_id) DO NOTHING",
+                (tg_id, added_by, now),
+            )
+            await self.conn.commit()
+
+    async def remove_allowed_user(self, tg_id: int) -> None:
+        """Revoke a user's runtime access."""
+        async with self._write_lock:
+            await self.conn.execute("DELETE FROM allowed_users WHERE tg_id = ?", (tg_id,))
+            await self.conn.commit()
+
+    async def is_allowed_in_db(self, tg_id: int) -> bool:
+        """Whether a user was granted access at runtime (DB allowlist)."""
+        async with self.conn.execute(
+            "SELECT 1 FROM allowed_users WHERE tg_id = ?", (tg_id,)
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+    async def list_allowed_users(self) -> list[int]:
+        """All runtime-granted user IDs (oldest first)."""
+        async with self.conn.execute(
+            "SELECT tg_id FROM allowed_users ORDER BY created_at"
+        ) as cursor:
+            return [row[0] for row in await cursor.fetchall()]
 
     # Search methods
     async def save_search(

@@ -93,6 +93,12 @@ class Settings(BaseSettings):
     # Pagination
     results_per_page: int = Field(default=5, ge=1, le=10, description="Search results per page")
 
+    # Webhook server (#8) — inbound Radarr/Sonarr "on import" notifications.
+    # Off by default; when enabled, point *arr Connect→Webhook at http://<host>:<port>/webhook
+    webhook_enabled: bool = Field(default=False, description="Enable inbound *arr webhook notification server")
+    webhook_port: int = Field(default=8090, ge=1, le=65535, description="Webhook server port")
+    webhook_bind: str = Field(default="0.0.0.0", description="Webhook server bind address")
+
     @field_validator("allowed_tg_ids", "admin_tg_ids", mode="before")
     @classmethod
     def parse_comma_separated_ids(cls, v: str | list[int] | None) -> list[int]:
