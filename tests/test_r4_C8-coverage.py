@@ -122,6 +122,7 @@ async def test_auth_middleware_rejects_unknown_user():
     db = AsyncMock()
     db.get_user = AsyncMock()
     db.create_user = AsyncMock()
+    db.is_allowed_in_db = AsyncMock(return_value=False)  # #6: not in runtime allowlist
 
     mw = AuthMiddleware(db)
     handler = AsyncMock(return_value="SHOULD_NOT_RUN")
@@ -140,6 +141,7 @@ async def test_auth_middleware_rejects_unknown_user():
 async def test_auth_middleware_rejects_unknown_callback():
     """Unknown id on a CallbackQuery is denied via answer(show_alert=True)."""
     db = AsyncMock()
+    db.is_allowed_in_db = AsyncMock(return_value=False)  # #6: not in runtime allowlist
     mw = AuthMiddleware(db)
     handler = AsyncMock(return_value="SHOULD_NOT_RUN")
     data: dict = {}
