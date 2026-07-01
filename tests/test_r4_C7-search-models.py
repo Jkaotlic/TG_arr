@@ -106,9 +106,11 @@ async def test_pagination_skips_save_when_page_unchanged():
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
 
-    callback = _make_callback(search.CallbackData.PAGE + "1")  # same page
+    from bot.ui.callbacks import PageCB
 
-    await search.handle_pagination(callback, _make_db_user(), db)
+    callback = _make_callback("")
+
+    await search.handle_pagination(callback, PageCB(scope="search", page=1), _make_db_user(), db)  # same page
 
     db.save_session.assert_not_called()
     callback.answer.assert_awaited()
@@ -124,9 +126,11 @@ async def test_pagination_saves_when_page_changes():
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
 
-    callback = _make_callback(search.CallbackData.PAGE + "1")  # different page
+    from bot.ui.callbacks import PageCB
 
-    await search.handle_pagination(callback, _make_db_user(), db)
+    callback = _make_callback("")
+
+    await search.handle_pagination(callback, PageCB(scope="search", page=1), _make_db_user(), db)  # different page
 
     db.save_session.assert_awaited_once()
     assert session.current_page == 1
