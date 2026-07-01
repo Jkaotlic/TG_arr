@@ -276,6 +276,9 @@ class SearchSession(BaseModel):
     current_page: int = 0
     selected_result: Optional[SearchResult] = None
     selected_content: Optional[ContentInfo] = None
+    # Feature #2: user-chosen Sonarr season-monitoring preset (all/future/
+    # latestSeason/firstSeason/none); None → auto-decide from the release.
+    monitor_type: Optional[str] = None
     created_at: datetime = Field(default_factory=_utcnow)
 
 
