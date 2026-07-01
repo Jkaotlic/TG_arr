@@ -310,6 +310,26 @@ async def main() -> None:
         name="liveness-watchdog",
     ).start()
 
+    # #8: optional inbound webhook server for *arr on-import notifications.
+    webhook_runner = None
+    if settings.webhook_enabled:
+        from bot.webhook import build_webhook_app, start_webhook_server
+
+        async def _webhook_notify(message: str) -> None:
+            for uid in set(settings.allowed_tg_ids) | set(settings.admin_tg_ids or []):
+                try:
+                    await bot.send_message(uid, message, parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    logger.warning("webhook_notify_failed", user_id=uid, error=str(e))
+
+        webhook_runner = await start_webhook_server(
+            build_webhook_app(_webhook_notify),
+            settings.webhook_bind,
+            settings.webhook_port,
+        )
+    else:
+        logger.info("Webhook server disabled")
+
     # Start polling
     try:
         logger.info("Starting polling...")
@@ -324,6 +344,8 @@ async def main() -> None:
     finally:
         liveness_task.cancel()
         cleanup_task.cancel()
+        if webhook_runner is not None:
+            await webhook_runner.cleanup()
         await bot.session.close()
 
 
