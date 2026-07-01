@@ -3,6 +3,7 @@
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
+from bot.ui.callbacks import PageCB
 from bot.models import (
     ArtistInfo,
     ContentType,
@@ -26,10 +27,9 @@ class CallbackData:
     TYPE_MUSIC = "type:music"
 
     # Pagination
-    PAGE = "page:"  # page:5
-    # LOGIC-14: separate prefix for music artist pagination — search router
-    # was matching `page:` and replying "сессия истекла" on music sessions
-    # (which have empty results) before music router could handle it.
+    # #1: search pagination migrated to the typed PageCB factory
+    # (bot/ui/callbacks.py) — the old "page:" string prefix collided with music's
+    # "art_page:" (LOGIC-14). Music pagination below is not yet migrated.
     ARTIST_PAGE = "art_page:"  # art_page:N
     MUSIC_BACK = "music_back"  # LOGIC-24: music-aware back button
     BACK = "back"
@@ -188,11 +188,11 @@ class Keyboards:
                 )
             ])
 
-        # Pagination row
+        # Pagination row — #1: typed PageCB(scope="search") instead of "page:" string
         nav_buttons = []
         if current_page > 0:
             nav_buttons.append(
-                InlineKeyboardButton(text="◀️", callback_data=f"{CallbackData.PAGE}{current_page - 1}")
+                InlineKeyboardButton(text="◀️", callback_data=PageCB(scope="search", page=current_page - 1).pack())
             )
 
         nav_buttons.append(
@@ -201,7 +201,7 @@ class Keyboards:
 
         if current_page < total_pages - 1:
             nav_buttons.append(
-                InlineKeyboardButton(text="▶️", callback_data=f"{CallbackData.PAGE}{current_page + 1}")
+                InlineKeyboardButton(text="▶️", callback_data=PageCB(scope="search", page=current_page + 1).pack())
             )
 
         if nav_buttons:
