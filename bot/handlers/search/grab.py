@@ -139,13 +139,13 @@ def _decide_monitor_type(result, force_download: bool, override: str | None = No
 
 
 def _resolve_folder(folders: list, preferred_id: int | None) -> str:
-    """Resolve root folder path from user preference or first available."""
-    if not folders:
-        raise ValueError("Нет доступных папок для сохранения")
-    if preferred_id:
-        folder = next((f for f in folders if f.id == preferred_id), None)
-        return folder.path if folder else folders[0].path
-    return folders[0].path
+    """Resolve root folder path from user preference or first available.
+
+    LOGIC-11: thin wrapper kept for backward compatibility (tests/callers
+    patch/import this by name) — the real logic now lives in
+    ``AddService.resolve_root_folder``, shared with trending.py/music.py.
+    """
+    return AddService.resolve_root_folder(folders, preferred_id)
 
 
 async def _execute_grab(
@@ -192,8 +192,8 @@ async def _execute_grab(
                 await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Radarr"))
                 return
 
-            profile_id = prefs.radarr_quality_profile_id or profiles[0].id
-            folder_path = _resolve_folder(folders, prefs.radarr_root_folder_id)
+            profile_id = AddService.resolve_profile(profiles, prefs.radarr_quality_profile_id).id
+            folder_path = AddService.resolve_root_folder(folders, prefs.radarr_root_folder_id)
 
             success, action, msg = await add_service.grab_movie_release(
                 movie=movie,
@@ -234,8 +234,8 @@ async def _execute_grab(
                 await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Sonarr"))
                 return
 
-            profile_id = prefs.sonarr_quality_profile_id or profiles[0].id
-            folder_path = _resolve_folder(folders, prefs.sonarr_root_folder_id)
+            profile_id = AddService.resolve_profile(profiles, prefs.sonarr_quality_profile_id).id
+            folder_path = AddService.resolve_root_folder(folders, prefs.sonarr_root_folder_id)
 
             # Determine monitor type: user preset (#2) wins, else auto (BUG-04/BUG-32)
             monitor_type = _search._decide_monitor_type(result, force_download, override=session.monitor_type)

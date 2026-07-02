@@ -330,15 +330,17 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
                     )
                 return
 
-            profile_id = prefs.lidarr_quality_profile_id or profiles[0].id
-            metadata_profile_id = prefs.lidarr_metadata_profile_id or metadata_profiles[0].id
-            folder = next((f for f in folders if f.id == prefs.lidarr_root_folder_id), None) or folders[0]
+            profile_id = AddService.resolve_profile(profiles, prefs.lidarr_quality_profile_id).id
+            metadata_profile_id = AddService.resolve_profile(
+                metadata_profiles, prefs.lidarr_metadata_profile_id
+            ).id
+            folder_path = AddService.resolve_root_folder(folders, prefs.lidarr_root_folder_id)
 
             added, action = await add_service.add_artist(
                 artist=artist,
                 quality_profile_id=profile_id,
                 metadata_profile_id=metadata_profile_id,
-                root_folder_path=folder.path,
+                root_folder_path=folder_path,
                 monitor="all",
                 search_for_missing=True,
             )

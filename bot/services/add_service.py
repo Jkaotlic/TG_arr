@@ -288,6 +288,67 @@ class AddService:
             return []
         return await self.lidarr.get_root_folders()
 
+    @staticmethod
+    def resolve_profile(
+        profiles: list[QualityProfile] | list[MetadataProfile],
+        preferred_id: Optional[int],
+    ):
+        """LOGIC-11: resolve a quality/metadata profile from user preference or the
+        first available one. Shared by grab.py, trending.py and music.py, which
+        previously each inlined ``prefs.X_profile_id or profiles[0]`` (grab.py) or
+        the equivalent ``next(...) or profiles[0]`` lookup (trending.py/music.py).
+
+        Returns the profile object itself (not just its id) so callers needing
+        only the id can do ``.id`` and callers needing the object (music.py's
+        root-folder case) don't need a second lookup.
+        """
+        if preferred_id:
+            match = next((p for p in profiles if p.id == preferred_id), None)
+            if match is not None:
+                return match
+        return profiles[0]
+
+    @staticmethod
+    def resolve_root_folder(folders: list[RootFolder], preferred_id: Optional[int]) -> str:
+        """LOGIC-11: resolve root folder PATH from user preference or the first
+        available folder. Equivalent to the former ``grab.py:_resolve_folder``
+        plus the inline duplicates in trending.py (x2) and music.py.
+
+        Raises ValueError if no folders are available (matches prior
+        ``_resolve_folder`` behavior — callers already guard with an
+        ``if not folders`` check beforehand, so this is a defensive backstop).
+        """
+        if not folders:
+            raise ValueError("Нет доступных папок для сохранения")
+        if preferred_id:
+            folder = next((f for f in folders if f.id == preferred_id), None)
+            if folder is not None:
+                return folder.path
+        return folders[0].path
+
+    async def resolve_series_tvdb_id(self, series: SeriesInfo) -> Optional[SeriesInfo]:
+        """LOGIC-11: resolve a missing TVDB id via Sonarr lookup-by-title.
+
+        TMDb-sourced trending series arrive with ``tvdb_id=0`` (TMDb doesn't
+        know about TVDB), so Sonarr's add/grab calls (which key off tvdb_id)
+        need a real id first. Matches the best candidate by tmdb_id, falling
+        back to the first lookup result. Returns None if no candidate has a
+        usable tvdb_id.
+        """
+        if series.tvdb_id:
+            return series
+        lookup_results = await self.sonarr.lookup_series(series.title)
+        matched = None
+        for lr in lookup_results:
+            if lr.tmdb_id == series.tmdb_id:
+                matched = lr
+                break
+        if not matched and lookup_results:
+            matched = lookup_results[0]
+        if matched and matched.tvdb_id:
+            return matched
+        return None
+
     async def add_movie(
         self,
         movie: MovieInfo,
@@ -432,16 +493,8 @@ class AddService:
         Returns:
             Tuple of (success, ActionLog, message)
         """
-        log = logger.bind(
-            title=movie.title,
-            release_title=release.title,
-            indexer=release.indexer,
-        )
-        log.info("Grabbing movie release")
-
-        # user_id will be set by caller before logging
         action = ActionLog(
-            user_id=0,
+            user_id=0,  # Will be set by caller before logging
             action_type=ActionType.GRAB,
             content_type=ContentType.MOVIE,
             content_title=movie.title,
@@ -449,142 +502,40 @@ class AddService:
             release_title=release.title,
         )
 
-        try:
-            # Ensure movie is in Radarr
+        async def _ensure_added() -> tuple[Optional[MovieInfo], Optional[str]]:
             existing = await self.radarr.get_movie_by_tmdb(movie.tmdb_id)
-            if not existing or not existing.radarr_id:
-                log.info("Movie not in library, adding first")
-                added, add_action = await self.add_movie(
-                    movie=movie,
-                    quality_profile_id=quality_profile_id,
-                    root_folder_path=root_folder_path,
-                    search_for_movie=False,  # We'll grab manually
-                )
-                if not added:
-                    action.success = False
-                    action.error_message = add_action.error_message or "Failed to add movie"
-                    _log_grab_completed(
-                        log, success=False, path="failed",
-                        force_download=force_download, content_type=ContentType.MOVIE,
-                    )
-                    return False, action, "Не удалось добавить фильм"
-                existing = added
-
-            # Try to push the release
-            release_rejected = False
-            rejections = []
-            if release.download_url:
-                # SEC-16: validate URL BEFORE handing it to Radarr to prevent
-                # SSRF via arr → private network.
-                if not await _validate_download_url(release.download_url):
-                    log.warning(
-                        "Skipping push_release: unsafe/private download URL (SEC-16)",
-                        download_url=_mask_url(release.download_url),
-                    )
-                else:
-                    try:
-                        log.info("Attempting push_release", download_url=_mask_url(release.download_url))
-                        result = await self.radarr.push_release(
-                            title=release.title,
-                            download_url=release.download_url,
-                            protocol=release.protocol,
-                            publish_date=release.publish_date.isoformat() if release.publish_date else None,
-                        )
-                        log.info("Push release result", result=_safe_push_result(result))
-                        if result and result.get("approved") is True:
-                            action.success = True
-                            log.info("Release pushed successfully")
-                            _log_grab_completed(
-                                log, success=True, path="push",
-                                force_download=force_download, content_type=ContentType.MOVIE,
-                            )
-                            return True, action, "Релиз отправлен на скачивание"
-                        else:
-                            rejections = result.get("rejections", []) if result else []
-                            release_rejected = True
-                            rejection_msg = f"rejections: {rejections}" if rejections else "no explicit approval from Radarr/Sonarr"
-                            log.warning("Release was not approved", reason=rejection_msg)
-                    except APIError as e:
-                        # BUG-05: no direct-grab fallback here — Prowlarr's guid/
-                        # indexerId are meaningless to Radarr's own /release cache
-                        # (always 404). Fall straight through to the qBittorrent
-                        # fallback / auto-search below.
-                        log.warning("Push release failed, falling back to auto-search", error=str(e))
-
-            # Download via qBittorrent if rejected by Radarr profile or force_download
-            if (release_rejected or force_download) and self.qbittorrent:
-                download_url = release.download_url or release.magnet_url
-                if download_url:
-                    if not await _validate_download_url(download_url):
-                        raise ValueError("Небезопасный URL для скачивания")
-                    try:
-                        success = await self.qbittorrent.add_torrent_url(
-                            download_url,
-                            category="radarr",
-                        )
-                        if success:
-                            action.success = True
-                            log.info("Downloaded via qBittorrent (bypassed profile rejection)")
-                            _log_grab_completed(
-                                log, success=True, path="qbit",
-                                force_download=force_download, content_type=ContentType.MOVIE,
-                            )
-                            return True, action, "Загружено через qBittorrent"
-                        else:
-                            log.error("qBittorrent rejected torrent", download_url=_mask_url(download_url))
-                            raise QBittorrentError("Failed to add torrent to qBittorrent")
-                    except Exception as e:
-                        log.error("qBittorrent download failed", error=str(e), exc_info=True)
-                        action.success = False
-                        action.error_message = f"qBittorrent fallback failed: {e}"
-                        _log_grab_completed(
-                            log, success=False, path="failed",
-                            force_download=force_download, content_type=ContentType.MOVIE,
-                        )
-                        return False, action, "Ошибка загрузки через qBittorrent"
-
-            # If rejected and no qBittorrent fallback available
-            if release_rejected:
-                action.success = False
-                rejection_msg = ", ".join(rejections) if rejections else "Отклонено"
-                action.error_message = rejection_msg
-                # OBS-03: keep the structured rejection reasons in details for history forensics.
-                action.details = json.dumps({"rejections": rejections}, ensure_ascii=False)
-                _log_grab_completed(
-                    log, success=False, path="rejected",
-                    force_download=force_download, content_type=ContentType.MOVIE,
-                    rejections=rejections,
-                )
-                return False, action, f"Релиз отклонён: {rejection_msg}"
-
-            # Fallback: trigger search
             if existing and existing.radarr_id:
-                await self.radarr.search_movie(existing.radarr_id)
-                action.success = True
-                log.info("Triggered automatic search as fallback")
-                _log_grab_completed(
-                    log, success=True, path="auto_search",
-                    force_download=force_download, content_type=ContentType.MOVIE,
-                )
-                return True, action, "Запущен автопоиск (выбранный релиз не удалось передать)"
-
-            action.success = False
-            action.error_message = "Could not grab release or trigger search"
-            _log_grab_completed(
-                log, success=False, path="failed",
-                force_download=force_download, content_type=ContentType.MOVIE,
+                return existing, None
+            logger.bind(title=movie.title).info("Movie not in library, adding first")
+            added, add_action = await self.add_movie(
+                movie=movie,
+                quality_profile_id=quality_profile_id,
+                root_folder_path=root_folder_path,
+                search_for_movie=False,  # We'll grab manually
             )
-            return False, action, "Не удалось захватить релиз"
+            if not added:
+                return None, add_action.error_message or "Failed to add movie"
+            return added, None
 
-        except Exception as e:
-            log.error("Failed to grab release", error=str(e), exc_info=True)
-            action.success = False
-            action.error_message = str(e)
-            _log_grab_completed(
-                log, success=False, path="failed",
-                force_download=force_download, content_type=ContentType.MOVIE,
-            )
-            return False, action, "Ошибка захвата релиза"
+        async def _auto_search(existing: MovieInfo) -> Optional[str]:
+            if not (existing and existing.radarr_id):
+                return None
+            await self.radarr.search_movie(existing.radarr_id)
+            return "Запущен автопоиск (выбранный релиз не удалось передать)"
+
+        return await self._grab_release(
+            log=logger.bind(title=movie.title, release_title=release.title, indexer=release.indexer),
+            log_start_msg="Grabbing movie release",
+            action=action,
+            release=release,
+            force_download=force_download,
+            content_type=ContentType.MOVIE,
+            arr_client=self.radarr,
+            qbit_category="radarr",
+            ensure_added=_ensure_added,
+            not_added_message="Не удалось добавить фильм",
+            auto_search=_auto_search,
+        )
 
     async def grab_series_release(
         self,
@@ -609,16 +560,8 @@ class AddService:
         Returns:
             Tuple of (success, ActionLog, message)
         """
-        log = logger.bind(
-            title=series.title,
-            release_title=release.title,
-            indexer=release.indexer,
-        )
-        log.info("Grabbing series release")
-
-        # user_id will be set by caller before logging
         action = ActionLog(
-            user_id=0,
+            user_id=0,  # Will be set by caller before logging
             action_type=ActionType.GRAB,
             content_type=ContentType.SERIES,
             content_title=series.title,
@@ -629,34 +572,90 @@ class AddService:
         if not series.tvdb_id:
             return False, action, "Сериал не найден в TVDB"
 
-        try:
-            # Ensure series is in Sonarr
+        async def _ensure_added() -> tuple[Optional[SeriesInfo], Optional[str]]:
             existing = await self.sonarr.get_series_by_tvdb(series.tvdb_id)
-            if not existing or not existing.sonarr_id:
-                log.info("Series not in library, adding first")
-                added, add_action = await self.add_series(
-                    series=series,
-                    quality_profile_id=quality_profile_id,
-                    root_folder_path=root_folder_path,
-                    monitor_type=monitor_type,
-                    search_for_missing=False,
+            if existing and existing.sonarr_id:
+                return existing, None
+            logger.bind(title=series.title).info("Series not in library, adding first")
+            added, add_action = await self.add_series(
+                series=series,
+                quality_profile_id=quality_profile_id,
+                root_folder_path=root_folder_path,
+                monitor_type=monitor_type,
+                search_for_missing=False,
+            )
+            if not added:
+                return None, add_action.error_message or "Failed to add series"
+            return added, None
+
+        async def _auto_search(existing: SeriesInfo) -> Optional[str]:
+            if not (existing and existing.sonarr_id):
+                return None
+            if release.is_season_pack and release.detected_season is not None:
+                await self.sonarr.search_season(existing.sonarr_id, release.detected_season)
+                return f"Запущен поиск сезона {release.detected_season} (выбранный релиз не удалось передать)"
+            await self.sonarr.search_series(existing.sonarr_id)
+            return "Запущен полный поиск сериала (выбранный релиз не удалось передать)"
+
+        return await self._grab_release(
+            log=logger.bind(title=series.title, release_title=release.title, indexer=release.indexer),
+            log_start_msg="Grabbing series release",
+            action=action,
+            release=release,
+            force_download=force_download,
+            content_type=ContentType.SERIES,
+            arr_client=self.sonarr,
+            qbit_category="tv-sonarr",
+            ensure_added=_ensure_added,
+            not_added_message="Не удалось добавить сериал",
+            auto_search=_auto_search,
+        )
+
+    async def _grab_release(
+        self,
+        *,
+        log,
+        log_start_msg: str,
+        action: ActionLog,
+        release: SearchResult,
+        force_download: bool,
+        content_type: ContentType,
+        arr_client,
+        qbit_category: str,
+        ensure_added,
+        not_added_message: str,
+        auto_search,
+    ) -> tuple[bool, ActionLog, str]:
+        """Shared push/qBit-fallback/auto-search template for grab_movie_release
+        and grab_series_release (LOGIC-19/deferred-refactor: the two ~150-line
+        methods differed only in client (radarr/sonarr), qBit category, the
+        "ensure content is added" step and the auto-search fallback — every
+        terminal path (success/log/ActionLog shape) is now defined exactly
+        once here, called with movie/series-specific hooks.
+
+        `ensure_added`/`auto_search` are async closures bound to the specific
+        movie/series + release so this method stays content-type-agnostic.
+        """
+        log.info(log_start_msg)
+
+        try:
+            # Ensure content is in Radarr/Sonarr
+            existing, add_error = await ensure_added()
+            if existing is None:
+                action.success = False
+                action.error_message = add_error
+                _log_grab_completed(
+                    log, success=False, path="failed",
+                    force_download=force_download, content_type=content_type,
                 )
-                if not added:
-                    action.success = False
-                    action.error_message = add_action.error_message or "Failed to add series"
-                    _log_grab_completed(
-                        log, success=False, path="failed",
-                        force_download=force_download, content_type=ContentType.SERIES,
-                    )
-                    return False, action, "Не удалось добавить сериал"
-                existing = added
+                return False, action, not_added_message
 
             # Try to push the release
             release_rejected = False
             rejections = []
             if release.download_url:
-                # SEC-16: validate URL BEFORE handing it to Sonarr to prevent
-                # SSRF via arr → private network.
+                # SEC-16: validate URL BEFORE handing it to Radarr/Sonarr to
+                # prevent SSRF via arr → private network.
                 if not await _validate_download_url(release.download_url):
                     log.warning(
                         "Skipping push_release: unsafe/private download URL (SEC-16)",
@@ -665,7 +664,7 @@ class AddService:
                 else:
                     try:
                         log.info("Attempting push_release", download_url=_mask_url(release.download_url))
-                        result = await self.sonarr.push_release(
+                        result = await arr_client.push_release(
                             title=release.title,
                             download_url=release.download_url,
                             protocol=release.protocol,
@@ -677,7 +676,7 @@ class AddService:
                             log.info("Release pushed successfully")
                             _log_grab_completed(
                                 log, success=True, path="push",
-                                force_download=force_download, content_type=ContentType.SERIES,
+                                force_download=force_download, content_type=content_type,
                             )
                             return True, action, "Релиз отправлен на скачивание"
                         else:
@@ -687,12 +686,12 @@ class AddService:
                             log.warning("Release was not approved", reason=rejection_msg)
                     except APIError as e:
                         # BUG-05: no direct-grab fallback here — Prowlarr's guid/
-                        # indexerId are meaningless to Sonarr's own /release cache
-                        # (always 404). Fall straight through to the qBittorrent
-                        # fallback / auto-search below.
+                        # indexerId are meaningless to Radarr/Sonarr's own
+                        # /release cache (always 404). Fall straight through to
+                        # the qBittorrent fallback / auto-search below.
                         log.warning("Push release failed, falling back to auto-search", error=str(e))
 
-            # Download via qBittorrent if rejected by Sonarr profile or force_download
+            # Download via qBittorrent if rejected by profile or force_download
             if (release_rejected or force_download) and self.qbittorrent:
                 download_url = release.download_url or release.magnet_url
                 if download_url:
@@ -701,14 +700,14 @@ class AddService:
                     try:
                         success = await self.qbittorrent.add_torrent_url(
                             download_url,
-                            category="tv-sonarr",
+                            category=qbit_category,
                         )
                         if success:
                             action.success = True
                             log.info("Downloaded via qBittorrent (bypassed profile rejection)")
                             _log_grab_completed(
                                 log, success=True, path="qbit",
-                                force_download=force_download, content_type=ContentType.SERIES,
+                                force_download=force_download, content_type=content_type,
                             )
                             return True, action, "Загружено через qBittorrent"
                         else:
@@ -720,7 +719,7 @@ class AddService:
                         action.error_message = f"qBittorrent fallback failed: {e}"
                         _log_grab_completed(
                             log, success=False, path="failed",
-                            force_download=force_download, content_type=ContentType.SERIES,
+                            force_download=force_download, content_type=content_type,
                         )
                         return False, action, "Ошибка загрузки через qBittorrent"
 
@@ -733,25 +732,19 @@ class AddService:
                 action.details = json.dumps({"rejections": rejections}, ensure_ascii=False)
                 _log_grab_completed(
                     log, success=False, path="rejected",
-                    force_download=force_download, content_type=ContentType.SERIES,
+                    force_download=force_download, content_type=content_type,
                     rejections=rejections,
                 )
                 return False, action, f"Релиз отклонён: {rejection_msg}"
 
             # Fallback: trigger appropriate search
-            if existing and existing.sonarr_id:
-                if release.is_season_pack and release.detected_season is not None:
-                    await self.sonarr.search_season(existing.sonarr_id, release.detected_season)
-                    msg = f"Запущен поиск сезона {release.detected_season} (выбранный релиз не удалось передать)"
-                else:
-                    await self.sonarr.search_series(existing.sonarr_id)
-                    msg = "Запущен полный поиск сериала (выбранный релиз не удалось передать)"
-
+            msg = await auto_search(existing)
+            if msg is not None:
                 action.success = True
                 log.info("Triggered automatic search as fallback")
                 _log_grab_completed(
                     log, success=True, path="auto_search",
-                    force_download=force_download, content_type=ContentType.SERIES,
+                    force_download=force_download, content_type=content_type,
                 )
                 return True, action, msg
 
@@ -759,7 +752,7 @@ class AddService:
             action.error_message = "Could not grab release or trigger search"
             _log_grab_completed(
                 log, success=False, path="failed",
-                force_download=force_download, content_type=ContentType.SERIES,
+                force_download=force_download, content_type=content_type,
             )
             return False, action, "Не удалось захватить релиз"
 
@@ -769,7 +762,7 @@ class AddService:
             action.error_message = str(e)
             _log_grab_completed(
                 log, success=False, path="failed",
-                force_download=force_download, content_type=ContentType.SERIES,
+                force_download=force_download, content_type=content_type,
             )
             return False, action, "Ошибка захвата релиза"
 

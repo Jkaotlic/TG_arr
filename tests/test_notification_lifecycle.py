@@ -1,7 +1,7 @@
 """TEST-05: NotificationService lifecycle coverage (start/stop idempotency,
 initial sync, disappearing torrents, partial broadcast failure) plus the
-OBS-03 (honest success/failure logging) and PERF-02 (adaptive, filtered
-polling) behavior changes that ride along with it."""
+OBS-03 (honest success/failure logging) and PERF-02 full (sync/maindata
+delta-protocol, adaptive polling) behavior changes that ride along with it."""
 
 import asyncio
 from datetime import datetime, timezone
@@ -23,6 +23,24 @@ def _torrent(hash="a" * 40, name="Movie.2024", progress=0.5, state=TorrentState.
     )
 
 
+def _raw(name="Movie.2024", progress=0.5, state="downloading", **extra):
+    """Raw per-torrent dict as it appears inside maindata's "torrents" map
+    (qBittorrent's native field names — state is the raw string, not the
+    normalized TorrentState enum)."""
+    return {"name": name, "progress": progress, "state": state, **extra}
+
+
+def _maindata(rid=1, torrents=None, removed=None, full_update=False):
+    """Build a get_maindata()-shaped response (already normalized the way
+    QBittorrentClient.get_maindata returns it)."""
+    return {
+        "rid": rid,
+        "torrents": torrents or {},
+        "torrents_removed": removed or [],
+        "full_update": full_update,
+    }
+
+
 def _make_service(qbit=None, sender=None):
     qbit = qbit or AsyncMock()
     sender = sender or AsyncMock()
@@ -35,7 +53,7 @@ def _make_service(qbit=None, sender=None):
 @pytest.mark.asyncio
 async def test_double_start_is_idempotent_single_monitor_task():
     svc, qbit, _ = _make_service()
-    qbit.get_torrents.return_value = []
+    qbit.get_maindata.return_value = _maindata(full_update=True)
     await svc.start()
     task1 = svc._monitor_task
     await svc.start()  # second call must be a no-op, not spawn a second task
@@ -46,7 +64,7 @@ async def test_double_start_is_idempotent_single_monitor_task():
 @pytest.mark.asyncio
 async def test_stop_cancels_monitor_task():
     svc, qbit, _ = _make_service()
-    qbit.get_torrents.return_value = []
+    qbit.get_maindata.return_value = _maindata(full_update=True)
     await svc.start()
     task = svc._monitor_task
     await svc.stop()
@@ -68,12 +86,30 @@ async def test_initial_sync_marks_existing_torrents_notified_without_notifying()
     """Torrents already present at startup must not trigger a notification —
     only downloads that complete *during* this run should notify."""
     svc, qbit, sender = _make_service()
-    qbit.get_torrents.return_value = [_torrent(progress=1.0, state=TorrentState.COMPLETED)]
+    qbit.get_maindata.return_value = _maindata(
+        full_update=True,
+        torrents={"a" * 40: _raw(progress=1.0, state="uploading")},
+    )
 
     await svc._initial_sync()
 
     assert svc._tracked_torrents["a" * 40]["notified"] is True
+    assert svc._tracked_torrents["a" * 40]["completed"] is True
     sender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_initial_sync_forces_rid_zero_and_full_snapshot():
+    """_initial_sync must always start from rid=0 (a full snapshot), even if
+    the service somehow already had a non-zero rid (e.g. re-init)."""
+    svc, qbit, _ = _make_service()
+    svc._rid = 99
+    qbit.get_maindata.return_value = _maindata(rid=5, full_update=True, torrents={})
+
+    await svc._initial_sync()
+
+    qbit.get_maindata.assert_awaited_once_with(0)
+    assert svc._rid == 5
 
 
 # --- disappearing torrents ------------------------------------------------
@@ -85,12 +121,119 @@ async def test_disappeared_torrent_removed_from_tracked():
     svc._tracked_torrents["b" * 40] = {
         "completed": False, "notified": False, "name": "Old", "added_on": None,
     }
-    qbit.get_torrents.return_value = []  # torrent is gone from qBit entirely
-    qbit.get_torrent.return_value = None  # confirmed gone, not just filtered out
+    svc._torrents_raw["b" * 40] = _raw(name="Old", progress=0.5, state="downloading")
+    # torrent is gone from qBit entirely -> reported via torrents_removed
+    qbit.get_maindata.return_value = _maindata(removed=["b" * 40])
 
     await svc._check_for_completions()
 
     assert "b" * 40 not in svc._tracked_torrents
+    assert "b" * 40 not in svc._torrents_raw
+
+
+# --- PERF-02 full: _merge_maindata (delta merge + full_update rebuild) ----
+
+
+def test_merge_maindata_partial_update_does_not_lose_prior_fields():
+    """A delta only carries the fields that changed — merging it must update
+    those fields in place while preserving everything else already known
+    about that hash (e.g. name, size) instead of clobbering the row."""
+    svc, _, _ = _make_service()
+    h = "e" * 40
+    svc._torrents_raw[h] = {
+        "name": "Movie.2024", "progress": 0.4, "state": "downloading",
+        "size": 5_000_000_000, "dlspeed": 100,
+    }
+
+    svc._merge_maindata({
+        "rid": 2,
+        "torrents": {h: {"progress": 0.6, "dlspeed": 200}},
+        "torrents_removed": [],
+        "full_update": False,
+    })
+
+    row = svc._torrents_raw[h]
+    assert row["progress"] == 0.6
+    assert row["dlspeed"] == 200
+    # Untouched fields survive the partial merge.
+    assert row["name"] == "Movie.2024"
+    assert row["size"] == 5_000_000_000
+    assert row["state"] == "downloading"
+    assert svc._rid == 2
+
+
+def test_merge_maindata_partial_update_adds_new_hash():
+    """A delta can introduce a brand-new hash (torrent just added) — merge
+    must create it rather than requiring it to pre-exist."""
+    svc, _, _ = _make_service()
+
+    svc._merge_maindata({
+        "rid": 1,
+        "torrents": {"f" * 40: {"name": "New", "progress": 0.0, "state": "downloading"}},
+        "torrents_removed": [],
+        "full_update": False,
+    })
+
+    assert svc._torrents_raw["f" * 40]["name"] == "New"
+
+
+def test_merge_maindata_removed_hash_dropped_from_mirror():
+    svc, _, _ = _make_service()
+    h = "g" * 40
+    svc._torrents_raw[h] = {"name": "Gone", "progress": 0.5, "state": "downloading"}
+
+    svc._merge_maindata({
+        "rid": 3, "torrents": {}, "torrents_removed": [h], "full_update": False,
+    })
+
+    assert h not in svc._torrents_raw
+
+
+def test_merge_maindata_full_update_replaces_mirror_outright():
+    """full_update=True means the payload is a complete snapshot — stale
+    hashes that are no longer present (and weren't explicitly listed in
+    torrents_removed) must not survive the rebuild."""
+    svc, _, _ = _make_service()
+    svc._torrents_raw["stale" + "0" * 36] = {
+        "name": "Stale", "progress": 1.0, "state": "uploading",
+    }
+
+    svc._merge_maindata({
+        "rid": 9,
+        "torrents": {"h" * 40: {"name": "Fresh", "progress": 0.1, "state": "downloading"}},
+        "torrents_removed": [],
+        "full_update": True,
+    })
+
+    assert "stale" + "0" * 36 not in svc._torrents_raw
+    assert svc._torrents_raw["h" * 40]["name"] == "Fresh"
+    assert svc._rid == 9
+
+
+@pytest.mark.asyncio
+async def test_full_update_resync_reevaluates_every_torrent_for_completion():
+    """End-to-end: a full_update mid-run (e.g. qBit dropped our rid after a
+    WebUI restart) must fully resync the mirror and re-evaluate every
+    torrent it contains, not just the ones that "changed" relative to the
+    now-discarded previous state."""
+    svc, qbit, sender = _make_service()
+    svc.subscribe_user(1)
+    h = "i" * 40
+    # Not previously tracked at all (simulates rid reset losing our history).
+    qbit.get_maindata.return_value = _maindata(
+        rid=100,
+        full_update=True,
+        torrents={h: _raw(name="Resynced", progress=1.0, state="uploading")},
+    )
+
+    await svc._check_for_completions()
+
+    # First sight of an already-complete torrent outside of _initial_sync is
+    # suppressed (consistent with the initial-sync no-spurious-notify rule),
+    # but it must be tracked as completed so it doesn't linger.
+    assert h not in svc._tracked_torrents or svc._tracked_torrents[h]["completed"] is True
+    sender.assert_not_awaited()
+    assert svc._rid == 100
 
 
 # --- partial broadcast failure --------------------------------------------
@@ -135,42 +278,46 @@ async def test_notify_completion_only_logs_success_on_true(caplog):
     await svc._notify_completion(_torrent())
 
 
-# --- PERF-02: filtered polling + adaptive interval -------------------------
+# --- PERF-02 full: sync/maindata delta polling + adaptive interval --------
 
 
 @pytest.mark.asyncio
-async def test_check_for_completions_polls_only_downloading_filter():
-    from bot.models import TorrentFilter
-
+async def test_check_for_completions_polls_maindata_with_current_rid():
     svc, qbit, _ = _make_service()
-    qbit.get_torrents.return_value = []
+    svc._rid = 7
+    qbit.get_maindata.return_value = _maindata(rid=8)
 
     await svc._check_for_completions()
 
-    assert qbit.get_torrents.await_args.kwargs.get("filter_type") == TorrentFilter.DOWNLOADING
+    qbit.get_maindata.assert_awaited_once_with(7)
+    assert svc._rid == 8
 
 
 @pytest.mark.asyncio
-async def test_completion_detected_when_torrent_disappears_from_downloading_filter():
-    """PERF-02: instead of polling the full list, completion is detected when
-    a previously-downloading torrent no longer shows up under the DOWNLOADING
-    filter; get_torrent(hash) confirms it (vs. having been removed)."""
+async def test_completion_detected_when_torrent_flips_to_completed_in_delta():
+    """PERF-02 full: completion is detected when a delta update for a
+    previously-tracked hash reports progress=1.0 / a completed state."""
     svc, qbit, sender = _make_service()
     svc.subscribe_user(1)
     h = "c" * 40
     svc._tracked_torrents[h] = {
         "completed": False, "notified": False, "name": "Show.S01E01", "added_on": None,
     }
+    svc._torrents_raw[h] = _raw(name="Show.S01E01", progress=0.9, state="downloading")
 
-    qbit.get_torrents.return_value = []  # no longer downloading
-    qbit.get_torrent.return_value = _torrent(hash=h, progress=1.0, state=TorrentState.COMPLETED)
+    qbit.get_maindata.return_value = _maindata(
+        torrents={h: {"progress": 1.0, "state": "uploading"}},
+    )
 
     await svc._check_for_completions()
 
     sender.assert_awaited_once()
-    # Once complete+notified there's no further state to track (it can't
-    # re-enter the DOWNLOADING filter) — dropped to avoid unbounded growth.
+    # Once complete+notified there's no further state to track — dropped to
+    # avoid unbounded growth.
     assert h not in svc._tracked_torrents
+    # The raw mirror keeps the torrent (it's still seeding in qBit); only
+    # notification tracking is dropped.
+    assert svc._torrents_raw[h]["progress"] == 1.0
 
 
 @pytest.mark.asyncio
@@ -182,8 +329,10 @@ async def test_get_stats_completed_counter_survives_tracked_torrent_eviction():
     svc.subscribe_user(1)
     h = "d" * 40
     svc._tracked_torrents[h] = {"completed": False, "notified": False, "name": "X", "added_on": None}
-    qbit.get_torrents.return_value = []
-    qbit.get_torrent.return_value = _torrent(hash=h, progress=1.0, state=TorrentState.COMPLETED)
+    svc._torrents_raw[h] = _raw(name="X", progress=0.5, state="downloading")
+    qbit.get_maindata.return_value = _maindata(
+        torrents={h: {"progress": 1.0, "state": "uploading"}},
+    )
 
     await svc._check_for_completions()
 
@@ -195,11 +344,25 @@ async def test_get_stats_completed_counter_survives_tracked_torrent_eviction():
 async def test_get_poll_interval_adapts_to_active_downloads():
     svc, qbit, _ = _make_service()
 
-    qbit.get_torrents.return_value = [_torrent()]
+    svc._torrents_raw["a" * 40] = _raw(state="downloading")
     assert await svc._get_poll_interval() == svc.settings.notify_check_interval
 
-    qbit.get_torrents.return_value = []
+    svc._torrents_raw.clear()
     assert await svc._get_poll_interval() == svc._idle_check_interval
+
+
+@pytest.mark.asyncio
+async def test_get_poll_interval_uses_local_view_without_extra_api_call():
+    """The adaptive interval must not perform its own qBittorrent request —
+    it should be derivable from the maindata mirror already populated by
+    _check_for_completions this cycle."""
+    svc, qbit, _ = _make_service()
+    svc._torrents_raw["a" * 40] = _raw(state="downloading")
+
+    await svc._get_poll_interval()
+
+    qbit.get_torrents.assert_not_called()
+    qbit.get_maindata.assert_not_called()
 
 
 # --- OBS-06: component contextvar + backoff on monitor loop errors --------
@@ -210,7 +373,7 @@ async def test_monitor_loop_binds_component_contextvar():
     import structlog
 
     svc, qbit, _ = _make_service()
-    qbit.get_torrents.return_value = []
+    qbit.get_maindata.return_value = _maindata(full_update=True)
 
     bound = {}
     orig_bind = structlog.contextvars.bind_contextvars

@@ -279,6 +279,72 @@ class TestQBittorrentClient:
         assert "16" in doc
         assert "first 8 chars" not in doc
 
+    # ------------------------------------------------------------------
+    # PERF-02 full: get_maindata() wraps sync/maindata?rid=N and normalizes
+    # the response shape so callers never have to guard for missing keys.
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_get_maindata_passes_rid_and_normalizes_response(self, client):
+        raw = {
+            "rid": 42,
+            "torrents": {"a" * 40: {"progress": 0.5}},
+            "torrents_removed": ["b" * 40],
+            "full_update": False,
+        }
+        with patch.object(client, "_request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = raw
+
+            result = await client.get_maindata(17)
+
+            mock_request.assert_awaited_once()
+            call_args = mock_request.call_args
+            assert call_args[0][0] == "GET"
+            assert call_args[0][1] == "/api/v2/sync/maindata"
+            assert call_args[1]["params"] == {"rid": 17}
+
+        assert result == raw
+
+    @pytest.mark.asyncio
+    async def test_get_maindata_defaults_rid_to_zero(self, client):
+        with patch.object(client, "_request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = {"rid": 0, "torrents": {}, "full_update": True}
+            await client.get_maindata()
+            assert mock_request.call_args[1]["params"] == {"rid": 0}
+
+    @pytest.mark.asyncio
+    async def test_get_maindata_normalizes_missing_keys_on_empty_delta(self, client):
+        """qBittorrent may omit torrents/torrents_removed entirely when
+        nothing changed since ``rid`` — callers must still get well-formed
+        dict/list defaults rather than KeyErrors."""
+        with patch.object(client, "_request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = {"rid": 5}
+
+            result = await client.get_maindata(5)
+
+        assert result == {
+            "rid": 5,
+            "torrents": {},
+            "torrents_removed": [],
+            "full_update": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_get_maindata_handles_non_dict_response(self, client):
+        """Defensive: an unexpected non-dict response (e.g. empty body parsed
+        as None) must not crash the notification loop."""
+        with patch.object(client, "_request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = None
+
+            result = await client.get_maindata(3)
+
+        assert result == {
+            "rid": 3,
+            "torrents": {},
+            "torrents_removed": [],
+            "full_update": False,
+        }
+
 
 class TestTorrentInfo:
     """Test TorrentInfo model."""
@@ -627,6 +693,11 @@ class TestNotificationService:
         client = AsyncMock()
         client.login = AsyncMock(return_value=True)
         client.get_torrents = AsyncMock(return_value=[])
+        # PERF-02 full: the notification loop polls sync/maindata, not
+        # get_torrents() — keep both mocked so either code path is covered.
+        client.get_maindata = AsyncMock(
+            return_value={"rid": 0, "torrents": {}, "torrents_removed": [], "full_update": True}
+        )
         return client
 
     @pytest.fixture

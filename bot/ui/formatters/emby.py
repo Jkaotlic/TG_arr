@@ -1,8 +1,11 @@
 """Emby server status and trending/poster (TMDb-backed) formatters."""
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from bot.ui.formatters._common import _e
+
+if TYPE_CHECKING:
+    from bot.clients.emby import EmbyServerInfo
 
 
 class _EmbyFormatters:
@@ -10,28 +13,32 @@ class _EmbyFormatters:
 
     @staticmethod
     def format_emby_status(
-        server_name: str,
-        version: str,
-        operating_system: str,
-        has_pending_restart: bool,
-        has_update_available: bool,
+        info: "EmbyServerInfo",
         active_sessions: int = 0,
         libraries: list = None,
     ) -> str:
-        """Format Emby server status."""
+        """Format Emby server status.
+
+        LOGIC-19: takes the already-fetched ``EmbyServerInfo`` instead of 7
+        loose scalars (server_name/version/operating_system/
+        has_pending_restart/has_update_available were all fields of the same
+        object at every call site) — ``active_sessions``/``libraries`` stay
+        separate since they come from different Emby API calls, not from
+        ``EmbyServerInfo`` itself.
+        """
         lines = ["<b>📺 Emby Media Server</b>\n"]
 
-        lines.append(f"🏷 <b>Сервер:</b> {_e(server_name)}")
-        lines.append(f"🖥 <b>Версия:</b> {_e(version)}")
-        lines.append(f"💻 <b>ОС:</b> {_e(operating_system)}")
+        lines.append(f"🏷 <b>Сервер:</b> {_e(info.server_name)}")
+        lines.append(f"🖥 <b>Версия:</b> {_e(info.version)}")
+        lines.append(f"💻 <b>ОС:</b> {_e(info.operating_system)}")
 
         lines.append("")
 
         # Status indicators
-        if has_update_available:
+        if info.has_update_available:
             lines.append("⬆️ <b>Доступно обновление!</b>")
 
-        if has_pending_restart:
+        if info.has_pending_restart:
             lines.append("🔄 <b>Требуется перезагрузка</b>")
 
         if active_sessions > 0:

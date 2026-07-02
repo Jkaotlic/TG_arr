@@ -253,30 +253,47 @@ def _torrent(hash_: str, progress: float, state: TorrentState, name: str = "T") 
     return TorrentInfo(hash=hash_, name=name, progress=progress, state=state)
 
 
+def _raw(name: str, progress: float, state: str) -> dict:
+    """Raw per-torrent dict as it appears inside maindata's "torrents" map
+    (qBittorrent's native field names/state strings, not the TorrentState enum)."""
+    return {"name": name, "progress": progress, "state": state}
+
+
+def _maindata(rid: int = 1, torrents=None, removed=None, full_update: bool = False) -> dict:
+    """Build a get_maindata()-shaped response (already normalized the way
+    QBittorrentClient.get_maindata returns it)."""
+    return {
+        "rid": rid,
+        "torrents": torrents or {},
+        "torrents_removed": removed or [],
+        "full_update": full_update,
+    }
+
+
 @pytest.mark.asyncio
 async def test_notification_completion_fires_once_on_flip():
-    """PERF-02 model: completion is detected when a tracked, still-downloading
-    torrent DROPS OUT of the DOWNLOADING filter and a per-hash lookup shows it
-    finished — it then notifies EXACTLY once and is dropped from tracking so a
-    re-check cannot re-notify."""
+    """PERF-02 full model: completion is detected when a sync/maindata delta
+    for a tracked, still-downloading torrent reports progress=1.0 / a
+    completed state — it then notifies EXACTLY once and is dropped from
+    tracking so a re-check cannot re-notify."""
     qbt = AsyncMock()
     sender = AsyncMock()
     svc = NotificationService(qbt, sender)
     svc.subscribe_user(42)
 
-    downloading = _torrent("abc", 0.5, TorrentState.DOWNLOADING, "Movie")
-    completed = _torrent("abc", 1.0, TorrentState.COMPLETED, "Movie")
-
     # Cycle 1: torrent is actively downloading — tracked, not notified.
-    qbt.get_torrents = AsyncMock(return_value=[downloading])
+    qbt.get_maindata = AsyncMock(
+        return_value=_maindata(rid=1, torrents={"abc": _raw("Movie", 0.5, "downloading")})
+    )
     await svc._check_for_completions()
     assert sender.await_count == 0
     assert svc._tracked_torrents["abc"]["completed"] is False
 
-    # Cycle 2: it left the DOWNLOADING filter; per-hash lookup shows it
-    # completed → notify once, then drop it from tracking.
-    qbt.get_torrents = AsyncMock(return_value=[])
-    qbt.get_torrent = AsyncMock(return_value=completed)
+    # Cycle 2: delta reports it finished → notify once, then drop it from
+    # tracking (torrent stays in the raw mirror — it's still seeding in qBit).
+    qbt.get_maindata = AsyncMock(
+        return_value=_maindata(rid=2, torrents={"abc": {"progress": 1.0, "state": "uploading"}})
+    )
     await svc._check_for_completions()
     assert sender.await_count == 1
     sent_user, sent_msg = sender.await_args.args
@@ -284,23 +301,27 @@ async def test_notification_completion_fires_once_on_flip():
     assert "Movie" in sent_msg
     assert "abc" not in svc._tracked_torrents
 
-    # Cycle 3: still absent — no duplicate notification.
+    # Cycle 3: empty delta (nothing changed) — no duplicate notification.
+    qbt.get_maindata = AsyncMock(return_value=_maindata(rid=3))
     await svc._check_for_completions()
     assert sender.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_notification_new_already_complete_does_not_notify():
-    """PERF-02 model: a torrent that is ALREADY complete at startup never
-    enters the DOWNLOADING filter, so suppression happens in _initial_sync —
-    it is recorded as completed + notified and never fires a spurious alert."""
+    """PERF-02 full model: a torrent that is ALREADY complete at startup is
+    picked up by the full-snapshot maindata poll in _initial_sync — it is
+    recorded as completed + notified and never fires a spurious alert."""
     qbt = AsyncMock()
     sender = AsyncMock()
     svc = NotificationService(qbt, sender)
     svc.subscribe_user(42)
 
-    already_done = _torrent("zzz", 1.0, TorrentState.COMPLETED, "OldThing")
-    qbt.get_torrents = AsyncMock(return_value=[already_done])
+    qbt.get_maindata = AsyncMock(
+        return_value=_maindata(
+            full_update=True, torrents={"zzz": _raw("OldThing", 1.0, "uploading")}
+        )
+    )
 
     await svc._initial_sync()
 

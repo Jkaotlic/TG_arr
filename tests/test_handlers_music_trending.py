@@ -420,7 +420,12 @@ async def test_add_movie_from_trending_escapes_error_message():
 @pytest.mark.asyncio
 async def test_add_series_from_trending_does_not_call_get_sonarr_twice():
     """The TVDB-resolution branch must reuse the `sonarr` client obtained
-    earlier in the handler, not call get_sonarr() again."""
+    earlier in the handler, not call get_sonarr() again.
+
+    LOGIC-11: TVDB resolution now lives in AddService.resolve_series_tvdb_id
+    (shared with grab.py) rather than an inline `sonarr.lookup_series` call in
+    the handler, so this asserts the delegation instead of the raw client call.
+    """
     from bot.handlers import trending
     from bot.models import ActionLog, ActionType, ContentType
 
@@ -431,17 +436,17 @@ async def test_add_series_from_trending_does_not_call_get_sonarr_twice():
         year = 2024
         poster_url = None
 
-    class FakeLookupResult:
+    class FakeResolved:
         tmdb_id = 55
         tvdb_id = 12345
         title = "Some Series"
 
     series = FakeSeries()
+    resolved = FakeResolved()
     trending._trending_series_cache.clear()
     trending._cache_put(trending._trending_series_cache, series.tmdb_id, series)
 
     sonarr_client = AsyncMock()
-    sonarr_client.lookup_series = AsyncMock(return_value=[FakeLookupResult()])
     get_sonarr_mock = AsyncMock(return_value=sonarr_client)
 
     action = ActionLog(
@@ -454,6 +459,7 @@ async def test_add_series_from_trending_does_not_call_get_sonarr_twice():
     add_service.get_sonarr_profiles = AsyncMock(return_value=[MagicMock(id=1)])
     add_service.get_sonarr_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="/tv")])
     add_service.add_series = AsyncMock(return_value=(MagicMock(title="Some Series", year=2024), action))
+    add_service.resolve_series_tvdb_id = AsyncMock(return_value=resolved)
 
     db = AsyncMock()
     db_user = MagicMock()
@@ -480,5 +486,5 @@ async def test_add_series_from_trending_does_not_call_get_sonarr_twice():
         f"get_sonarr() called {get_sonarr_mock.await_count} times; expected 1 "
         "(TVDB-resolution branch must reuse the existing `sonarr` variable)"
     )
-    sonarr_client.lookup_series.assert_awaited_once()
+    add_service.resolve_series_tvdb_id.assert_awaited_once()
     trending._trending_series_cache.clear()
