@@ -336,6 +336,34 @@ class QBittorrentClient:
 
         return torrents
 
+    async def get_maindata(self, rid: int = 0) -> dict:
+        """Fetch a delta snapshot from qBittorrent's sync API.
+
+        PERF-02: ``GET /api/v2/sync/maindata?rid=N`` is qBittorrent's
+        purpose-built delta protocol — on the first call (``rid=0``) it
+        returns a full snapshot of every torrent; on subsequent calls it
+        returns only what changed since the given ``rid`` (partial per-torrent
+        dicts carrying just the updated fields, plus a list of removed
+        hashes). When nothing changed since ``rid``, ``torrents``/
+        ``torrents_removed`` come back empty. This lets the notification loop
+        avoid re-fetching and re-parsing the entire torrent list every cycle.
+
+        Returns a dict shaped like the raw API response, normalized so
+        callers can rely on the keys always being present:
+            {"rid": int, "torrents": dict[hash, dict], "torrents_removed":
+             list[str], "full_update": bool}
+        """
+        result = await self._request("GET", "/api/v2/sync/maindata", params={"rid": rid})
+        if not isinstance(result, dict):
+            result = {}
+
+        return {
+            "rid": result.get("rid", rid),
+            "torrents": result.get("torrents") or {},
+            "torrents_removed": result.get("torrents_removed") or [],
+            "full_update": bool(result.get("full_update", False)),
+        }
+
     async def get_torrent_by_short_hash(self, short_hash: str) -> Optional[TorrentInfo]:
         """Get torrent by partial hash prefix (fallback for legacy 16-char callback_data).
 
@@ -483,8 +511,17 @@ class QBittorrentClient:
         logger.info("Added torrent from URL", category=category)
         return True
 
-    def _parse_torrent(self, item: dict) -> TorrentInfo:
-        """Parse qBittorrent torrent response to TorrentInfo."""
+    @staticmethod
+    def _parse_torrent(item: dict) -> TorrentInfo:
+        """Parse qBittorrent torrent response to TorrentInfo.
+
+        PERF-02 full: a plain ``staticmethod`` (it never touched ``self``) so
+        ``NotificationService`` can call ``QBittorrentClient._parse_torrent``
+        directly to turn its locally-merged sync/maindata rows into
+        ``TorrentInfo`` without going through an instance — important because
+        that instance is normally an ``AsyncMock`` in tests, where a bound
+        instance-method call would itself become an (unawaited) coroutine.
+        """
         state_str = item.get("state", "unknown")
         state = STATE_MAP.get(state_str, TorrentState.UNKNOWN)
 

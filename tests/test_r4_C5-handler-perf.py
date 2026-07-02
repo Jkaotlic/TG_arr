@@ -206,8 +206,9 @@ async def test_emby_status_runs_fetches_concurrently():
     # Concurrency: all three started before any finished.
     assert set(order[:3]) == {"info:start", "lib:start", "sess:start"}, order
 
-    fmt_kwargs = fmt.call_args.kwargs
-    assert fmt_kwargs["server_name"] == "S"
+    # LOGIC-19: format_emby_status now takes the EmbyServerInfo positionally.
+    fmt_args, fmt_kwargs = fmt.call_args.args, fmt.call_args.kwargs
+    assert fmt_args[0] is info
     assert fmt_kwargs["active_sessions"] == 3
     assert fmt_kwargs["libraries"] == ["lib1", "lib2"]
 
@@ -247,8 +248,15 @@ async def test_emby_status_error_renders_error_text():
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_trending_add_series_caches_resolved_tvdb():
-    """First add resolves tvdb via Sonarr lookup; the resolved object is written
-    back to the cache so the second add skips lookup_series entirely."""
+    """First add resolves tvdb via AddService.resolve_series_tvdb_id; the
+    resolved object is written back to the cache so the second add skips
+    resolution entirely (still unresolved series never even calls it again
+    because the cache now holds the resolved one).
+
+    LOGIC-11: TVDB resolution now lives in AddService.resolve_series_tvdb_id
+    (shared with grab.py) instead of an inline `sonarr.lookup_series` call in
+    the handler.
+    """
     from bot.handlers import trending
 
     tmdb_id = 555
@@ -261,10 +269,11 @@ async def test_trending_add_series_caches_resolved_tvdb():
     add_service.get_sonarr_profiles = AsyncMock(return_value=[MagicMock(id=1)])
     add_service.get_sonarr_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="/tv")])
     add_service.add_series = AsyncMock(return_value=(resolved, action))
-
-    # Sonarr lookup used to resolve tvdb on the first add only.
-    sonarr_client = MagicMock()
-    sonarr_client.lookup_series = AsyncMock(return_value=[resolved])
+    # Mimics the real AddService.resolve_series_tvdb_id: a no-op passthrough
+    # once the series already carries a tvdb_id, otherwise resolves it.
+    add_service.resolve_series_tvdb_id = AsyncMock(
+        side_effect=lambda s: resolved if not s.tvdb_id else s
+    )
 
     db = AsyncMock()
     db_user = MagicMock()
@@ -281,33 +290,39 @@ async def test_trending_add_series_caches_resolved_tvdb():
 
     with patch.object(trending, "get_prowlarr", AsyncMock()), \
          patch.object(trending, "get_radarr", AsyncMock()), \
-         patch.object(trending, "get_sonarr", AsyncMock(return_value=sonarr_client)), \
+         patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
-        # First add: must perform the Sonarr lookup to resolve tvdb.
+        # First add: must resolve tvdb via AddService.
         await trending.handle_add_series_from_trending(
             cb, AddContentCB(kind="series", tmdb_id=tmdb_id), db_user=db_user, db=db
         )
-        assert sonarr_client.lookup_series.await_count == 1
+        assert add_service.resolve_series_tvdb_id.await_count == 1
 
         # Cache must now hold the *resolved* series (with a real tvdb_id).
         cached = trending._trending_series_cache[tmdb_id]
         assert cached.tvdb_id == 98765
 
-        # Second add: cache already resolved → no further lookup_series call.
+        # Second add: cache already resolved → resolve_series_tvdb_id is a
+        # passthrough (no lookup performed inside it), called once more but
+        # cheaply since the cached series already has a tvdb_id.
         cb2, _ = _callback_with_status()
         cb2.data = None
         await trending.handle_add_series_from_trending(
             cb2, AddContentCB(kind="series", tmdb_id=tmdb_id), db_user=db_user, db=db
         )
-        assert sonarr_client.lookup_series.await_count == 1  # unchanged
+        assert add_service.resolve_series_tvdb_id.await_count == 1  # not called again
 
     trending._trending_series_cache.clear()
 
 
 @pytest.mark.asyncio
 async def test_trending_add_series_already_resolved_skips_lookup():
-    """A series already carrying a tvdb_id must never trigger a Sonarr lookup."""
+    """A series already carrying a tvdb_id must never trigger tvdb resolution.
+
+    LOGIC-11: resolution now goes through AddService.resolve_series_tvdb_id;
+    the handler must not even call it when series.tvdb_id is already set.
+    """
     from bot.handlers import trending
 
     tmdb_id = 777
@@ -318,9 +333,7 @@ async def test_trending_add_series_already_resolved_skips_lookup():
     add_service.get_sonarr_profiles = AsyncMock(return_value=[MagicMock(id=1)])
     add_service.get_sonarr_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="/tv")])
     add_service.add_series = AsyncMock(return_value=(resolved, action))
-
-    sonarr_client = MagicMock()
-    sonarr_client.lookup_series = AsyncMock(return_value=[])
+    add_service.resolve_series_tvdb_id = AsyncMock(return_value=resolved)
 
     db = AsyncMock()
     db_user = MagicMock()
@@ -337,14 +350,14 @@ async def test_trending_add_series_already_resolved_skips_lookup():
 
     with patch.object(trending, "get_prowlarr", AsyncMock()), \
          patch.object(trending, "get_radarr", AsyncMock()), \
-         patch.object(trending, "get_sonarr", AsyncMock(return_value=sonarr_client)), \
+         patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
         await trending.handle_add_series_from_trending(
             cb, AddContentCB(kind="series", tmdb_id=tmdb_id), db_user=db_user, db=db
         )
 
-    sonarr_client.lookup_series.assert_not_awaited()
+    add_service.resolve_series_tvdb_id.assert_not_awaited()
     trending._trending_series_cache.clear()
 
 

@@ -409,13 +409,8 @@ async def handle_add_movie_from_trending(
             await status_msg.edit_text("❌ Нет профилей качества или папок в Radarr")
             return
 
-        profile_id = prefs.radarr_quality_profile_id or profiles[0].id
-        folder_path = None
-        if prefs.radarr_root_folder_id:
-            folder = next((f for f in folders if f.id == prefs.radarr_root_folder_id), None)
-            folder_path = folder.path if folder else folders[0].path
-        else:
-            folder_path = folders[0].path
+        profile_id = AddService.resolve_profile(profiles, prefs.radarr_quality_profile_id).id
+        folder_path = AddService.resolve_root_folder(folders, prefs.radarr_root_folder_id)
 
         # Add movie to Radarr
         added_movie, action = await add_service.add_movie(
@@ -497,28 +492,15 @@ async def handle_add_series_from_trending(
             await status_msg.edit_text("❌ Нет профилей качества или папок в Sonarr")
             return
 
-        profile_id = prefs.sonarr_quality_profile_id or profiles[0].id
-        folder_path = None
-        if prefs.sonarr_root_folder_id:
-            folder = next((f for f in folders if f.id == prefs.sonarr_root_folder_id), None)
-            folder_path = folder.path if folder else folders[0].path
-        else:
-            folder_path = folders[0].path
+        profile_id = AddService.resolve_profile(profiles, prefs.sonarr_quality_profile_id).id
+        folder_path = AddService.resolve_root_folder(folders, prefs.sonarr_root_folder_id)
 
         # Resolve TVDB ID if missing (TMDb trending returns tvdb_id=0)
         if not series.tvdb_id:
-            # LOGIC-22: reuse the `sonarr` client already fetched above instead
-            # of a redundant await get_sonarr().
-            lookup_results = await sonarr.lookup_series(series.title)
-            matched = None
-            for lr in lookup_results:
-                if lr.tmdb_id == series.tmdb_id:
-                    matched = lr
-                    break
-            if not matched and lookup_results:
-                matched = lookup_results[0]
-            if matched and matched.tvdb_id:
-                series = matched
+            # LOGIC-11: shared with grab.py's series-resolution path.
+            resolved = await add_service.resolve_series_tvdb_id(series)
+            if resolved:
+                series = resolved
                 # PERF-07: write the resolved series (now carrying a real
                 # tvdb_id) back into the cache so a subsequent add/detail view
                 # reuses it instead of re-running the Sonarr lookup.

@@ -2,13 +2,13 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Optional
+from typing import Any, Optional
 
 import structlog
 
-from bot.clients.qbittorrent import QBittorrentClient
+from bot.clients.qbittorrent import STATE_MAP, QBittorrentClient
 from bot.config import get_settings
-from bot.models import TorrentFilter, TorrentInfo, TorrentState
+from bot.models import TorrentInfo, TorrentState
 from bot.ui.formatters import Formatters
 
 logger = structlog.get_logger()
@@ -45,6 +45,16 @@ class NotificationService:
         # Track known torrents and their completion state
         # Format: {torrent_hash: {"completed": bool, "notified": bool, "name": str}}
         self._tracked_torrents: dict[str, dict] = {}
+
+        # PERF-02 full: local mirror of qBittorrent's torrent table, fed by
+        # the sync/maindata delta protocol. Each entry is the *raw* API dict
+        # for that hash (same shape _parse_torrent expects), kept up to date
+        # by merging partial per-field updates on top of it — see
+        # ``_merge_maindata``. ``_rid`` is the response-id qBittorrent uses to
+        # compute the next delta; 0 forces a full snapshot (first poll, or
+        # after a full_update resync).
+        self._torrents_raw: dict[str, dict[str, Any]] = {}
+        self._rid = 0
 
         # Users subscribed to notifications
         self._subscribed_users: set[int] = set()
@@ -158,19 +168,84 @@ class NotificationService:
         back off to `_idle_check_interval` when the queue is empty — avoids
         polling qBittorrent every notify_check_interval (default 60s) around
         the clock when nothing is happening.
+
+        Uses the local maindata-fed view (``_torrents_raw``) instead of an
+        extra API call — the view is already kept current by
+        ``_check_for_completions`` every cycle, so no network round-trip is
+        needed just to decide the next sleep duration.
         """
-        try:
-            active = await self.qbittorrent.get_torrents(filter_type=TorrentFilter.DOWNLOADING)
-        except Exception:
-            return self.settings.notify_check_interval
+        active = any(
+            STATE_MAP.get(raw.get("state", "unknown"), TorrentState.UNKNOWN)
+            == TorrentState.DOWNLOADING
+            for raw in self._torrents_raw.values()
+        )
         return self.settings.notify_check_interval if active else self._idle_check_interval
 
-    async def _initial_sync(self) -> None:
-        """Perform initial sync of current torrents."""
-        try:
-            torrents = await self.qbittorrent.get_torrents()
+    def _merge_maindata(self, maindata: dict) -> None:
+        """Merge a sync/maindata response into the local torrent-table mirror.
 
-            for torrent in torrents:
+        PERF-02 full: qBittorrent's delta protocol sends only the fields that
+        changed since ``rid`` for each torrent (not a full row), so a naive
+        replace would silently drop every field the server didn't repeat this
+        cycle. Instead each hash's partial dict is merged field-by-field on
+        top of whatever we already know about that hash. ``full_update=True``
+        (first poll, or after the server drops our rid, e.g. a WebUI restart)
+        means ``torrents`` is a complete snapshot — the mirror is replaced
+        outright rather than merged, so stale fields from a previous torrent
+        that reused a hash can't linger.
+        """
+        if maindata.get("full_update"):
+            self._torrents_raw = {
+                h: dict(raw) for h, raw in maindata.get("torrents", {}).items()
+            }
+        else:
+            for h, partial in maindata.get("torrents", {}).items():
+                existing = self._torrents_raw.setdefault(h, {})
+                existing.update(partial)
+
+        for h in maindata.get("torrents_removed", []):
+            self._torrents_raw.pop(h, None)
+
+        self._rid = maindata.get("rid", self._rid)
+
+    def _torrent_view(self, torrent_hash: str) -> Optional[TorrentInfo]:
+        """Parse the merged raw dict for one hash into a ``TorrentInfo``.
+
+        Calls ``QBittorrentClient._parse_torrent`` on the class rather than
+        ``self.qbittorrent._parse_torrent`` — the latter would resolve
+        through the (normally mocked, in tests) client instance, which for
+        an ``AsyncMock`` turns a plain sync helper into an unawaited
+        coroutine. ``_parse_torrent`` is a ``@staticmethod`` that only
+        depends on its ``item`` argument, so calling it via the class is
+        equivalent and mock-safe.
+        """
+        raw = self._torrents_raw.get(torrent_hash)
+        if raw is None:
+            return None
+        # Merged partial updates may still lack "hash"/"name" if the first
+        # delta this process ever saw for that hash arrived before a full
+        # snapshot (shouldn't happen with rid=0 on the first poll, but stay
+        # defensive rather than let _parse_torrent blow up on a KeyError).
+        raw = {"hash": torrent_hash, **raw}
+        return QBittorrentClient._parse_torrent(raw)
+
+    async def _initial_sync(self) -> None:
+        """Perform initial sync of current torrents.
+
+        PERF-02 full: forces a full maindata snapshot (``rid=0``) rather than
+        ``get_torrents()`` — same information, fetched via the delta protocol
+        so the local mirror (``_torrents_raw``) and ``_rid`` are primed for
+        ``_check_for_completions`` to take over with incremental polls.
+        """
+        try:
+            maindata = await self.qbittorrent.get_maindata(0)
+            self._torrents_raw = {}
+            self._merge_maindata(maindata)
+
+            for torrent_hash in self._torrents_raw:
+                torrent = self._torrent_view(torrent_hash)
+                if torrent is None:
+                    continue
                 is_complete = torrent.progress >= 1.0 or torrent.state == TorrentState.COMPLETED
                 self._tracked_torrents[torrent.hash] = {
                     "completed": is_complete,
@@ -181,7 +256,7 @@ class NotificationService:
 
             logger.info(
                 "Initial torrent sync completed",
-                total_torrents=len(torrents),
+                total_torrents=len(self._torrents_raw),
                 completed=sum(1 for t in self._tracked_torrents.values() if t["completed"]),
             )
 
@@ -191,62 +266,68 @@ class NotificationService:
     async def _check_for_completions(self) -> None:
         """Check for newly completed downloads and send notifications.
 
-        PERF-02 (minimal): instead of pulling and parsing the *entire*
-        torrent list every cycle (most of which is idle seeding torrents on
-        a Pi), only the DOWNLOADING filter is polled. A previously-tracked,
-        not-yet-completed torrent that no longer shows up as downloading is
-        looked up individually via ``get_torrent(hash)`` — either it just
-        completed (notify), it's in some other non-downloading state like
-        paused/stalled (update, don't notify), or it's gone entirely (drop
-        from tracking). Full sync/maindata delta-protocol is deferred (see
-        fix-plan Refactoring section) — this is the minimal fix.
+        PERF-02 full: polls qBittorrent's ``sync/maindata`` delta protocol
+        (``rid``-based) instead of the DOWNLOADING filter. The response is
+        merged into the local mirror (``_torrents_raw``); completion is then
+        determined the same way as before — progress >= 1.0 or
+        state == COMPLETED — just read from the local view instead of a
+        fresh per-torrent fetch. Torrents reported in ``torrents_removed``
+        are dropped from tracking (deleted/moved out of qBittorrent).
+
+        Only hashes that actually changed this cycle (``maindata["torrents"]``
+        keys — or every hash on a ``full_update`` resync) are re-parsed and
+        re-evaluated; an idle cycle with an empty delta does no per-torrent
+        work at all, which is the whole point of the delta protocol on a Pi.
         """
         try:
-            downloading = await self.qbittorrent.get_torrents(filter_type=TorrentFilter.DOWNLOADING)
-            downloading_hashes = {t.hash for t in downloading}
+            maindata = await self.qbittorrent.get_maindata(self._rid)
+            self._merge_maindata(maindata)
 
-            for torrent in downloading:
-                if torrent.hash not in self._tracked_torrents:
-                    # New torrent appeared while downloading — track it,
-                    # don't notify (it wasn't observed completing).
-                    self._tracked_torrents[torrent.hash] = {
-                        "completed": False,
-                        "notified": False,
-                        "name": torrent.name,
-                        "added_on": torrent.added_on,
-                    }
+            for h in maindata.get("torrents_removed", []):
+                self._tracked_torrents.pop(h, None)
 
-            # Torrents we were tracking as "not yet complete" that dropped out
-            # of the DOWNLOADING filter: resolve what happened to each.
-            pending_hashes = {
-                h for h, t in self._tracked_torrents.items()
-                if not t["completed"] and h not in downloading_hashes
-            }
-            for h in pending_hashes:
-                tracked = self._tracked_torrents[h]
-                try:
-                    torrent = await self.qbittorrent.get_torrent(h)
-                except Exception as e:
-                    logger.debug("completion_recheck_failed", torrent_hash=h, error=str(e))
-                    continue
+            if maindata.get("full_update"):
+                changed_hashes = list(self._torrents_raw)
+            else:
+                changed_hashes = list(maindata.get("torrents", {}))
 
+            for torrent_hash in changed_hashes:
+                torrent = self._torrent_view(torrent_hash)
                 if torrent is None:
-                    # Removed from qBittorrent entirely (deleted/moved out).
-                    del self._tracked_torrents[h]
                     continue
 
                 is_complete = torrent.progress >= 1.0 or torrent.state == TorrentState.COMPLETED
+                tracked = self._tracked_torrents.get(torrent_hash)
+
+                if tracked is None:
+                    # New torrent observed mid-run. If it's already complete
+                    # the moment we see it (e.g. instantly-finished magnet),
+                    # treat it like _initial_sync would — suppress the
+                    # notification rather than fire one for a download we
+                    # never actually watched progress on.
+                    self._tracked_torrents[torrent_hash] = {
+                        "completed": is_complete,
+                        "notified": is_complete,
+                        "name": torrent.name,
+                        "added_on": torrent.added_on,
+                    }
+                    continue
+
+                if tracked["completed"]:
+                    # Already resolved (shouldn't normally still be tracked —
+                    # see the drop below — but guard against a stray entry).
+                    continue
+
                 if is_complete:
                     if not tracked["notified"]:
                         await self._notify_completion(torrent)
                         self._completed_count += 1
                     # Once complete+notified there is no further state to
-                    # track (it won't re-enter the DOWNLOADING filter) — drop
-                    # it now instead of keeping a growing dict of finished
-                    # torrents alive for the lifetime of the process.
-                    del self._tracked_torrents[h]
-                # else: paused/stalled/errored etc — leave tracked, re-check
-                # next cycle since it's still not in the downloading filter.
+                    # track — drop it now instead of keeping a growing dict
+                    # of finished torrents alive for the process lifetime.
+                    del self._tracked_torrents[torrent_hash]
+                # else: still downloading/paused/stalled/errored — leave
+                # tracked, re-check next cycle.
 
         except Exception as e:
             logger.error("notification_check_failed", error=str(e), exc_info=True)

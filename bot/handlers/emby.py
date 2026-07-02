@@ -43,11 +43,7 @@ async def _render_status_text() -> tuple[str, InlineKeyboardMarkup | None]:
         )
 
         text = Formatters.format_emby_status(
-            server_name=info.server_name,
-            version=info.version,
-            operating_system=info.operating_system,
-            has_pending_restart=info.has_pending_restart,
-            has_update_available=info.has_update_available,
+            info,
             active_sessions=len(sessions),
             libraries=libraries,
         )
