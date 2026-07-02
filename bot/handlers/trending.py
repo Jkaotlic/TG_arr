@@ -16,12 +16,10 @@ from bot.models import User
 from bot.services.add_service import AddService
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.menu import MENU_TRENDING
 
 logger = structlog.get_logger()
 router = Router()
-
-# Menu button text
-MENU_TRENDING = "🔥 Топ"
 
 # Cache for trending data to avoid re-fetching when viewing details.
 # Keyed by tmdb_id for O(1) lookup; values are the plain item (kept as a bare

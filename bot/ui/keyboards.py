@@ -4,6 +4,18 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from bot.ui.callbacks import PageCB, TorrentPageCB
+from bot.ui.menu import (
+    MENU_CALENDAR,
+    MENU_DOWNLOADS,
+    MENU_EMBY,
+    MENU_HISTORY,
+    MENU_MUSIC,
+    MENU_QSTATUS,
+    MENU_SEARCH,
+    MENU_SETTINGS,
+    MENU_STATUS,
+    MENU_TRENDING,
+)
 from bot.models import (
     ArtistInfo,
     ContentType,
@@ -121,10 +133,10 @@ class Keyboards:
         """Create main (reply) menu keyboard with the most used commands."""
         return ReplyKeyboardMarkup(
             keyboard=[
-                [KeyboardButton(text="🔍 Поиск"), KeyboardButton(text="🎵 Музыка"), KeyboardButton(text="🔥 Топ")],
-                [KeyboardButton(text="📅 Календарь"), KeyboardButton(text="📥 Загрузки"), KeyboardButton(text="📊 qBit")],
-                [KeyboardButton(text="📺 Emby"), KeyboardButton(text="🔌 Статус"), KeyboardButton(text="⚙️ Настройки")],
-                [KeyboardButton(text="📋 История")],
+                [KeyboardButton(text=MENU_SEARCH), KeyboardButton(text=MENU_MUSIC), KeyboardButton(text=MENU_TRENDING)],
+                [KeyboardButton(text=MENU_CALENDAR), KeyboardButton(text=MENU_DOWNLOADS), KeyboardButton(text=MENU_QSTATUS)],
+                [KeyboardButton(text=MENU_EMBY), KeyboardButton(text=MENU_STATUS), KeyboardButton(text=MENU_SETTINGS)],
+                [KeyboardButton(text=MENU_HISTORY)],
             ],
             resize_keyboard=True,
             input_field_placeholder="Введите название для поиска...",

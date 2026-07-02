@@ -546,6 +546,51 @@ async def test_cmd_pause_single_torrent_open_to_non_admin():
 
 
 # ============================================================================
+# LOGIC-13: /pause@botname / /resume@botname must not leak "@botname" into args
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_cmd_pause_strips_botname_suffix():
+    """RED test (LOGIC-13): a naive text.replace("/pause", "") left "@botname all"
+    as the args, so /pause@botname all tried to resolve "@botname all" as a
+    torrent hash instead of running the admin "pause all" branch.
+    """
+    from bot.handlers import downloads
+
+    qbt = AsyncMock()
+    qbt.pause = AsyncMock()
+    qbt.get_torrent_by_short_hash = AsyncMock(side_effect=AssertionError("should not look up a torrent"))
+
+    message = MagicMock()
+    message.text = "/pause@botname all"
+    message.answer = AsyncMock()
+
+    with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
+        await downloads.cmd_pause(message, db_user=MagicMock(), is_admin=True)
+
+    qbt.pause.assert_awaited_once_with("all")
+
+
+@pytest.mark.asyncio
+async def test_cmd_resume_strips_botname_suffix():
+    from bot.handlers import downloads
+
+    qbt = AsyncMock()
+    qbt.resume = AsyncMock()
+    qbt.get_torrent_by_short_hash = AsyncMock(side_effect=AssertionError("should not look up a torrent"))
+
+    message = MagicMock()
+    message.text = "/resume@botname all"
+    message.answer = AsyncMock()
+
+    with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
+        await downloads.cmd_resume(message, db_user=MagicMock(), is_admin=True)
+
+    qbt.resume.assert_awaited_once_with("all")
+
+
+# ============================================================================
 # PERF-05: full-hash callback_data resolves via get_torrent (no full-list scan)
 # ============================================================================
 

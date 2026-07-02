@@ -23,12 +23,14 @@ from bot.models import (
     User,
 )
 from bot.clients.registry import get_emby, get_lidarr, get_prowlarr, get_qbittorrent, get_radarr, get_sonarr
+from bot.handlers.common import safe_edit, strip_command
 from bot.services.add_service import AddService
 from bot.services.scoring import ScoringService
 from bot.services.search_service import SearchService
 from bot.ui.callbacks import PageCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.menu import MENU_BUTTONS, MENU_SEARCH
 
 logger = structlog.get_logger()
 router = Router()
@@ -56,17 +58,6 @@ async def _claim_grab(user_id: int) -> bool:
 def _release_grab(user_id: int) -> None:
     """Release a user's grab slot (safe to call even if not held)."""
     _grab_in_progress.discard(user_id)
-
-# Russian menu button texts
-MENU_SEARCH = "🔍 Поиск"
-
-# All menu button texts that should NOT trigger text search
-# These are handled by their respective routers
-MENU_BUTTONS = {
-    MENU_SEARCH,
-    "📥 Загрузки", "📊 qBit", "📺 Emby", "🔌 Статус", "⚙️ Настройки", "📋 История",
-    "🔥 Топ", "📅 Календарь", "🎵 Музыка",
-}
 
 
 async def get_services() -> tuple[SearchService, AddService]:
@@ -129,35 +120,19 @@ async def _render_results_page(
         per_page=per_page,
     )
 
-    try:
-        await message.edit_text(
-            text,
-            reply_markup=Keyboards.search_results(
-                page_results,
-                page,
-                total_pages,
-                per_page,
-                show_grab_best,
-                best_result.calculated_score if best_result else 0,
-            ),
-            parse_mode="HTML",
-        )
-    except TelegramBadRequest as e:
-        if "message is not modified" not in str(e):
-            raise
-
-
-def _strip_command(text: str, command: str) -> str:
-    """Strip a leading /command (BUG-10/33: replace with maxsplit=1, prefix-only)."""
-    text = text.strip()
-    if text.startswith(command):
-        rest = text[len(command):]
-        # Strip @bot_username suffix on the command itself.
-        if rest.startswith("@"):
-            parts = rest.split(maxsplit=1)
-            rest = parts[1] if len(parts) > 1 else ""
-        return rest.strip()
-    return text
+    await safe_edit(
+        message,
+        text,
+        reply_markup=Keyboards.search_results(
+            page_results,
+            page,
+            total_pages,
+            per_page,
+            show_grab_best,
+            best_result.calculated_score if best_result else 0,
+        ),
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("search"))
@@ -167,7 +142,7 @@ async def cmd_search(message: Message, db_user: User, db: Database) -> None:
         await message.answer("Укажите запрос: <code>/search Дюна 2021</code>")
         return
 
-    query = _strip_command(message.text, "/search")
+    query = strip_command(message.text, "/search")
     if not query:
         await message.answer("Укажите запрос: <code>/search Дюна 2021</code>")
         return
@@ -182,7 +157,7 @@ async def cmd_movie(message: Message, db_user: User, db: Database) -> None:
         await message.answer("Укажите название фильма: <code>/movie Дюна 2021</code>")
         return
 
-    query = _strip_command(message.text, "/movie")
+    query = strip_command(message.text, "/movie")
     if not query:
         await message.answer("Укажите название фильма: <code>/movie Дюна 2021</code>")
         return
@@ -197,7 +172,7 @@ async def cmd_series(message: Message, db_user: User, db: Database) -> None:
         await message.answer("Укажите название сериала: <code>/series Breaking Bad</code>")
         return
 
-    query = _strip_command(message.text, "/series")
+    query = strip_command(message.text, "/series")
     if not query:
         await message.answer("Укажите название сериала: <code>/series Breaking Bad</code>")
         return

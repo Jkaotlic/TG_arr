@@ -11,14 +11,6 @@ from bot.ui.keyboards import Keyboards
 
 router = Router()
 
-# Russian menu button texts
-MENU_SEARCH = "🔍 Поиск"
-MENU_DOWNLOADS = "📥 Загрузки"
-MENU_QSTATUS = "📊 qBit"
-MENU_STATUS = "🔌 Статус"
-MENU_SETTINGS = "⚙️ Настройки"
-MENU_HISTORY = "📋 История"
-
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
