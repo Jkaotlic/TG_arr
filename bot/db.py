@@ -36,6 +36,28 @@ class Database:
         # commits) so one coroutine's commit/rollback can't terminate another's
         # explicit BEGIN..commit block. Must not be held across nested writes.
         self._write_lock = asyncio.Lock()
+        # DB-02: per-user locks for the "get_session -> mutate -> save_session"
+        # read-modify-write pattern used by handlers. `_write_lock` only
+        # serializes the SQL statement itself, not the read-then-write cycle
+        # around it — two concurrent callbacks from the same user (double-tap)
+        # can both read the same session, mutate different fields, and the
+        # second save_session silently clobbers the first. Lazily created, one
+        # Lock per user_id, kept for the process lifetime (bounded by the
+        # small number of distinct Telegram users this bot serves).
+        self._session_locks: dict[int, asyncio.Lock] = {}
+
+    def session_lock(self, user_id: int) -> asyncio.Lock:
+        """Return the per-user lock guarding session read-modify-write cycles.
+
+        Handlers wrap their `get_session -> mutate -> save_session/
+        update_session` sequence in `async with db.session_lock(user_id):` so
+        concurrent callbacks from the same user serialize instead of racing.
+        """
+        lock = self._session_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[user_id] = lock
+        return lock
 
     async def connect(self) -> None:
         """Connect to the database and initialize tables."""

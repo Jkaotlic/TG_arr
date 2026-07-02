@@ -54,6 +54,40 @@ async def test_bug01_substring_does_not_pick_music():
 
 
 @pytest.mark.asyncio
+async def test_logic06_definitive_movie_winner_carries_lookup_results():
+    """LOGIC-06: a confident MOVIE winner must carry the full MovieInfo
+    objects in `lookup_results` (not just titles in `candidates`) so callers
+    can skip a second Radarr lookup for the same query."""
+    movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
+    svc = _svc(movies=[movie])
+    result = await svc.detect_with_confidence("Interstellar 2014")
+    assert result.content_type == ContentType.MOVIE
+    assert result.lookup_results == [movie]
+
+
+@pytest.mark.asyncio
+async def test_logic06_definitive_series_winner_carries_lookup_results():
+    """Series counterpart of the above."""
+    series = SeriesInfo(title="Stranger Things", tvdb_id=305288, year=2016)
+    svc = _svc(series=[series])
+    result = await svc.detect_with_confidence("Stranger Things S01")
+    # "S01" is a strong series-pattern short-circuit — has no lookup_results
+    # since no lookup ran at all (this documents that short-circuit path).
+    assert result.content_type == ContentType.SERIES
+    assert result.lookup_results == []
+
+
+@pytest.mark.asyncio
+async def test_logic06_low_confidence_unknown_has_empty_lookup_results():
+    """UNKNOWN/ambiguous results must not carry stale lookup_results — the
+    caller asks the user, there is no "winning" content_type to attach them to."""
+    svc = _svc(movies=[], series=[], artists=[])
+    result = await svc.detect_with_confidence("zzz_no_such_thing_zzz")
+    assert result.content_type == ContentType.UNKNOWN
+    assert result.lookup_results == []
+
+
+@pytest.mark.asyncio
 async def test_bug05_all_lookups_failing_returns_unknown():
     """BUG-05: when Radarr/Sonarr/Lidarr all raise, return UNKNOWN — don't
     silently treat empty results as 'music' or 'no match'."""

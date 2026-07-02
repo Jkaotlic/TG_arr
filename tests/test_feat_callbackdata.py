@@ -1,5 +1,6 @@
 """Feature #1: typed CallbackData factory for pagination (LOGIC-14 collision class)."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -41,6 +42,7 @@ async def test_handle_pagination_reads_callback_data():
     db = AsyncMock()
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
+    db.session_lock = MagicMock(return_value=asyncio.Lock())  # DB-02: real lock, not AsyncMock
 
     db_user = MagicMock()
     db_user.preferences = MagicMock(auto_grab_enabled=False)
