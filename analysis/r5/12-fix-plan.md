@@ -180,23 +180,23 @@
 - [x] DEAD-07: удалена `detect_content_type`-обёртка; тесты на `detect_with_confidence(...).content_type`
 - [x] DEAD-08: удалён `force_check` (get_stats/unsubscribe_user оставлены)
 
-## Отложено в follow-up PR (дедуп-рефактор без изменения поведения — НЕ в этом цикле)
+## Follow-up дедуп-рефактор (СДЕЛАНО, коммит `84c525d`, задеплоено)
 
-⚠️ Ниже по риску, правильнее отдельным циклом с прогоном на Pi. Ничего не потеряно — перечислено здесь.
+- [x] LOGIC-07/DEAD-10: `bot/ui/menu.py` — единый источник текстов кнопок (main_menu + 9 модулей + MENU_BUTTONS frozenset); мёртвые MENU_* из start.py удалены
+- [x] LOGIC-13: общий `strip_command` (режет `@botname`) в `bot/handlers/common.py`
+- [x] LOGIC-15: `safe_edit`/`swallow_not_modified` — свёрнуто 12 копий try/except «not modified»
+- [x] LOGIC-14b: per_page музыкальной пагинации из settings.results_per_page
+- [x] OBS-07: единое `health_check_failed` (service=kv) вместо 6 f-string имён; `prowlarr_search_completed`
 
-- [ ] LOGIC-07/DEAD-10: `bot/ui/menu.py` — единый источник текстов кнопок (main_menu + 8 модулей + MENU_BUTTONS frozenset); удалить мёртвые MENU_* из start.py
-- [ ] LOGIC-13: общий `_strip_command` (режет `@botname`) в `bot/handlers/common.py`
-- [ ] LOGIC-15: `safe_edit(message, text, **kw)` — заменить ~10 копий try/except «not modified»
-- [ ] LOGIC-14b: per_page музыкальной пагинации из settings.results_per_page
-- [ ] OBS-07 (финал): унификация имён событий snake_case по списку из 07-observability.md
-- [ ] PERF-04: in-process write-through кэш активных сессий в Database.get_session/save_session
+## Wave 3 — бандл-апгрейд зависимостей (СДЕЛАНО, коммит `f949550`, собран на Pi)
+
+- [x] DEP-05: aiogram 3.27.0→3.29.1, pydantic 2.12.5→2.13.4 (cap→<2.14), pydantic-settings→2.14.2, structlog 25.5→26.1 (cap <27), pytest 9.0.2→9.1.1, pytest-asyncio→1.4.0, ruff→0.15.20; README синхронизирован; сборка на Pi (Python 3.12.13) чистая, healthy, 0 рестартов
+
+## Осталось отложенным (осознанно, следующий заход)
+
+- [ ] PERF-04: in-process write-through кэш активных сессий в Database.get_session/save_session (чистая оптимизация, риск на только что изменённом hot-path DB-02 — отдельно)
 - [ ] Тест-гигиена: TEST-09 (sleep-гонки→Event/Barrier), TEST-12 (хелперы→conftest), TEST-13 (переименование r4-файлов), TEST-14, TEST-16
-
-## Wave 3 — бандл-апгрейд зависимостей (отложено в follow-up PR)
-
-⚠️ Требует прогона на Pi (локальный env — Python 3.14 ≠ прод 3.12, локальный pass — слабый сигнал для dep-bump). Есть `make rollback`.
-
-- [ ] DEP-05: aiogram 3.27.0→3.29.1, pydantic 2.12.5→2.13.4 (cap→<2.14), pydantic-settings→2.14.2, structlog 25.5→26.1 (cap <27), pytest 9.0.2→9.1.1, pytest-asyncio→1.4.0, ruff→0.15.20; обновить README; полный прогон; при падении — откат виновника
+- [ ] Отложенный архитектурный рефакторинг (см. секцию ниже): god-file split, ArrBaseClient, полная миграция CallbackData, PERF-02 full (sync/maindata), DEP-02 lock-файл
 
 ## Верификация (verification-before-completion)
 
