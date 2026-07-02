@@ -2,7 +2,6 @@
 
 import asyncio
 import html
-import time
 
 import structlog
 from aiogram import F, Router
@@ -12,6 +11,7 @@ from typing import Any
 from bot.config import get_settings
 from bot.clients.registry import get_tmdb, get_radarr, get_sonarr, get_qbittorrent, get_prowlarr
 from bot.db import Database
+from bot.handlers._cache import get_ttl, put_ttl
 from bot.models import User
 from bot.services.add_service import AddService
 from bot.ui.callbacks import AddContentCB, TrendingItemCB
@@ -57,19 +57,13 @@ _cache_lock = asyncio.Lock()
 def _cache_put(cache: dict[int, Any], key: int, value: Any) -> None:
     """Insert/refresh `key`, evicting the oldest entry when at capacity.
 
-    Must be called while holding `_cache_lock`. Pops-then-reinserts so a
-    refreshed key also becomes the freshest for eviction ordering (dict
-    iteration order = insertion order in CPython).
+    Must be called while holding `_cache_lock`. Thin wrapper around the
+    shared LRU+TTL cache helper (LOGIC-21) — kept as a module-level function
+    (rather than inlining the call) because existing tests patch/call
+    ``trending._cache_put`` directly.
     """
     timestamps = _TIMESTAMPS[id(cache)]
-    cache.pop(key, None)
-    timestamps.pop(key, None)
-    while len(cache) >= _MAX_CACHE_SIZE:
-        oldest = next(iter(cache))
-        cache.pop(oldest, None)
-        timestamps.pop(oldest, None)
-    cache[key] = value
-    timestamps[key] = time.monotonic()
+    put_ttl(cache, timestamps, key, value, _MAX_CACHE_SIZE)
 
 
 def _cache_get(cache: dict[int, Any], key: int) -> Any | None:
@@ -78,15 +72,8 @@ def _cache_get(cache: dict[int, Any], key: int) -> Any | None:
     Entries with no recorded timestamp (inserted via a direct `cache[key] =
     value`, bypassing `_cache_put`) are treated as always-fresh.
     """
-    if key not in cache:
-        return None
     timestamps = _TIMESTAMPS[id(cache)]
-    inserted_at = timestamps.get(key)
-    if inserted_at is not None and time.monotonic() - inserted_at > _CACHE_TTL_SECONDS:
-        cache.pop(key, None)
-        timestamps.pop(key, None)
-        return None
-    return cache[key]
+    return get_ttl(cache, timestamps, key, _CACHE_TTL_SECONDS)
 
 
 @router.message(F.text == MENU_TRENDING)

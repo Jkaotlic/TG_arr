@@ -16,6 +16,27 @@ from bot.models import (
     TorrentState,
     User,
 )
+from tests.conftest import callback_with_status as _callback_with_status
+
+
+@pytest.fixture(autouse=True)
+def _clear_trending_caches():
+    """TEST-16: this module pokes bot.handlers.trending's module-level
+    _trending_movies_cache/_trending_series_cache (and their TTL timestamp
+    side-tables) directly in several tests. Without cleanup those entries
+    leak into whichever test runs next, creating a latent test-order
+    dependency. Clear before and after every test in this module."""
+    from bot.handlers import trending
+
+    def _clear():
+        trending._trending_movies_cache.clear()
+        trending._trending_series_cache.clear()
+        trending._trending_movies_inserted_at.clear()
+        trending._trending_series_inserted_at.clear()
+
+    _clear()
+    yield
+    _clear()
 
 
 # ---------------------------------------------------------------------------
@@ -111,17 +132,6 @@ async def test_cmd_resume_escapes_torrent_name():
 # SEC-02: TMDB titles must be html-escaped in trending add confirmations
 # ---------------------------------------------------------------------------
 _DANGEROUS_TITLE = "Fast & Furious <hd>"
-
-
-def _callback_with_status():
-    """Build a callback whose message.answer returns a status_msg with edit_text."""
-    status_msg = MagicMock()
-    status_msg.edit_text = AsyncMock()
-    cb = MagicMock()
-    cb.answer = AsyncMock()
-    cb.message = MagicMock()
-    cb.message.answer = AsyncMock(return_value=status_msg)
-    return cb, status_msg
 
 
 @pytest.mark.asyncio
@@ -242,16 +252,30 @@ async def test_double_tap_grab_best_executes_once():
 
     cb1, cb2 = make_cb(), make_cb()
 
-    async def slow_grab(*a, **k):
-        await asyncio.sleep(0.05)
+    # TEST-09: deterministic gate instead of a real asyncio.sleep race. The
+    # winner's grab_release() blocks on this Event so the loser's
+    # handle_grab_best (racing in via asyncio.gather) has to observe the
+    # guard as still claimed — no wall-clock timing involved.
+    release_grab = asyncio.Event()
+
+    async def gated_grab(*a, **k):
+        await release_grab.wait()
+
+    async def release_after_both_attempted():
+        # Cooperative yields let both handle_grab_best coroutines run up to
+        # their _claim_grab checkpoint before the winner's grab is unblocked.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        release_grab.set()
 
     services = (MagicMock(), MagicMock())
 
     with patch.object(search, "get_services", AsyncMock(return_value=services)), \
-         patch.object(search, "grab_release", AsyncMock(side_effect=slow_grab)) as gr:
+         patch.object(search, "grab_release", AsyncMock(side_effect=gated_grab)) as gr:
         await asyncio.gather(
             search.handle_grab_best(cb1, db_user, db),
             search.handle_grab_best(cb2, db_user, db),
+            release_after_both_attempted(),
         )
 
     assert gr.await_count == 1, "grab ran more than once on a double-tap"

@@ -17,6 +17,7 @@ from bot.models import (
     UserPreferences,
 )
 from bot.services.add_service import AddService
+from tests.conftest import build_add_service as _build_add_service
 
 
 def _make_series() -> SeriesInfo:
@@ -165,16 +166,6 @@ def _private_release(url: str = "http://192.168.1.1/download/evil") -> SearchRes
         download_url=url,
         publish_date=datetime(2024, 1, 1),
         detected_type=ContentType.MOVIE,
-    )
-
-
-def _build_add_service(radarr=None, sonarr=None, lidarr=None, qbt=None):
-    return AddService(
-        prowlarr=AsyncMock(),
-        radarr=radarr or AsyncMock(),
-        sonarr=sonarr or AsyncMock(),
-        qbittorrent=qbt,
-        lidarr=lidarr,
     )
 
 

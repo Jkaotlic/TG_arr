@@ -19,24 +19,14 @@ from bot.models import (
     SearchResult,
     SeriesInfo,
 )
-from bot.services.add_service import AddService
 from bot.services.search_service import SearchService
+from tests.conftest import build_add_service as _build_add_service
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 _PUBLIC_MAGNET = "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01"
-
-
-def _build_add_service(radarr=None, sonarr=None, lidarr=None, qbt=None) -> AddService:
-    return AddService(
-        prowlarr=AsyncMock(),
-        radarr=radarr or AsyncMock(),
-        sonarr=sonarr or AsyncMock(),
-        qbittorrent=qbt,
-        lidarr=lidarr,
-    )
 
 
 def _rejected_release(url: str = _PUBLIC_MAGNET) -> SearchResult:

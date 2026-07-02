@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bot.models import MovieInfo, SeriesInfo
+from tests.conftest import callback_with_status as _callback_with_status
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -32,32 +33,36 @@ def _answer_capture():
     return answer_func, captured
 
 
-def _callback_with_status():
-    """Build a callback whose message.answer returns a status_msg with edit_text."""
-    status_msg = MagicMock()
-    status_msg.edit_text = AsyncMock()
-    cb = MagicMock()
-    cb.answer = AsyncMock()
-    cb.message = MagicMock()
-    cb.message.answer = AsyncMock(return_value=status_msg)
-    return cb, status_msg
-
-
 # ---------------------------------------------------------------------------
 # PERF-03 / LOGIC-05: calendar fetched concurrently, merged + error-tolerant
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_calendar_runs_fetches_concurrently():
     """The three get_calendar() calls must overlap in time (gather), not run
-    strictly back-to-back."""
+    strictly back-to-back.
+
+    TEST-09: deterministic barrier instead of a real asyncio.sleep race —
+    each fake get_calendar() records "start", then blocks until all three
+    have recorded "start" before returning. If _fetch_and_send_calendar
+    awaited them sequentially, the first call would deadlock waiting for the
+    2nd/3rd to start and the test would time out instead of completing.
+    """
     from bot.handlers import calendar
 
     order: list[str] = []
+    started = 0
+    all_started = asyncio.Event()
+    lock = asyncio.Lock()
 
     def make_client(name, payload):
         async def get_calendar(days):
+            nonlocal started
             order.append(f"{name}:start")
-            await asyncio.sleep(0.05)
+            async with lock:
+                started += 1
+                if started == 3:
+                    all_started.set()
+            await asyncio.wait_for(all_started.wait(), timeout=5)
             order.append(f"{name}:end")
             return payload
 
@@ -160,10 +165,27 @@ async def test_calendar_without_lidarr_omits_albums():
 @pytest.mark.asyncio
 async def test_emby_status_runs_fetches_concurrently():
     """server_info / libraries / sessions must overlap (gather), and the same
-    status text/keyboard must be produced."""
+    status text/keyboard must be produced.
+
+    TEST-09: deterministic barrier instead of a real asyncio.sleep race —
+    each fake fetch records "start", then blocks until all three have
+    recorded "start" before returning. A sequential await chain would
+    deadlock here instead of completing.
+    """
     from bot.handlers import emby as emby_handler
 
     order: list[str] = []
+    started = 0
+    all_started = asyncio.Event()
+    lock = asyncio.Lock()
+
+    async def _mark_started_and_wait():
+        nonlocal started
+        async with lock:
+            started += 1
+            if started == 3:
+                all_started.set()
+        await asyncio.wait_for(all_started.wait(), timeout=5)
 
     info = MagicMock(
         server_name="S", version="4.8", operating_system="Linux",
@@ -173,19 +195,19 @@ async def test_emby_status_runs_fetches_concurrently():
 
     async def get_server_info():
         order.append("info:start")
-        await asyncio.sleep(0.05)
+        await _mark_started_and_wait()
         order.append("info:end")
         return info
 
     async def get_libraries():
         order.append("lib:start")
-        await asyncio.sleep(0.05)
+        await _mark_started_and_wait()
         order.append("lib:end")
         return ["lib1", "lib2"]
 
     async def get_sessions():
         order.append("sess:start")
-        await asyncio.sleep(0.05)
+        await _mark_started_and_wait()
         order.append("sess:end")
         return ["s1", "s2", "s3"]
 
