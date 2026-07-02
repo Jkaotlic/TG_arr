@@ -10,3 +10,9 @@ pytest-asyncio==1.3.0
 pytest-cov==7.1.0
 ruff==0.14.6
 mypy==1.18.2
+# DEP-07/DEAD-16: needed by the compose-config guard tests in
+# tests/test_r4_C1-deploy-docs.py (yaml.safe_load); without it those tests
+# silently skip instead of validating docker-compose.yml/.dev.yml.
+# Lowercase to match the exact-string comparison in the pyproject [dev] guard
+# test below (pip itself is case-insensitive, but that test isn't).
+pyyaml==6.0.3

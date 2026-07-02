@@ -16,6 +16,9 @@ dependencies = [
     "aiogram>=3.20,<4",
     "httpx>=0.28,<1",
     "tenacity>=9.0,<10",
+    # DEP-01: explicit floor for the webhook server transport (bot/webhook.py),
+    # otherwise unreproducibly pulled in transitively via aiogram.
+    "aiohttp>=3.9,<4",
     # DEP-09: aiogram 3.27 requires pydantic<2.13. Cap so `pip install -e .`
     # without requirements.txt cannot accidentally pull a breaking version.
     "pydantic>=2.9,<2.13",
@@ -34,6 +37,7 @@ dev = [
     "pytest-cov>=7.1,<8",
     "ruff>=0.14,<1",
     "mypy>=1.18,<2",
+    "pyyaml>=6,<7",
 ]
 
 [tool.pytest.ini_options]
@@ -44,3 +48,24 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["bot*"]
+
+# DEP-04: pin ruff's config explicitly instead of relying on version-drifting
+# defaults (target-version/line-length/rule-set). `select` below fixes the
+# current effective defaults (E4/E7/E9/F) so `pip install -e ".[dev]"` (which
+# can resolve a newer ruff within the `>=0.14,<1` range) can't silently change
+# what gets linted. Widening the rule-set is a deliberate follow-up, not this
+# fix.
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+# DEP-03: mypy is declared as a dev dependency but was never configured or
+# wired into a make target (see `make typecheck` in Makefile). Config kept
+# minimal — bot/ isn't owned by this cluster, so no strict-mode ratchet here.
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+no_strict_optional = true

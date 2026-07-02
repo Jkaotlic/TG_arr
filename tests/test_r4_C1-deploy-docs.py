@@ -50,19 +50,20 @@ def test_readme_does_not_mention_orjson() -> None:
 
 
 # ---------------------------------------------------------------------------
-# DEP-03: README pins the same aiogram version as requirements.txt (3.27.0).
+# DEP-03: README pins the same aiogram version as requirements.txt.
+# TEST-15: no hardcoded version literal here — a routine aiogram bump (Wave 3
+# / DEP-05) must not fail this test just for updating both files in lockstep.
+# It only checks that README and requirements.txt still agree with each other.
 # ---------------------------------------------------------------------------
 def test_readme_aiogram_matches_requirements() -> None:
     req = _read("requirements.txt")
     m = re.search(r"^aiogram==([\d.]+)", req, re.MULTILINE)
     assert m, "requirements.txt must pin aiogram"
     pinned = m.group(1)
-    assert pinned == "3.27.0"
     readme = _read("README.md")
     assert f"aiogram {pinned}" in readme, (
         f"README should reference aiogram {pinned}, not a stale version"
     )
-    assert "3.26.0" not in readme
 
 
 # ---------------------------------------------------------------------------

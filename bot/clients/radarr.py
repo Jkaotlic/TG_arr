@@ -126,24 +126,6 @@ class RadarrClient(BaseAPIClient):
 
         raise APIError("Не удалось добавить фильм в Radarr")
 
-    async def grab_release(self, guid: str, indexer_id: int) -> dict[str, Any]:
-        """
-        Grab a specific release for download.
-
-        Args:
-            guid: Release GUID
-            indexer_id: Indexer ID
-
-        Returns:
-            Grab result
-        """
-        payload = {
-            "guid": guid,
-            "indexerId": indexer_id,
-        }
-        result = await self._post_no_retry("/api/v3/release", json_data=payload)
-        return result if isinstance(result, dict) else {}
-
     async def push_release(
         self,
         title: str,
@@ -173,6 +155,10 @@ class RadarrClient(BaseAPIClient):
             payload["publishDate"] = publish_date
 
         result = await self._post_no_retry("/api/v3/release/push", json_data=payload)
+        # BUG-01: Radarr's POST /release/push returns List<ReleaseResource>,
+        # not a single object — unwrap it so callers can read `approved`.
+        if isinstance(result, list):
+            return result[0] if result and isinstance(result[0], dict) else {}
         return result if isinstance(result, dict) else {}
 
     async def search_movie(self, movie_id: int) -> dict[str, Any]:
@@ -232,7 +218,12 @@ class RadarrClient(BaseAPIClient):
         return movies
 
     async def get_quality_profiles(self) -> list[QualityProfile]:
-        """Get all quality profiles."""
+        """Get all quality profiles (PERF-07: cached for _PROFILE_CACHE_TTL)."""
+        return await self._ttl_cached(
+            "quality_profiles", self._PROFILE_CACHE_TTL, self._fetch_quality_profiles,
+        )
+
+    async def _fetch_quality_profiles(self) -> list[QualityProfile]:
         results = await self.get("/api/v3/qualityprofile")
         profiles = []
         if isinstance(results, list):
@@ -247,7 +238,12 @@ class RadarrClient(BaseAPIClient):
         return profiles
 
     async def get_root_folders(self) -> list[RootFolder]:
-        """Get all root folders."""
+        """Get all root folders (PERF-07: cached for _PROFILE_CACHE_TTL)."""
+        return await self._ttl_cached(
+            "root_folders", self._PROFILE_CACHE_TTL, self._fetch_root_folders,
+        )
+
+    async def _fetch_root_folders(self) -> list[RootFolder]:
         results = await self.get("/api/v3/rootfolder")
         folders = []
         if isinstance(results, list):

@@ -66,3 +66,167 @@ async def test_webhook_app_calls_notify_on_import():
         assert resp2.status == 200
 
     assert len(calls) == 1 and "Dune" in calls[0]
+
+
+# --- SEC-02/BUG-08: shared-secret auth -------------------------------------
+#
+# Matching rule (documented here and in bot/webhook.py): when a token is
+# configured, a request is accepted if EITHER the `?token=` query parameter
+# OR the last path segment of `/webhook/<token>` equals the configured
+# token. `/webhook/{service}` (e.g. `/webhook/radarr`) keeps working as a
+# *arr instance label in the un-authenticated (no token configured) case;
+# once a token is configured, `/webhook/<service>` no longer authenticates
+# unless `<service>` happens to equal the token — operators who want both
+# a service label AND auth should use `/webhook/<token>?service=radarr` or
+# simply `?token=<token>` on `/webhook`.
+
+
+@pytest.mark.asyncio
+async def test_webhook_with_correct_query_token_accepted():
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from bot.webhook import build_webhook_app
+
+    calls: list[str] = []
+
+    async def notify(message: str) -> None:
+        calls.append(message)
+
+    app = build_webhook_app(notify, token="s3cret")
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post(
+            "/webhook?token=s3cret",
+            json={"eventType": "Download", "movie": {"title": "Dune", "year": 2021}},
+        )
+        assert resp.status == 200
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_webhook_with_correct_path_token_accepted():
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from bot.webhook import build_webhook_app
+
+    calls: list[str] = []
+
+    async def notify(message: str) -> None:
+        calls.append(message)
+
+    app = build_webhook_app(notify, token="s3cret")
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post(
+            "/webhook/s3cret",
+            json={"eventType": "Download", "movie": {"title": "Dune", "year": 2021}},
+        )
+        assert resp.status == 200
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_webhook_without_token_rejected_403():
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from bot.webhook import build_webhook_app
+
+    calls: list[str] = []
+
+    async def notify(message: str) -> None:
+        calls.append(message)
+
+    app = build_webhook_app(notify, token="s3cret")
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/webhook", json={"eventType": "Download", "movie": {"title": "Dune"}})
+        assert resp.status == 403
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_webhook_with_wrong_token_rejected_403():
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from bot.webhook import build_webhook_app
+
+    calls: list[str] = []
+
+    async def notify(message: str) -> None:
+        calls.append(message)
+
+    app = build_webhook_app(notify, token="s3cret")
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/webhook/radarr?token=nope", json={"eventType": "Download"})
+        assert resp.status == 403
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_webhook_no_configured_token_still_works_unauthenticated():
+    """Backward compat: WEBHOOK_TOKEN unset -> no auth is enforced (a startup
+    warning is emitted separately via the Settings model_validator)."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from bot.webhook import build_webhook_app
+
+    calls: list[str] = []
+
+    async def notify(message: str) -> None:
+        calls.append(message)
+
+    app = build_webhook_app(notify, token=None)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/webhook", json={"eventType": "Download", "movie": {"title": "Dune"}})
+        assert resp.status == 200
+    assert len(calls) == 1
+
+
+# --- TEST-06: error paths ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_webhook_invalid_json_returns_400():
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from bot.webhook import build_webhook_app
+
+    async def notify(message: str) -> None:
+        pass
+
+    app = build_webhook_app(notify)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/webhook", data="not json", headers={"Content-Type": "application/json"})
+        assert resp.status == 400
+
+
+@pytest.mark.asyncio
+async def test_webhook_notify_exception_still_returns_200():
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from bot.webhook import build_webhook_app
+
+    async def notify(message: str) -> None:
+        raise RuntimeError("telegram down")
+
+    app = build_webhook_app(notify)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/webhook", json={"eventType": "Download", "movie": {"title": "Dune"}})
+        assert resp.status == 200
+
+
+# --- LOGIC-18b: episode ranges -------------------------------------------
+
+
+def test_parse_arr_event_sonarr_episode_range_for_season_pack():
+    from bot.webhook import parse_arr_event
+
+    msg = parse_arr_event({
+        "eventType": "Download",
+        "series": {"title": "Breaking Bad"},
+        "episodes": [
+            {"seasonNumber": 1, "episodeNumber": 1},
+            {"seasonNumber": 1, "episodeNumber": 2},
+            {"seasonNumber": 1, "episodeNumber": 10},
+        ],
+    })
+    assert msg is not None
+    assert "S01E01-E10" in msg
+    assert "Breaking Bad" in msg

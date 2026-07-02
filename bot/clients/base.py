@@ -8,6 +8,7 @@ from typing import Any, Optional
 import httpx
 import structlog
 from tenacity import (
+    RetryCallState,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
@@ -17,6 +18,24 @@ from tenacity import (
 from bot.config import get_settings
 
 logger = structlog.get_logger()
+
+
+def _log_before_sleep(retry_state: RetryCallState) -> None:
+    """OBS-14: tenacity retries silently by default — log each retried
+    attempt with its number so "1 timeout out of 3, recovered" is
+    distinguishable in prod logs from "all 3 attempts failed" (the latter
+    additionally gets a WARNING from the _safe_request wrapper once retries
+    are exhausted and reraise=True surfaces the last exception).
+    """
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    instance = retry_state.args[0] if retry_state.args else None
+    service = getattr(instance, "service_name", "unknown")
+    logger.warning(
+        "request_retry_attempt",
+        service=service,
+        attempt=retry_state.attempt_number,
+        error=str(exc) if exc else None,
+    )
 
 
 class APIError(Exception):
@@ -56,6 +75,11 @@ class RetryableAPIError(APIError):
 class BaseAPIClient:
     """Base async HTTP client with retry logic."""
 
+    # PERF-07: profiles/root-folders change only when the user edits *arr
+    # settings — polling them on every grab/settings-menu open is a wasted
+    # RTT on rpie4. 600s (10 min) balances freshness vs. round-trips.
+    _PROFILE_CACHE_TTL = 600.0
+
     def __init__(self, base_url: str, api_key: str, service_name: str):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -65,11 +89,30 @@ class BaseAPIClient:
         # LOGIC-07: lazy settings lookup — don't touch env at import/construction time
         # so tests can instantiate clients without a fully configured environment.
         self._settings: Optional[object] = None
+        self._ttl_cache: dict[str, tuple[float, Any]] = {}
+        self._ttl_cache_lock = asyncio.Lock()
 
     def _get_http_timeout(self) -> float:
         if self._settings is None:
             self._settings = get_settings()
         return self._settings.http_timeout
+
+    async def _ttl_cached(self, key: str, ttl: float, fetch):
+        """Return a cached value for `key` if fetched within the last `ttl`
+        seconds, otherwise call the async `fetch()` and cache the result.
+
+        Uses time.monotonic() (immune to wall-clock adjustments) and a lock
+        so concurrent callers during a cold cache don't fan out N identical
+        requests.
+        """
+        async with self._ttl_cache_lock:
+            cached = self._ttl_cache.get(key)
+            now = time.monotonic()
+            if cached is not None and (now - cached[0]) < ttl:
+                return cached[1]
+            value = await fetch()
+            self._ttl_cache[key] = (now, value)
+            return value
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -115,6 +158,7 @@ class BaseAPIClient:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=4),
         reraise=True,
+        before_sleep=_log_before_sleep,
     )
     async def _request(
         self,
@@ -221,9 +265,35 @@ class BaseAPIClient:
         try:
             return await self._request(method, endpoint, params=params, json_data=json_data, timeout=timeout)
         except httpx.TimeoutException as e:
+            # OBS-14: tenacity's `before_sleep` already logged each retried
+            # attempt — this WARNING marks that all attempts were exhausted
+            # (vs. "1 timeout out of 3, recovered", which never reaches here).
+            logger.warning(
+                "request_retries_exhausted",
+                service=self.service_name,
+                method=method,
+                endpoint=endpoint,
+                error=str(e),
+            )
             raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}") from e
         except httpx.ConnectError as e:
+            logger.warning(
+                "request_retries_exhausted",
+                service=self.service_name,
+                method=method,
+                endpoint=endpoint,
+                error=str(e),
+            )
             raise ServiceConnectionError(f"Не удалось подключиться к {self.service_name} ({self.base_url})") from e
+        except RetryableAPIError as e:
+            logger.warning(
+                "request_retries_exhausted",
+                service=self.service_name,
+                method=method,
+                endpoint=endpoint,
+                error=str(e),
+            )
+            raise
 
     async def get(
         self,
@@ -244,14 +314,10 @@ class BaseAPIClient:
         """HTTP POST request."""
         return await self._safe_request("POST", endpoint, params=params, json_data=json_data, timeout=timeout)
 
-    async def delete(
-        self,
-        endpoint: str,
-        params: Optional[dict[str, Any]] = None,
-        timeout: Optional[float] = None,
-    ) -> dict[str, Any] | list[Any]:
-        """HTTP DELETE request."""
-        return await self._safe_request("DELETE", endpoint, params=params, timeout=timeout)
+    # DEAD-11: no HTTP DELETE method — removed (zero callers; Radarr/Sonarr/
+    # Lidarr/Prowlarr client methods never delete resources, and qBittorrent
+    # has its own dedicated `delete()` on QBittorrentClient, unrelated to
+    # this base HTTP client).
 
     async def _post_no_retry(
         self,

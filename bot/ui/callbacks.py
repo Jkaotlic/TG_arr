@@ -18,3 +18,18 @@ class PageCB(CallbackData, prefix="pg"):
 
     scope: str
     page: int
+
+
+class TorrentPageCB(CallbackData, prefix="tpg"):
+    """Torrent-list pagination callback (LOGIC-01).
+
+    Carries the active filter (a ``TorrentFilter`` value, field name ``flt``
+    — plain ``filter`` shadows ``CallbackData.filter()`` and triggers a
+    pydantic ``UserWarning`` on class creation) alongside the page number so
+    pagination/refresh/back round-trips no longer silently drop the user's
+    filter selection — the previous plain ``t_page:N`` string callback had
+    nowhere to carry that state.
+    """
+
+    page: int
+    flt: str

@@ -1,13 +1,12 @@
 """Lidarr API client."""
 
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import structlog
 
 from bot.clients.base import APIError, BaseAPIClient
-from bot.models import AlbumInfo, ArtistInfo, MetadataProfile, QualityProfile, RootFolder
+from bot.models import ArtistInfo, MetadataProfile, QualityProfile, RootFolder
 
 logger = structlog.get_logger()
 
@@ -105,12 +104,6 @@ class LidarrClient(BaseAPIClient):
 
         raise APIError("Не удалось добавить артиста в Lidarr")
 
-    async def grab_release(self, guid: str, indexer_id: int) -> dict[str, Any]:
-        """Grab a specific release (non-idempotent)."""
-        payload = {"guid": guid, "indexerId": indexer_id}
-        result = await self._post_no_retry("/api/v1/release", json_data=payload)
-        return result if isinstance(result, dict) else {}
-
     async def push_release(
         self,
         title: str,
@@ -128,6 +121,10 @@ class LidarrClient(BaseAPIClient):
             payload["publishDate"] = publish_date
 
         result = await self._post_no_retry("/api/v1/release/push", json_data=payload)
+        # BUG-01: Lidarr's POST /release/push returns List<ReleaseResource>,
+        # not a single object — unwrap it so callers can read `approved`.
+        if isinstance(result, list):
+            return result[0] if result and isinstance(result[0], dict) else {}
         return result if isinstance(result, dict) else {}
 
     async def search_artist(self, artist_id: int) -> dict[str, Any]:
@@ -171,7 +168,12 @@ class LidarrClient(BaseAPIClient):
         return albums
 
     async def get_quality_profiles(self) -> list[QualityProfile]:
-        """Get all quality profiles."""
+        """Get all quality profiles (PERF-07: cached for _PROFILE_CACHE_TTL)."""
+        return await self._ttl_cached(
+            "quality_profiles", self._PROFILE_CACHE_TTL, self._fetch_quality_profiles,
+        )
+
+    async def _fetch_quality_profiles(self) -> list[QualityProfile]:
         results = await self.get("/api/v1/qualityprofile")
         profiles = []
         if isinstance(results, list):
@@ -183,7 +185,12 @@ class LidarrClient(BaseAPIClient):
         return profiles
 
     async def get_metadata_profiles(self) -> list[MetadataProfile]:
-        """Get all metadata profiles (Lidarr-specific)."""
+        """Get all metadata profiles (Lidarr-specific; PERF-07 cached)."""
+        return await self._ttl_cached(
+            "metadata_profiles", self._PROFILE_CACHE_TTL, self._fetch_metadata_profiles,
+        )
+
+    async def _fetch_metadata_profiles(self) -> list[MetadataProfile]:
         results = await self.get("/api/v1/metadataprofile")
         profiles = []
         if isinstance(results, list):
@@ -195,7 +202,12 @@ class LidarrClient(BaseAPIClient):
         return profiles
 
     async def get_root_folders(self) -> list[RootFolder]:
-        """Get all root folders."""
+        """Get all root folders (PERF-07: cached for _PROFILE_CACHE_TTL)."""
+        return await self._ttl_cached(
+            "root_folders", self._PROFILE_CACHE_TTL, self._fetch_root_folders,
+        )
+
+    async def _fetch_root_folders(self) -> list[RootFolder]:
         results = await self.get("/api/v1/rootfolder")
         folders = []
         if isinstance(results, list):
@@ -259,74 +271,6 @@ class LidarrClient(BaseAPIClient):
             root_folder_path=item.get("rootFolderPath") or item.get("path"),
         )
 
-    def _parse_album(self, item: dict[str, Any]) -> Optional[AlbumInfo]:
-        """Parse Lidarr album response to AlbumInfo."""
-        mb_id = item.get("foreignAlbumId") or item.get("mbId") or ""
-        if not mb_id:
-            return None
-
-        title = item.get("title") or ""
-        if not title:
-            return None
-
-        poster_url = None
-        for image in item.get("images", []) or []:
-            cover_type = (image.get("coverType") or "").lower()
-            url = image.get("remoteUrl") or image.get("url")
-            if cover_type in ("cover", "poster") and not poster_url:
-                poster_url = url
-
-        release_date = None
-        year = None
-        rd = item.get("releaseDate")
-        if isinstance(rd, str) and rd:
-            try:
-                release_date = datetime.fromisoformat(rd.replace("Z", "+00:00"))
-                year = release_date.year
-            except ValueError:
-                pass
-
-        artist_data = item.get("artist") or {}
-        artist_name = artist_data.get("artistName") or item.get("artistName")
-        artist_mb_id = artist_data.get("foreignArtistId") or item.get("foreignArtistId")
-
-        ratings: dict[str, Any] = {}
-        rating_data = item.get("ratings")
-        if isinstance(rating_data, dict) and "value" in rating_data:
-            ratings["default"] = rating_data["value"]
-
-        stats = item.get("statistics") or {}
-        track_count = int(stats.get("trackCount", 0) or 0)
-        duration_ms = int(item.get("duration", 0) or 0)
-
-        return AlbumInfo(
-            mb_id=mb_id,
-            artist_mb_id=artist_mb_id,
-            title=title,
-            artist_name=artist_name,
-            disambiguation=item.get("disambiguation"),
-            album_type=item.get("albumType"),
-            release_date=release_date,
-            year=year,
-            overview=item.get("overview"),
-            genres=item.get("genres", []) or [],
-            poster_url=poster_url,
-            ratings=ratings,
-            track_count=track_count,
-            duration_ms=duration_ms,
-            lidarr_id=item.get("id"),
-            has_file=bool(stats.get("trackFileCount", 0) > 0) if stats else False,
-        )
-
-    async def check_connection(self) -> tuple[bool, str | None, float | None]:
-        """Check if Lidarr is available."""
-        start_time = time.monotonic()
-        try:
-            result = await self.get("/api/v1/system/status")
-            elapsed = (time.monotonic() - start_time) * 1000
-            version = result.get("version") if isinstance(result, dict) else None
-            return True, version, round(elapsed, 2)
-        except Exception as e:
-            elapsed = (time.monotonic() - start_time) * 1000
-            logger.warning("Lidarr health check failed", error=str(e))
-            return False, None, round(elapsed, 2)
+    # LOGIC-10c: no check_connection override — BaseAPIClient's default hits
+    # the same "/api/v1/system/status" endpoint Lidarr uses, so the override
+    # was a verbatim duplicate (down to the health_check_failed log event).

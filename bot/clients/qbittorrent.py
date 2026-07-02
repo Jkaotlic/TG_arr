@@ -73,16 +73,31 @@ class QBittorrentClient:
         self.timeout = timeout
         self._client: Optional[httpx.AsyncClient] = None
         self._authenticated = False
+        # BUG-09: guard client creation and login against concurrent first
+        # callers (notification loop vs. handlers can both hit an empty
+        # ``_client``/``_authenticated`` at once) — same double-check pattern
+        # as ``BaseAPIClient._client_lock`` in base.py.
+        self._client_lock = asyncio.Lock()
+        self._auth_lock = asyncio.Lock()
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url,
-                timeout=httpx.Timeout(self.timeout),
-                follow_redirects=True,
-            )
-            self._authenticated = False
+        async with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.AsyncClient(
+                    base_url=self.base_url,
+                    timeout=httpx.Timeout(self.timeout),
+                    follow_redirects=True,
+                    # PERF-06a: without explicit limits httpx defaults to a 5s
+                    # keepalive_expiry — the notification loop polls every 60s,
+                    # so every poll paid for a fresh TCP handshake.
+                    limits=httpx.Limits(
+                        max_keepalive_connections=4,
+                        max_connections=10,
+                        keepalive_expiry=300.0,
+                    ),
+                )
+                self._authenticated = False
         return self._client
 
     async def close(self) -> None:
@@ -94,8 +109,12 @@ class QBittorrentClient:
 
     async def _ensure_authenticated(self) -> None:
         """Ensure we have a valid session."""
-        if not self._authenticated:
-            await self.login()
+        if self._authenticated:
+            return
+        async with self._auth_lock:
+            # Double-check: another caller may have logged in while we waited.
+            if not self._authenticated:
+                await self.login()
 
     @retry(
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
@@ -277,7 +296,7 @@ class QBittorrentClient:
             )
 
         except Exception as e:
-            log.error("Failed to get qBittorrent status", error=str(e))
+            log.error("Failed to get qBittorrent status", error=str(e), exc_info=True)
             raise
 
     async def get_torrents(
@@ -318,7 +337,14 @@ class QBittorrentClient:
         return torrents
 
     async def get_torrent_by_short_hash(self, short_hash: str) -> Optional[TorrentInfo]:
-        """Get torrent by partial hash (first 8 chars)."""
+        """Get torrent by partial hash prefix (fallback for legacy 16-char callback_data).
+
+        PERF-05: current callback_data carries the full 40-hex hash, so new
+        buttons resolve via the targeted ``get_torrent(full_hash)`` instead.
+        This scan-based lookup remains only as a fallback for old inline
+        keyboards still in a chat that were built with the previous
+        16-character truncated hash.
+        """
         torrents = await self.get_torrents()
         for t in torrents:
             if t.hash.lower().startswith(short_hash.lower()):
@@ -406,30 +432,6 @@ class QBittorrentClient:
             },
         )
         logger.info("Deleted torrents", hashes=hashes, delete_files=delete_files)
-
-    async def recheck(self, hashes: list[str] | str) -> None:
-        """Force recheck torrent(s)."""
-        if isinstance(hashes, list):
-            hashes = "|".join(hashes)
-
-        await self._request("POST", "/api/v2/torrents/recheck", data={"hashes": hashes})
-        logger.info("Rechecking torrents", hashes=hashes)
-
-    async def set_priority_top(self, hashes: list[str]) -> None:
-        """Set torrent(s) to maximum priority."""
-        await self._request(
-            "POST",
-            "/api/v2/torrents/topPrio",
-            data={"hashes": "|".join(hashes)},
-        )
-
-    async def set_priority_bottom(self, hashes: list[str]) -> None:
-        """Set torrent(s) to minimum priority."""
-        await self._request(
-            "POST",
-            "/api/v2/torrents/bottomPrio",
-            data={"hashes": "|".join(hashes)},
-        )
 
     async def set_download_limit(self, limit: int) -> None:
         """Set global download speed limit in bytes/s. 0 = unlimited."""

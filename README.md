@@ -291,6 +291,35 @@ pytest -x -q
 pytest --cov=bot --cov-report=html
 ```
 
+Дев-инструменты (ruff, mypy, pytest-cov, PyYAML) ставятся одной командой:
+
+```bash
+make dev          # pip install -e . -r requirements-dev.txt
+make lint         # ruff check
+make typecheck    # mypy bot/ (не входит в make lint — ошибки известны, чинятся отдельно)
+```
+
+### Деплой и откат на Pi
+
+```bash
+make deploy       # build → tag prev → up -d → ps
+make rollback     # вернуть :prev как :latest → up -d
+```
+
+### Обновление базового образа
+
+`Dockerfile` пинит `python:3.12-slim` по digest для воспроизводимости сборки — это
+значит, что security-патчи Debian-слоя не приезжают автоматически. Обновляйте
+digest вручную не реже раза в месяц (или сразу после объявления CVE в базовом
+образе):
+
+```bash
+make check-base-image   # docker buildx imagetools inspect python:3.12-slim
+```
+
+Сравните digest с зафиксированным в `Dockerfile` (обе строки `FROM`) и обновите
+при расхождении.
+
 ---
 
 ## Безопасность

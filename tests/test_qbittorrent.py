@@ -188,6 +188,97 @@ class TestQBittorrentClient:
         assert torrent.progress == 0.0
         assert torrent.state == TorrentState.UNKNOWN
 
+    # ------------------------------------------------------------------
+    # BUG-09: concurrent first callers must not create multiple clients or
+    # perform multiple logins.
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_get_client_concurrent_first_callers_create_one_client(self, client):
+        """Two concurrent first calls to _get_client must share one AsyncClient."""
+        import asyncio
+
+        results = await asyncio.gather(*(client._get_client() for _ in range(5)))
+
+        assert all(r is results[0] for r in results)
+
+    @pytest.mark.asyncio
+    async def test_ensure_authenticated_concurrent_callers_login_once(self, client):
+        """Concurrent _ensure_authenticated callers must only trigger one login()."""
+        import asyncio
+
+        login_calls = 0
+        login_started = asyncio.Event()
+        release_login = asyncio.Event()
+
+        async def fake_login():
+            nonlocal login_calls
+            login_calls += 1
+            login_started.set()
+            await release_login.wait()
+            client._authenticated = True
+
+        with patch.object(client, "login", side_effect=fake_login) as mock_login:
+            task1 = asyncio.create_task(client._ensure_authenticated())
+            await login_started.wait()
+            task2 = asyncio.create_task(client._ensure_authenticated())
+            # give task2 a chance to reach the lock/double-check
+            await asyncio.sleep(0)
+            release_login.set()
+            await asyncio.gather(task1, task2)
+
+        assert mock_login.call_count == 1
+        assert login_calls == 1
+
+    def test_client_has_dedicated_locks(self, client):
+        """BUG-09: guard locks exist (base.py pattern) instead of unguarded checks."""
+        import asyncio
+
+        assert isinstance(client._client_lock, asyncio.Lock)
+        assert isinstance(client._auth_lock, asyncio.Lock)
+
+    # ------------------------------------------------------------------
+    # PERF-06a: keepalive-friendly httpx.Limits (base.py already does this;
+    # qBittorrent's client previously used bare defaults -> 5s keepalive).
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_get_client_sets_keepalive_limits(self, client):
+        """PERF-06a: the created AsyncClient must carry non-default keepalive limits."""
+        http_client = await client._get_client()
+        try:
+            pool = http_client._transport._pool
+            assert pool._max_keepalive_connections == 4
+            assert pool._max_connections == 10
+            assert pool._keepalive_expiry == 300.0
+        finally:
+            await client.close()
+
+    # ------------------------------------------------------------------
+    # PERF-05: get_torrent uses the server-side hashes filter (targeted,
+    # single-row) rather than a full-list scan.
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_get_torrent_full_hash_uses_hashes_param(self, client):
+        full_hash = "d" * 40
+        with patch.object(client, "_request", new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = [{"hash": full_hash, "name": "X"}]
+
+            result = await client.get_torrent(full_hash)
+
+            assert result is not None
+            assert result.hash == full_hash
+            mock_request.assert_awaited_once()
+            call_args = mock_request.call_args
+            assert call_args[1]["params"] == {"hashes": full_hash}
+
+    def test_get_torrent_by_short_hash_docstring_mentions_16_chars(self, client):
+        """LOGIC-22: docstring must reflect the actual 16-char legacy truncation."""
+        doc = client.get_torrent_by_short_hash.__doc__ or ""
+        assert "16" in doc
+        assert "first 8 chars" not in doc
+
 
 class TestTorrentInfo:
     """Test TorrentInfo model."""
@@ -433,22 +524,34 @@ class TestKeyboards:
         assert "abc123" in first_button.callback_data
 
     def test_torrent_list_pagination(self):
-        """Test torrent list pagination."""
+        """Test torrent list pagination.
+
+        LOGIC-01: pagination now uses the typed ``TorrentPageCB`` (prefix
+        "tpg:") instead of the old plain ``t_page:N`` string, so the filter
+        survives pagination round-trips. See test_feat_callbackdata-style
+        assertions below.
+        """
+        from bot.ui.callbacks import TorrentPageCB
+
         torrents = [
             TorrentInfo(hash=f"hash{i}", name=f"Torrent {i}", progress=0.5)
             for i in range(10)
         ]
 
-        keyboard = Keyboards.torrent_list(torrents[:5], current_page=0, total_pages=2)
+        keyboard = Keyboards.torrent_list(
+            torrents[:5], current_page=0, total_pages=2, current_filter=TorrentFilter.DOWNLOADING
+        )
 
-        # Check pagination buttons exist
-        has_next = any(
-            CallbackData.TORRENT_PAGE in btn.callback_data
+        # Check pagination buttons exist and carry the active filter
+        page_cbs = [
+            btn.callback_data
             for row in keyboard.inline_keyboard
             for btn in row
-            if btn.callback_data
-        )
-        assert has_next
+            if btn.callback_data and btn.callback_data.startswith("tpg:")
+        ]
+        assert page_cbs, "no typed TorrentPageCB pagination button found"
+        unpacked = [TorrentPageCB.unpack(cb) for cb in page_cbs]
+        assert any(u.flt == TorrentFilter.DOWNLOADING.value for u in unpacked)
 
     def test_torrent_details_keyboard(self):
         """Test torrent details keyboard creation."""

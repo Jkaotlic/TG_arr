@@ -255,41 +255,45 @@ def _torrent(hash_: str, progress: float, state: TorrentState, name: str = "T") 
 
 @pytest.mark.asyncio
 async def test_notification_completion_fires_once_on_flip():
-    """A tracked, not-yet-complete torrent that flips to complete triggers
-    send_notification EXACTLY once; a re-check does not re-notify."""
+    """PERF-02 model: completion is detected when a tracked, still-downloading
+    torrent DROPS OUT of the DOWNLOADING filter and a per-hash lookup shows it
+    finished — it then notifies EXACTLY once and is dropped from tracking so a
+    re-check cannot re-notify."""
     qbt = AsyncMock()
     sender = AsyncMock()
     svc = NotificationService(qbt, sender)
     svc.subscribe_user(42)
 
-    # Tracked as still downloading and not yet notified.
-    svc._tracked_torrents["abc"] = {
-        "completed": False,
-        "notified": False,
-        "name": "Movie",
-        "added_on": None,
-    }
-
+    downloading = _torrent("abc", 0.5, TorrentState.DOWNLOADING, "Movie")
     completed = _torrent("abc", 1.0, TorrentState.COMPLETED, "Movie")
-    qbt.get_torrents = AsyncMock(return_value=[completed])
 
+    # Cycle 1: torrent is actively downloading — tracked, not notified.
+    qbt.get_torrents = AsyncMock(return_value=[downloading])
+    await svc._check_for_completions()
+    assert sender.await_count == 0
+    assert svc._tracked_torrents["abc"]["completed"] is False
+
+    # Cycle 2: it left the DOWNLOADING filter; per-hash lookup shows it
+    # completed → notify once, then drop it from tracking.
+    qbt.get_torrents = AsyncMock(return_value=[])
+    qbt.get_torrent = AsyncMock(return_value=completed)
     await svc._check_for_completions()
     assert sender.await_count == 1
     sent_user, sent_msg = sender.await_args.args
     assert sent_user == 42
     assert "Movie" in sent_msg
-    assert svc._tracked_torrents["abc"]["completed"] is True
-    assert svc._tracked_torrents["abc"]["notified"] is True
+    assert "abc" not in svc._tracked_torrents
 
-    # Second pass with the same complete torrent: no duplicate notification.
+    # Cycle 3: still absent — no duplicate notification.
     await svc._check_for_completions()
     assert sender.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_notification_new_already_complete_does_not_notify():
-    """A brand-new torrent that is ALREADY complete when first seen must not
-    notify (it wasn't downloaded during this session)."""
+    """PERF-02 model: a torrent that is ALREADY complete at startup never
+    enters the DOWNLOADING filter, so suppression happens in _initial_sync —
+    it is recorded as completed + notified and never fires a spurious alert."""
     qbt = AsyncMock()
     sender = AsyncMock()
     svc = NotificationService(qbt, sender)
@@ -298,7 +302,7 @@ async def test_notification_new_already_complete_does_not_notify():
     already_done = _torrent("zzz", 1.0, TorrentState.COMPLETED, "OldThing")
     qbt.get_torrents = AsyncMock(return_value=[already_done])
 
-    await svc._check_for_completions()
+    await svc._initial_sync()
 
     sender.assert_not_called()
     # It is now tracked, recorded as completed + notified (suppressed).
@@ -371,17 +375,21 @@ async def test_grab_movie_push_approved_success():
 
 @pytest.mark.asyncio
 async def test_grab_movie_push_fails_then_direct_grab_success():
-    """push_release raises APIError (not a rejection) → release_rejected stays
-    False, so the direct grab_release branch runs and succeeds."""
+    """BUG-05: push_release raises APIError (not a rejection) → there is no
+    direct grab_release fallback anymore (Prowlarr's guid/indexerId are
+    meaningless to Radarr's own /release cache and always 404d). The code
+    falls straight through to the auto-search fallback with an honest
+    message instead."""
     from bot.clients.base import APIError
 
     movie = _movie(radarr_id=42)
     radarr = AsyncMock()
     radarr.get_movie_by_tmdb = AsyncMock(return_value=movie)
     # An APIError from push (transient) must NOT mark the release rejected;
-    # the code falls through to the direct-grab branch (indexer_id > 0).
+    # the code falls through to the auto-search fallback (indexer_id > 0
+    # no longer matters — the direct-grab branch was removed).
     radarr.push_release = AsyncMock(side_effect=APIError("boom"))
-    radarr.grab_release = AsyncMock(return_value=None)
+    radarr.search_movie = AsyncMock()
 
     svc = _build_service(radarr=radarr)
     ok, action, msg = await svc.grab_movie_release(
@@ -393,9 +401,9 @@ async def test_grab_movie_push_fails_then_direct_grab_success():
 
     assert ok is True
     assert action.success is True
-    assert "захвач" in msg.lower()
+    assert "автопоиск" in msg.lower()
     radarr.push_release.assert_awaited_once()
-    radarr.grab_release.assert_awaited_once()
+    radarr.search_movie.assert_awaited_once()
 
 
 @pytest.mark.asyncio

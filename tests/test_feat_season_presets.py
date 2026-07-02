@@ -46,7 +46,7 @@ async def test_handle_season_preset_stores_choice_in_session():
     cb.message.edit_text = AsyncMock()
     cb.answer = AsyncMock()
 
-    with patch.object(search, "get_services", AsyncMock(return_value=(MagicMock(), MagicMock(), None))):
+    with patch.object(search, "get_services", AsyncMock(return_value=(MagicMock(), MagicMock()))):
         await search.handle_season_preset(cb, db_user=MagicMock(), db=db)
 
     assert session.monitor_type == "future"

@@ -1,9 +1,10 @@
 """Application configuration using pydantic-settings."""
 
+import warnings
 from functools import lru_cache
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -71,6 +72,11 @@ class Settings(BaseSettings):
     # Optional
     timezone: str = Field(default="Europe/Moscow", description="Timezone for timestamps")
     log_level: str = Field(default="INFO", description="Logging level")
+    # OBS-13: rendering format is independent of verbosity — LOG_LEVEL=DEBUG in
+    # prod must not silently switch the log stream to non-JSON ConsoleRenderer.
+    log_format: Literal["json", "console"] = Field(
+        default="json", description="Log rendering format (json for prod/docker logs, console for local dev)"
+    )
     database_path: str = Field(default="data/bot.db", description="SQLite database path")
     auto_grab_score_threshold: int = Field(
         default=80, ge=0, le=100, description="Score threshold for auto-grab suggestion"
@@ -97,7 +103,17 @@ class Settings(BaseSettings):
     # Off by default; when enabled, point *arr Connect→Webhook at http://<host>:<port>/webhook
     webhook_enabled: bool = Field(default=False, description="Enable inbound *arr webhook notification server")
     webhook_port: int = Field(default=8090, ge=1, le=65535, description="Webhook server port")
-    webhook_bind: str = Field(default="0.0.0.0", description="Webhook server bind address")
+    # SEC-02: default changed from 0.0.0.0 → loopback. Exposing the webhook to
+    # the whole LAN by default was the actual vulnerability; operators who need
+    # *arr (running elsewhere, e.g. another container) to reach it must opt in
+    # explicitly via WEBHOOK_BIND.
+    webhook_bind: str = Field(default="127.0.0.1", description="Webhook server bind address")
+    # SEC-02/BUG-08: shared secret required to accept webhook POSTs. Checked
+    # against either `?token=` query param or the `/webhook/{token}` path
+    # segment — see bot/webhook.py docstring for the exact matching rule.
+    webhook_token: Optional[str] = Field(
+        default=None, description="Shared secret required to accept inbound webhook requests"
+    )
 
     @field_validator("allowed_tg_ids", "admin_tg_ids", mode="before")
     @classmethod
@@ -138,6 +154,49 @@ class Settings(BaseSettings):
         if v is not None:
             return v.rstrip("/")
         return v
+
+    @model_validator(mode="after")
+    def _warn_on_inconsistent_integration_config(self) -> "Settings":
+        """LOGIC-09: half-configured integrations fail silently (`*_enabled`
+        properties just go False) — an operator with a typo'd env var gets no
+        signal beyond "why doesn't Lidarr search work". These are warnings,
+        not ValueErrors: an inconsistent optional integration must not stop
+        the bot from starting (structlog isn't configured yet at this stage,
+        so we use the stdlib `warnings` module).
+        """
+        if (self.lidarr_url is None) != (self.lidarr_api_key is None):
+            warnings.warn(
+                "Lidarr partially configured: both LIDARR_URL and LIDARR_API_KEY "
+                "are required — Lidarr integration will stay disabled.",
+                stacklevel=2,
+            )
+        if (self.emby_url is None) != (self.emby_api_key is None):
+            warnings.warn(
+                "Emby partially configured: both EMBY_URL and EMBY_API_KEY are "
+                "required — Emby integration will stay disabled.",
+                stacklevel=2,
+            )
+        if (self.qbittorrent_url is None) != (self.qbittorrent_password is None):
+            warnings.warn(
+                "qBittorrent partially configured: both QBITTORRENT_URL and "
+                "QBITTORRENT_PASSWORD are required — qBittorrent integration "
+                "will stay disabled.",
+                stacklevel=2,
+            )
+        if self.notify_download_complete and not self.qbittorrent_enabled:
+            warnings.warn(
+                "NOTIFY_DOWNLOAD_COMPLETE=true but qBittorrent is not fully "
+                "configured — download-completion notifications will never fire.",
+                stacklevel=2,
+            )
+        if self.webhook_enabled and not self.webhook_token:
+            warnings.warn(
+                "WEBHOOK_ENABLED=true but WEBHOOK_TOKEN is not set — the "
+                "inbound webhook will accept unauthenticated requests from "
+                "anything that can reach WEBHOOK_BIND:WEBHOOK_PORT.",
+                stacklevel=2,
+            )
+        return self
 
     @property
     def qbittorrent_enabled(self) -> bool:

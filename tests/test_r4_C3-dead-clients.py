@@ -4,8 +4,13 @@ Covers DEAD-02 (ProwlarrClient.grab_release), DEAD-03/04
 (LidarrClient.lookup_album / search_album + Formatters.format_album_info),
 DEAD-05 (SonarrClient.lookup_series_by_tvdb) and DEAD-06
 (DeezerClient.get_trending_albums). The deleted symbols must be gone, while
-the live siblings (_parse_album / AlbumInfo, the calendar/lookup paths) keep
-working unchanged.
+the live siblings (the calendar/lookup paths) keep working unchanged.
+
+r5 DEAD-09: LidarrClient._parse_album and models.AlbumInfo — originally kept
+alive here as "surviving siblings" of the r4 album-flow removal — were
+themselves removed in round 5: no album-grab flow ever materialized, so
+_parse_album had zero production callers (only these now-deleted pinning
+tests). See analysis/r5/03-dead-code.md DEAD-09.
 """
 
 from bot.clients.deezer import DeezerClient
@@ -36,26 +41,13 @@ class TestDeadSymbolsRemoved:
     def test_formatters_format_album_info_removed(self):
         assert not hasattr(Formatters, "format_album_info")
 
+    def test_lidarr_parse_album_removed(self):
+        """DEAD-09 (r5): _parse_album had no production callers — removed."""
+        assert not hasattr(LidarrClient, "_parse_album")
+
 
 class TestSurvivingSymbolsIntact:
     """Live siblings of the deleted code must keep working."""
-
-    def test_lidarr_parse_album_still_works(self):
-        lidarr = LidarrClient("http://lidarr:8686", "k")
-        raw = {
-            "id": 7,
-            "foreignAlbumId": "mb-album-1",
-            "title": "Master of Puppets",
-            "releaseDate": "1986-03-03T00:00:00Z",
-            "albumType": "Album",
-            "artist": {"artistName": "Metallica", "foreignArtistId": "mb-uuid-1"},
-            "statistics": {"trackCount": 8, "trackFileCount": 8},
-            "duration": 3200000,
-        }
-        album = lidarr._parse_album(raw)
-        assert album is not None
-        assert album.title == "Master of Puppets"
-        assert album.year == 1986
 
     def test_sonarr_lookup_series_still_present(self):
         # The remaining title-based lookup is untouched.

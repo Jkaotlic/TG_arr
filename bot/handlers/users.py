@@ -5,12 +5,15 @@ instead of editing ALLOWED_TG_IDS and restarting. The env allowlist stays
 authoritative for admins; DB-granted users are regular users.
 """
 
+from typing import Optional
+
 import structlog
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
 from bot.db import Database
+from bot.services.notification_service import NotificationService
 
 logger = structlog.get_logger()
 router = Router()
@@ -50,8 +53,19 @@ async def cmd_users(message: Message, db: Database, is_admin: bool) -> None:
 
 
 @router.message(Command("adduser"))
-async def cmd_adduser(message: Message, db: Database, is_admin: bool) -> None:
-    """Grant a user runtime access (admin only)."""
+async def cmd_adduser(
+    message: Message,
+    db: Database,
+    is_admin: bool,
+    notification_service: Optional[NotificationService] = None,
+) -> None:
+    """Grant a user runtime access (admin only).
+
+    DB-04/BUG-15/LOGIC-08: also subscribes the user to download-completion /
+    webhook notifications immediately — without this, a runtime-granted user
+    had bot access but silently never received any notification until the
+    next bot restart (on_startup resubscribes from db.list_allowed_users()).
+    """
     if not is_admin:
         await message.answer("⛔ Только для администратора.")
         return
@@ -61,12 +75,19 @@ async def cmd_adduser(message: Message, db: Database, is_admin: bool) -> None:
         return
     added_by = message.from_user.id if message.from_user else 0
     await db.add_allowed_user(uid, added_by=added_by)
+    if notification_service is not None:
+        notification_service.subscribe_user(uid)
     logger.info("runtime_user_granted", user_id=uid, added_by=added_by)
     await message.answer(f"✅ Пользователь <code>{uid}</code> получил доступ.", parse_mode="HTML")
 
 
 @router.message(Command("deluser"))
-async def cmd_deluser(message: Message, db: Database, is_admin: bool) -> None:
+async def cmd_deluser(
+    message: Message,
+    db: Database,
+    is_admin: bool,
+    notification_service: Optional[NotificationService] = None,
+) -> None:
     """Revoke a user's runtime access (admin only)."""
     if not is_admin:
         await message.answer("⛔ Только для администратора.")
@@ -76,5 +97,7 @@ async def cmd_deluser(message: Message, db: Database, is_admin: bool) -> None:
         await message.answer("Использование: <code>/deluser &lt;tg_id&gt;</code>", parse_mode="HTML")
         return
     await db.remove_allowed_user(uid)
+    if notification_service is not None:
+        notification_service.unsubscribe_user(uid)
     logger.info("runtime_user_revoked", user_id=uid)
     await message.answer(f"🚫 Доступ пользователя <code>{uid}</code> отозван.", parse_mode="HTML")

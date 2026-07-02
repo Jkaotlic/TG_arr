@@ -76,3 +76,57 @@ async def test_cmd_deluser_parses_and_revokes():
     await users.cmd_deluser(msg, db=db, is_admin=True)
     db.remove_allowed_user.assert_awaited_once()
     assert db.remove_allowed_user.await_args.args[0] == 999
+
+
+# --- DB-04/BUG-15: runtime-allowlist users must be subscribed/unsubscribed
+# from notifications so /adduser'd users actually receive download-completion
+# and webhook alerts (not just gain bot access).
+
+
+@pytest.mark.asyncio
+async def test_cmd_adduser_subscribes_to_notifications():
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.handlers import users
+
+    db = AsyncMock()
+    notification_service = MagicMock()
+    msg = MagicMock()
+    msg.text = "/adduser 42"
+    msg.from_user = MagicMock(id=1)
+    msg.answer = AsyncMock()
+
+    await users.cmd_adduser(msg, db=db, is_admin=True, notification_service=notification_service)
+    notification_service.subscribe_user.assert_called_once_with(42)
+
+
+@pytest.mark.asyncio
+async def test_cmd_adduser_works_when_notification_service_is_none():
+    """qBittorrent not configured -> notification_service is None; /adduser
+    must still grant DB access without raising."""
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.handlers import users
+
+    db = AsyncMock()
+    msg = MagicMock()
+    msg.text = "/adduser 42"
+    msg.from_user = MagicMock(id=1)
+    msg.answer = AsyncMock()
+
+    await users.cmd_adduser(msg, db=db, is_admin=True, notification_service=None)
+    db.add_allowed_user.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cmd_deluser_unsubscribes_from_notifications():
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.handlers import users
+
+    db = AsyncMock()
+    notification_service = MagicMock()
+    msg = MagicMock()
+    msg.text = "/deluser 999"
+    msg.from_user = MagicMock(id=1)
+    msg.answer = AsyncMock()
+
+    await users.cmd_deluser(msg, db=db, is_admin=True, notification_service=notification_service)
+    notification_service.unsubscribe_user.assert_called_once_with(999)

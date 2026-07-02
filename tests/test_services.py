@@ -223,20 +223,12 @@ class TestScoringServiceEdgeCases:
         bad_score = scoring.calculate_score(bad_result)
         assert bad_score >= -100
 
-    def test_filter_empty_list(self, scoring):
-        """Test filtering an empty list."""
-        filtered = scoring.filter_by_quality([])
-        assert filtered == []
-
     def test_sort_empty_list(self, scoring):
         """Test sorting an empty list."""
         sorted_results = scoring.sort_results([])
         assert sorted_results == []
 
-    def test_get_best_empty_list(self, scoring):
-        """Test getting best from empty list."""
-        best = scoring.get_best_result([])
-        assert best is None
+    # DEAD-06: filter_by_quality/get_best_result removed (unused dead code).
 
     def test_combined_hdr_formats(self, scoring):
         """Test combined HDR formats (DV+HDR10)."""

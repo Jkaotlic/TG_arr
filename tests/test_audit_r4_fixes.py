@@ -241,7 +241,7 @@ async def test_double_tap_grab_best_executes_once():
     async def slow_grab(*a, **k):
         await asyncio.sleep(0.05)
 
-    services = (MagicMock(), MagicMock(), None)
+    services = (MagicMock(), MagicMock())
 
     with patch.object(search, "get_services", AsyncMock(return_value=services)), \
          patch.object(search, "grab_release", AsyncMock(side_effect=slow_grab)) as gr:

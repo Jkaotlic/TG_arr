@@ -7,7 +7,7 @@ import pytest
 from bot.clients.deezer import DeezerClient
 from bot.clients.lidarr import LidarrClient
 from bot.clients.prowlarr import MUSIC_CATEGORIES, ProwlarrClient
-from bot.models import ArtistInfo, ContentType, SearchResult
+from bot.models import ArtistInfo, ContentType
 
 
 class TestLidarrClient:
@@ -53,27 +53,6 @@ class TestLidarrClient:
         assert lidarr._parse_artist({"artistName": "X"}) is None
         # No name → must return None
         assert lidarr._parse_artist({"foreignArtistId": "mb-1"}) is None
-
-    def test_parse_album(self, lidarr):
-        raw = {
-            "id": 7,
-            "foreignAlbumId": "mb-album-1",
-            "title": "Master of Puppets",
-            "releaseDate": "1986-03-03T00:00:00Z",
-            "albumType": "Album",
-            "genres": ["Thrash Metal"],
-            "artist": {"artistName": "Metallica", "foreignArtistId": "mb-uuid-1"},
-            "statistics": {"trackCount": 8, "trackFileCount": 8},
-            "duration": 3200000,
-        }
-        album = lidarr._parse_album(raw)
-        assert album is not None
-        assert album.title == "Master of Puppets"
-        assert album.artist_name == "Metallica"
-        assert album.year == 1986
-        assert album.track_count == 8
-        assert album.has_file is True
-        assert album.duration_ms == 3200000
 
     async def test_lookup_artist_http(self, lidarr):
         with patch.object(lidarr, "get", new=AsyncMock(return_value=[
@@ -121,12 +100,57 @@ class TestLidarrClient:
         assert payload["addOptions"]["searchForMissingAlbums"] is True
 
     async def test_check_connection_v1_endpoint(self, lidarr):
+        """LOGIC-10c: LidarrClient no longer overrides check_connection — the
+        inherited BaseAPIClient default already hits "/api/v1/system/status",
+        the same endpoint the (now removed) override used verbatim."""
         with patch.object(lidarr, "get", new=AsyncMock(return_value={"version": "1.0.0.0"})) as g:
             ok, ver, elapsed = await lidarr.check_connection()
         assert ok is True
         assert ver == "1.0.0.0"
         # Must hit v1, not v3
         g.assert_called_with("/api/v1/system/status")
+
+    async def test_push_release_unwraps_list_response(self, lidarr):
+        """BUG-01: POST /release/push returns List<ReleaseResource> — the
+        client must unwrap it to the first dict, not collapse it to {}."""
+        with patch.object(
+            lidarr,
+            "_post_no_retry",
+            new=AsyncMock(return_value=[{"approved": True, "rejections": []}]),
+        ):
+            result = await lidarr.push_release(
+                title="Test.Release.FLAC",
+                download_url="http://example.com/file.torrent",
+            )
+        assert result == {"approved": True, "rejections": []}
+
+    async def test_push_release_empty_list_returns_empty_dict(self, lidarr):
+        """An empty list response must not raise — falls back to {}."""
+        with patch.object(lidarr, "_post_no_retry", new=AsyncMock(return_value=[])):
+            result = await lidarr.push_release(
+                title="Test.Release.FLAC",
+                download_url="http://example.com/file.torrent",
+            )
+        assert result == {}
+
+    def test_parse_album_removed(self, lidarr):
+        """DEAD-09: _parse_album had no production callers — removed."""
+        assert not hasattr(lidarr, "_parse_album")
+
+    def test_grab_release_removed(self, lidarr):
+        """BUG-05: no client keeps a direct grab_release — Prowlarr's
+        guid/indexerId are meaningless to *arr's own /release cache."""
+        assert not hasattr(lidarr, "grab_release")
+
+
+class TestAlbumInfoRemoved:
+    """DEAD-09: AlbumInfo (and its ContentInfo union slot) had no producer
+    left after _parse_album's removal — no album-grab flow exists yet."""
+
+    def test_album_info_not_importable(self):
+        import bot.models as models_module
+
+        assert not hasattr(models_module, "AlbumInfo")
 
 
 class TestDeezerClient:
@@ -206,11 +230,11 @@ class TestUrlMasking:
     def test_mask_multiple_secrets(self):
         from bot.services.add_service import _mask_url
 
-        url = "https://t.example/file?passkey=XYZ&token=ABC&file=nice.mkv"
+        url = "https://t.example/dl?passkey=XYZ&token=ABC&name=nice.mkv"
         masked = _mask_url(url)
         assert "XYZ" not in masked
         assert "ABC" not in masked
-        assert "file=nice.mkv" in masked
+        assert "name=nice.mkv" in masked
 
     def test_magnet_untouched(self):
         from bot.services.add_service import _mask_url
@@ -223,6 +247,47 @@ class TestUrlMasking:
         from bot.services.add_service import _mask_url
 
         assert _mask_url("") == ""
+
+    def test_mask_link_file_r_rss_params(self):
+        """SEC-03: Prowlarr's own download proxy nests the ORIGINAL tracker
+        URL (itself carrying a passkey) inside `link`/`file`/`r`/`rss` query
+        params — these must be masked too, not just `apikey`."""
+        from bot.services.add_service import _mask_url
+
+        url = (
+            "https://prowlarr.local/2/download"
+            "?apikey=PROWLARR_KEY"
+            "&link=https%3A%2F%2Ftracker%2Fdl%2F1%2FTRACKERPASSKEY"
+            "&file=release.torrent"
+            "&r=true"
+            "&rss=1"
+        )
+        masked = _mask_url(url, max_len=500)
+        assert "PROWLARR_KEY" not in masked
+        assert "TRACKERPASSKEY" not in masked
+        assert "link=***" in masked
+        assert "file=***" in masked
+        assert "r=***" in masked
+        assert "rss=***" in masked
+
+    def test_mask_long_path_segment_passkey(self):
+        """SEC-03: a passkey embedded as a path segment (common format:
+        /download/<id>/<passkey>/name.torrent) must be masked even though
+        it's not in the query string."""
+        from bot.services.add_service import _mask_url
+
+        url = "https://tracker.example/download/123/abcdef0123456789abcdef01/name.torrent"
+        masked = _mask_url(url, max_len=200)
+        assert "abcdef0123456789abcdef01" not in masked
+        assert "/download/123/***/name.torrent" in masked
+
+    def test_short_path_segments_not_masked(self):
+        """Short, ordinary path segments (ids, filenames) must survive."""
+        from bot.services.add_service import _mask_url
+
+        url = "https://tracker.example/download/123/name.torrent"
+        masked = _mask_url(url, max_len=200)
+        assert masked == "https://tracker.example/download/123/name.torrent"
 
 
 class TestDownloadUrlValidation:
@@ -300,7 +365,7 @@ class TestSearchServiceMusicDetection:
 
 
 class TestAddServiceMusic:
-    """AddService.add_artist and grab_music_release wire through to Lidarr."""
+    """AddService.add_artist wires through to Lidarr."""
 
     async def test_add_artist_no_lidarr_returns_error(self):
         from bot.services.add_service import AddService
@@ -330,18 +395,3 @@ class TestAddServiceMusic:
         assert added is existing
         assert action.success is True
         lidarr.add_artist.assert_not_called()
-
-    async def test_grab_music_release_no_lidarr(self):
-        from bot.services.add_service import AddService
-
-        svc = AddService(AsyncMock(), AsyncMock(), AsyncMock(), lidarr=None)
-        release = SearchResult(guid="g", title="t")
-        ok, action, msg = await svc.grab_music_release(
-            artist=ArtistInfo(mb_id="m-1", name="X"),
-            release=release,
-            quality_profile_id=1,
-            metadata_profile_id=1,
-            root_folder_path="/m",
-        )
-        assert ok is False
-        assert "Lidarr" in msg

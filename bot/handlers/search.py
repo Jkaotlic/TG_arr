@@ -3,9 +3,11 @@
 import asyncio
 import html
 import time
+from typing import Optional
 
 import structlog
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
@@ -67,19 +69,82 @@ MENU_BUTTONS = {
 }
 
 
-async def get_services() -> tuple[SearchService, AddService, ScoringService]:
-    """Get service instances using singleton clients from registry."""
+async def get_services() -> tuple[SearchService, AddService]:
+    """Get service instances using singleton clients from registry.
+
+    LOGIC-22: used to return `ScoringService` as a third element, but no
+    caller in this module ever consumed it (music.py imports the module-level
+    `_SCORING_SERVICE` singleton directly instead — see below).
+    """
     prowlarr = await get_prowlarr()
     radarr = await get_radarr()
     sonarr = await get_sonarr()
     qbittorrent = await get_qbittorrent()  # Returns None if not configured
     lidarr = await get_lidarr()  # Returns None if not configured
 
-    scoring = _SCORING_SERVICE
-    search_service = SearchService(prowlarr, radarr, sonarr, scoring, lidarr=lidarr)
+    search_service = SearchService(prowlarr, radarr, sonarr, _SCORING_SERVICE, lidarr=lidarr)
     add_service = AddService(prowlarr, radarr, sonarr, qbittorrent=qbittorrent, lidarr=lidarr)
 
-    return search_service, add_service, scoring
+    return search_service, add_service
+
+
+async def _render_results_page(
+    message: Message,
+    results: list,
+    page: int,
+    total_pages: int,
+    query: str,
+    content_type: ContentType,
+    per_page: int,
+    db_user: User,
+    settings,
+) -> None:
+    """LOGIC-04: shared renderer for a page of search results.
+
+    Deduplicates the "per_page → total_pages → slice → best_result →
+    show_grab_best → format + Keyboards → edit" block that used to be copied
+    verbatim in process_search, handle_pagination and handle_back.
+
+    BUG-03: swallows the harmless "message is not modified" TelegramBadRequest
+    that a fast double-tap on pagination/back triggers (re-rendering identical
+    text+keyboard) — without this, callback.answer() downstream never runs and
+    the button spins forever.
+    """
+    start_idx = page * per_page
+    page_results = results[start_idx:start_idx + per_page]
+
+    best_result = results[0] if results else None
+    show_grab_best = bool(
+        best_result
+        and best_result.calculated_score >= settings.auto_grab_score_threshold
+        and db_user.preferences.auto_grab_enabled
+    )
+
+    text = Formatters.format_search_results_page(
+        page_results,
+        page,
+        total_pages,
+        query,
+        content_type,
+        per_page=per_page,
+    )
+
+    try:
+        await message.edit_text(
+            text,
+            reply_markup=Keyboards.search_results(
+                page_results,
+                page,
+                total_pages,
+                per_page,
+                show_grab_best,
+                best_result.calculated_score if best_result else 0,
+            ),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
 
 
 def _strip_command(text: str, command: str) -> str:
@@ -177,13 +242,17 @@ async def process_search(
         return
 
     settings = get_settings()
-    search_service, add_service, scoring = await get_services()
+    search_service, add_service = await get_services()
 
     # BUG-01: bind log BEFORE try so the except handler never sees a NameError
     # if message.answer() fails before log could be assigned inside try.
     user_id = db_user.tg_id
     log = logger.bind(user_id=user_id, query=query)
     t_start = time.monotonic()
+    # LOGIC-23: tracked so the except-handler can edit the in-flight status
+    # message ("Ищу релизы...") instead of leaving it hanging and sending a
+    # brand-new error message underneath it.
+    status_msg: Optional[Message] = None
 
     try:
         parsed = search_service.parse_query(query)
@@ -262,7 +331,11 @@ async def process_search(
         # title is for Radarr/Sonarr lookup APIs, not for the indexer search.
         search_term = query if (clean_title and parsed.get("year")) else (clean_title or query)
         t_search = time.monotonic()
-        results = await search_service.search_releases(search_term, content_type)
+        results = await search_service.search_releases(
+            search_term,
+            content_type,
+            preferred_resolution=db_user.preferences.preferred_resolution,
+        )
         log.info(
             "stage_done",
             stage="search_releases",
@@ -278,8 +351,10 @@ async def process_search(
             log.info("search_branch", branch="no_results")
             return
 
-        await db.save_search(user_id, query, content_type, results)
-
+        # DB-03: search_results was a write-only table (JSON blob duplicated
+        # into `sessions` right below) — never read by any handler. Dropped
+        # from the hot path; `actions` (ActionType.SEARCH, logged below)
+        # already covers search history.
         session = SearchSession(
             user_id=user_id,
             query=query,
@@ -289,37 +364,12 @@ async def process_search(
         )
         await db.save_session(user_id, session)
 
-        best_result = results[0] if results else None
-        show_grab_best = (
-            best_result
-            and best_result.calculated_score >= settings.auto_grab_score_threshold
-            and db_user.preferences.auto_grab_enabled
-        )
-
         per_page = settings.results_per_page
         total_pages = (len(results) + per_page - 1) // per_page
-        page_results = results[:per_page]
 
-        text = Formatters.format_search_results_page(
-            page_results,
-            0,
-            total_pages,
-            query,
-            content_type,
-            per_page=per_page,
-        )
-
-        await status_msg.edit_text(
-            text,
-            reply_markup=Keyboards.search_results(
-                page_results,
-                0,
-                total_pages,
-                per_page,
-                show_grab_best,
-                best_result.calculated_score if best_result else 0,
-            ),
-            parse_mode="HTML",
+        # LOGIC-04: shared renderer (also swallows "message is not modified").
+        await _render_results_page(
+            status_msg, results, 0, total_pages, query, content_type, per_page, db_user, settings
         )
 
         action = ActionLog(
@@ -338,7 +388,16 @@ async def process_search(
 
     except Exception as e:
         log.error("Search failed", error=str(e), exc_info=True)
-        await message.answer(Formatters.format_error("Поиск временно недоступен"))
+        # LOGIC-23: edit the in-flight status message ("Ищу релизы...") rather
+        # than leaving it hanging forever with a separate error message below it.
+        error_text = Formatters.format_error("Поиск временно недоступен")
+        if status_msg is not None:
+            try:
+                await status_msg.edit_text(error_text)
+            except TelegramBadRequest:
+                await message.answer(error_text)
+        else:
+            await message.answer(error_text)
 
 
 @router.callback_query(
@@ -374,6 +433,15 @@ async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Data
     await db.save_session(user_id, session)
 
     await callback.answer()
+
+    # LOGIC-23: remove the type-selection buttons from the question message —
+    # otherwise it stays clickable and a repeat tap re-launches a second
+    # parallel search while the first one is still in flight.
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
 
     # Use message.answer() to send results to same chat
     await process_search(
@@ -416,38 +484,18 @@ async def handle_pagination(
         session.current_page = page
         await db.save_session(user_id, session)
 
-    # Get page results
-    start_idx = page * per_page
-    page_results = session.results[start_idx:start_idx + per_page]
-
-    # Check grab best
-    best_result = session.results[0] if session.results else None
-    show_grab_best = (
-        best_result
-        and best_result.calculated_score >= settings.auto_grab_score_threshold
-        and db_user.preferences.auto_grab_enabled
-    )
-
-    text = Formatters.format_search_results_page(
-        page_results,
+    # LOGIC-04/BUG-03: shared renderer — also swallows "message is not
+    # modified" from a fast double-tap on the same page.
+    await _render_results_page(
+        callback.message,
+        session.results,
         page,
         total_pages,
         session.query,
         session.content_type,
-        per_page=per_page,
-    )
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=Keyboards.search_results(
-            page_results,
-            page,
-            total_pages,
-            per_page,
-            show_grab_best,
-            best_result.calculated_score if best_result else 0,
-        ),
-        parse_mode="HTML",
+        per_page,
+        db_user,
+        settings,
     )
 
     await callback.answer()
@@ -459,7 +507,7 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
     if not callback.data or not callback.message:
         return
 
-    search_service, add_service, _ = await get_services()
+    search_service, add_service = await get_services()
 
     user_id = callback.from_user.id
     session = await db.get_session(user_id)
@@ -478,6 +526,12 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
     if idx < 0 or idx >= len(session.results):
         await callback.answer("Неверный выбор", show_alert=True)
         return
+
+    # BUG-07: ack right after validation — the lookup below can take up to
+    # HTTP_TIMEOUT × retries (30-95s when *arr is degraded), and Telegram
+    # rejects answerCallbackQuery once the query is "too old" (~15-30s). The
+    # user's tap-feedback (spinner) must not depend on a slow *arr response.
+    await callback.answer()
 
     result = session.results[idx]
     session.selected_result = result
@@ -557,8 +611,6 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
             parse_mode="HTML",
         )
 
-    await callback.answer()
-
 
 async def _emby_library_note(content) -> str:
     """Feature #4: best-effort '<title> already in Emby' hint for the release card.
@@ -574,7 +626,11 @@ async def _emby_library_note(content) -> str:
         year = getattr(content, "year", None)
         exists = await asyncio.wait_for(emby.item_exists(name, year, item_type), timeout=5.0)
         return "\n\n✅ <i>Уже в библиотеке Emby</i>" if exists else ""
-    except Exception:
+    except Exception as e:
+        # OBS-12a: this branch is intentionally best-effort/non-blocking, but a
+        # silent swallow with zero trace made a systematically-timing-out Emby
+        # invisible in the logs. DEBUG only — never fails the release card.
+        logger.debug("emby_note_skipped", error=str(e))
         return ""
 
 
@@ -608,7 +664,7 @@ async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database)
         await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
     try:
-        search_service, add_service, _ = await get_services()
+        search_service, add_service = await get_services()
 
         session = await db.get_session(user_id)
 
@@ -668,7 +724,7 @@ async def handle_confirm_grab(callback: CallbackQuery, db_user: User, db: Databa
         await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
     try:
-        search_service, add_service, _ = await get_services()
+        search_service, add_service = await get_services()
         await callback.answer("Обработка...")
         await callback.message.edit_text("⏳ Обрабатываю запрос...")
 
@@ -755,8 +811,10 @@ async def _execute_grab(
                     return
                 movie = _pick_by_year(movies, result.detected_year, parsed.get("year"))
 
-            profiles = await add_service.get_radarr_profiles()
-            folders = await add_service.get_radarr_root_folders()
+            # PERF-07b: independent reads — one RTT instead of two sequential ones.
+            profiles, folders = await asyncio.gather(
+                add_service.get_radarr_profiles(), add_service.get_radarr_root_folders()
+            )
 
             if not profiles or not folders:
                 await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Radarr"))
@@ -793,8 +851,10 @@ async def _execute_grab(
                     return
                 series = _pick_by_year(series_list, result.detected_year, parsed.get("year"))
 
-            profiles = await add_service.get_sonarr_profiles()
-            folders = await add_service.get_sonarr_root_folders()
+            # PERF-07b: independent reads — one RTT instead of two sequential ones.
+            profiles, folders = await asyncio.gather(
+                add_service.get_sonarr_profiles(), add_service.get_sonarr_root_folders()
+            )
 
             if not profiles or not folders:
                 await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Sonarr"))
@@ -867,36 +927,18 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
     total_pages = (len(session.results) + per_page - 1) // per_page
     page = min(session.current_page, max(0, total_pages - 1))
 
-    start_idx = page * per_page
-    page_results = session.results[start_idx:start_idx + per_page]
-
-    best_result = session.results[0] if session.results else None
-    show_grab_best = (
-        best_result
-        and best_result.calculated_score >= settings.auto_grab_score_threshold
-        and db_user.preferences.auto_grab_enabled
-    )
-
-    text = Formatters.format_search_results_page(
-        page_results,
+    # LOGIC-04/BUG-03: shared renderer — also swallows "message is not
+    # modified" from a repeat Back tap.
+    await _render_results_page(
+        callback.message,
+        session.results,
         page,
         total_pages,
         session.query,
         session.content_type,
-        per_page=per_page,
-    )
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=Keyboards.search_results(
-            page_results,
-            page,
-            total_pages,
-            per_page,
-            show_grab_best,
-            best_result.calculated_score if best_result else 0,
-        ),
-        parse_mode="HTML",
+        per_page,
+        db_user,
+        settings,
     )
 
     await callback.answer()
@@ -935,7 +977,7 @@ async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database
             await message.edit_text(Formatters.format_error("Сессия истекла. Повторите поиск."))
             return
 
-        search_service, add_service, _ = await get_services()
+        search_service, add_service = await get_services()
 
         if not add_service.qbittorrent:
             await message.edit_text(Formatters.format_error("qBittorrent не настроен"))
@@ -988,7 +1030,7 @@ async def handle_season_preset(callback: CallbackQuery, db_user: User, db: Datab
         return
 
     await callback.answer(f"Мониторинг: {preset}")
-    _, add_service, _ = await get_services()
+    _, add_service = await get_services()
     has_qbittorrent = add_service.qbittorrent is not None
     result = session.selected_result
     text = Formatters.format_release_details(result)
@@ -1007,3 +1049,13 @@ async def handle_season_preset(callback: CallbackQuery, db_user: User, db: Datab
 async def handle_noop(callback: CallbackQuery) -> None:
     """Handle no-op buttons (like page counter)."""
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("page:"))
+async def handle_legacy_page(callback: CallbackQuery) -> None:
+    """BUG-02: orphaned legacy `page:N` buttons from messages sent before the
+    typed-PageCB migration (a430ad3) have no matching handler anymore, so a
+    tap on them used to spin forever (no answer() ever fired). Surface an
+    explicit alert instead of a silent hang.
+    """
+    await callback.answer("Кнопка устарела — повторите поиск", show_alert=True)

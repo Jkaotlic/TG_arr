@@ -33,3 +33,25 @@ async def test_still_blocks_unconfigured_internal_hosts():
 async def test_magnet_and_scheme_rules_unchanged():
     assert await _validate_download_url("magnet:?xt=urn:btih:aabbccdd") is True
     assert await _validate_download_url("ftp://example.com/") is False
+
+
+# ---------------------------------------------------------------------------
+# SEC-01: trust must be scoped to (host, port), not host alone
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_same_trusted_host_wrong_port_is_blocked():
+    # conftest configures RADARR at http://localhost:7878 — localhost is a
+    # trusted service host, but :6379 (e.g. a Redis instance on the same LAN
+    # box) is NOT one of the configured service ports and must be blocked.
+    assert await _validate_download_url("http://localhost:6379/x") is False
+    assert await _validate_download_url("http://localhost:22/x") is False
+
+
+@pytest.mark.asyncio
+async def test_same_trusted_host_correct_port_is_allowed():
+    # The exact configured (host, port) pairs stay trusted.
+    assert await _validate_download_url("http://localhost:9696/download?apikey=x") is True
+    assert await _validate_download_url("http://localhost:7878/download?apikey=x") is True
+    assert await _validate_download_url("http://localhost:8989/download?apikey=x") is True

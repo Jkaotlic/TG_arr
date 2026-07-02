@@ -18,13 +18,23 @@ class TMDbClient(BaseAPIClient):
         """Initialize TMDb client.
 
         Args:
-            api_key: TMDb API key (v3)
+            api_key: TMDb API key. TMDb has two incompatible credential
+                formats sharing the same "API key" label in their dashboard:
+                the legacy v3 key (a short alphanumeric string) and the v4
+                read-access token (a long JWT starting with "eyJ"). Only the
+                v4 token works with `Authorization: Bearer` — a v3 key must be
+                sent as the `api_key` query parameter instead, or every
+                request 401s (BUG-13).
             language: Language for TMDb content (e.g., ru-RU, en-US)
             proxy_url: Optional HTTP proxy for TMDb requests (bypasses geo-blocks)
         """
         super().__init__("https://api.themoviedb.org/3", api_key, "TMDb")
         self.language = language
         self._proxy_url = proxy_url
+        # BUG-13: v4 read-access tokens are JWTs, which always start with the
+        # base64url encoding of `{"` — i.e. "eyJ". v3 keys are short opaque
+        # alphanumeric strings and never start with that prefix.
+        self._is_v4_token = api_key.startswith("eyJ")
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client with optional proxy."""
@@ -48,12 +58,28 @@ class TMDbClient(BaseAPIClient):
         return self._client
 
     def _get_headers(self) -> dict[str, str]:
-        """Override to use Bearer token authentication."""
-        return {
-            "Authorization": f"Bearer {self.api_key}",
+        """Bearer auth for v4 read-access tokens; v3 keys go via query param
+        instead (see get()/BUG-13) since TMDb rejects `Authorization: Bearer
+        <v3 key>` with 401."""
+        headers = {
             "Accept": "application/json",
             "User-Agent": "TG_arr-bot/1.0",
         }
+        if self._is_v4_token:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    async def get(
+        self,
+        endpoint: str,
+        params: Optional[dict] = None,
+        timeout: Optional[float] = None,
+    ):
+        """BUG-13: a v3 key must be sent as ?api_key=... on every request."""
+        if not self._is_v4_token:
+            params = dict(params or {})
+            params.setdefault("api_key", self.api_key)
+        return await super().get(endpoint, params=params, timeout=timeout)
 
     async def get_trending_movies(self, time_window: str = "week", page: int = 1) -> list[MovieInfo]:
         """Get trending movies.

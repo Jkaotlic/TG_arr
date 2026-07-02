@@ -29,6 +29,39 @@ _IMPORT_EVENTS = {
 }
 
 
+def _format_episode_range(episodes: object) -> str:
+    """LOGIC-18b: Sonarr season-pack imports report ALL episodes in one
+    webhook payload; only showing ``episodes[0]`` made a 10-episode season
+    pack look like a single episode. Collapse a contiguous/multi-episode
+    list into "S01E01-E10"; a single episode stays "S01E02".
+    """
+    if not isinstance(episodes, list) or not episodes:
+        return ""
+    nums = []
+    season = None
+    for ep in episodes:
+        if not isinstance(ep, dict):
+            continue
+        s = ep.get("seasonNumber")
+        e = ep.get("episodeNumber")
+        if s is None or e is None:
+            continue
+        try:
+            s, e = int(s), int(e)
+        except (TypeError, ValueError):
+            continue
+        if season is None:
+            season = s
+        if s == season:
+            nums.append(e)
+    if not nums:
+        return ""
+    nums.sort()
+    if len(nums) == 1:
+        return f" S{season:02d}E{nums[0]:02d}"
+    return f" S{season:02d}E{nums[0]:02d}-E{nums[-1]:02d}"
+
+
 def parse_arr_event(payload: Optional[dict]) -> Optional[str]:
     """Turn an *arr webhook payload into a user notification, or None to ignore.
 
@@ -55,16 +88,7 @@ def parse_arr_event(payload: Optional[dict]) -> Optional[str]:
 
     series = payload.get("series")
     if isinstance(series, dict) and series.get("title"):
-        ep_str = ""
-        episodes = payload.get("episodes")
-        if isinstance(episodes, list) and episodes and isinstance(episodes[0], dict):
-            season = episodes[0].get("seasonNumber")
-            episode = episodes[0].get("episodeNumber")
-            if season is not None and episode is not None:
-                try:
-                    ep_str = f" S{int(season):02d}E{int(episode):02d}"
-                except (TypeError, ValueError):
-                    ep_str = ""
+        ep_str = _format_episode_range(payload.get("episodes"))
         return f"📺 <b>{html.escape(str(series['title']))}</b>{ep_str} — готово, в библиотеке."
 
     artist = payload.get("artist")
@@ -74,25 +98,63 @@ def parse_arr_event(payload: Optional[dict]) -> Optional[str]:
     return None
 
 
-def build_webhook_app(notify: Callable[[str], Awaitable[None]]) -> web.Application:
-    """Build the aiohttp app; ``notify`` is called with the message on each import."""
+def _token_matches(request: web.Request, token: str) -> bool:
+    """SEC-02/BUG-08: accept either `?token=` query param or a `/webhook/<token>`
+    path segment. Documented matching rule (also in tests/test_feat_webhook.py):
+    once a token is configured, `/webhook/{service}` no longer authenticates
+    unless `{service}` happens to equal the token — operators who want a
+    service label AND auth should use `?token=` instead.
+    """
+    if request.query.get("token") == token:
+        return True
+    service = request.match_info.get("service")
+    return service is not None and service == token
+
+
+def build_webhook_app(
+    notify: Callable[[str], Awaitable[None]],
+    token: Optional[str] = None,
+) -> web.Application:
+    """Build the aiohttp app; ``notify`` is called with the message on each import.
+
+    SEC-02/BUG-08: when ``token`` is set, requests must present it via
+    `?token=<token>` or `/webhook/<token>` — anything else gets 403. When
+    ``token`` is None (not configured), requests are accepted unauthenticated
+    (a startup warning is emitted separately by Settings' model_validator).
+    """
 
     async def handle(request: web.Request) -> web.Response:
+        service = request.match_info.get("service")
+
+        if token and not _token_matches(request, token):
+            logger.warning("webhook_rejected_bad_token", remote=request.remote, service=service)
+            return web.Response(status=403, text="forbidden")
+
         try:
             payload = await request.json()
         except Exception:
+            logger.warning("webhook_invalid_json", remote=request.remote)
             return web.Response(status=400, text="invalid json")
+
+        event_type = payload.get("eventType") if isinstance(payload, dict) else None
         message = parse_arr_event(payload)
+        logger.info(
+            "webhook_received",
+            event_type=event_type,
+            service=service,
+            matched=message is not None,
+        )
         if message:
             try:
                 await notify(message)
+                logger.info("webhook_notified", service=service)
             except Exception as e:  # never let a notify error 500 the *arr side
                 logger.warning("webhook_notify_failed", error=str(e))
         return web.Response(text="ok")
 
     app = web.Application()
     app.router.add_post("/webhook", handle)
-    app.router.add_post("/webhook/{service}", handle)  # /webhook/radarr etc.
+    app.router.add_post("/webhook/{service}", handle)  # /webhook/radarr or /webhook/<token>
     return app
 
 

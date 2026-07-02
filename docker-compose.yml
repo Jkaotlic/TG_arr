@@ -3,6 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # DEPLOY-02: explicit name so `make deploy`/`make rollback` can tag a
+    # known image reference regardless of the compose project directory name
+    # (which would otherwise drive the default `<dir>-tg-arr-bot` tag).
+    image: tg-arr-bot:latest
     container_name: tg-arr-bot
     restart: unless-stopped
     environment:
@@ -42,11 +46,46 @@ services:
       # DEPLOY-03: TZ feeds glibc; tzdata is installed in the image.
       TZ: ${TIMEZONE:-Europe/Moscow}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # OBS-13: rendering format (json for docker logs vs console for a tty)
+      # is independent of LOG_LEVEL verbosity.
+      LOG_FORMAT: ${LOG_FORMAT:-json}
       AUTO_GRAB_SCORE_THRESHOLD: ${AUTO_GRAB_SCORE_THRESHOLD:-80}
       HTTP_TIMEOUT: ${HTTP_TIMEOUT:-30.0}
+      # BUG-21/PERF-02: Prowlarr search timeout/retry tuning — previously
+      # undocumented in compose, so setting these in .env had no effect
+      # (DEPLOY-01: config.py supports them but they never reached the
+      # container).
+      PROWLARR_SEARCH_TIMEOUT: ${PROWLARR_SEARCH_TIMEOUT:-25.0}
+      PROWLARR_SEARCH_RETRIES: ${PROWLARR_SEARCH_RETRIES:-1}
       RESULTS_PER_PAGE: ${RESULTS_PER_PAGE:-5}
+      # Database path (relative to /app inside the container)
+      DATABASE_PATH: ${DATABASE_PATH:-data/bot.db}
+      # Webhook server (optional, #8) — inbound *arr "on import" notifications.
+      # Off by default; also uncomment the `ports:` block below to expose it
+      # beyond the container when WEBHOOK_BIND is opened past 127.0.0.1.
+      WEBHOOK_ENABLED: ${WEBHOOK_ENABLED:-false}
+      WEBHOOK_PORT: ${WEBHOOK_PORT:-8090}
+      WEBHOOK_BIND: ${WEBHOOK_BIND:-127.0.0.1}
+      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-}
+    # DEPLOY-01: uncomment when WEBHOOK_ENABLED=true and *arr needs to reach
+    # this port from outside the container (e.g. WEBHOOK_BIND=0.0.0.0 because
+    # *arr runs in another container/host). Left commented by default since
+    # webhook is off and nothing should be published.
+    # ports:
+    #   - "${WEBHOOK_PORT:-8090}:${WEBHOOK_PORT:-8090}"
     volumes:
       - bot-data:/app/data
+    # DEPLOY-05: the container only ever needs to write to /app/data (the
+    # named volume above, holding the sqlite db) and /tmp (the liveness file
+    # bot/main.py touches for HEALTHCHECK). Everything else — including the
+    # app code itself — can be a read-only root filesystem.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     logging:
       driver: "json-file"
       options:

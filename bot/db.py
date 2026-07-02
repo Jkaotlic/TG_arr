@@ -5,7 +5,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import aiosqlite
 import structlog
@@ -110,6 +110,7 @@ class Database:
                 user_id INTEGER NOT NULL,
                 query TEXT NOT NULL,
                 content_type TEXT NOT NULL,
+                result_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(tg_id)
             );
@@ -155,8 +156,8 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_searches_user ON searches(user_id);
             CREATE INDEX IF NOT EXISTS idx_searches_created ON searches(created_at);
             CREATE INDEX IF NOT EXISTS idx_search_results_search ON search_results(search_id);
-            CREATE INDEX IF NOT EXISTS idx_actions_user ON actions(user_id);
             CREATE INDEX IF NOT EXISTS idx_actions_created ON actions(created_at);
+            CREATE INDEX IF NOT EXISTS idx_actions_user_created ON actions(user_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
         """)
         await self.conn.commit()
@@ -197,6 +198,8 @@ class Database:
             await self._migrate_to_v1()
         if version < 2:
             await self._migrate_to_v2()
+        if version < 3:
+            await self._migrate_to_v3()
 
     async def _migrate_to_v1(self) -> None:
         """
@@ -222,6 +225,31 @@ class Database:
             await self.conn.execute("ALTER TABLE actions ADD COLUMN details TEXT")
             await self.conn.commit()
         await self._set_schema_version(2)
+
+    async def _migrate_to_v3(self) -> None:
+        """
+        DB-06: composite index for the ``get_user_actions`` hot path
+        (``WHERE user_id = ? ORDER BY created_at DESC``); the old single-column
+        ``idx_actions_user`` is superseded and dropped.
+
+        DB-03: add ``result_count`` to ``searches`` for legacy databases (fresh
+        ones already have it via ``_create_tables``); ``save_search`` no longer
+        writes to ``search_results``.
+        """
+        async with self.conn.execute("PRAGMA table_info(searches)") as cursor:
+            cols = {row[1] for row in await cursor.fetchall()}
+        if "result_count" not in cols:
+            await self.conn.execute(
+                "ALTER TABLE searches ADD COLUMN result_count INTEGER NOT NULL DEFAULT 0"
+            )
+
+        await self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_actions_user_created "
+            "ON actions(user_id, created_at DESC)"
+        )
+        await self.conn.execute("DROP INDEX IF EXISTS idx_actions_user")
+        await self.conn.commit()
+        await self._set_schema_version(3)
 
     # User methods
     async def get_user(self, tg_id: int) -> Optional[User]:
@@ -264,6 +292,35 @@ class Database:
                 (prefs_json, now, tg_id),
             )
             await self.conn.commit()
+
+    async def update_user_preference(self, user_id: int, key: str, value: Any) -> bool:
+        """DB-05: point-update a single preference key without a read-modify-write.
+
+        ``update_user_preferences`` overwrites the *entire* ``preferences`` JSON
+        with a snapshot the caller fetched earlier; two concurrent settings
+        changes (fast double-tap on different menu items) race and the loser's
+        edit is silently lost. This uses SQLite's JSON1 ``json_set`` to patch a
+        single key in place, so two concurrent calls on *different* keys both
+        survive regardless of ordering.
+
+        ``value`` is JSON-encoded by the caller's data (via ``json.dumps``) and
+        passed through SQLite's ``json()`` so it is stored as a native JSON
+        value (not a doubly-quoted string) — this covers numbers, strings and
+        ``null`` alike.
+
+        Returns True if a row was updated (user existed), False otherwise.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        value_json = json.dumps(value)
+
+        async with self._write_lock:
+            cursor = await self.conn.execute(
+                "UPDATE users SET preferences = json_set(preferences, '$.' || ?, json(?)), "
+                "updated_at = ? WHERE tg_id = ?",
+                (key, value_json, now, user_id),
+            )
+            await self.conn.commit()
+            return cursor.rowcount > 0
 
     def _row_to_user(self, row: aiosqlite.Row) -> User:
         """Convert database row to User model.
@@ -312,9 +369,17 @@ class Database:
             await self.conn.commit()
 
     async def remove_allowed_user(self, tg_id: int) -> None:
-        """Revoke a user's runtime access."""
+        """Revoke a user's runtime access.
+
+        DB-09: also drop the user's active session — access is revoked but a
+        stale session would otherwise linger until the 24h cleanup sweep,
+        keeping search state around for a user who should no longer be able
+        to act on it. ``users``/``actions`` rows are intentionally kept for
+        history.
+        """
         async with self._write_lock:
             await self.conn.execute("DELETE FROM allowed_users WHERE tg_id = ?", (tg_id,))
+            await self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (tg_id,))
             await self.conn.commit()
 
     async def is_allowed_in_db(self, tg_id: int) -> bool:
@@ -335,51 +400,30 @@ class Database:
     async def save_search(
         self, user_id: int, query: str, content_type: ContentType, results: list[SearchResult]
     ) -> int:
-        """Save a search and its results. Returns search ID."""
+        """Save search metadata (query, content_type, result_count). Returns search ID.
+
+        DB-03: ``results`` is no longer serialized to the write-only
+        ``search_results`` table — the same payload is already persisted in
+        ``sessions`` (search.py) and nothing ever reads ``search_results``
+        back. Only the result *count* is worth keeping for history purposes.
+        The ``results`` parameter is kept (rather than dropped) so existing
+        call sites stay source-compatible; only ``len(results)`` is used.
+        """
         now = datetime.now(timezone.utc).isoformat()
 
         async with self._write_lock:
-            await self.conn.execute("BEGIN")
-            try:
-                # Insert search
-                cursor = await self.conn.execute(
-                    """
-                    INSERT INTO searches (user_id, query, content_type, created_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (user_id, query, content_type.value, now),
-                )
-                search_id = cursor.lastrowid
-                if search_id is None:
-                    await self.conn.rollback()
-                    raise RuntimeError("Failed to insert search record")
-
-                # Insert results
-                results_json = json.dumps([r.model_dump(mode="json") for r in results])
-                await self.conn.execute(
-                    """
-                    INSERT INTO search_results (search_id, results_json, created_at)
-                    VALUES (?, ?, ?)
-                    """,
-                    (search_id, results_json, now),
-                )
-
-                await self.conn.commit()
-            except Exception:
-                await self.conn.rollback()
-                raise
+            cursor = await self.conn.execute(
+                """
+                INSERT INTO searches (user_id, query, content_type, result_count, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, query, content_type.value, len(results), now),
+            )
+            await self.conn.commit()
+            search_id = cursor.lastrowid
+            if search_id is None:
+                raise RuntimeError("Failed to insert search record")
             return search_id
-
-    async def get_search_results(self, search_id: int) -> list[SearchResult]:
-        """Get search results by search ID."""
-        async with self.conn.execute(
-            "SELECT results_json FROM search_results WHERE search_id = ?", (search_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                results_data = json.loads(row["results_json"])
-                return [SearchResult(**r) for r in results_data]
-        return []
 
     # Session methods
     async def save_session(self, user_id: int, session: SearchSession) -> None:
@@ -394,7 +438,7 @@ class Database:
         try:
             session_json = session.model_dump_json()
         except Exception as e:
-            logger.error("Failed to serialize session", user_id=user_id, error=str(e))
+            logger.error("Failed to serialize session", user_id=user_id, error=str(e), exc_info=True)
             raise
 
         async with self._write_lock:
@@ -426,7 +470,7 @@ class Database:
         try:
             session_json = session.model_dump_json()
         except Exception as e:
-            logger.error("Failed to serialize session", user_id=user_id, error=str(e))
+            logger.error("Failed to serialize session", user_id=user_id, error=str(e), exc_info=True)
             raise
 
         async with self._write_lock:
@@ -465,6 +509,7 @@ class Database:
                     user_id=user_id,
                     error=str(e),
                     session_preview=row_data[:200] if row_data else None,
+                    exc_info=True,
                 )
                 # Delete corrupted session
                 await self.delete_session(user_id)
@@ -599,13 +644,20 @@ class Database:
             return cursor.rowcount
 
     async def cleanup_old_searches(self, days: int = 7) -> int:
-        """Delete searches older than specified days. Returns count deleted."""
+        """Delete searches older than specified days. Returns count deleted.
+
+        DB-03: ``save_search`` no longer writes to ``search_results`` (see
+        above), but the table remains in the schema until a later migration
+        drops it, and legacy rows written before this change may still be
+        present. Clean both so pre-existing ``search_results`` data doesn't
+        linger forever.
+        """
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
         async with self._write_lock:
             await self.conn.execute("BEGIN")
             try:
-                # First delete related results
+                # First delete related legacy results (if any)
                 await self.conn.execute(
                     """
                     DELETE FROM search_results
@@ -623,3 +675,93 @@ class Database:
                 await self.conn.rollback()
                 raise
             return cursor.rowcount
+
+    # DB-01/DB-08: maintenance (cleanup + optimize + optional backup)
+    _BACKUP_KEEP = 3
+
+    async def run_maintenance(self, backup: bool = False) -> dict[str, int]:
+        """Periodic maintenance: prune old rows, ask SQLite to re-plan indexes,
+        and optionally take an atomic on-disk backup.
+
+        Called from ``bot.main._periodic_cleanup`` (Task E) instead of the
+        three separate ``cleanup_old_*`` calls it used to make.
+
+        - Deletes old sessions (24h)/searches (7d)/actions (90d).
+        - ``PRAGMA optimize`` — cheap, SQLite-recommended after bulk deletes;
+          updates query planner stats without a full ANALYZE.
+        - When ``backup=True``: ``VACUUM INTO`` an atomic, defragmented copy
+          under ``<db_dir>/backup/bot-YYYYMMDD.db`` (safe to run against a live
+          WAL database). Skipped if today's backup already exists (idempotent
+          — safe to call more than once on the same day). Keeps only the
+          ``_BACKUP_KEEP`` most recent backup files, deleting older ones.
+
+          Note: this only protects against SQLite-level corruption / accidental
+          deletes — the backup still lives on the same SD card as the primary
+          DB. Copying ``backup/`` off-device (e.g. host cron) is out of scope
+          for the bot itself.
+
+        Returns counts: ``{"sessions": n, "searches": n, "actions": n, "backup": 0|1}``.
+        """
+        sessions = await self.cleanup_old_sessions()
+        searches = await self.cleanup_old_searches()
+        actions = await self.cleanup_old_actions()
+
+        try:
+            await self.conn.execute("PRAGMA optimize")
+        except Exception as e:
+            logger.warning("PRAGMA optimize failed", error=str(e))
+
+        backup_made = 0
+        if backup:
+            try:
+                backup_made = await self._backup(_keep=self._BACKUP_KEEP)
+            except Exception as e:
+                logger.error("Database backup failed", error=str(e), exc_info=True)
+
+        result = {
+            "sessions": sessions,
+            "searches": searches,
+            "actions": actions,
+            "backup": backup_made,
+        }
+        logger.info("run_maintenance_completed", **result)
+        return result
+
+    async def _backup(self, _keep: int = 3) -> int:
+        """VACUUM INTO today's backup file (if not already present) + rotate.
+
+        Returns 1 if a new backup file was created this call, 0 if today's
+        backup already existed (no-op, still counts rotation).
+        """
+        if self.db_path == ":memory:":
+            # Nothing to back up for an in-memory database (tests).
+            return 0
+
+        db_dir = os.path.dirname(self.db_path) or "."
+        backup_dir = Path(db_dir) / "backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        backup_path = backup_dir / f"bot-{today}.db"
+
+        created = 0
+        if backup_path.exists():
+            logger.debug("Backup for today already exists, skipping", path=str(backup_path))
+        else:
+            # VACUUM INTO requires the target not to exist and works against a
+            # live WAL database without blocking writers for long.
+            async with self._write_lock:
+                await self.conn.execute(f"VACUUM INTO '{backup_path.as_posix()}'")
+            created = 1
+            logger.info("Database backup created", path=str(backup_path))
+
+        # Rotate: keep only the _keep most recent bot-YYYYMMDD.db files.
+        existing = sorted(backup_dir.glob("bot-*.db"), key=lambda p: p.name, reverse=True)
+        for stale in existing[_keep:]:
+            try:
+                stale.unlink()
+                logger.info("Rotated old backup", path=str(stale))
+            except OSError as e:
+                logger.warning("Failed to remove old backup", path=str(stale), error=str(e))
+
+        return created
