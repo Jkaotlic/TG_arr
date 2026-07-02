@@ -1,7 +1,9 @@
 """Tests for database operations."""
 
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -667,3 +669,272 @@ class TestSessionLock:
         final = await db.get_session(user_id)
         assert final.current_page == 1
         assert final.monitor_type == "all"
+
+
+@pytest.mark.asyncio
+class TestSessionCache:
+    """PERF-04: in-process write-through cache of active sessions.
+
+    Every click (pagination/selection) used to round-trip a full JSON
+    parse/pydantic-validate (~100 nested models) through SQLite via
+    get_session/save_session. A cache hit still does one cheap SELECT to
+    confirm the stored text matches what's cached (so out-of-band tampering,
+    e.g. the corrupt-row regression tests, is still detected) but skips the
+    expensive part — ``json.loads`` + ``SearchSession.model_validate`` of the
+    full payload — entirely.
+    """
+
+    async def _execute_calls(self, db, monkeypatch) -> list[str]:
+        """Patch db.conn.execute to record the SQL text of every call."""
+        calls: list[str] = []
+        real_execute = db.conn.execute
+
+        def recording_execute(sql, *args, **kwargs):
+            calls.append(sql)
+            return real_execute(sql, *args, **kwargs)
+
+        monkeypatch.setattr(db.conn, "execute", recording_execute)
+        return calls
+
+    async def test_cache_hit_skips_json_parse_and_validate(self, db, monkeypatch):
+        """A cache hit may issue a cheap SELECT to confirm freshness, but must
+        never re-run json.loads/model_validate — the actual PERF-04 cost."""
+        user_id = 2001
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)  # populates cache (write-through)
+
+        with (
+            patch("bot.db.json.loads") as mock_loads,
+            patch(
+                "bot.db.SearchSession.model_validate", wraps=SearchSession.model_validate
+            ) as mock_validate,
+        ):
+            retrieved = await db.get_session(user_id)
+
+        assert retrieved is not None
+        assert retrieved.query == "q"
+        mock_loads.assert_not_called()
+        mock_validate.assert_not_called()
+
+    async def test_cache_miss_falls_back_to_sqlite_and_populates_cache(self, db, monkeypatch):
+        user_id = 2002
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+        db._cache_invalidate_session(user_id)  # force a miss
+
+        with patch(
+            "bot.db.SearchSession.model_validate", wraps=SearchSession.model_validate
+        ) as mock_validate:
+            first = await db.get_session(user_id)
+            assert first is not None
+            mock_validate.assert_called_once()  # had to parse the full row
+
+            mock_validate.reset_mock()
+            second = await db.get_session(user_id)
+            assert second is not None
+            mock_validate.assert_not_called()  # now served from cache
+
+    async def test_write_through_visible_to_next_get_session(self, db):
+        """save_session's write-through means the very next get_session (even
+        with an untouched cache) sees the update without re-reading SQLite."""
+        user_id = 2003
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="first", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+
+        session.query = "second"
+        session.current_page = 3
+        await db.save_session(user_id, session)
+
+        retrieved = await db.get_session(user_id)
+        assert retrieved.query == "second"
+        assert retrieved.current_page == 3
+
+    async def test_update_session_write_through_visible(self, db):
+        user_id = 2004
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+
+        session.current_page = 7
+        ok = await db.update_session(user_id, session)
+        assert ok is True
+
+        retrieved = await db.get_session(user_id)
+        assert retrieved.current_page == 7
+
+    async def test_update_session_rowcount_zero_does_not_resurrect_cache(self, db):
+        """RACE-04: if the session row was deleted concurrently, update_session
+        must not repopulate the cache with a session that no longer exists."""
+        user_id = 2005
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+
+        await db.delete_session(user_id)  # row gone, cache invalidated
+
+        session.current_page = 9
+        ok = await db.update_session(user_id, session)
+        assert ok is False
+
+        assert await db._cache_get_session(user_id) is None
+        assert await db.get_session(user_id) is None
+
+    async def test_delete_session_invalidates_cache(self, db):
+        user_id = 2006
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+        assert await db._cache_get_session(user_id) is not None
+
+        await db.delete_session(user_id)
+
+        assert await db._cache_get_session(user_id) is None
+        assert await db.get_session(user_id) is None
+
+    async def test_cleanup_old_sessions_invalidates_cache(self, db):
+        user_id = 2007
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+        assert await db._cache_get_session(user_id) is not None
+
+        # Backdate updated_at directly so cleanup treats it as stale.
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        async with db._write_lock:
+            await db.conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE user_id = ?", (old_ts, user_id)
+            )
+            await db.conn.commit()
+
+        deleted = await db.cleanup_old_sessions(hours=24)
+        assert deleted == 1
+        assert await db._cache_get_session(user_id) is None
+        assert await db.get_session(user_id) is None
+
+    async def test_remove_allowed_user_invalidates_session_cache(self, db):
+        user_id = 2008
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+        assert await db._cache_get_session(user_id) is not None
+
+        await db.remove_allowed_user(user_id)
+
+        assert await db._cache_get_session(user_id) is None
+
+    async def test_corrupt_session_row_invalidates_cache_and_deletes(self, db):
+        user_id = 2009
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+        db._cache_invalidate_session(user_id)  # force re-read from (corrupted) row
+
+        async with db._write_lock:
+            await db.conn.execute(
+                "UPDATE sessions SET session_data = ? WHERE user_id = ?",
+                ("not-valid-json{{{", user_id),
+            )
+            await db.conn.commit()
+
+        result = await db.get_session(user_id)
+        assert result is None
+        assert await db._cache_get_session(user_id) is None
+
+    async def test_returned_session_is_independent_copy(self, db):
+        """Mutating the object returned by get_session must not corrupt the
+        cached copy — otherwise two racing handlers reading the same cached
+        session would silently share state (breaking DB-02's guarantees)."""
+        user_id = 2010
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+
+        first = await db.get_session(user_id)
+        first.query = "mutated-locally"
+
+        second = await db.get_session(user_id)
+        assert second.query == "q"  # unaffected by the mutation on `first`
+
+    async def test_save_session_stores_independent_copy_in_cache(self, db):
+        """Mutating the `session` object after save_session() returns must not
+        retroactively change what's cached (and later returned)."""
+        user_id = 2011
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+
+        session.query = "mutated-after-save"  # caller keeps using the object
+
+        retrieved = await db.get_session(user_id)
+        assert retrieved.query == "q"
+
+    async def test_cache_ttl_expiry_falls_back_to_sqlite(self, db, monkeypatch):
+        user_id = 2012
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+
+        # Force the cached entry to look 24h+ old without waiting.
+        cached_session, cached_json, _ = db._session_cache[user_id]
+        db._session_cache[user_id] = (
+            cached_session,
+            cached_json,
+            time.monotonic() - 25 * 60 * 60,
+        )
+
+        calls = await self._execute_calls(db, monkeypatch)
+        retrieved = await db.get_session(user_id)
+        assert retrieved is not None
+        assert any("session_data" in sql for sql in calls)  # expired entry forced a re-read
+
+    async def test_cache_eviction_caps_size(self, db):
+        """Cache is bounded to ~50 entries; the oldest is evicted on overflow."""
+        db._session_cache_cap = 3
+        for i in range(5):
+            user_id = 3000 + i
+            await db.create_user(User(tg_id=user_id))
+            session = SearchSession(user_id=user_id, query=f"q{i}", content_type=ContentType.MOVIE)
+            await db.save_session(user_id, session)
+
+        assert len(db._session_cache) == 3
+        # Oldest two (3000, 3001) evicted; newest three remain.
+        assert 3000 not in db._session_cache
+        assert 3001 not in db._session_cache
+        assert 3002 in db._session_cache
+        assert 3003 in db._session_cache
+        assert 3004 in db._session_cache
+
+    async def test_concurrent_mutations_under_lock_keep_cache_and_db_in_sync(self, db):
+        """Two locked read-modify-write cycles (DB-02 pattern) leave the cache
+        holding exactly what SQLite has, even though each save_session call
+        writes through to cache immediately under _write_lock."""
+        user_id = 2013
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+
+        async def racer_a():
+            async with db.session_lock(user_id):
+                s = await db.get_session(user_id)
+                await asyncio.sleep(0.02)
+                s.current_page = 1
+                await db.save_session(user_id, s)
+
+        async def racer_b():
+            async with db.session_lock(user_id):
+                s = await db.get_session(user_id)
+                s.monitor_type = "all"
+                await db.save_session(user_id, s)
+
+        await asyncio.gather(racer_a(), racer_b())
+
+        from_cache = await db._cache_get_session(user_id)
+        db._cache_invalidate_session(user_id)
+        from_db = await db.get_session(user_id)
+
+        assert from_cache.current_page == from_db.current_page
+        assert from_cache.monitor_type == from_db.monitor_type
+        assert from_cache.query == from_db.query

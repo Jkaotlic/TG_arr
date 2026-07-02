@@ -3,6 +3,8 @@
 import asyncio
 import json
 import os
+import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -45,6 +47,21 @@ class Database:
         # Lock per user_id, kept for the process lifetime (bounded by the
         # small number of distinct Telegram users this bot serves).
         self._session_locks: dict[int, asyncio.Lock] = {}
+        # PERF-04: in-process write-through cache of active sessions. The bot
+        # is a single process, so the on-disk `sessions` row is only ever
+        # mutated through this Database instance — a hot session (pagination
+        # clicks, release selection) skips the expensive JSON parse/pydantic
+        # validation of the full payload on every click. Keyed by
+        # user_id -> (session, last-known session_data JSON text, cached_at
+        # monotonic timestamp). Bounded LRU (oldest entry evicted once the
+        # cap is exceeded) with a TTL matching the 24h staleness window
+        # already enforced by `cleanup_old_sessions`. Consistency with
+        # SQLite is maintained by only ever mutating this dict from inside
+        # `_write_lock` (writes) — reads don't need the lock since dict
+        # access is atomic under asyncio's single-threaded event loop.
+        self._session_cache: OrderedDict[int, tuple[SearchSession, str, float]] = OrderedDict()
+        self._session_cache_cap = 50
+        self._session_cache_ttl = 24 * 60 * 60  # seconds
 
     def session_lock(self, user_id: int) -> asyncio.Lock:
         """Return the per-user lock guarding session read-modify-write cycles.
@@ -58,6 +75,67 @@ class Database:
             lock = asyncio.Lock()
             self._session_locks[user_id] = lock
         return lock
+
+    # ------------------------------------------------------------------
+    # PERF-04: session cache helpers
+    #
+    # Cache entries are keyed by user_id -> (session, session_json,
+    # cached_at monotonic timestamp). ``session_json`` is the exact
+    # serialized text this Database instance last wrote/read for that user
+    # and is used to cheaply confirm the cached copy still matches what's on
+    # disk before trusting it — so a session row modified/corrupted by
+    # something other than this Database instance's own write path (e.g.
+    # direct SQL, as the corrupt-row regression tests do) is still detected
+    # instead of being masked by a stale-but-valid cache entry. This still
+    # avoids the expensive part of a full read — json.loads + pydantic
+    # model_validate of ~100 nested SearchResult models — by comparing raw
+    # text; only a mismatch falls through to a real parse.
+    # ------------------------------------------------------------------
+    def _cache_put_session(self, user_id: int, session: SearchSession, session_json: str) -> None:
+        """Store a deep copy of ``session`` in the cache (write-through).
+
+        Must be called while holding ``_write_lock`` (or before any other
+        writer could observe a torn state) so the cache never briefly
+        disagrees with what's about to be committed. Evicts the oldest entry
+        once the cap is exceeded.
+        """
+        self._session_cache[user_id] = (
+            session.model_copy(deep=True),
+            session_json,
+            time.monotonic(),
+        )
+        self._session_cache.move_to_end(user_id)
+        while len(self._session_cache) > self._session_cache_cap:
+            self._session_cache.popitem(last=False)
+
+    async def _cache_get_session(self, user_id: int) -> Optional[SearchSession]:
+        """Return a deep copy of the cached session, or None on miss/expiry/staleness."""
+        entry = self._session_cache.get(user_id)
+        if entry is None:
+            return None
+        session, cached_json, cached_at = entry
+        if time.monotonic() - cached_at > self._session_cache_ttl:
+            del self._session_cache[user_id]
+            return None
+
+        # Cheap freshness check: compare the raw stored text against what we
+        # cached. This transfers the JSON blob but skips the expensive part
+        # (json.loads + pydantic model_validate), which is what PERF-04
+        # actually targets.
+        async with self.conn.execute(
+            "SELECT session_data FROM sessions WHERE user_id = ?", (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None or row["session_data"] != cached_json:
+            del self._session_cache[user_id]
+            return None
+
+        self._session_cache.move_to_end(user_id)
+        return session.model_copy(deep=True)
+
+    def _cache_invalidate_session(self, user_id: int) -> None:
+        """Drop a user's cached session, if present."""
+        self._session_cache.pop(user_id, None)
 
     async def connect(self) -> None:
         """Connect to the database and initialize tables."""
@@ -403,6 +481,7 @@ class Database:
             await self.conn.execute("DELETE FROM allowed_users WHERE tg_id = ?", (tg_id,))
             await self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (tg_id,))
             await self.conn.commit()
+            self._cache_invalidate_session(tg_id)  # PERF-04
 
     async def is_allowed_in_db(self, tg_id: int) -> bool:
         """Whether a user was granted access at runtime (DB allowlist)."""
@@ -475,6 +554,9 @@ class Database:
                 (user_id, session_json, now, now),
             )
             await self.conn.commit()
+            # PERF-04: write-through — keep the cache in sync with what was
+            # just committed, under the same lock that serializes the write.
+            self._cache_put_session(user_id, session, session_json)
         logger.debug("Session saved", user_id=user_id, results_count=len(session.results))
 
     async def update_session(self, user_id: int, session: SearchSession) -> bool:
@@ -501,10 +583,28 @@ class Database:
                 (session_json, now, user_id),
             )
             await self.conn.commit()
-            return cursor.rowcount > 0
+            updated = cursor.rowcount > 0
+            if updated:
+                # PERF-04: write-through, but only if the row still existed —
+                # a rowcount of 0 means a concurrent delete/cancel already
+                # removed the session (RACE-04); don't resurrect it in cache.
+                self._cache_put_session(user_id, session, session_json)
+            return updated
 
     async def get_session(self, user_id: int) -> Optional[SearchSession]:
-        """Get user session."""
+        """Get user session.
+
+        PERF-04: served from the in-process cache when possible. A cache hit
+        still does one cheap SELECT to confirm the stored text still matches
+        what was cached — skipping the expensive part (json.loads + pydantic
+        validation of the full payload), which is what this cache targets.
+        Falls back to a normal full read (and (re)populates the cache) on a
+        miss/staleness.
+        """
+        cached = await self._cache_get_session(user_id)
+        if cached is not None:
+            return cached
+
         row_data = None
         async with self.conn.execute(
             "SELECT session_data FROM sessions WHERE user_id = ?", (user_id,)
@@ -524,6 +624,8 @@ class Database:
                     results_count=len(session.results),
                     has_selected=session.selected_result is not None,
                 )
+                # PERF-04: populate the cache so subsequent clicks hit it.
+                self._cache_put_session(user_id, session, row_data)
                 return session
             except Exception as e:
                 logger.error(
@@ -543,6 +645,7 @@ class Database:
         async with self._write_lock:
             await self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
             await self.conn.commit()
+            self._cache_invalidate_session(user_id)  # PERF-04
 
     # Action log methods
     async def log_action(self, action: ActionLog) -> int:
@@ -647,6 +750,11 @@ class Database:
                 "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
             )
             await self.conn.commit()
+            # PERF-04: the DELETE is a bulk sweep with no per-user_id list, so
+            # rather than tracking which rows it hit, just drop the whole
+            # cache — cheap (<=50 entries) and correctness-preserving; a
+            # freshly-cleaned entry gets reloaded from SQLite on next access.
+            self._session_cache.clear()
             return cursor.rowcount
 
     async def cleanup_old_actions(self, days: int = 90) -> int:
