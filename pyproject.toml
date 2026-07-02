@@ -19,12 +19,13 @@ dependencies = [
     # DEP-01: explicit floor for the webhook server transport (bot/webhook.py),
     # otherwise unreproducibly pulled in transitively via aiogram.
     "aiohttp>=3.9,<4",
-    # DEP-09: aiogram 3.27 requires pydantic<2.13. Cap so `pip install -e .`
-    # without requirements.txt cannot accidentally pull a breaking version.
-    "pydantic>=2.9,<2.13",
+    # DEP-05: aiogram 3.29.1 relaxed its cap to pydantic<2.14. Keep our own cap
+    # one minor ahead of the current pin so `pip install -e .` without
+    # requirements.txt cannot pull a not-yet-vetted 2.14.
+    "pydantic>=2.9,<2.14",
     "pydantic-settings>=2.6,<3",
     "aiosqlite>=0.20,<2",
-    "structlog>=24.4,<26",
+    "structlog>=24.4,<27",
 ]
 
 # DEP-04: keep these floors in sync with the exact pins in

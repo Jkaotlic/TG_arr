@@ -374,7 +374,7 @@ make check-base-image   # docker buildx imagetools inspect python:3.12-slim
 | Компонент | Технология |
 |-----------|------------|
 | Язык | Python 3.12 |
-| Telegram | aiogram 3.27.0 |
+| Telegram | aiogram 3.29.1 |
 | HTTP | httpx + tenacity (retry) |
 | Конфигурация | pydantic-settings v2 |
 | БД | SQLite (aiosqlite) |
