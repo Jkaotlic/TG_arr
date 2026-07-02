@@ -192,11 +192,19 @@
 
 - [x] DEP-05: aiogram 3.27.0→3.29.1, pydantic 2.12.5→2.13.4 (cap→<2.14), pydantic-settings→2.14.2, structlog 25.5→26.1 (cap <27), pytest 9.0.2→9.1.1, pytest-asyncio→1.4.0, ruff→0.15.20; README синхронизирован; сборка на Pi (Python 3.12.13) чистая, healthy, 0 рестартов
 
+## Архитектурный рефактор (СДЕЛАНО, задеплоено — коммиты 2899e44/8d49daa/43daa31)
+
+- [x] PERF-04: in-process write-through кэш активных сессий (LRU 50/TTL 24ч, согласован с DB-02/RACE-04)
+- [x] ArrBaseClient: общий предок Radarr/Sonarr/Lidarr c `_api_prefix` (−120 строк дубля)
+- [x] God-file split: `formatters.py`→пакет, `search.py`→пакет, `keyboards.py`→пакет (API 1:1)
+- [x] Полная миграция payload-CallbackData: ReleaseCB/ArtistCB/AddContentCB/SettingCB/SeasonPresetCB/TrendingItemCB/TorrentActionCB/CalCB + legacy-заглушки
+
 ## Осталось отложенным (осознанно, следующий заход)
 
-- [ ] PERF-04: in-process write-through кэш активных сессий в Database.get_session/save_session (чистая оптимизация, риск на только что изменённом hot-path DB-02 — отдельно)
+- [ ] PERF-02 full: qBittorrent `sync/maindata` delta-протокол (минимальная версия — опрос DOWNLOADING — уже в проде)
+- [ ] DEP-02 lock-файл с `--require-hashes` (риск сломать arm64-сборку ради малого — верхние deps и base-image уже пиненые)
 - [ ] Тест-гигиена: TEST-09 (sleep-гонки→Event/Barrier), TEST-12 (хелперы→conftest), TEST-13 (переименование r4-файлов), TEST-14, TEST-16
-- [ ] Отложенный архитектурный рефакторинг (см. секцию ниже): god-file split, ArrBaseClient, полная миграция CallbackData, PERF-02 full (sync/maindata), DEP-02 lock-файл
+- [ ] LOGIC-11/18a/19/21 (мелкий рефактор слоёв), унификация grab_movie/series шаблонным методом, константные колбэки (back/type/emby_*) — низкий приоритет
 
 ## Верификация (verification-before-completion)
 
