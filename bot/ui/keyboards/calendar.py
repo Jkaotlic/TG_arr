@@ -2,6 +2,7 @@
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from bot.ui.callbacks import CalCB
 from bot.ui.keyboards._constants import CallbackData
 
 
@@ -12,14 +13,14 @@ class _CalendarKeyboards:
     def calendar_controls(current_days: int = 7) -> InlineKeyboardMarkup:
         """Create keyboard for calendar period selection."""
         periods = [
-            ("7 дней", CallbackData.CALENDAR_7, 7),
-            ("14 дней", CallbackData.CALENDAR_14, 14),
-            ("30 дней", CallbackData.CALENDAR_30, 30),
+            ("7 дней", 7),
+            ("14 дней", 14),
+            ("30 дней", 30),
         ]
         buttons = []
-        for label, callback, days in periods:
+        for label, days in periods:
             text = f"• {label} •" if days == current_days else label
-            buttons.append(InlineKeyboardButton(text=text, callback_data=callback))
+            buttons.append(InlineKeyboardButton(text=text, callback_data=CalCB(days=days).pack()))
 
         return InlineKeyboardMarkup(
             inline_keyboard=[

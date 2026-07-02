@@ -1,6 +1,7 @@
 """Download management handlers for qBittorrent integration."""
 
 import html
+from collections.abc import Awaitable, Callable
 from typing import Optional
 
 import structlog
@@ -12,7 +13,7 @@ from bot.clients.qbittorrent import QBittorrentClient, QBittorrentError
 from bot.clients.registry import get_qbittorrent
 from bot.handlers.common import safe_edit, strip_command
 from bot.models import TorrentFilter, TorrentInfo, User, format_speed
-from bot.ui.callbacks import TorrentPageCB
+from bot.ui.callbacks import TorrentActionCB, TorrentPageCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.menu import MENU_DOWNLOADS, MENU_QSTATUS
@@ -346,10 +347,109 @@ async def _resolve_torrent(qbt: QBittorrentClient, hash_or_short: str) -> Option
     return await qbt.get_torrent_by_short_hash(hash_or_short)
 
 
-@router.callback_query(F.data.startswith(CallbackData.TORRENT))
-async def handle_torrent_details(callback: CallbackQuery) -> None:
-    """Show torrent details."""
-    if not callback.message or not callback.data:
+async def _do_view(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str) -> None:
+    """Show torrent details (was ``t:<hash>``)."""
+    await _render_torrent_details(callback.message, torrent)
+    await callback.answer()
+
+
+async def _do_pause(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, h: str) -> None:
+    """Pause a torrent (was ``t_pause:<hash>``)."""
+    await qbt.pause([torrent.hash])
+    await callback.answer(f"⏸️ Приостановлен: {torrent.name[:30]}")
+
+    # BUG-15: redraw details directly — do NOT call the view action, which
+    # would ack the callback a second time.
+    if callback.message:
+        # PERF-01: re-fetch only this torrent (server-side ``hashes`` filter)
+        # to show the updated state (speed=0, state=paused) instead of
+        # pulling and parsing the whole list again. Fall back to a
+        # short-hash lookup if the targeted fetch returns nothing.
+        refreshed = await _refetch_one(qbt, torrent, h)
+        await _render_torrent_details(callback.message, refreshed or torrent)
+
+
+async def _do_resume(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, h: str) -> None:
+    """Resume a torrent (was ``t_resume:<hash>``)."""
+    await qbt.resume([torrent.hash])
+    await callback.answer(f"▶️ Возобновлён: {torrent.name[:30]}")
+
+    # BUG-15: redraw details directly — do NOT call the view action.
+    if callback.message:
+        # PERF-01: targeted single-torrent re-fetch (see _refetch_one).
+        refreshed = await _refetch_one(qbt, torrent, h)
+        await _render_torrent_details(callback.message, refreshed or torrent)
+
+
+async def _do_delete(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str) -> None:
+    """Delete a torrent, keeping files (was ``t_delete:<hash>``)."""
+    await qbt.delete([torrent.hash], delete_files=False)
+    await callback.answer(f"🗑️ Удалён: {torrent.name[:30]}")
+
+    # BUG-15: redraw list directly — do NOT call a callback handler.
+    if callback.message:
+        await _render_torrent_list(callback.message, qbt)
+
+
+async def _do_delf(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str) -> None:
+    """Ask for confirmation before deleting a torrent with its files (was
+    ``t_delf:<hash>``).
+
+    BUG-14/DEAD-03: deleting with files is irreversible, so this shows
+    ``Keyboards.confirm_delete_torrent(hash, with_files=True)`` instead of
+    deleting immediately. The actual delete happens in ``_do_delfc``.
+    """
+    if not callback.message:
+        return
+    await safe_edit(
+        callback.message,
+        f"⚠️ Удалить торрент <b>С файлами</b>?\n\n{html.escape(torrent.name)}\n\n"
+        f"Это действие необратимо.",
+        reply_markup=Keyboards.confirm_delete_torrent(torrent.hash, with_files=True),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+async def _do_delfc(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str) -> None:
+    """Confirmed deletion of a torrent with its files (was ``t_delfc:<hash>``,
+    BUG-14/DEAD-03)."""
+    await qbt.delete([torrent.hash], delete_files=True)
+    await callback.answer(f"🗑️💾 Удалён с файлами: {torrent.name[:25]}")
+
+    # BUG-15: redraw list directly — do NOT call a callback handler.
+    if callback.message:
+        await _render_torrent_list(callback.message, qbt)
+
+
+# r5: was six separate ``F.data.startswith(CallbackData.TORRENT_*)`` handlers
+# parsing "<prefix><hash>" by hand (LOGIC-12) — now one TorrentActionCB
+# dispatch table. ``delete``/``delf``/``delfc`` stay admin-gated exactly as
+# before; ``view``/``pause``/``resume`` remain open to all allowed users.
+_TORRENT_ACTIONS: dict[str, Callable[[CallbackQuery, QBittorrentClient, TorrentInfo, str], Awaitable[None]]] = {
+    "view": _do_view,
+    "pause": _do_pause,
+    "resume": _do_resume,
+    "delete": _do_delete,
+    "delf": _do_delf,
+    "delfc": _do_delfc,
+}
+_ADMIN_ONLY_ACTIONS = frozenset({"delete", "delf", "delfc"})
+
+
+@router.callback_query(TorrentActionCB.filter())
+async def handle_torrent_action(
+    callback: CallbackQuery, callback_data: TorrentActionCB, is_admin: bool = False
+) -> None:
+    """Dispatch a per-torrent action by ``callback_data.action`` (r5/LOGIC-12)."""
+    action = callback_data.action
+    handler = _TORRENT_ACTIONS.get(action)
+    if handler is None:
+        await callback.answer("Неизвестное действие", show_alert=True)
+        return
+
+    if action in _ADMIN_ONLY_ACTIONS and not is_admin:
+        await callback.answer("Недостаточно прав для удаления", show_alert=True)
         return
 
     qbt = await check_qbt_enabled(callback)
@@ -357,197 +457,37 @@ async def handle_torrent_details(callback: CallbackQuery) -> None:
         return
 
     try:
-        hash_arg = callback.data.replace(CallbackData.TORRENT, "")
-        torrent = await _resolve_torrent(qbt, hash_arg)
+        h = callback_data.h
+        torrent = await _resolve_torrent(qbt, h)
 
         if not torrent:
             await callback.answer("Торрент не найден", show_alert=True)
             return
 
-        await _render_torrent_details(callback.message, torrent)
-        await callback.answer()
+        await handler(callback, qbt, torrent, h)
 
     except Exception as e:
-        logger.error("Failed to get torrent details", error=str(e), exc_info=True)
+        logger.error("Torrent action failed", action=action, error=str(e), exc_info=True)
         await callback.answer("Ошибка операции", show_alert=True)
 
 
 @router.callback_query(F.data.startswith(CallbackData.TORRENT_PAUSE))
-async def handle_pause_torrent(callback: CallbackQuery) -> None:
-    """Pause a torrent."""
-    if not callback.data:
-        return
-
-    qbt = await check_qbt_enabled(callback)
-    if not qbt:
-        return
-
-    try:
-        hash_arg = callback.data.replace(CallbackData.TORRENT_PAUSE, "")
-        torrent = await _resolve_torrent(qbt, hash_arg)
-
-        if not torrent:
-            await callback.answer("Торрент не найден", show_alert=True)
-            return
-
-        await qbt.pause([torrent.hash])
-        await callback.answer(f"⏸️ Приостановлен: {torrent.name[:30]}")
-
-        # BUG-15: redraw details directly — do NOT call handle_torrent_details,
-        # which would ack the callback a second time.
-        if callback.message:
-            # PERF-01: re-fetch only this torrent (server-side ``hashes`` filter)
-            # to show the updated state (speed=0, state=paused) instead of
-            # pulling and parsing the whole list again. Fall back to a
-            # short-hash lookup if the targeted fetch returns nothing.
-            refreshed = await _refetch_one(qbt, torrent, hash_arg)
-            await _render_torrent_details(callback.message, refreshed or torrent)
-
-    except Exception as e:
-        logger.error("Failed to pause", error=str(e), exc_info=True)
-        await callback.answer("Ошибка операции", show_alert=True)
-
-
 @router.callback_query(F.data.startswith(CallbackData.TORRENT_RESUME))
-async def handle_resume_torrent(callback: CallbackQuery) -> None:
-    """Resume a torrent."""
-    if not callback.data:
-        return
-
-    qbt = await check_qbt_enabled(callback)
-    if not qbt:
-        return
-
-    try:
-        hash_arg = callback.data.replace(CallbackData.TORRENT_RESUME, "")
-        torrent = await _resolve_torrent(qbt, hash_arg)
-
-        if not torrent:
-            await callback.answer("Торрент не найден", show_alert=True)
-            return
-
-        await qbt.resume([torrent.hash])
-        await callback.answer(f"▶️ Возобновлён: {torrent.name[:30]}")
-
-        # BUG-15: redraw details directly — do NOT call handle_torrent_details.
-        if callback.message:
-            # PERF-01: targeted single-torrent re-fetch (see _refetch_one).
-            refreshed = await _refetch_one(qbt, torrent, hash_arg)
-            await _render_torrent_details(callback.message, refreshed or torrent)
-
-    except Exception as e:
-        logger.error("Failed to resume", error=str(e), exc_info=True)
-        await callback.answer("Ошибка операции", show_alert=True)
-
-
-@router.callback_query(F.data.startswith(CallbackData.TORRENT_DELETE))
-async def handle_delete_torrent(callback: CallbackQuery, is_admin: bool = False) -> None:
-    """Delete a torrent (keep files)."""
-    if not is_admin:
-        await callback.answer("Недостаточно прав для удаления", show_alert=True)
-        return
-
-    if not callback.data or not callback.message:
-        return
-
-    qbt = await check_qbt_enabled(callback)
-    if not qbt:
-        return
-
-    try:
-        hash_arg = callback.data.replace(CallbackData.TORRENT_DELETE, "")
-        torrent = await _resolve_torrent(qbt, hash_arg)
-
-        if not torrent:
-            await callback.answer("Торрент не найден", show_alert=True)
-            return
-
-        await qbt.delete([torrent.hash], delete_files=False)
-        await callback.answer(f"🗑️ Удалён: {torrent.name[:30]}")
-
-        # BUG-15: redraw list directly — do NOT call a callback handler.
-        if callback.message:
-            await _render_torrent_list(callback.message, qbt)
-
-    except Exception as e:
-        logger.error("Failed to delete", error=str(e), exc_info=True)
-        await callback.answer("Ошибка операции", show_alert=True)
-
-
-@router.callback_query(F.data.startswith(CallbackData.TORRENT_DELETE_FILES))
-async def handle_delete_with_files(callback: CallbackQuery, is_admin: bool = False) -> None:
-    """Ask for confirmation before deleting a torrent with its files.
-
-    BUG-14/DEAD-03: deleting with files is irreversible, so this now shows
-    ``Keyboards.confirm_delete_torrent(hash, with_files=True)`` instead of
-    deleting immediately. The actual delete happens in
-    ``handle_delete_with_files_confirm`` (``t_delfc:``).
-    """
-    if not is_admin:
-        await callback.answer("Недостаточно прав для удаления", show_alert=True)
-        return
-
-    if not callback.data or not callback.message:
-        return
-
-    qbt = await check_qbt_enabled(callback)
-    if not qbt:
-        return
-
-    try:
-        hash_arg = callback.data.replace(CallbackData.TORRENT_DELETE_FILES, "")
-        torrent = await _resolve_torrent(qbt, hash_arg)
-
-        if not torrent:
-            await callback.answer("Торрент не найден", show_alert=True)
-            return
-
-        await safe_edit(
-            callback.message,
-            f"⚠️ Удалить торрент <b>С файлами</b>?\n\n{html.escape(torrent.name)}\n\n"
-            f"Это действие необратимо.",
-            reply_markup=Keyboards.confirm_delete_torrent(torrent.hash, with_files=True),
-            parse_mode="HTML",
-        )
-        await callback.answer()
-
-    except Exception as e:
-        logger.error("Failed to prepare delete-with-files confirmation", error=str(e), exc_info=True)
-        await callback.answer("Ошибка операции", show_alert=True)
-
-
 @router.callback_query(F.data.startswith(CallbackData.TORRENT_DELETE_FILES_CONFIRM))
-async def handle_delete_with_files_confirm(callback: CallbackQuery, is_admin: bool = False) -> None:
-    """Confirmed deletion of a torrent with its files (BUG-14/DEAD-03)."""
-    if not is_admin:
-        await callback.answer("Недостаточно прав для удаления", show_alert=True)
-        return
-
-    if not callback.data or not callback.message:
-        return
-
-    qbt = await check_qbt_enabled(callback)
-    if not qbt:
-        return
-
-    try:
-        hash_arg = callback.data.replace(CallbackData.TORRENT_DELETE_FILES_CONFIRM, "")
-        torrent = await _resolve_torrent(qbt, hash_arg)
-
-        if not torrent:
-            await callback.answer("Торрент не найден", show_alert=True)
-            return
-
-        await qbt.delete([torrent.hash], delete_files=True)
-        await callback.answer(f"🗑️💾 Удалён с файлами: {torrent.name[:25]}")
-
-        # BUG-15: redraw list directly — do NOT call a callback handler.
-        if callback.message:
-            await _render_torrent_list(callback.message, qbt)
-
-    except Exception as e:
-        logger.error("Failed to delete with files", error=str(e), exc_info=True)
-        await callback.answer("Ошибка операции", show_alert=True)
+@router.callback_query(F.data.startswith(CallbackData.TORRENT_DELETE_FILES))
+@router.callback_query(F.data.startswith(CallbackData.TORRENT_DELETE))
+@router.callback_query(F.data.startswith(CallbackData.TORRENT))
+async def handle_legacy_torrent_action(callback: CallbackQuery) -> None:
+    """r5: legacy ``t:``/``t_pause:``/``t_resume:``/``t_delete:``/``t_delf:``/
+    ``t_delfc:`` string buttons from messages sent before the TorrentActionCB
+    migration — surface an explicit alert instead of falling through
+    unhandled. Registered last (and most-specific-first among these six
+    string prefixes, since e.g. "t_delete:" also starts with "t:"'s shorter
+    cousins would not match here — "t:" is checked last) so it only catches
+    what the typed ``TorrentActionCB.filter()`` handler above didn't already
+    claim.
+    """
+    await callback.answer("Кнопка устарела, обновите список", show_alert=True)
 
 
 @router.callback_query(F.data == CallbackData.TORRENT_PAUSE_ALL)

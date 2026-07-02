@@ -5,7 +5,7 @@ speed-limit menu and delete confirmation.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import TorrentFilter, TorrentInfo
-from bot.ui.callbacks import TorrentPageCB
+from bot.ui.callbacks import TorrentActionCB, TorrentPageCB
 from bot.ui.keyboards._constants import CallbackData
 
 
@@ -46,10 +46,11 @@ class _TorrentKeyboards:
                 InlineKeyboardButton(
                     text=label,
                     # PERF-05: full 40-hex hash fits comfortably under the 64-byte
-                    # callback_data limit ("t:" + 40 hex = 42 bytes), so lookups
-                    # can use the targeted get_torrent(hash) instead of scanning
-                    # the whole list for a short-hash prefix match.
-                    callback_data=f"{CallbackData.TORRENT}{torrent.hash}",
+                    # callback_data limit (worst case "ta:delfc:" + 40 hex = 49
+                    # bytes — see TorrentActionCB), so lookups can use the
+                    # targeted get_torrent(hash) instead of scanning the whole
+                    # list for a short-hash prefix match.
+                    callback_data=TorrentActionCB(action="view", h=torrent.hash).pack(),
                 )
             ])
 
@@ -119,17 +120,17 @@ class _TorrentKeyboards:
         from bot.models import TorrentState
         if torrent.state in (TorrentState.PAUSED, TorrentState.QUEUED):
             keyboard.append([
-                InlineKeyboardButton(text="▶️ Возобновить", callback_data=f"{CallbackData.TORRENT_RESUME}{full_hash}"),
+                InlineKeyboardButton(text="▶️ Возобновить", callback_data=TorrentActionCB(action="resume", h=full_hash).pack()),
             ])
         else:
             keyboard.append([
-                InlineKeyboardButton(text="⏸ Пауза", callback_data=f"{CallbackData.TORRENT_PAUSE}{full_hash}"),
+                InlineKeyboardButton(text="⏸ Пауза", callback_data=TorrentActionCB(action="pause", h=full_hash).pack()),
             ])
 
         # Delete options
         keyboard.append([
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"{CallbackData.TORRENT_DELETE}{full_hash}"),
-            InlineKeyboardButton(text="🗑 + Файлы", callback_data=f"{CallbackData.TORRENT_DELETE_FILES}{full_hash}"),
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=TorrentActionCB(action="delete", h=full_hash).pack()),
+            InlineKeyboardButton(text="🗑 + Файлы", callback_data=TorrentActionCB(action="delf", h=full_hash).pack()),
         ])
 
         # Back button — carries the filter so the list redraw stays filtered.
@@ -253,10 +254,10 @@ class _TorrentKeyboards:
         """
         full_hash = torrent_hash
         if with_files:
-            confirm_callback = f"{CallbackData.TORRENT_DELETE_FILES_CONFIRM}{full_hash}"
+            confirm_callback = TorrentActionCB(action="delfc", h=full_hash).pack()
             text = "⚠️ Да, удалить с файлами"
         else:
-            confirm_callback = f"{CallbackData.TORRENT_DELETE}{full_hash}"
+            confirm_callback = TorrentActionCB(action="delete", h=full_hash).pack()
             text = "Да, удалить торрент"
 
         return InlineKeyboardMarkup(
@@ -266,7 +267,7 @@ class _TorrentKeyboards:
                 ],
                 [
                     InlineKeyboardButton(
-                        text="❌ Отмена", callback_data=f"{CallbackData.TORRENT}{full_hash}"
+                        text="❌ Отмена", callback_data=TorrentActionCB(action="view", h=full_hash).pack()
                     ),
                 ],
             ]

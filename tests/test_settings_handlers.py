@@ -14,6 +14,7 @@ import pytest
 
 from bot.handlers import settings
 from bot.models import MetadataProfile, QualityProfile, RootFolder, User, UserPreferences
+from bot.ui.callbacks import SettingCB
 
 
 def _make_callback(data: str) -> MagicMock:
@@ -51,54 +52,54 @@ def _fake_add_service(**overrides) -> AsyncMock:
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "menu_callback,getter_attr,choices,expected_prefix",
+    "menu_callback,getter_attr,choices,expected_key",
     [
         (
             "settings:radarr_profile",
             "radarr_profiles",
             [QualityProfile(id=1, name="HD-1080p")],
-            "set:rp:",
+            "radarr_quality_profile_id",
         ),
         (
             "settings:radarr_folder",
             "radarr_folders",
             [RootFolder(id=1, path="/movies")],
-            "set:rf:",
+            "radarr_root_folder_id",
         ),
         (
             "settings:sonarr_profile",
             "sonarr_profiles",
             [QualityProfile(id=2, name="HD-720p")],
-            "set:sp:",
+            "sonarr_quality_profile_id",
         ),
         (
             "settings:sonarr_folder",
             "sonarr_folders",
             [RootFolder(id=2, path="/tv")],
-            "set:sf:",
+            "sonarr_root_folder_id",
         ),
         (
             "settings:lidarr_profile",
             "lidarr_profiles",
             [QualityProfile(id=3, name="Lossless")],
-            "set:lp:",
+            "lidarr_quality_profile_id",
         ),
         (
             "settings:lidarr_meta",
             "lidarr_meta_profiles",
             [MetadataProfile(id=4, name="Standard")],
-            "set:lm:",
+            "lidarr_metadata_profile_id",
         ),
         (
             "settings:lidarr_folder",
             "lidarr_folders",
             [RootFolder(id=5, path="/music")],
-            "set:lf:",
+            "lidarr_root_folder_id",
         ),
     ],
 )
 async def test_settings_menu_opens_correct_picker(
-    menu_callback, getter_attr, choices, expected_prefix
+    menu_callback, getter_attr, choices, expected_key
 ):
     svc = _fake_add_service(**{getter_attr: choices})
     cb = _make_callback(menu_callback)
@@ -110,7 +111,8 @@ async def test_settings_menu_opens_correct_picker(
     _, kwargs = cb.message.edit_text.call_args
     keyboard = kwargs["reply_markup"]
     button = keyboard.inline_keyboard[0][0]
-    assert button.callback_data.startswith(expected_prefix)
+    got = SettingCB.unpack(button.callback_data)
+    assert got.key == expected_key
     cb.answer.assert_awaited_once_with()
 
 
@@ -134,32 +136,31 @@ async def test_settings_menu_alerts_when_empty():
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "set_callback,pref_key",
+    "pref_key,value",
     [
-        ("set:rp:7", "radarr_quality_profile_id"),
-        ("set:rf:8", "radarr_root_folder_id"),
-        ("set:sp:9", "sonarr_quality_profile_id"),
-        ("set:sf:10", "sonarr_root_folder_id"),
-        ("set:lp:11", "lidarr_quality_profile_id"),
-        ("set:lm:12", "lidarr_metadata_profile_id"),
-        ("set:lf:13", "lidarr_root_folder_id"),
+        ("radarr_quality_profile_id", 7),
+        ("radarr_root_folder_id", 8),
+        ("sonarr_quality_profile_id", 9),
+        ("sonarr_root_folder_id", 10),
+        ("lidarr_quality_profile_id", 11),
+        ("lidarr_metadata_profile_id", 12),
+        ("lidarr_root_folder_id", 13),
     ],
 )
-async def test_settings_set_writes_correct_preference_key(set_callback, pref_key):
+async def test_settings_set_writes_correct_preference_key(pref_key, value):
     db_user = _make_user()
     db = AsyncMock()
     db.update_user_preference = AsyncMock(return_value=True)
     svc = _fake_add_service()
-    cb = _make_callback(set_callback)
+    cb = _make_callback(None)
 
     with patch.object(settings, "_get_add_service", AsyncMock(return_value=svc)):
-        await settings.handle_settings_set(cb, db_user, db)
+        await settings.handle_settings_set(cb, SettingCB(key=pref_key, value=str(value)), db_user, db)
 
-    expected_value = int(set_callback.rsplit(":", 1)[1])
     db.update_user_preference.assert_awaited_once_with(
-        db_user.tg_id, pref_key, expected_value
+        db_user.tg_id, pref_key, value
     )
-    assert getattr(db_user.preferences, pref_key) == expected_value
+    assert getattr(db_user.preferences, pref_key) == value
 
 
 # ---------------------------------------------------------------------------
@@ -171,10 +172,12 @@ async def test_settings_set_calls_answer_exactly_once():
     db = AsyncMock()
     db.update_user_preference = AsyncMock(return_value=True)
     svc = _fake_add_service()
-    cb = _make_callback("set:rp:7")
+    cb = _make_callback(None)
 
     with patch.object(settings, "_get_add_service", AsyncMock(return_value=svc)):
-        await settings.handle_settings_set(cb, db_user, db)
+        await settings.handle_settings_set(
+            cb, SettingCB(key="radarr_quality_profile_id", value="7"), db_user, db
+        )
 
     assert cb.answer.call_count == 1
     # And the settings menu was re-rendered (edit_text called) without a
@@ -192,13 +195,15 @@ async def test_settings_set_render_failure_still_answers_exactly_once():
     db_user = _make_user()
     db = AsyncMock()
     db.update_user_preference = AsyncMock(return_value=True)
-    cb = _make_callback("set:rp:7")
+    cb = _make_callback(None)
 
     broken_add_service = AsyncMock()
     broken_add_service.get_radarr_profiles = AsyncMock(side_effect=RuntimeError("arr down"))
 
     with patch.object(settings, "_get_add_service", AsyncMock(return_value=broken_add_service)):
-        await settings.handle_settings_set(cb, db_user, db)
+        await settings.handle_settings_set(
+            cb, SettingCB(key="radarr_quality_profile_id", value="7"), db_user, db
+        )
 
     assert cb.answer.call_count == 1
     args, kwargs = cb.answer.call_args
@@ -209,9 +214,11 @@ async def test_settings_set_render_failure_still_answers_exactly_once():
 async def test_settings_set_invalid_value_answers_once_no_render():
     db_user = _make_user()
     db = AsyncMock()
-    cb = _make_callback("set:rp:not-an-int")
+    cb = _make_callback(None)
 
-    await settings.handle_settings_set(cb, db_user, db)
+    await settings.handle_settings_set(
+        cb, SettingCB(key="radarr_quality_profile_id", value="not-an-int"), db_user, db
+    )
 
     assert cb.answer.call_count == 1
     db.update_user_preference.assert_not_called()
@@ -224,10 +231,12 @@ async def test_resolution_set_calls_answer_exactly_once():
     db = AsyncMock()
     db.update_user_preference = AsyncMock(return_value=True)
     svc = _fake_add_service()
-    cb = _make_callback("set:res:1080p")
+    cb = _make_callback(None)
 
     with patch.object(settings, "_get_add_service", AsyncMock(return_value=svc)):
-        await settings.handle_set_resolution(cb, db_user, db)
+        await settings.handle_set_resolution(
+            cb, SettingCB(key="preferred_resolution", value="1080p"), db_user, db
+        )
 
     assert cb.answer.call_count == 1
     db.update_user_preference.assert_awaited_once_with(
@@ -242,10 +251,12 @@ async def test_resolution_set_any_maps_to_none():
     db = AsyncMock()
     db.update_user_preference = AsyncMock(return_value=True)
     svc = _fake_add_service()
-    cb = _make_callback("set:res:any")
+    cb = _make_callback(None)
 
     with patch.object(settings, "_get_add_service", AsyncMock(return_value=svc)):
-        await settings.handle_set_resolution(cb, db_user, db)
+        await settings.handle_set_resolution(
+            cb, SettingCB(key="preferred_resolution", value="any"), db_user, db
+        )
 
     db.update_user_preference.assert_awaited_once_with(
         db_user.tg_id, "preferred_resolution", None
@@ -259,10 +270,12 @@ async def test_auto_grab_set_calls_answer_exactly_once():
     db = AsyncMock()
     db.update_user_preference = AsyncMock(return_value=True)
     svc = _fake_add_service()
-    cb = _make_callback("set:ag:1")
+    cb = _make_callback(None)
 
     with patch.object(settings, "_get_add_service", AsyncMock(return_value=svc)):
-        await settings.handle_set_auto_grab(cb, db_user, db)
+        await settings.handle_set_auto_grab(
+            cb, SettingCB(key="auto_grab_enabled", value="1"), db_user, db
+        )
 
     assert cb.answer.call_count == 1
     db.update_user_preference.assert_awaited_once_with(

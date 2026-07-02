@@ -142,17 +142,21 @@ async def test_trending_add_movie_escapes_title():
     db_user.preferences = MagicMock(radarr_quality_profile_id=None, radarr_root_folder_id=None)
 
     cb, status_msg = _callback_with_status()
-    cb.data = "add_movie:123"
+    cb.data = None
 
     trending._trending_movies_cache.clear()
     trending._trending_movies_cache[123] = added
+
+    from bot.ui.callbacks import AddContentCB
 
     with patch.object(trending, "get_prowlarr", AsyncMock()), \
          patch.object(trending, "get_radarr", AsyncMock()), \
          patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
-        await trending.handle_add_movie_from_trending(cb, db_user=db_user, db=db)
+        await trending.handle_add_movie_from_trending(
+            cb, AddContentCB(kind="movie", tmdb_id=123), db_user=db_user, db=db
+        )
 
     sent = status_msg.edit_text.await_args_list[-1].args[0]
     assert html.escape(_DANGEROUS_TITLE) in sent
@@ -310,18 +314,22 @@ async def test_trending_add_series_escapes_title():
     db_user.preferences = MagicMock(sonarr_quality_profile_id=None, sonarr_root_folder_id=None)
 
     cb, status_msg = _callback_with_status()
-    cb.data = "add_series:123"
+    cb.data = None
 
     cached = SeriesInfo(tvdb_id=999, tmdb_id=123, title=_DANGEROUS_TITLE, year=2020)
     trending._trending_series_cache.clear()
     trending._trending_series_cache[123] = cached
+
+    from bot.ui.callbacks import AddContentCB
 
     with patch.object(trending, "get_prowlarr", AsyncMock()), \
          patch.object(trending, "get_radarr", AsyncMock()), \
          patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
-        await trending.handle_add_series_from_trending(cb, db_user=db_user, db=db)
+        await trending.handle_add_series_from_trending(
+            cb, AddContentCB(kind="series", tmdb_id=123), db_user=db_user, db=db
+        )
 
     sent = status_msg.edit_text.await_args_list[-1].args[0]
     assert html.escape(_DANGEROUS_TITLE) in sent

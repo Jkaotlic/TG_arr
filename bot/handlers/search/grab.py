@@ -11,6 +11,7 @@ from bot.db import Database
 from bot.models import ContentType, MovieInfo, SearchSession, SeriesInfo, User
 from bot.services.add_service import AddService
 from bot.services.search_service import SearchService
+from bot.ui.callbacks import SeasonPresetCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 
@@ -324,10 +325,12 @@ async def handle_season_menu(callback: CallbackQuery, db_user: User, db: Databas
     )
 
 
-@router.callback_query(F.data.startswith(CallbackData.SEASON_PRESET))
-async def handle_season_preset(callback: CallbackQuery, db_user: User, db: Database) -> None:
+@router.callback_query(SeasonPresetCB.filter())
+async def handle_season_preset(
+    callback: CallbackQuery, callback_data: SeasonPresetCB, db_user: User, db: Database
+) -> None:
     """Feature #2: store the chosen monitoring preset and return to the release card."""
-    if not callback.data or not callback.message:
+    if not callback.message:
         return
     user_id = callback.from_user.id
 
@@ -338,7 +341,7 @@ async def handle_season_preset(callback: CallbackQuery, db_user: User, db: Datab
             await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
             return
 
-        preset = callback.data.removeprefix(CallbackData.SEASON_PRESET)
+        preset = callback_data.preset
         if preset not in _SEASON_PRESETS:
             await callback.answer("Неверный выбор", show_alert=True)
             return
@@ -395,3 +398,12 @@ async def handle_season_back(callback: CallbackQuery, db_user: User, db: Databas
         ),
         parse_mode="HTML",
     )
+
+
+@router.callback_query(F.data.startswith(CallbackData.SEASON_PRESET))
+async def handle_legacy_season_preset(callback: CallbackQuery) -> None:
+    """r5: legacy ``season_set:preset`` string buttons from messages sent
+    before the SeasonPresetCB migration — surface an explicit alert instead
+    of falling through unhandled.
+    """
+    await callback.answer("Кнопка устарела — откройте карточку релиза заново", show_alert=True)

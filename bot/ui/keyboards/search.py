@@ -12,7 +12,7 @@ class via normal attribute lookup either way.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import ContentType, SearchResult, SeriesInfo
-from bot.ui.callbacks import PageCB
+from bot.ui.callbacks import PageCB, ReleaseCB, SeasonPresetCB
 from bot.ui.keyboards._constants import CallbackData
 
 
@@ -70,7 +70,7 @@ class _SearchKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=label,
-                    callback_data=f"{CallbackData.RELEASE}{idx}",
+                    callback_data=ReleaseCB(idx=idx).pack(),
                 )
             ])
 
@@ -161,10 +161,10 @@ class _SearchKeyboards:
         the results list, which is not what a user expects from a submenu.
         """
         rows = [
-            [InlineKeyboardButton(text="📺 Все сезоны", callback_data=f"{CallbackData.SEASON_PRESET}all")],
-            [InlineKeyboardButton(text="🔮 Только будущие", callback_data=f"{CallbackData.SEASON_PRESET}future")],
-            [InlineKeyboardButton(text="1️⃣ Первый сезон", callback_data=f"{CallbackData.SEASON_PRESET}firstSeason")],
-            [InlineKeyboardButton(text="🔚 Последний сезон", callback_data=f"{CallbackData.SEASON_PRESET}latestSeason")],
+            [InlineKeyboardButton(text="📺 Все сезоны", callback_data=SeasonPresetCB(preset="all").pack())],
+            [InlineKeyboardButton(text="🔮 Только будущие", callback_data=SeasonPresetCB(preset="future").pack())],
+            [InlineKeyboardButton(text="1️⃣ Первый сезон", callback_data=SeasonPresetCB(preset="firstSeason").pack())],
+            [InlineKeyboardButton(text="🔚 Последний сезон", callback_data=SeasonPresetCB(preset="latestSeason").pack())],
             [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.SEASON_BACK)],
         ]
         return InlineKeyboardMarkup(inline_keyboard=rows)

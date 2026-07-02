@@ -22,6 +22,7 @@ from bot.models import (
 )
 from bot.services.add_service import AddService
 from bot.services.search_service import SearchService
+from bot.ui.callbacks import ArtistCB, TrendingItemCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.menu import MENU_MUSIC
@@ -242,19 +243,16 @@ async def handle_music_back(callback: CallbackQuery, db_user: User, db: Database
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith(CallbackData.ARTIST))
-async def handle_artist_selection(callback: CallbackQuery, db_user: User, db: Database) -> None:
+@router.callback_query(ArtistCB.filter())
+async def handle_artist_selection(
+    callback: CallbackQuery, callback_data: ArtistCB, db_user: User, db: Database
+) -> None:
     """Handle artist selection from lookup results."""
-    if not callback.data or not callback.message:
+    if not callback.message:
         return
 
     user_id = callback.from_user.id
-
-    try:
-        idx = int(callback.data.removeprefix(CallbackData.ARTIST))
-    except ValueError:
-        await callback.answer("Неверный выбор", show_alert=True)
-        return
+    idx = callback_data.idx
 
     artists = _artist_candidates.get(user_id) or []
     if idx < 0 or idx >= len(artists):
@@ -277,6 +275,15 @@ async def handle_artist_selection(callback: CallbackQuery, db_user: User, db: Da
         reply_markup=Keyboards.artist_details(artist, already_in_library=bool(artist.lidarr_id)),
         parse_mode="HTML",
     )
+
+
+@router.callback_query(F.data.startswith(CallbackData.ARTIST))
+async def handle_legacy_artist(callback: CallbackQuery) -> None:
+    """r5: legacy ``artist:N`` string buttons from messages sent before the
+    ArtistCB migration — surface an explicit alert instead of falling
+    through unhandled.
+    """
+    await callback.answer("Кнопка устарела — повторите поиск", show_alert=True)
 
 
 async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: Database) -> None:
@@ -406,16 +413,16 @@ async def handle_trending_music(callback: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data.startswith(CallbackData.TRENDING_ARTIST))
+@router.callback_query(TrendingItemCB.filter(F.kind == "artist"))
 async def handle_trending_artist_click(
-    callback: CallbackQuery, db_user: User, db: Database,
+    callback: CallbackQuery, callback_data: TrendingItemCB, db_user: User, db: Database,
 ) -> None:
     """Click a trending artist → lookup in Lidarr and show details."""
-    if not callback.data or not callback.message:
+    if not callback.message:
         return
 
     try:
-        idx = int(callback.data.removeprefix(CallbackData.TRENDING_ARTIST))
+        idx = int(callback_data.item_id)
     except ValueError:
         await callback.answer("Неверный выбор", show_alert=True)
         return
@@ -431,3 +438,12 @@ async def handle_trending_artist_click(
     if callback.message:
         await callback.message.edit_text(f"🔍 Ищу <b>{html.escape(name)}</b> в Lidarr...", parse_mode="HTML")
     await process_music_search(callback.message, name, db_user, db)
+
+
+@router.callback_query(F.data.startswith(CallbackData.TRENDING_ARTIST))
+async def handle_legacy_trending_artist(callback: CallbackQuery) -> None:
+    """r5: legacy ``trend_a:N`` string buttons from messages sent before the
+    TrendingItemCB migration — surface an explicit alert instead of falling
+    through unhandled.
+    """
+    await callback.answer("Кнопка устарела — обновите список", show_alert=True)

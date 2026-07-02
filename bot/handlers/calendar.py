@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message
 
 from bot.clients.registry import get_lidarr, get_radarr, get_sonarr
 from bot.handlers.common import swallow_not_modified
+from bot.ui.callbacks import CalCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.menu import MENU_CALENDAR
@@ -105,49 +106,29 @@ async def handle_calendar_menu(message: Message) -> None:
     )
 
 
-@router.callback_query(F.data == CallbackData.CALENDAR_7)
-async def handle_calendar_7(callback: CallbackQuery) -> None:
-    """Switch calendar to 7 days."""
+@router.callback_query(CalCB.filter())
+async def handle_calendar_period(callback: CallbackQuery, callback_data: CalCB) -> None:
+    """Switch calendar to the requested period (was ``cal_7``/``cal_14``/``cal_30``)."""
     await callback.answer()
     if not callback.message:
         return
+    days = callback_data.days
     user_id = callback.from_user.id
     async with _period_lock:
-        _user_period[user_id] = 7
+        _user_period[user_id] = days
     await _fetch_and_send_calendar(
-        7,
+        days,
         answer_func=callback.message.edit_text,
     )
 
 
-@router.callback_query(F.data == CallbackData.CALENDAR_14)
-async def handle_calendar_14(callback: CallbackQuery) -> None:
-    """Switch calendar to 14 days."""
-    await callback.answer()
-    if not callback.message:
-        return
-    user_id = callback.from_user.id
-    async with _period_lock:
-        _user_period[user_id] = 14
-    await _fetch_and_send_calendar(
-        14,
-        answer_func=callback.message.edit_text,
-    )
-
-
-@router.callback_query(F.data == CallbackData.CALENDAR_30)
-async def handle_calendar_30(callback: CallbackQuery) -> None:
-    """Switch calendar to 30 days."""
-    await callback.answer()
-    if not callback.message:
-        return
-    user_id = callback.from_user.id
-    async with _period_lock:
-        _user_period[user_id] = 30
-    await _fetch_and_send_calendar(
-        30,
-        answer_func=callback.message.edit_text,
-    )
+@router.callback_query(F.data.in_({"cal_7", "cal_14", "cal_30"}))
+async def handle_legacy_calendar_period(callback: CallbackQuery) -> None:
+    """r5: legacy ``cal_7``/``cal_14``/``cal_30`` string buttons from messages
+    sent before the CalCB migration — surface an explicit alert instead of
+    falling through unhandled.
+    """
+    await callback.answer("Кнопка устарела — откройте календарь заново", show_alert=True)
 
 
 @router.callback_query(F.data == CallbackData.CALENDAR_REFRESH)

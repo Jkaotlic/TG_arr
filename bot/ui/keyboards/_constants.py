@@ -49,15 +49,10 @@ class CallbackData:
 
     # Settings
     SETTINGS = "settings"
-    SET_RADARR_PROFILE = "set:rp:"  # set:rp:1
-    SET_RADARR_FOLDER = "set:rf:"  # set:rf:1
-    SET_SONARR_PROFILE = "set:sp:"  # set:sp:1
-    SET_SONARR_FOLDER = "set:sf:"  # set:sf:1
-    SET_LIDARR_PROFILE = "set:lp:"  # set:lp:1
-    SET_LIDARR_META = "set:lm:"  # set:lm:1 (Lidarr metadata profile)
-    SET_LIDARR_FOLDER = "set:lf:"  # set:lf:1
-    SET_RESOLUTION = "set:res:"  # set:res:1080p
-    SET_AUTO_GRAB = "set:ag:"  # set:ag:1 or set:ag:0
+    # r5: the "set:rp:"/"rf:"/"sp:"/"sf:"/"lp:"/"lm:"/"lf:"/"res:"/"ag:" value
+    # pickers migrated to the typed SettingCB (bot/ui/callbacks.py) — see
+    # bot/handlers/settings.py::handle_legacy_setting_set for the shared
+    # "set:" legacy-string fallback.
 
     # qBittorrent / Downloads
     TORRENT = "t:"  # t:hash - select torrent
@@ -97,7 +92,7 @@ class CallbackData:
     TRENDING_BACK = "trending_back"  # BUG-01: back to trending menu (not search's BACK)
 
     # Calendar
-    CALENDAR_7 = "cal_7"  # 7 days
-    CALENDAR_14 = "cal_14"  # 14 days
-    CALENDAR_30 = "cal_30"  # 30 days
+    # r5: cal_7/cal_14/cal_30 migrated to the typed CalCB(days) (bot/ui/callbacks.py)
+    # — see bot/handlers/calendar.py::handle_legacy_calendar_period for the
+    # legacy-string fallback.
     CALENDAR_REFRESH = "cal_refresh"  # Refresh current view

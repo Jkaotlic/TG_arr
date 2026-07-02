@@ -13,7 +13,7 @@ from bot.config import get_settings
 from bot.db import Database
 from bot.models import ContentType, MovieInfo, SearchSession, SeriesInfo, User
 from bot.services.search_service import SearchService
-from bot.ui.callbacks import PageCB
+from bot.ui.callbacks import PageCB, ReleaseCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 
@@ -128,10 +128,12 @@ async def handle_pagination(
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith(CallbackData.RELEASE))
-async def handle_release_selection(callback: CallbackQuery, db_user: User, db: Database) -> None:
+@router.callback_query(ReleaseCB.filter())
+async def handle_release_selection(
+    callback: CallbackQuery, callback_data: ReleaseCB, db_user: User, db: Database
+) -> None:
     """Handle release selection."""
-    if not callback.data or not callback.message:
+    if not callback.message:
         return
 
     search_service, add_service = await _search.get_services()
@@ -150,12 +152,7 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
             await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
             return
 
-        # Parse release index
-        try:
-            idx = int(callback.data.removeprefix(CallbackData.RELEASE))
-        except ValueError:
-            await callback.answer("Неверный выбор", show_alert=True)
-            return
+        idx = callback_data.idx
 
         if idx < 0 or idx >= len(session.results):
             await callback.answer("Неверный выбор", show_alert=True)
@@ -405,5 +402,14 @@ async def handle_legacy_page(callback: CallbackQuery) -> None:
     typed-PageCB migration (a430ad3) have no matching handler anymore, so a
     tap on them used to spin forever (no answer() ever fired). Surface an
     explicit alert instead of a silent hang.
+    """
+    await callback.answer("Кнопка устарела — повторите поиск", show_alert=True)
+
+
+@router.callback_query(F.data.startswith(CallbackData.RELEASE))
+async def handle_legacy_release(callback: CallbackQuery) -> None:
+    """r5: legacy ``rel:N`` string buttons from messages sent before the
+    ReleaseCB migration — surface an explicit alert instead of falling
+    through unhandled (see ``handle_legacy_page`` for the same pattern).
     """
     await callback.answer("Кнопка устарела — повторите поиск", show_alert=True)

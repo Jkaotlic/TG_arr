@@ -5,6 +5,7 @@ the settings menu, resolution selection, and the auto-grab toggle.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import MetadataProfile, QualityProfile, RootFolder
+from bot.ui.callbacks import SettingCB
 from bot.ui.keyboards._constants import CallbackData
 
 
@@ -12,15 +13,19 @@ class _SettingsKeyboards:
     """Settings keyboard mixin."""
 
     @staticmethod
-    def quality_profiles(profiles: list[QualityProfile], prefix: str) -> InlineKeyboardMarkup:
-        """Create keyboard for selecting quality profile."""
+    def quality_profiles(profiles: list[QualityProfile], key: str) -> InlineKeyboardMarkup:
+        """Create keyboard for selecting quality profile.
+
+        ``key`` is the ``UserPreferences`` field name this picker writes
+        (was a raw ``CallbackData.SET_*`` string prefix — see ``SettingCB``).
+        """
         keyboard = []
 
         for profile in profiles:
             keyboard.append([
                 InlineKeyboardButton(
                     text=profile.name,
-                    callback_data=f"{prefix}{profile.id}",
+                    callback_data=SettingCB(key=key, value=str(profile.id)).pack(),
                 )
             ])
 
@@ -31,8 +36,8 @@ class _SettingsKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
-    def root_folders(folders: list[RootFolder], prefix: str) -> InlineKeyboardMarkup:
-        """Create keyboard for selecting root folder."""
+    def root_folders(folders: list[RootFolder], key: str) -> InlineKeyboardMarkup:
+        """Create keyboard for selecting root folder (see ``quality_profiles`` for ``key``)."""
         keyboard = []
 
         for folder in folders:
@@ -43,7 +48,7 @@ class _SettingsKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=label,
-                    callback_data=f"{prefix}{folder.id}",
+                    callback_data=SettingCB(key=key, value=str(folder.id)).pack(),
                 )
             ])
 
@@ -80,14 +85,14 @@ class _SettingsKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
-    def metadata_profiles(profiles: list[MetadataProfile], prefix: str) -> InlineKeyboardMarkup:
-        """Create keyboard for selecting Lidarr metadata profile."""
+    def metadata_profiles(profiles: list[MetadataProfile], key: str) -> InlineKeyboardMarkup:
+        """Create keyboard for selecting Lidarr metadata profile (see ``quality_profiles`` for ``key``)."""
         keyboard = []
         for profile in profiles:
             keyboard.append([
                 InlineKeyboardButton(
                     text=profile.name,
-                    callback_data=f"{prefix}{profile.id}",
+                    callback_data=SettingCB(key=key, value=str(profile.id)).pack(),
                 )
             ])
         keyboard.append([
@@ -104,7 +109,7 @@ class _SettingsKeyboards:
         for i in range(0, len(resolutions), 2):
             row = []
             for label, value in resolutions[i:i + 2]:
-                callback = f"{CallbackData.SET_RESOLUTION}{value}"
+                callback = SettingCB(key="preferred_resolution", value=value).pack()
                 row.append(InlineKeyboardButton(text=label, callback_data=callback))
             keyboard.append(row)
 
@@ -125,7 +130,7 @@ class _SettingsKeyboards:
                 [
                     InlineKeyboardButton(
                         text=f"Авто-граб: {current_text}",
-                        callback_data=f"{CallbackData.SET_AUTO_GRAB}{new_value}",
+                        callback_data=SettingCB(key="auto_grab_enabled", value=str(new_value)).pack(),
                     ),
                 ],
                 [
