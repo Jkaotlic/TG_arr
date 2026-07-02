@@ -1,3 +1,9 @@
+# Pin the compose project name so the deploy keeps using the existing
+# `tgarr_bot-data` volume. Without this, Compose v2 derives the project from
+# the directory (`TG_arr` -> `tg_arr`) and would create a fresh EMPTY
+# `tg_arr_bot-data` volume, orphaning the live database (allowlist, prefs).
+name: tgarr
+
 services:
   tg-arr-bot:
     build:
