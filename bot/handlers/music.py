@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, Message
 from bot.clients.registry import get_deezer, get_lidarr, get_prowlarr, get_qbittorrent, get_radarr, get_sonarr
 from bot.config import get_settings
 from bot.db import Database
+from bot.handlers.common import safe_edit, strip_command
 from bot.models import (
     ActionLog,
     ActionType,
@@ -23,11 +24,10 @@ from bot.services.add_service import AddService
 from bot.services.search_service import SearchService
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.menu import MENU_MUSIC
 
 logger = structlog.get_logger()
 router = Router()
-
-MENU_MUSIC = "🎵 Музыка"
 
 # PERF-04: Reuse the same ScoringService instance across music requests.
 # Import here rather than in search.py to avoid a circular import at module load.
@@ -74,22 +74,22 @@ async def _render_artist_list(message: Message, artists: list[ArtistInfo], page:
     """LOGIC-14a: shared renderer for the artist-list keyboard — dedups the
     three previously-copied render blocks (initial search, art_page:, music_back).
 
-    `per_page`/keyboard construction intentionally untouched (Wave 2 territory).
+    LOGIC-14b: ``per_page`` now follows ``settings.results_per_page`` (same
+    knob the search-results pagination already respects) instead of a
+    hardcoded 5, so users who tune that setting get consistent page sizes
+    across search and artist lists.
     """
-    per_page = 5
+    per_page = get_settings().results_per_page
     start_idx = page * per_page
     page_artists = artists[start_idx:start_idx + per_page]
     text = _artist_list_text(artists, page_artists, start_idx)
 
-    try:
-        await message.edit_text(
-            text,
-            reply_markup=Keyboards.artist_list(artists, current_page=page),
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        if "message is not modified" not in str(e):
-            raise
+    await safe_edit(
+        message,
+        text,
+        reply_markup=Keyboards.artist_list(artists, current_page=page, per_page=per_page),
+        parse_mode="HTML",
+    )
 
 
 async def _get_music_services() -> tuple[SearchService, AddService] | None:
@@ -115,7 +115,7 @@ async def cmd_music(message: Message, db_user: User, db: Database) -> None:
         await message.answer("Укажите артиста: <code>/music Metallica</code>")
         return
 
-    query = message.text.replace("/music", "", 1).strip()
+    query = strip_command(message.text, "/music")
     if not query:
         await message.answer("Укажите артиста: <code>/music Metallica</code>")
         return
@@ -217,7 +217,7 @@ async def handle_artist_pagination(callback: CallbackQuery, db_user: User, db: D
         await callback.answer("Список истёк. Начните новый поиск.", show_alert=True)
         return
 
-    per_page = 5
+    per_page = get_settings().results_per_page
     total_pages = max(1, (len(artists) + per_page - 1) // per_page)
     if page < 0 or page >= total_pages:
         await callback.answer("Неверная страница", show_alert=True)

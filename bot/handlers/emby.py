@@ -4,20 +4,18 @@ import asyncio
 
 import structlog
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.clients.emby import EmbyError
 from bot.clients.registry import get_emby
+from bot.handlers.common import safe_edit
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.menu import MENU_EMBY
 
 logger = structlog.get_logger()
 router = Router()
-
-# Russian menu button text
-MENU_EMBY = "📺 Emby"
 
 
 async def _render_status_text() -> tuple[str, InlineKeyboardMarkup | None]:
@@ -78,11 +76,7 @@ async def _edit_status(callback: CallbackQuery) -> None:
     if not callback.message:
         return
     text, keyboard = await _render_status_text()
-    try:
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    except TelegramBadRequest as e:
-        if "message is not modified" not in str(e):
-            raise
+    await safe_edit(callback.message, text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def show_emby_status(message_or_callback, edit: bool = False) -> None:
@@ -98,11 +92,7 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
     text, keyboard = await _render_status_text()
 
     if edit and is_callback:
-        try:
-            await message_or_callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
+        await safe_edit(message_or_callback.message, text, reply_markup=keyboard, parse_mode="HTML")
     else:
         await message_or_callback.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -120,11 +110,7 @@ async def handle_refresh(callback: CallbackQuery) -> None:
     """Refresh Emby status. BUG-04c: exactly one callback.answer()."""
     text, keyboard = await _render_status_text()
     if callback.message:
-        try:
-            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-        except TelegramBadRequest as e:
-            if "message is not modified" not in str(e):
-                raise
+        await safe_edit(callback.message, text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 

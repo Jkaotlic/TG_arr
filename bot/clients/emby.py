@@ -274,5 +274,5 @@ class EmbyClient:
             return True, info.version, round(elapsed, 2)
         except Exception as e:
             elapsed = (time.monotonic() - start_time) * 1000
-            logger.warning("Emby health check failed", error=str(e))
+            logger.warning("health_check_failed", service="Emby", error=str(e))
             return False, None, round(elapsed, 2)

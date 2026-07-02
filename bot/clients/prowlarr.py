@@ -147,8 +147,11 @@ class ProwlarrClient(BaseAPIClient):
                 log.warning("Failed to normalize result", error=str(e), item=item.get("title", "unknown"))
 
         # OBS-21: surface dropped items so "few results" complaints can be debugged.
+        # OBS-07: snake_case event name, distinct from search_service.py's
+        # "search_completed" (Prowlarr-level raw fetch vs. the higher-level
+        # detect+score+dedupe pipeline) — prefixed so grep/jq can tell them apart.
         log.info(
-            "Search completed",
+            "prowlarr_search_completed",
             result_count=len(normalized),
             raw_count=len(results),
             dropped_no_guid=dropped_no_guid,

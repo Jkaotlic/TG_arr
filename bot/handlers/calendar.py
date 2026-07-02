@@ -6,18 +6,16 @@ from typing import Any
 
 import structlog
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
 from bot.clients.registry import get_lidarr, get_radarr, get_sonarr
+from bot.handlers.common import swallow_not_modified
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.menu import MENU_CALENDAR
 
 logger = structlog.get_logger()
 router = Router()
-
-# Menu button text
-MENU_CALENDAR = "📅 Календарь"
 
 # Store current period per-user so refresh keeps the same range
 # Limited to prevent unbounded growth (whitelist bots have few users anyway)
@@ -78,18 +76,17 @@ async def _fetch_and_send_calendar(
     if errors:
         text += "\n\n⚠️ " + " | ".join(errors)
 
-    try:
-        await answer_func(
+    # BUG-17a: repeating the currently-active period (e.g. tapping "7 дней"
+    # again) produces identical text/markup — Telegram rejects the edit.
+    # swallow_not_modified only silences that specific, harmless case;
+    # anything else re-raises.
+    await swallow_not_modified(
+        answer_func(
             text=text,
             parse_mode="HTML",
             reply_markup=Keyboards.calendar_controls(current_days=days),
         )
-    except TelegramBadRequest as e:
-        # BUG-17a: repeating the currently-active period (e.g. tapping "7 дней"
-        # again) produces identical text/markup — Telegram rejects the edit.
-        # Swallow only that specific, harmless case; anything else re-raises.
-        if "message is not modified" not in str(e):
-            raise
+    )
 
 
 @router.message(F.text == MENU_CALENDAR)

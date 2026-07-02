@@ -207,7 +207,43 @@ async def test_render_artist_list_used_by_pagination_and_back():
     back_text = cb_back.message.edit_text.call_args.args[0]
     page_text = cb_page.message.edit_text.call_args.args[0]
     assert back_text == page_text
-    music._artist_candidates.pop(user_id, None)
+
+
+# ---------------------------------------------------------------------------
+# LOGIC-14b — music.py: artist-list pagination respects settings.results_per_page
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_render_artist_list_respects_results_per_page_setting(monkeypatch):
+    """Artist-list page size must follow settings.results_per_page (like search
+    pagination already does) instead of a hardcoded 5."""
+    monkeypatch.setenv("RESULTS_PER_PAGE", "3")
+    from bot.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        from bot.handlers import music
+
+        assert get_settings().results_per_page == 3
+
+        message = MagicMock()
+        message.edit_text = AsyncMock()
+        artists = [_make_artist(i) for i in range(5)]
+
+        await music._render_artist_list(message, artists, page=0)
+
+        keyboard = message.edit_text.call_args.kwargs["reply_markup"]
+        # One button row per artist on the page, plus a nav row (since
+        # total_pages > 1 for 5 artists @ per_page=3) — count artist rows only.
+        artist_button_rows = [
+            row for row in keyboard.inline_keyboard
+            if len(row) == 1 and row[0].callback_data.startswith(music.CallbackData.ARTIST)
+            and not row[0].callback_data.startswith(music.CallbackData.ARTIST_PAGE)
+        ]
+        assert len(artist_button_rows) == 3
+    finally:
+        get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------

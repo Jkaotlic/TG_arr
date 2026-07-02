@@ -8,12 +8,10 @@ from aiogram.types import Message
 from bot.db import Database
 from bot.models import User
 from bot.ui.formatters import Formatters
+from bot.ui.menu import MENU_HISTORY
 
 logger = structlog.get_logger()
 router = Router()
-
-# Russian menu button text
-MENU_HISTORY = "📋 История"
 
 
 @router.message(F.text == MENU_HISTORY)

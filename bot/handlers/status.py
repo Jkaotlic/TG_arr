@@ -24,12 +24,10 @@ from bot.models import (
     format_speed,
 )
 from bot.ui.formatters import Formatters
+from bot.ui.menu import MENU_STATUS
 
 logger = structlog.get_logger()
 router = Router()
-
-# Russian menu button text
-MENU_STATUS = "🔌 Статус"
 
 
 def _format_health(

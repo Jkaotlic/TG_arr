@@ -34,12 +34,10 @@ from bot.models import User
 from bot.services.add_service import AddService
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.menu import MENU_SETTINGS
 
 logger = structlog.get_logger()
 router = Router()
-
-# Russian menu button text
-MENU_SETTINGS = "⚙️ Настройки"
 
 
 async def _get_add_service() -> AddService:
