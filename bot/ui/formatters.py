@@ -6,7 +6,7 @@ All output uses HTML parse_mode. User-provided content is escaped via html.escap
 import html
 from datetime import datetime, timezone
 from typing import Optional
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from bot.models import (
     ActionLog,
@@ -32,13 +32,62 @@ def _e(text) -> str:
     return html.escape(str(text))
 
 
+# BUG-06/DEAD-14: module-level ZoneInfo cache — constructing ZoneInfo() parses
+# the IANA tzdata file; every formatted datetime used to pay that cost again
+# (calendar headers alone do it once per distinct release date). One process
+# only ever runs under a single configured TIMEZONE, so a tiny cache keyed by
+# tz name is effectively a single cached object in practice.
+_ZONEINFO_CACHE: dict[str, ZoneInfo] = {}
+
+
 class Formatters:
     """Message formatting utilities — HTML mode."""
 
     @staticmethod
+    def _get_cached_zoneinfo(tz_name: str) -> ZoneInfo:
+        """Return a cached ZoneInfo for `tz_name`, falling back to UTC if the
+        IANA database doesn't know it (DEAD-14: single plain except clause).
+        """
+        cached = _ZONEINFO_CACHE.get(tz_name)
+        if cached is not None:
+            return cached
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+        _ZONEINFO_CACHE[tz_name] = tz
+        return tz
+
+    @staticmethod
+    def _to_local(dt: Optional[datetime]) -> Optional[datetime]:
+        """Convert `dt` to the configured settings.timezone (BUG-06).
+
+        Naive datetimes are assumed UTC (every datetime written by this
+        codebase is UTC — see bot/models.py `_utcnow`). Returns None
+        unchanged so call-sites can keep their existing `if dt:` guards.
+        """
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        from bot.config import get_settings
+
+        tz = Formatters._get_cached_zoneinfo(get_settings().timezone)
+        return dt.astimezone(tz)
+
+    # BUG-11: cap an individual release title before rendering — some indexers
+    # (notably RuTracker) return 300+ char titles; 5 of those on one page can
+    # blow past Telegram's 4096-char message cap and the search silently
+    # "fails" (MESSAGE_TOO_LONG).
+    _MAX_RESULT_TITLE_LEN = 150
+
+    @staticmethod
     def format_search_result(result: SearchResult, index: int) -> str:
         """Format a single search result for display."""
-        lines = [f"<b>{index}. {_e(result.title)}</b>"]
+        title = result.title or ""
+        if len(title) > Formatters._MAX_RESULT_TITLE_LEN:
+            title = title[: Formatters._MAX_RESULT_TITLE_LEN - 1] + "…"
+        lines = [f"<b>{index}. {_e(title)}</b>"]
 
         # Quality info
         quality_parts = []
@@ -95,7 +144,10 @@ class Formatters:
                 Formatters.format_search_result(result, i + 1 + (page * per_page))
             )
 
-        return header + "\n\n".join(result_texts)
+        page_text = header + "\n\n".join(result_texts)
+        # BUG-11/TEST-07: hard safety net on top of per-title truncation —
+        # keeps the page well under Telegram's 4096-char message limit.
+        return Formatters._safe_truncate(page_text, max_len=3800)
 
     @staticmethod
     def format_release_details(result: SearchResult) -> str:
@@ -149,9 +201,9 @@ class Formatters:
                 season_info += " (сезон целиком)"
             lines.append(f"📅 {season_info}")
 
-        # Publish date
+        # Publish date (BUG-06: shown in the configured local timezone)
         if result.publish_date:
-            date_str = result.publish_date.strftime("%d.%m.%Y %H:%M")
+            date_str = Formatters._to_local(result.publish_date).strftime("%d.%m.%Y %H:%M")
             lines.append(f"📆 <b>Опубликовано:</b> {date_str}")
 
         return "\n".join(lines)
@@ -359,9 +411,15 @@ class Formatters:
 
         lines = ["<b>📋 Последние действия</b>\n"]
 
+        _TYPE_EMOJI = {
+            ContentType.MOVIE: "🎬",
+            ContentType.SERIES: "📺",
+            ContentType.MUSIC: "🎵",  # LOGIC-22: music actions used to show the series emoji
+        }
+
         for action in actions[:limit]:
             emoji = "✅" if action.success else "❌"
-            type_emoji = "🎬" if action.content_type == ContentType.MOVIE else "📺"
+            type_emoji = _TYPE_EMOJI.get(action.content_type, "📺")
 
             action_str = action.action_type.value.upper()
             title = action.content_title or action.query or "Неизвестно"
@@ -369,7 +427,7 @@ class Formatters:
             if len(title) > 30:
                 title = title[:27] + "..."
 
-            date_str = action.created_at.strftime("%d.%m %H:%M")
+            date_str = Formatters._to_local(action.created_at).strftime("%d.%m %H:%M")
 
             lines.append(
                 f"{emoji} {type_emoji} {action_str}: {_e(title)} ({date_str})"
@@ -555,14 +613,14 @@ class Formatters:
         # Save path
         lines.append(f"\n📂 <b>Путь:</b> <code>{_e(torrent.save_path)}</code>")
 
-        # Dates
+        # Dates (BUG-06: local timezone)
         if torrent.added_on:
             lines.append(
-                f"📅 <b>Добавлен:</b> {torrent.added_on.strftime('%d.%m.%Y %H:%M')}"
+                f"📅 <b>Добавлен:</b> {Formatters._to_local(torrent.added_on).strftime('%d.%m.%Y %H:%M')}"
             )
         if torrent.completion_on and torrent.progress >= 1.0:
             lines.append(
-                f"✅ <b>Завершён:</b> {torrent.completion_on.strftime('%d.%m.%Y %H:%M')}"
+                f"✅ <b>Завершён:</b> {Formatters._to_local(torrent.completion_on).strftime('%d.%m.%Y %H:%M')}"
             )
 
         return "\n".join(lines)
@@ -624,7 +682,7 @@ class Formatters:
 
         if torrent.completion_on:
             lines.append(
-                f"⏱ Завершено: {torrent.completion_on.strftime('%d.%m.%Y %H:%M')}"
+                f"⏱ Завершено: {Formatters._to_local(torrent.completion_on).strftime('%d.%m.%Y %H:%M')}"
             )
 
         return "\n".join(lines)
@@ -870,8 +928,13 @@ class Formatters:
             lines.append("Нет предстоящих релизов.")
             return "\n".join(lines)
 
-        now = datetime.now(timezone.utc)
-        today = now.date()
+        # BUG-06: "today" must be the local calendar day (settings.timezone),
+        # not the UTC day — between 00:00-03:00 MSK, UTC is still "yesterday"
+        # and a same-day release would be mislabelled "tomorrow".
+        from bot.config import get_settings
+
+        tz = Formatters._get_cached_zoneinfo(get_settings().timezone)
+        today = datetime.now(tz).date()
 
         if episodes:
             lines.append(f"📺 <b>Сериалы ({len(episodes)})</b>")
@@ -960,16 +1023,7 @@ class Formatters:
             return "9999-12-31"
         try:
             dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            try:
-                from bot.config import get_settings
-
-                tz_name = get_settings().timezone
-                tz = ZoneInfo(tz_name)
-            except (ZoneInfoNotFoundError, Exception):
-                tz = timezone.utc
-            local = dt.astimezone(tz)
+            local = Formatters._to_local(dt)
             return local.strftime("%Y-%m-%d")
         except (ValueError, IndexError):
             return date_str[:10] if len(date_str) >= 10 else "9999-12-31"

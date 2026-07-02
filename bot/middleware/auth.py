@@ -197,9 +197,20 @@ class RateLimitMiddleware(BaseMiddleware):
         recent.append(now)
         self._user_requests[user_id] = recent
 
-        # Periodic cleanup: remove users with no recent requests
-        if len(self._user_requests) > 10000:
-            stale = [uid for uid, reqs in self._user_requests.items() if not reqs]
+        # PERF-09/BUG-17b: periodic cleanup of stale per-user request lists.
+        # The old condition (`not reqs`) could never be true — entries are only
+        # ever trimmed to `recent` (non-empty, since we just appended `now`),
+        # so the dict grew unbounded until process restart. Instead, drop any
+        # user whose *newest* recorded request already fell out of the
+        # current window — they have no requests worth remembering. Threshold
+        # lowered from 10000 to 1000: for a bot with a handful of allowed
+        # users this already indicates unbounded growth worth cleaning up.
+        if len(self._user_requests) > 1000:
+            stale = [
+                uid
+                for uid, reqs in self._user_requests.items()
+                if not reqs or reqs[-1] < window_start
+            ]
             for uid in stale:
                 del self._user_requests[uid]
 

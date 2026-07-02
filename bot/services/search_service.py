@@ -8,6 +8,7 @@ from typing import NamedTuple, Optional
 
 import structlog
 
+from bot.clients.base import ServiceConnectionError
 from bot.clients.lidarr import LidarrClient
 from bot.clients.prowlarr import ProwlarrClient
 from bot.clients.radarr import RadarrClient
@@ -35,6 +36,98 @@ _SEASON_WORD_RE = re.compile(r"(?:season|сезон)\s*(\d+)", re.IGNORECASE)
 _QUALITY_TOKENS = ("2160p", "4k", "4к", "uhd", "1080p", "720p", "480p")
 _DETECT_TIMEOUT_S = 8.0  # PERF-01: cap parallel lookups
 _MUSIC_QUERY_HARD_FLOOR = 3   # ignore Lidarr matches when query <3 chars
+
+# PERF-01: detection-burst guard. A single free-text message previously fired
+# concurrent Radarr+Sonarr+Lidarr `/lookup` calls with no cap, no cache and no
+# cooldown — the exact code-path behind the prod incident where Radarr and
+# Lidarr went 503 at the same time. Three mitigations, all module-level so
+# they're shared across every SearchService instance (there's effectively one
+# per request via get_services(), so per-instance state would be useless):
+#
+#   1. A semaphore capping concurrent *arr lookup coroutines globally at 2 —
+#      even if 3 users search simultaneously, only 2 lookup calls are ever
+#      in flight across the whole process.
+#   2. A TTL cache (300s) keyed by normalized query — a retried/duplicate
+#      search doesn't re-trigger the lookup burst.
+#   3. A per-service circuit breaker — once a service raises
+#      ServiceConnectionError (or any APIError with a 503 status), detection
+#      skips that service for 30s instead of hammering an already-struggling
+#      instance.
+_DETECT_SEMAPHORE = asyncio.Semaphore(2)
+_DETECTION_CACHE_TTL_S = 300.0
+_DETECTION_CACHE_CAP = 100
+_DETECTION_CACHE: dict[str, tuple[float, "DetectionResult"]] = {}
+_CIRCUIT_BREAKER_COOLDOWN_S = 30.0
+_CIRCUIT_BREAKER: dict[str, float] = {}  # service name -> monotonic retry_after
+
+
+def _normalize_query(query: str) -> str:
+    """Normalize a query for cache-key purposes (PERF-01)."""
+    return re.sub(r"\s+", " ", query.lower().strip())
+
+
+def _cache_get(key: str) -> Optional["DetectionResult"]:
+    entry = _DETECTION_CACHE.get(key)
+    if entry is None:
+        return None
+    deadline, result = entry
+    if time.monotonic() >= deadline:
+        _DETECTION_CACHE.pop(key, None)
+        return None
+    return result
+
+
+def _cache_put(key: str, result: "DetectionResult") -> None:
+    if key not in _DETECTION_CACHE and len(_DETECTION_CACHE) >= _DETECTION_CACHE_CAP:
+        # Evict the oldest entry (smallest deadline) to keep the cache bounded.
+        oldest_key = min(_DETECTION_CACHE, key=lambda k: _DETECTION_CACHE[k][0])
+        _DETECTION_CACHE.pop(oldest_key, None)
+    _DETECTION_CACHE[key] = (time.monotonic() + _DETECTION_CACHE_TTL_S, result)
+
+
+def _breaker_is_open(service: str) -> bool:
+    retry_after = _CIRCUIT_BREAKER.get(service)
+    if retry_after is None:
+        return False
+    if time.monotonic() >= retry_after:
+        _CIRCUIT_BREAKER.pop(service, None)
+        return False
+    return True
+
+
+def _breaker_trip(service: str) -> None:
+    _CIRCUIT_BREAKER[service] = time.monotonic() + _CIRCUIT_BREAKER_COOLDOWN_S
+
+
+def _is_service_down_error(exc: BaseException) -> bool:
+    """True for connection failures / 503s that should trip the breaker."""
+    if isinstance(exc, ServiceConnectionError):
+        return True
+    status_code = getattr(exc, "status_code", None)
+    return status_code == 503
+
+
+async def _guarded_lookup(service: str, coro_factory):
+    """Run a detection lookup under the global semaphore + circuit breaker.
+
+    ``coro_factory`` is a zero-arg callable that creates the coroutine lazily
+    — when the breaker is open we must not even instantiate it (an
+    unawaited AsyncMock coroutine still warns/leaks).
+
+    Returns the lookup result, or the underlying exception (never raised —
+    detect_with_confidence already treats exceptions-in-gather as failures
+    via `return_exceptions=True`, this just short-circuits the call entirely
+    when the breaker is open).
+    """
+    if _breaker_is_open(service):
+        return ServiceConnectionError(f"{service} circuit breaker open")
+    async with _DETECT_SEMAPHORE:
+        try:
+            return await coro_factory()
+        except BaseException as exc:  # noqa: BLE001 - surfaced to gather(return_exceptions=True) caller
+            if _is_service_down_error(exc):
+                _breaker_trip(service)
+            return exc
 
 
 class DetectionResult(NamedTuple):
@@ -81,6 +174,12 @@ class SearchService:
         Bounded latency (PERF-01): parallel lookups capped at 8s; on timeout
         returns UNKNOWN with confidence 0 so the user gets the button choice.
 
+        Detection-burst guard (PERF-01): lookups are additionally routed
+        through a global semaphore(2) + 300s TTL cache (by normalized query)
+        + a 30s per-service circuit breaker after a connection error/503 —
+        see the module-level `_DETECT_SEMAPHORE`/`_DETECTION_CACHE`/
+        `_CIRCUIT_BREAKER` docstring for the full rationale.
+
         Failure surfacing (BUG-05): exceptions during lookups don't silently
         become empty arrays — they downgrade confidence and reason gets
         "lookup_failures=N" so the user sees the type-question instead of a
@@ -101,14 +200,31 @@ class SearchService:
                 log.info("detect_content_type", winner="series", reason="series_pattern")
                 return DetectionResult(ContentType.SERIES, 0.9, "series_pattern", {})
 
-        # Parallel lookups with hard timeout (PERF-01)
+        # PERF-01: repeated/duplicate searches (retries, double-taps) must not
+        # re-trigger the *arr lookup burst — serve from the TTL cache.
+        cache_key = _normalize_query(query)
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            log.info("content_type_detected", winner=cached.content_type.value, reason="cache_hit")
+            return cached
+
+        # Parallel lookups with hard timeout (PERF-01), each routed through the
+        # global semaphore + circuit breaker via _guarded_lookup.
         # Use clean_query_no_year for Lidarr (LOGIC-01) — MusicBrainz returns garbage on year strings.
         tasks: list = [
-            asyncio.create_task(self.radarr.lookup_movie(clean_query)),
-            asyncio.create_task(self.sonarr.lookup_series(clean_query)),
+            asyncio.create_task(
+                _guarded_lookup("radarr", lambda: self.radarr.lookup_movie(clean_query))
+            ),
+            asyncio.create_task(
+                _guarded_lookup("sonarr", lambda: self.sonarr.lookup_series(clean_query))
+            ),
         ]
         if self.lidarr is not None and len(clean_query_no_year) >= _MUSIC_QUERY_HARD_FLOOR:
-            tasks.append(asyncio.create_task(self.lidarr.lookup_artist(clean_query_no_year)))
+            tasks.append(
+                asyncio.create_task(
+                    _guarded_lookup("lidarr", lambda: self.lidarr.lookup_artist(clean_query_no_year))
+                )
+            )
 
         try:
             gathered = await asyncio.wait_for(
@@ -183,13 +299,20 @@ class SearchService:
 
         # Confidence threshold: below 0.7 → UNKNOWN so user gets the question.
         if top_score < 0.7:
-            return DetectionResult(ContentType.UNKNOWN, top_score, "low_confidence", candidates)
-
+            result = DetectionResult(ContentType.UNKNOWN, top_score, "low_confidence", candidates)
         # Tie-break: if top and runner-up are within 0.05, ask the user.
-        if top_score - runner_up_score < 0.05 and runner_up_score > 0.6:
-            return DetectionResult(ContentType.UNKNOWN, top_score, "ambiguous", candidates)
+        elif top_score - runner_up_score < 0.05 and runner_up_score > 0.6:
+            result = DetectionResult(ContentType.UNKNOWN, top_score, "ambiguous", candidates)
+        else:
+            result = DetectionResult(top_type, top_score, reason, candidates)
 
-        return DetectionResult(top_type, top_score, reason, candidates)
+        # PERF-01: cache the classification (even UNKNOWN/low-confidence — a
+        # repeat of the exact same ambiguous query would just burn another
+        # lookup burst for the same answer) unless a service failed, so a
+        # transient 503 doesn't poison the cache for the retry.
+        if failure_count == 0:
+            _cache_put(cache_key, result)
+        return result
 
     @staticmethod
     def _strip_quality_tokens(query: str) -> str:
@@ -267,6 +390,7 @@ class SearchService:
         query: str,
         content_type: ContentType = ContentType.UNKNOWN,
         sort_by_score: bool = True,
+        preferred_resolution: Optional[str] = None,
     ) -> list[SearchResult]:
         """Search for releases using Prowlarr.
 
@@ -274,6 +398,10 @@ class SearchService:
         disagrees with the requested type — Russian indexers regularly mis-tag
         categories, and dropping cuts legitimate releases. Trust Prowlarr's
         category filter (driven by `content_type`) and let scoring rank.
+
+        DEAD-06: `preferred_resolution` (user's "Качество" setting) is passed
+        through to scoring so a same-quality release at the preferred
+        resolution ranks above others instead of being purely resolution-maxed.
         """
         log = logger.bind(query=query, content_type=content_type.value)
         log.info("Searching for releases")
@@ -289,7 +417,7 @@ class SearchService:
         raw_count = len(results)
 
         if sort_by_score:
-            results = self.scoring.sort_results(results, content_type)
+            results = self.scoring.sort_results(results, content_type, preferred_resolution)
 
         # OBS-13: log top-N for debug
         top_preview = [

@@ -14,7 +14,6 @@ import pytest
 
 from bot.clients.base import BaseAPIClient
 from bot.models import (
-    ArtistInfo,
     ContentType,
     MovieInfo,
     SearchResult,
@@ -216,37 +215,6 @@ async def test_grab_series_persists_rejections_into_details():
 
     success, action, _msg = await svc.grab_series_release(
         series=series, release=release, quality_profile_id=1, root_folder_path="/tv",
-    )
-
-    assert success is False
-    assert action.details is not None
-    parsed = json.loads(action.details)
-    assert parsed["rejections"] == rejections
-
-
-@pytest.mark.asyncio
-async def test_grab_music_persists_rejections_into_details():
-    """OBS-03: Lidarr rejection reasons land in action.details."""
-    artist = ArtistInfo(
-        mb_id="9c9f1380-2516-4fc9-a3e6-f9f61941d090", name="Test Artist", lidarr_id=11,
-    )
-
-    rejections = ["Not an album release"]
-    lidarr = AsyncMock()
-    lidarr.get_artist_by_mbid = AsyncMock(return_value=artist)
-    lidarr.push_release = AsyncMock(return_value={"approved": False, "rejections": rejections})
-    lidarr.grab_release = AsyncMock()
-    lidarr.search_artist = AsyncMock()
-
-    svc = _build_add_service(lidarr=lidarr)
-    release = _rejected_release()
-
-    success, action, _msg = await svc.grab_music_release(
-        artist=artist,
-        release=release,
-        quality_profile_id=1,
-        metadata_profile_id=1,
-        root_folder_path="/music",
     )
 
     assert success is False

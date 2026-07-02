@@ -3,14 +3,18 @@
 .env.*
 !.env.example
 venv/
-__pycache__
-*.pyc
+# DEPLOY-04: unlike .gitignore, .dockerignore patterns without a leading **/
+# only match relative to the build context root — `__pycache__`/`*.pyc` alone
+# do NOT exclude nested dirs like bot/__pycache__/, which really exist in a
+# dirty working copy (e.g. built from a desktop checkout, not a fresh clone).
+**/__pycache__
+**/*.pyc
 tests/
 docs/
 *.md
-.pytest_cache
+**/.pytest_cache
 .mypy_cache
-.ruff_cache
+**/.ruff_cache
 .coverage
 analysis/
 .claude/

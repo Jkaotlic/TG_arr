@@ -6,7 +6,7 @@ import structlog
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.clients.emby import EmbyError
 from bot.clients.registry import get_emby
@@ -20,18 +20,18 @@ router = Router()
 MENU_EMBY = "📺 Emby"
 
 
-async def show_emby_status(message_or_callback, edit: bool = False) -> None:
-    """Show Emby server status."""
-    is_callback = isinstance(message_or_callback, CallbackQuery)
+async def _render_status_text() -> tuple[str, InlineKeyboardMarkup | None]:
+    """LOGIC-20: fetch Emby status and build (text, keyboard) — no I/O side
+    effects on Telegram, so both cmd_emby and handle_refresh can call it and
+    decide for themselves whether to answer()/edit_text()/send a new message.
 
+    `keyboard` is None for the "not configured" case (message.answer/edit_text
+    both accept reply_markup=None).
+    """
     emby = await get_emby()
     if not emby:
         text = "❌ Emby не настроен. Добавьте <code>EMBY_URL</code> и <code>EMBY_API_KEY</code> в конфигурацию."
-        if edit and is_callback:
-            await message_or_callback.message.edit_text(text, parse_mode="HTML")
-        else:
-            await message_or_callback.answer(text, parse_mode="HTML")
-        return
+        return text, None
 
     try:
         # PERF-04: fetch server info, libraries and sessions concurrently
@@ -59,62 +59,73 @@ async def show_emby_status(message_or_callback, edit: bool = False) -> None:
             can_restart=info.can_self_restart,
             can_update=info.can_self_update,
         )
-
-        if edit and is_callback:
-            try:
-                await message_or_callback.message.edit_text(
-                    text,
-                    reply_markup=keyboard,
-                    parse_mode="HTML",
-                )
-            except TelegramBadRequest as e:
-                if "message is not modified" not in str(e):
-                    raise
-                # Message content unchanged - ignore
-            await message_or_callback.answer()
-        else:
-            await message_or_callback.answer(
-                text,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-            )
+        return text, keyboard
 
     except EmbyError as e:
-        logger.error("Emby status error", error=str(e.message))
-        error_text = Formatters.format_error("Не удалось получить статус Emby")
-        if edit and is_callback:
-            try:
-                await message_or_callback.message.edit_text(error_text, parse_mode="HTML")
-            except TelegramBadRequest:
-                pass
-            await message_or_callback.answer()
-        else:
-            await message_or_callback.answer(error_text, parse_mode="HTML")
+        logger.error("Emby status error", error=str(e.message), exc_info=True)
+        return Formatters.format_error("Не удалось получить статус Emby"), None
 
     except Exception as e:
-        logger.error("Failed to get Emby status", error=str(e))
-        error_text = "❌ Ошибка получения статуса Emby"
-        if edit and is_callback:
-            try:
-                await message_or_callback.message.edit_text(error_text)
-            except TelegramBadRequest:
-                pass
-            await message_or_callback.answer()
-        else:
-            await message_or_callback.answer(error_text)
+        logger.error("Failed to get Emby status", error=str(e), exc_info=True)
+        return "❌ Ошибка получения статуса Emby", None
+
+
+async def _edit_status(callback: CallbackQuery) -> None:
+    """BUG-04c: re-render the status card in place WITHOUT calling
+    callback.answer() — callers that already answered (e.g. with a
+    "✅ Сканирование запущено" toast) must not answer a second time.
+    """
+    if not callback.message:
+        return
+    text, keyboard = await _render_status_text()
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
+
+
+async def show_emby_status(message_or_callback, edit: bool = False) -> None:
+    """Show Emby server status.
+
+    Kept as a thin wrapper around `_render_status_text` for callers that
+    don't need fine control over `callback.answer()` (e.g. handle_restart_confirm's
+    error-path re-render). New call sites should prefer calling
+    `_render_status_text()` directly to keep exactly one `answer()` per callback
+    (BUG-04c).
+    """
+    is_callback = isinstance(message_or_callback, CallbackQuery)
+    text, keyboard = await _render_status_text()
+
+    if edit and is_callback:
+        try:
+            await message_or_callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+    else:
+        await message_or_callback.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.message(F.text == MENU_EMBY)
 @router.message(Command("emby"))
 async def cmd_emby(message: Message) -> None:
     """Handle /emby command."""
-    await show_emby_status(message)
+    text, keyboard = await _render_status_text()
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.callback_query(F.data == CallbackData.EMBY_REFRESH)
 async def handle_refresh(callback: CallbackQuery) -> None:
-    """Refresh Emby status."""
-    await show_emby_status(callback, edit=True)
+    """Refresh Emby status. BUG-04c: exactly one callback.answer()."""
+    text, keyboard = await _render_status_text()
+    if callback.message:
+        try:
+            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+    await callback.answer()
 
 
 @router.callback_query(F.data == CallbackData.EMBY_CLOSE)
@@ -136,14 +147,14 @@ async def handle_scan_all(callback: CallbackQuery) -> None:
     try:
         await emby.scan_library()
         await callback.answer("✅ Сканирование всех библиотек запущено")
-        await show_emby_status(callback, edit=True)
+        await _edit_status(callback)
 
     except EmbyError as e:
-        logger.error("Failed to scan all libraries", error=str(e.message))
+        logger.error("Failed to scan all libraries", error=str(e.message), exc_info=True)
         await callback.answer("Не удалось запустить сканирование", show_alert=True)
 
     except Exception as e:
-        logger.error("Failed to scan all libraries", error=str(e))
+        logger.error("Failed to scan all libraries", error=str(e), exc_info=True)
         await callback.answer("Ошибка операции", show_alert=True)
 
 
@@ -165,14 +176,14 @@ async def handle_scan_movies(callback: CallbackQuery) -> None:
         else:
             await callback.answer("Библиотека фильмов не найдена", show_alert=True)
 
-        await show_emby_status(callback, edit=True)
+        await _edit_status(callback)
 
     except EmbyError as e:
-        logger.error("Failed to scan movies library", error=str(e.message))
+        logger.error("Failed to scan movies library", error=str(e.message), exc_info=True)
         await callback.answer("Не удалось запустить сканирование", show_alert=True)
 
     except Exception as e:
-        logger.error("Failed to scan movies library", error=str(e))
+        logger.error("Failed to scan movies library", error=str(e), exc_info=True)
         await callback.answer("Ошибка операции", show_alert=True)
 
 
@@ -194,14 +205,14 @@ async def handle_scan_series(callback: CallbackQuery) -> None:
         else:
             await callback.answer("Библиотека сериалов не найдена", show_alert=True)
 
-        await show_emby_status(callback, edit=True)
+        await _edit_status(callback)
 
     except EmbyError as e:
-        logger.error("Failed to scan series library", error=str(e.message))
+        logger.error("Failed to scan series library", error=str(e.message), exc_info=True)
         await callback.answer("Не удалось запустить сканирование", show_alert=True)
 
     except Exception as e:
-        logger.error("Failed to scan series library", error=str(e))
+        logger.error("Failed to scan series library", error=str(e), exc_info=True)
         await callback.answer("Ошибка операции", show_alert=True)
 
 
@@ -245,14 +256,14 @@ async def handle_restart_confirm(callback: CallbackQuery, is_admin: bool = False
         await callback.answer("Перезагрузка запущена")
 
     except EmbyError as e:
-        logger.error("Failed to restart server", error=str(e.message))
+        logger.error("Failed to restart server", error=str(e.message), exc_info=True)
         await callback.answer("Не удалось перезагрузить сервер", show_alert=True)
-        await show_emby_status(callback, edit=True)
+        await _edit_status(callback)
 
     except Exception as e:
-        logger.error("Failed to restart server", error=str(e))
+        logger.error("Failed to restart server", error=str(e), exc_info=True)
         await callback.answer("Ошибка операции", show_alert=True)
-        await show_emby_status(callback, edit=True)
+        await _edit_status(callback)
 
 
 @router.callback_query(F.data == CallbackData.EMBY_UPDATE)
@@ -296,11 +307,11 @@ async def handle_update_confirm(callback: CallbackQuery, is_admin: bool = False)
         await callback.answer("Обновление запущено")
 
     except EmbyError as e:
-        logger.error("Failed to install update", error=str(e.message))
+        logger.error("Failed to install update", error=str(e.message), exc_info=True)
         await callback.answer("Не удалось установить обновление", show_alert=True)
-        await show_emby_status(callback, edit=True)
+        await _edit_status(callback)
 
     except Exception as e:
-        logger.error("Failed to install update", error=str(e))
+        logger.error("Failed to install update", error=str(e), exc_info=True)
         await callback.answer("Ошибка операции", show_alert=True)
-        await show_emby_status(callback, edit=True)
+        await _edit_status(callback)

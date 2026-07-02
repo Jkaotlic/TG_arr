@@ -1,5 +1,7 @@
 """Tests for database operations."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 import pytest_asyncio
 
@@ -115,11 +117,17 @@ class TestSearchOperations:
 
         assert search_id > 0
 
-        # Retrieve results
-        retrieved = await db.get_search_results(search_id)
-        assert len(retrieved) == 2
-        assert retrieved[0].guid == "test-1"
-        assert retrieved[1].guid == "test-2"
+        # DB-03: search_results is gone; save_search only persists metadata
+        # (query/content_type/result_count) in the `searches` table.
+        async with db.conn.execute(
+            "SELECT query, content_type, result_count FROM searches WHERE id = ?",
+            (search_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        assert row["query"] == "test movie"
+        assert row["content_type"] == ContentType.MOVIE.value
+        assert row["result_count"] == 2
 
     async def test_save_and_get_session(self, db):
         """Test saving and retrieving a session."""
@@ -319,38 +327,271 @@ class TestCorruptPreferences:
 
 @pytest.mark.asyncio
 class TestCleanupOperations:
-    """Test cleanup operations."""
+    """Test cleanup operations.
+
+    TEST-04: these used to assert ``deleted >= 0`` — an always-true tautology
+    that provided zero coverage. Insert a row with an explicitly old
+    ``created_at``/``updated_at`` (bypassing the ``now()`` timestamp that
+    ``save_session``/``save_search`` always write) and assert the exact count,
+    with a fresh row surviving alongside it.
+    """
 
     async def test_cleanup_old_sessions(self, db):
-        """Test cleaning up old sessions."""
+        """A session older than the cutoff is deleted; a fresh one survives."""
         user = User(tg_id=123456789)
         await db.create_user(user)
 
-        session = SearchSession(
-            user_id=123456789,
-            query="old query",
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        async with db._write_lock:
+            await db.conn.execute(
+                "INSERT INTO sessions (user_id, session_data, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (123456789, "{}", old_ts, old_ts),
+            )
+            await db.conn.commit()
+
+        other_user = User(tg_id=555000111)
+        await db.create_user(other_user)
+        fresh_session = SearchSession(
+            user_id=555000111,
+            query="fresh query",
             content_type=ContentType.MOVIE,
+        )
+        await db.save_session(555000111, fresh_session)
+
+        deleted = await db.cleanup_old_sessions(hours=24)
+
+        assert deleted == 1
+        assert await db.get_session(123456789) is None
+        assert await db.get_session(555000111) is not None
+
+    async def test_cleanup_old_searches(self, db):
+        """A search older than the cutoff is deleted; a fresh one survives."""
+        user = User(tg_id=123456789)
+        await db.create_user(user)
+
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        async with db._write_lock:
+            await db.conn.execute(
+                "INSERT INTO searches (user_id, query, content_type, result_count, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (123456789, "old search", ContentType.MOVIE.value, 0, old_ts),
+            )
+            await db.conn.commit()
+
+        await db.save_search(
+            123456789,
+            "fresh search",
+            ContentType.MOVIE,
+            [SearchResult(guid="test", title="Test", indexer="Test")],
+        )
+
+        deleted = await db.cleanup_old_searches(days=7)
+
+        assert deleted == 1
+        async with db.conn.execute("SELECT query FROM searches") as cursor:
+            remaining = [row["query"] for row in await cursor.fetchall()]
+        assert remaining == ["fresh search"]
+
+
+@pytest.mark.asyncio
+class TestUpdateUserPreference:
+    """DB-05: point-update of a single preference key via json_set."""
+
+    async def test_update_number_preference(self, db):
+        user = User(tg_id=123456789)
+        await db.create_user(user)
+
+        ok = await db.update_user_preference(123456789, "radarr_quality_profile_id", 7)
+
+        assert ok is True
+        retrieved = await db.get_user(123456789)
+        assert retrieved.preferences.radarr_quality_profile_id == 7
+
+    async def test_update_string_preference(self, db):
+        user = User(tg_id=123456789)
+        await db.create_user(user)
+
+        ok = await db.update_user_preference(123456789, "preferred_resolution", "1080p")
+
+        assert ok is True
+        retrieved = await db.get_user(123456789)
+        assert retrieved.preferences.preferred_resolution == "1080p"
+
+    async def test_update_null_preference(self, db):
+        user = User(tg_id=123456789)
+        await db.create_user(user)
+        await db.update_user_preference(123456789, "preferred_resolution", "1080p")
+
+        ok = await db.update_user_preference(123456789, "preferred_resolution", None)
+
+        assert ok is True
+        retrieved = await db.get_user(123456789)
+        assert retrieved.preferences.preferred_resolution is None
+
+    async def test_update_nonexistent_user_returns_false(self, db):
+        ok = await db.update_user_preference(999999999, "auto_grab_enabled", True)
+        assert ok is False
+
+    async def test_concurrent_updates_to_different_keys_both_survive(self, db):
+        """DB-05: two concurrent point-updates on different keys must not
+        clobber each other the way a read-modify-write of the whole
+        preferences blob would.
+        """
+        import asyncio
+
+        user = User(tg_id=123456789)
+        await db.create_user(user)
+
+        await asyncio.gather(
+            db.update_user_preference(123456789, "radarr_quality_profile_id", 3),
+            db.update_user_preference(123456789, "sonarr_quality_profile_id", 9),
+        )
+
+        retrieved = await db.get_user(123456789)
+        assert retrieved.preferences.radarr_quality_profile_id == 3
+        assert retrieved.preferences.sonarr_quality_profile_id == 9
+
+
+@pytest.mark.asyncio
+class TestRemoveAllowedUserCleansSession:
+    """DB-09: revoking runtime access also drops the user's session."""
+
+    async def test_remove_allowed_user_deletes_session(self, db):
+        user = User(tg_id=123456789)
+        await db.create_user(user)
+        await db.add_allowed_user(123456789, added_by=1)
+        session = SearchSession(
+            user_id=123456789, query="q", content_type=ContentType.MOVIE
         )
         await db.save_session(123456789, session)
 
-        # With hours=0, should delete immediately
-        deleted = await db.cleanup_old_sessions(hours=0)
+        await db.remove_allowed_user(123456789)
 
-        # Session should be deleted
-        assert deleted >= 0  # May or may not delete depending on timing
+        assert await db.get_session(123456789) is None
+        assert await db.is_allowed_in_db(123456789) is False
 
-    async def test_cleanup_old_searches(self, db):
-        """Test cleaning up old searches."""
+
+@pytest.mark.asyncio
+class TestActionsCompositeIndexMigration:
+    """DB-06: idx_actions_user_created exists; idx_actions_user is dropped."""
+
+    async def test_fresh_database_has_composite_index_only(self, db):
+        async with db.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='actions'"
+        ) as cursor:
+            names = {row["name"] for row in await cursor.fetchall()}
+        assert "idx_actions_user_created" in names
+        assert "idx_actions_user" not in names
+
+    async def test_v2_database_migrates_index_on_connect(self, tmp_path):
+        """A pre-v3 database (with the old single-column index) gets the
+        composite index added and the old one dropped on next connect.
+        """
+        db_path = str(tmp_path / "legacy.db")
+
+        db1 = Database(db_path)
+        await db1.connect()
+        # Roll back to v2 schema shape: drop the composite index, recreate
+        # the legacy single-column one, and rewind user_version.
+        await db1.conn.execute("DROP INDEX IF EXISTS idx_actions_user_created")
+        await db1.conn.execute("CREATE INDEX idx_actions_user ON actions(user_id)")
+        await db1.conn.execute("PRAGMA user_version = 2")
+        await db1.conn.commit()
+        await db1.close()
+
+        db2 = Database(db_path)
+        await db2.connect()
+        async with db2.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='actions'"
+        ) as cursor:
+            names = {row["name"] for row in await cursor.fetchall()}
+        await db2.close()
+
+        assert "idx_actions_user_created" in names
+        assert "idx_actions_user" not in names
+
+
+@pytest.mark.asyncio
+class TestRunMaintenance:
+    """DB-01/DB-08: run_maintenance() — cleanup + PRAGMA optimize + backup."""
+
+    async def test_run_maintenance_returns_cleanup_counts(self, db):
         user = User(tg_id=123456789)
         await db.create_user(user)
 
-        results = [
-            SearchResult(guid="test", title="Test", indexer="Test"),
-        ]
-        await db.save_search(123456789, "old search", ContentType.MOVIE, results)
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        async with db._write_lock:
+            await db.conn.execute(
+                "INSERT INTO sessions (user_id, session_data, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (123456789, "{}", old_ts, old_ts),
+            )
+            await db.conn.commit()
 
-        # With days=0, should delete immediately
-        deleted = await db.cleanup_old_searches(days=0)
+        result = await db.run_maintenance(backup=False)
 
-        # Search should be deleted
-        assert deleted >= 0
+        assert result["sessions"] == 1
+        assert result["searches"] == 0
+        assert result["actions"] == 0
+        assert result["backup"] == 0
+
+    async def test_run_maintenance_backup_creates_file(self, tmp_path):
+        db_path = str(tmp_path / "bot.db")
+        database = Database(db_path)
+        await database.connect()
+        try:
+            result = await database.run_maintenance(backup=True)
+            assert result["backup"] == 1
+
+            backup_dir = tmp_path / "backup"
+            today = datetime.now(timezone.utc).strftime("%Y%m%d")
+            backup_file = backup_dir / f"bot-{today}.db"
+            assert backup_file.exists()
+        finally:
+            await database.close()
+
+    async def test_run_maintenance_backup_same_day_is_noop(self, tmp_path):
+        """Calling run_maintenance(backup=True) twice on the same day must not
+        raise (VACUUM INTO would fail if the target already existed and we
+        didn't guard for it) and must not report a second backup created.
+        """
+        db_path = str(tmp_path / "bot.db")
+        database = Database(db_path)
+        await database.connect()
+        try:
+            first = await database.run_maintenance(backup=True)
+            second = await database.run_maintenance(backup=True)
+
+            assert first["backup"] == 1
+            assert second["backup"] == 0
+
+            backup_dir = tmp_path / "backup"
+            today = datetime.now(timezone.utc).strftime("%Y%m%d")
+            assert (backup_dir / f"bot-{today}.db").exists()
+        finally:
+            await database.close()
+
+    async def test_backup_rotation_keeps_three_most_recent(self, tmp_path):
+        db_path = str(tmp_path / "bot.db")
+        database = Database(db_path)
+        await database.connect()
+        try:
+            backup_dir = tmp_path / "backup"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            # Seed 4 fake older backup files (dates in the past).
+            for day in ("20250101", "20250102", "20250103", "20250104"):
+                (backup_dir / f"bot-{day}.db").write_bytes(b"fake")
+
+            result = await database._backup(_keep=3)
+
+            remaining = sorted(p.name for p in backup_dir.glob("bot-*.db"))
+            assert len(remaining) == 3
+            assert result in (0, 1)
+        finally:
+            await database.close()
+
+    async def test_run_maintenance_backup_skipped_for_memory_db(self, db):
+        """In-memory DB (used by most tests) has no on-disk path to back up."""
+        result = await db.run_maintenance(backup=True)
+        assert result["backup"] == 0

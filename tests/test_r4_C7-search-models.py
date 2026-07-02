@@ -3,7 +3,8 @@
 Covers:
 - DEAD-01: bot/constants.py is deleted (no importable module).
 - DEAD-10: UserPreferences.language removed.
-- DEAD-11: SearchSession.monitor_type removed.
+- DEAD-11 (r4): SearchSession.monitor_type was removed, then reinstated by
+  feature #2 (season-monitoring presets) — the field exists again by design.
 - PERF-06: handle_pagination/handle_back avoid redundant save_session writes.
 """
 

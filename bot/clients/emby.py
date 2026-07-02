@@ -67,6 +67,14 @@ class EmbyClient:
                 base_url=self.base_url,
                 timeout=httpx.Timeout(self.timeout),
                 follow_redirects=True,
+                # PERF-06b: default httpx keepalive_expiry is 5s — the
+                # notification/status poll cadence (~60s) means every request
+                # re-handshakes TCP. Match BaseAPIClient's pool settings.
+                limits=httpx.Limits(
+                    max_keepalive_connections=4,
+                    max_connections=10,
+                    keepalive_expiry=300.0,
+                ),
             )
         return self._client
 

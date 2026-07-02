@@ -1,6 +1,7 @@
 """Status command handler."""
 
 import asyncio
+import html
 
 import structlog
 from aiogram import F, Router
@@ -43,15 +44,15 @@ def _format_health(
     lines = ["🩺 <b>Состояние системы</b>", ""]
     for s in statuses:
         icon = "✅" if s.available else "❌"
-        ver = f" <code>{s.version}</code>" if s.version else ""
-        lines.append(f"{icon} {s.service}{ver}")
+        ver = f" <code>{html.escape(s.version)}</code>" if s.version else ""
+        lines.append(f"{icon} {html.escape(s.service)}{ver}")
 
     if disks:
         lines.append("")
         lines.append("💽 <b>Диск (свободно)</b>")
         for path, free in disks:
             free_str = format_bytes(free) if free is not None else "N/A"
-            lines.append(f"  <code>{path}</code>: {free_str}")
+            lines.append(f"  <code>{html.escape(path)}</code>: {free_str}")
 
     if qbit is not None:
         lines.append("")
@@ -64,59 +65,58 @@ def _format_health(
     return "\n".join(lines)
 
 
-@router.message(F.text == MENU_STATUS)
-@router.message(Command("status"))
-async def cmd_status(message: Message) -> None:
-    """Handle /status command - check all services status."""
-    status_msg = await message.answer("🔍 Проверяю статус сервисов...")
+async def _collect_statuses(include_deezer: bool) -> list[SystemStatus]:
+    """LOGIC-17: shared service-check fan-out for cmd_status/cmd_health.
 
+    Note: `include_deezer` is only ever True from cmd_status — /health
+    deliberately omits Deezer (it doesn't affect grab/download health and
+    keeps the dashboard focused on infra the user acts on).
+    """
     prowlarr = await get_prowlarr()
     radarr = await get_radarr()
     sonarr = await get_sonarr()
     lidarr = await get_lidarr()
     qbittorrent = await get_qbittorrent()
     emby = await get_emby()
-    deezer = await get_deezer()
+
+    checks = [
+        check_service(prowlarr, "Prowlarr"),
+        check_service(radarr, "Radarr"),
+        check_service(sonarr, "Sonarr"),
+    ]
+    if lidarr:
+        checks.append(check_service(lidarr, "Lidarr"))
+    if qbittorrent:
+        checks.append(check_service(qbittorrent, "qBittorrent"))
+    if emby:
+        checks.append(check_service(emby, "Emby"))
+    if include_deezer:
+        deezer = await get_deezer()
+        if deezer:
+            checks.append(check_service(deezer, "Deezer"))
+
+    statuses: list[SystemStatus] = []
+    for result in await asyncio.gather(*checks, return_exceptions=True):
+        if isinstance(result, SystemStatus):
+            statuses.append(result)
+        else:
+            statuses.append(SystemStatus(service="Unknown", available=False, error=str(result)))
+    return statuses
+
+
+@router.message(F.text == MENU_STATUS)
+@router.message(Command("status"))
+async def cmd_status(message: Message) -> None:
+    """Handle /status command - check all services status."""
+    status_msg = await message.answer("🔍 Проверяю статус сервисов...")
 
     try:
-        # Build list of service checks
-        service_checks = [
-            check_service(prowlarr, "Prowlarr"),
-            check_service(radarr, "Radarr"),
-            check_service(sonarr, "Sonarr"),
-        ]
-
-        if lidarr:
-            service_checks.append(check_service(lidarr, "Lidarr"))
-
-        if qbittorrent:
-            service_checks.append(check_service(qbittorrent, "qBittorrent"))
-
-        if emby:
-            service_checks.append(check_service(emby, "Emby"))
-
-        if deezer:
-            service_checks.append(check_service(deezer, "Deezer"))
-
-        # Check all services in parallel
-        results = await asyncio.gather(*service_checks, return_exceptions=True)
-
-        statuses = []
-        for result in results:
-            if isinstance(result, Exception):
-                statuses.append(SystemStatus(
-                    service="Unknown",
-                    available=False,
-                    error=str(result),
-                ))
-            else:
-                statuses.append(result)
-
+        statuses = await _collect_statuses(include_deezer=True)
         text = Formatters.format_system_status(statuses)
         await status_msg.edit_text(text, parse_mode="HTML")
 
     except Exception as e:
-        logger.error("Status check failed", error=str(e))
+        logger.error("Status check failed", error=str(e), exc_info=True)
         await status_msg.edit_text(Formatters.format_error("Проверка статуса не удалась"))
 
 
@@ -139,35 +139,20 @@ async def _gather_disks(*clients) -> list[tuple[str, int | None]]:
 
 @router.message(Command("health"))
 async def cmd_health(message: Message) -> None:
-    """Feature #7: one-glance dashboard — service reachability + disk free + qBit."""
+    """Feature #7: one-glance dashboard — service reachability + disk free + qBit.
+
+    Deliberately does not include Deezer in `_collect_statuses` (see docstring
+    there) — this dashboard focuses on infra that affects grabs/downloads.
+    """
     status_msg = await message.answer("🩺 Собираю состояние...")
 
-    prowlarr = await get_prowlarr()
     radarr = await get_radarr()
     sonarr = await get_sonarr()
     lidarr = await get_lidarr()
     qbittorrent = await get_qbittorrent()
-    emby = await get_emby()
 
     try:
-        checks = [
-            check_service(prowlarr, "Prowlarr"),
-            check_service(radarr, "Radarr"),
-            check_service(sonarr, "Sonarr"),
-        ]
-        if lidarr:
-            checks.append(check_service(lidarr, "Lidarr"))
-        if qbittorrent:
-            checks.append(check_service(qbittorrent, "qBittorrent"))
-        if emby:
-            checks.append(check_service(emby, "Emby"))
-
-        statuses: list[SystemStatus] = []
-        for r in await asyncio.gather(*checks, return_exceptions=True):
-            statuses.append(
-                r if isinstance(r, SystemStatus)
-                else SystemStatus(service="Unknown", available=False, error=str(r))
-            )
+        statuses = await _collect_statuses(include_deezer=False)
 
         disks = await _gather_disks(radarr, sonarr, lidarr)
 
@@ -181,7 +166,7 @@ async def cmd_health(message: Message) -> None:
         await status_msg.edit_text(_format_health(statuses, disks, qbit), parse_mode="HTML")
 
     except Exception as e:
-        logger.error("Health check failed", error=str(e))
+        logger.error("Health check failed", error=str(e), exc_info=True)
         await status_msg.edit_text(Formatters.format_error("Не удалось собрать состояние"))
 
 
@@ -196,7 +181,7 @@ async def check_service(client, name: str) -> SystemStatus:
             response_time_ms=response_time,
         )
     except Exception as e:
-        logger.warning(f"{name} health check failed", error=str(e))
+        logger.warning("health_check_failed", service=name, error=str(e))
         return SystemStatus(
             service=name,
             available=False,

@@ -8,8 +8,11 @@ COPY requirements.txt .
 RUN pip install --user --no-cache-dir -r requirements.txt
 
 FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
-# DEPLOY-03: install tzdata so Python's datetime.now()/structlog timestamps
-# match TIMEZONE=Europe/Moscow instead of defaulting to UTC.
+# DEPLOY-07: tzdata is needed for ZoneInfo(settings.timezone) — used to render
+# user-facing timestamps (calendar, history, notifications) in TIMEZONE=
+# Europe/Moscow, see bot/ui/formatters.py. It does NOT affect structlog: the
+# JSON logs' TimeStamper defaults to utc=True, so `docker logs` timestamps
+# stay in UTC regardless of TZ/TIMEZONE — that's intentional, not a bug.
 RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd -m -u 1000 botuser
@@ -18,8 +21,12 @@ COPY --from=builder /root/.local /home/botuser/.local
 ENV PATH=/home/botuser/.local/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     TZ=Europe/Moscow
-RUN mkdir -p /app/data && chown -R botuser:botuser /app
-COPY --chown=botuser:botuser bot/ ./bot/
+# DEPLOY-05: only /app/data (sqlite db) needs to be writable by botuser at
+# runtime — the app code itself doesn't. Leaving bot/ root-owned means a
+# compromised process can't rewrite its own source even without read_only
+# rootfs; combined with `read_only: true` in compose it's defense-in-depth.
+RUN mkdir -p /app/data && chown -R botuser:botuser /app/data
+COPY bot/ ./bot/
 USER botuser
 
 # SEC-14 / DEPLOY-04: true liveness — checks that /tmp/tgarr-alive has been

@@ -246,106 +246,61 @@ class TestScoringService:
         # CAM should be last
         assert sorted_results[-1].guid == "1"
 
-    def test_get_best_result(self, scoring_service):
-        """Test getting the best result."""
-        results = [
-            SearchResult(
-                guid="1",
-                title="Low.Quality",
-                quality=QualityInfo(source="CAM"),
-            ),
-            SearchResult(
-                guid="2",
-                title="High.Quality.1080p.BluRay",
-                quality=QualityInfo(resolution="1080p", source="BluRay"),
-                seeders=100,
-            ),
-        ]
+    # DEAD-06: get_best_result/filter_by_quality were unused-in-production
+    # dead code — removed from ScoringService. Their one useful idea
+    # (preferred_resolution affecting ranking) is now covered by
+    # TestPreferredResolutionBonus below, wired into calculate_score/sort_results.
 
-        best = scoring_service.get_best_result(results)
-        assert best is not None
-        assert best.guid == "2"
 
-    def test_get_best_result_min_score(self, scoring_service):
-        """Test getting best result with minimum score requirement."""
-        results = [
-            SearchResult(
-                guid="1",
-                title="Low.Quality.CAM",
-                quality=QualityInfo(source="CAM"),
-            ),
-        ]
+class TestPreferredResolutionBonus:
+    """DEAD-06: preferred_resolution (settings 'Качество') is wired into
+    calculate_score as a bonus, and sort_results/search.py propagate it."""
 
-        # CAM should have low score
-        best = scoring_service.get_best_result(results, min_score=50)
-        assert best is None
+    def test_calculate_score_bonus_for_matching_resolution(self, scoring_service):
+        result = SearchResult(
+            guid="test",
+            title="Test.1080p.WEB-DL",
+            quality=QualityInfo(resolution="1080p", source="WEB-DL"),
+        )
+        score_no_pref = scoring_service.calculate_score(result)
+        score_with_pref = scoring_service.calculate_score(result, preferred_resolution="1080p")
+        assert score_with_pref > score_no_pref
 
-    def test_filter_by_quality_resolution(self, scoring_service):
-        """Test filtering by preferred resolution."""
-        results = [
-            SearchResult(
-                guid="1",
-                title="720p.Release",
-                quality=QualityInfo(resolution="720p"),
-            ),
-            SearchResult(
-                guid="2",
-                title="1080p.Release",
-                quality=QualityInfo(resolution="1080p"),
-            ),
-            SearchResult(
-                guid="3",
-                title="2160p.Release",
-                quality=QualityInfo(resolution="2160p"),
-            ),
-        ]
+    def test_calculate_score_no_bonus_for_mismatched_resolution(self, scoring_service):
+        result = SearchResult(
+            guid="test",
+            title="Test.1080p.WEB-DL",
+            quality=QualityInfo(resolution="1080p", source="WEB-DL"),
+        )
+        score_no_pref = scoring_service.calculate_score(result)
+        score_mismatch = scoring_service.calculate_score(result, preferred_resolution="2160p")
+        assert score_mismatch == score_no_pref
 
-        filtered = scoring_service.filter_by_quality(results, preferred_resolution="1080p")
-        assert len(filtered) == 1
-        assert filtered[0].guid == "2"
+    def test_sort_results_with_preferred_resolution_promotes_matching_release(self, scoring_service):
+        """A user preferring 1080p should see an equally-good 1080p release
+        ranked above an equally-good 2160p one."""
+        r_1080p = SearchResult(
+            guid="1080",
+            title="Movie.1080p.BluRay.x264",
+            quality=QualityInfo(resolution="1080p", source="BluRay", codec="x264"),
+            seeders=50,
+        )
+        r_2160p = SearchResult(
+            guid="2160",
+            title="Movie.2160p.BluRay.x264",
+            quality=QualityInfo(resolution="2160p", source="BluRay", codec="x264"),
+            seeders=50,
+        )
 
-    def test_filter_by_quality_exclude_cam(self, scoring_service):
-        """Test filtering to exclude CAM/TS releases."""
-        results = [
-            SearchResult(
-                guid="1",
-                title="CAM.Release",
-                quality=QualityInfo(source="CAM"),
-            ),
-            SearchResult(
-                guid="2",
-                title="TS.Release",
-                quality=QualityInfo(source="TS"),
-            ),
-            SearchResult(
-                guid="3",
-                title="BluRay.Release",
-                quality=QualityInfo(source="BluRay"),
-            ),
-        ]
+        # Without preference, 2160p naturally scores higher (bigger resolution bonus).
+        default_sorted = scoring_service.sort_results([r_1080p, r_2160p])
+        assert default_sorted[0].guid == "2160"
 
-        filtered = scoring_service.filter_by_quality(results, exclude_cam_ts=True)
-        assert len(filtered) == 1
-        assert filtered[0].guid == "3"
-
-    def test_filter_by_quality_min_seeders(self, scoring_service):
-        """Test filtering by minimum seeders."""
-        results = [
-            SearchResult(
-                guid="1",
-                title="Low.Seeders",
-                seeders=5,
-            ),
-            SearchResult(
-                guid="2",
-                title="High.Seeders",
-                seeders=100,
-            ),
-        ]
-
-        filtered = scoring_service.filter_by_quality(results, min_seeders=10)
-        assert len(filtered) == 1
-        assert filtered[0].guid == "2"
+        # With a 1080p preference, the +15 bonus flips the ordering.
+        preferred_sorted = scoring_service.sort_results(
+            [r_1080p, r_2160p], preferred_resolution="1080p"
+        )
+        assert preferred_sorted[0].guid == "1080"
 
 
 class TestScoringWeights:

@@ -36,57 +36,6 @@ def _default_env(monkeypatch):
 
 
 @pytest.fixture
-def mock_env(_default_env):
-    """Kept for backward compatibility with tests that still request `mock_env`."""
-    return None
-
-
-@pytest.fixture
-def sample_prowlarr_response():
-    """Sample Prowlarr search response."""
-    return [
-        {
-            "guid": "test-guid-1",
-            "title": "Test.Movie.2024.1080p.BluRay.x264-GROUP",
-            "size": 5368709120,
-            "seeders": 150,
-            "leechers": 25,
-            "indexer": "TestIndexer",
-            "indexerId": 1,
-            "protocol": "torrent",
-            "downloadUrl": "http://example.com/download/1",
-            "infoUrl": "http://example.com/info/1",
-            "publishDate": "2024-01-15T12:00:00Z",
-            "categories": [{"id": 2000, "name": "Movies"}],
-        },
-        {
-            "guid": "test-guid-2",
-            "title": "Test.Movie.2024.2160p.UHD.BluRay.x265.HDR-GROUP",
-            "size": 21474836480,
-            "seeders": 75,
-            "leechers": 10,
-            "indexer": "TestIndexer",
-            "indexerId": 1,
-            "protocol": "torrent",
-            "downloadUrl": "http://example.com/download/2",
-            "categories": [{"id": 2000, "name": "Movies"}],
-        },
-        {
-            "guid": "test-guid-3",
-            "title": "Test.Movie.2024.CAM.x264-BADGROUP",
-            "size": 1073741824,
-            "seeders": 500,
-            "leechers": 100,
-            "indexer": "BadIndexer",
-            "indexerId": 2,
-            "protocol": "torrent",
-            "downloadUrl": "http://example.com/download/3",
-            "categories": [{"id": 2000, "name": "Movies"}],
-        },
-    ]
-
-
-@pytest.fixture
 def sample_radarr_movie():
     """Sample Radarr movie lookup response."""
     return {
@@ -135,24 +84,3 @@ def sample_sonarr_series():
             {"seasonNumber": 3, "monitored": True, "statistics": {"totalEpisodeCount": 8}},
         ],
     }
-
-
-@pytest.fixture
-def sample_quality_profiles():
-    """Sample quality profiles."""
-    return [
-        {"id": 1, "name": "Any"},
-        {"id": 2, "name": "SD"},
-        {"id": 3, "name": "HD-720p"},
-        {"id": 4, "name": "HD-1080p"},
-        {"id": 5, "name": "Ultra-HD"},
-    ]
-
-
-@pytest.fixture
-def sample_root_folders():
-    """Sample root folders."""
-    return [
-        {"id": 1, "path": "/movies", "freeSpace": 1099511627776},
-        {"id": 2, "path": "/movies-4k", "freeSpace": 549755813888},
-    ]

@@ -1,6 +1,13 @@
-# Development overrides
-# This file is automatically loaded by docker compose
-# Use for local development settings
+# Development overrides — NOT auto-loaded.
+# DEPLOY-03: docker compose only auto-loads docker-compose.override.yml; this
+# file must be requested explicitly on every invocation:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml build
+# It is also NOT usable standalone (`docker compose -f docker-compose.dev.yml
+# up` on its own): only LOG_LEVEL is set below, so the required
+# TELEGRAM_BOT_TOKEN/PROWLARR_*/RADARR_*/SONARR_* variables from
+# docker-compose.yml are missing and the container will fail pydantic
+# validation on startup. Always layer this on top of docker-compose.yml.
 
 services:
   tg-arr-bot:
@@ -16,9 +23,10 @@ services:
     # For development, you might want to use host network
     # network_mode: host
 
-# DEPLOY-05: define bot-data here too so `docker compose -f docker-compose.dev.yml up`
-# works standalone (the named volume is otherwise only declared in docker-compose.yml,
-# which isn't loaded when -f points at this file alone).
+# Redeclared here only because compose requires every volume referenced by a
+# loaded file to be defined somewhere in the merged config; when layered with
+# -f docker-compose.yml (see above) this merges with, not replaces, that
+# file's `bot-data` definition.
 volumes:
   bot-data:
     driver: local

@@ -1,5 +1,6 @@
 """Music (Lidarr) handlers: search artists, view details, add to Lidarr."""
 
+import asyncio
 import html
 
 import structlog
@@ -37,15 +38,58 @@ _MAX_ARTIST_CANDIDATES = 100
 
 
 def _cleanup_if_overflow(cache: dict) -> None:
-    """Drop all entries from an in-memory cache if it exceeds the size cap."""
-    if len(cache) > _MAX_ARTIST_CANDIDATES:
-        cache.clear()
+    """BUG-10/PERF-12: evict the oldest entry (dict insertion order) instead of
+    clearing the whole cache — a single overflow no longer kicks every other
+    user mid-selection back to "Список истёк"."""
+    while len(cache) >= _MAX_ARTIST_CANDIDATES:
+        cache.pop(next(iter(cache)))
+
+
+def _remember(cache: dict, key, value) -> None:
+    """Insert/update `key` while keeping it "freshest" for LRU eviction order —
+    pop first so a re-insert moves the key to the end of iteration order."""
+    cache.pop(key, None)
+    _cleanup_if_overflow(cache)
+    cache[key] = value
 
 # Session key: store artist candidates list separately from SearchResult list
 # We reuse SearchSession.results (as search releases) and selected_content (ArtistInfo)
 # Per-user in-memory artist lookup cache (for select-by-index callbacks)
 _artist_candidates: dict[int, list[ArtistInfo]] = {}
 _trending_artists_cache: dict[int, list[dict]] = {}
+
+
+def _artist_list_text(artists: list[ArtistInfo], page_artists: list[ArtistInfo], start_idx: int) -> str:
+    """LOGIC-14a: render the numbered artist list body shared by the initial
+    search results, pagination and the music-back handler."""
+    lines = [f"🎵 <b>Найдено артистов: {len(artists)}</b>\n"]
+    for i, a in enumerate(page_artists, start=start_idx):
+        disamb = f" <i>[{html.escape(a.disambiguation)}]</i>" if a.disambiguation else ""
+        in_lib = " ✅" if a.lidarr_id else ""
+        lines.append(f"{i + 1}. <b>{html.escape(a.name)}</b>{disamb}{in_lib}")
+    return "\n".join(lines)
+
+
+async def _render_artist_list(message: Message, artists: list[ArtistInfo], page: int = 0) -> None:
+    """LOGIC-14a: shared renderer for the artist-list keyboard — dedups the
+    three previously-copied render blocks (initial search, art_page:, music_back).
+
+    `per_page`/keyboard construction intentionally untouched (Wave 2 territory).
+    """
+    per_page = 5
+    start_idx = page * per_page
+    page_artists = artists[start_idx:start_idx + per_page]
+    text = _artist_list_text(artists, page_artists, start_idx)
+
+    try:
+        await message.edit_text(
+            text,
+            reply_markup=Keyboards.artist_list(artists, current_page=page),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        if "message is not modified" not in str(e):
+            raise
 
 
 async def _get_music_services() -> tuple[SearchService, AddService] | None:
@@ -118,7 +162,7 @@ async def process_music_search(
     try:
         artists = await search_service.lookup_artist(query)
     except Exception as e:
-        log.error("Artist lookup failed", error=str(e))
+        log.error("Artist lookup failed", error=str(e), exc_info=True)
         await status_msg.edit_text(Formatters.format_error("Не удалось найти артистов (Lidarr недоступен?)"))
         return
 
@@ -132,9 +176,8 @@ async def process_music_search(
         )
         return
 
-    # Cache for callback lookup by index
-    _cleanup_if_overflow(_artist_candidates)
-    _artist_candidates[user_id] = artists[:25]
+    # Cache for callback lookup by index (BUG-10/PERF-12: LRU eviction, see _remember)
+    _remember(_artist_candidates, user_id, artists[:25])
 
     # Persist a minimal session so /back/cancel consistently works
     session = SearchSession(
@@ -153,17 +196,7 @@ async def process_music_search(
     )
     await db.log_action(action)
 
-    lines = [f"🎵 <b>Найдено артистов: {len(artists)}</b>\n"]
-    for i, a in enumerate(_artist_candidates[user_id]):
-        disamb = f" <i>[{html.escape(a.disambiguation)}]</i>" if a.disambiguation else ""
-        in_lib = " ✅" if a.lidarr_id else ""
-        lines.append(f"{i + 1}. <b>{html.escape(a.name)}</b>{disamb}{in_lib}")
-
-    await status_msg.edit_text(
-        "\n".join(lines),
-        reply_markup=Keyboards.artist_list(_artist_candidates[user_id]),
-        parse_mode="HTML",
-    )
+    await _render_artist_list(status_msg, _artist_candidates[user_id], page=0)
 
 
 @router.callback_query(F.data.startswith(CallbackData.ARTIST_PAGE))
@@ -190,24 +223,7 @@ async def handle_artist_pagination(callback: CallbackQuery, db_user: User, db: D
         await callback.answer("Неверная страница", show_alert=True)
         return
 
-    start_idx = page * per_page
-    page_artists = artists[start_idx:start_idx + per_page]
-
-    lines = [f"🎵 <b>Найдено артистов: {len(artists)}</b>\n"]
-    for i, a in enumerate(page_artists, start=start_idx):
-        disamb = f" <i>[{html.escape(a.disambiguation)}]</i>" if a.disambiguation else ""
-        in_lib = " ✅" if a.lidarr_id else ""
-        lines.append(f"{i + 1}. <b>{html.escape(a.name)}</b>{disamb}{in_lib}")
-
-    try:
-        await callback.message.edit_text(
-            "\n".join(lines),
-            reply_markup=Keyboards.artist_list(artists, current_page=page),
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        if "message is not modified" not in str(e):
-            raise
+    await _render_artist_list(callback.message, artists, page=page)
     await callback.answer()
 
 
@@ -222,21 +238,7 @@ async def handle_music_back(callback: CallbackQuery, db_user: User, db: Database
         await callback.answer("Список истёк. Начните новый поиск.", show_alert=True)
         return
 
-    lines = [f"🎵 <b>Найдено артистов: {len(artists)}</b>\n"]
-    for i, a in enumerate(artists[:5]):
-        disamb = f" <i>[{html.escape(a.disambiguation)}]</i>" if a.disambiguation else ""
-        in_lib = " ✅" if a.lidarr_id else ""
-        lines.append(f"{i + 1}. <b>{html.escape(a.name)}</b>{disamb}{in_lib}")
-
-    try:
-        await callback.message.edit_text(
-            "\n".join(lines),
-            reply_markup=Keyboards.artist_list(artists, current_page=0),
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        if "message is not modified" not in str(e):
-            raise
+    await _render_artist_list(callback.message, artists, page=0)
     await callback.answer()
 
 
@@ -305,9 +307,12 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
             await callback.message.edit_text(f"⏳ Добавляю <b>{html.escape(artist.name)}</b> в Lidarr...", parse_mode="HTML")
 
         try:
-            profiles = await add_service.get_lidarr_profiles()
-            metadata_profiles = await add_service.get_lidarr_metadata_profiles()
-            folders = await add_service.get_lidarr_root_folders()
+            # PERF-07a: 3 independent RTTs → 1 wall-clock RTT.
+            profiles, metadata_profiles, folders = await asyncio.gather(
+                add_service.get_lidarr_profiles(),
+                add_service.get_lidarr_metadata_profiles(),
+                add_service.get_lidarr_root_folders(),
+            )
 
             if not profiles or not folders or not metadata_profiles:
                 if callback.message:
@@ -348,7 +353,7 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
             await db.delete_session(user_id)
             _artist_candidates.pop(user_id, None)
         except Exception as e:
-            logger.error("Add artist failed", error=str(e))
+            logger.error("Add artist failed", error=str(e), exc_info=True)
             if callback.message:
                 await callback.message.edit_text(Formatters.format_error("Операция временно недоступна"))
     finally:
@@ -381,7 +386,7 @@ async def handle_trending_music(callback: CallbackQuery) -> None:
     try:
         artists = await deezer.get_trending_artists(limit=10)
     except Exception as e:
-        logger.error("Deezer trending failed", error=str(e))
+        logger.error("Deezer trending failed", error=str(e), exc_info=True)
         await callback.message.edit_text(Formatters.format_error("Не удалось загрузить трендовых артистов"))
         return
 
@@ -390,8 +395,7 @@ async def handle_trending_music(callback: CallbackQuery) -> None:
         return
 
     user_id = callback.from_user.id
-    _cleanup_if_overflow(_trending_artists_cache)
-    _trending_artists_cache[user_id] = artists
+    _remember(_trending_artists_cache, user_id, artists)
 
     await callback.message.edit_text(
         Formatters.format_trending_artists(artists),

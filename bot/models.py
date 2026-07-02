@@ -11,6 +11,12 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# LOGIC-22: qBittorrent's API returns this exact sentinel value for eta when
+# a torrent is stalled/queued with no seeders — i.e. "infinite" ETA. Named so
+# the comparison below is self-explanatory instead of a bare magic number.
+QBIT_INFINITE_ETA = 8640000
+
+
 class ContentType(str, Enum):
     """Type of content being searched."""
 
@@ -175,30 +181,6 @@ class ArtistInfo(BaseModel):
     root_folder_path: Optional[str] = Field(default=None)
 
 
-class AlbumInfo(BaseModel):
-    """Album information from Lidarr lookup."""
-
-    content_model_type: Literal["album"] = "album"
-    mb_id: str = Field(..., description="MusicBrainz release-group ID (foreignAlbumId)")
-    artist_mb_id: Optional[str] = Field(default=None, description="Artist MusicBrainz ID")
-    title: str = Field(..., description="Album title")
-    artist_name: Optional[str] = Field(default=None)
-    disambiguation: Optional[str] = Field(default=None)
-    album_type: Optional[str] = Field(default=None, description="Album, Single, EP, Compilation, etc.")
-    release_date: Optional[datetime] = Field(default=None)
-    year: Optional[int] = Field(default=None)
-    overview: Optional[str] = Field(default=None)
-    genres: list[str] = Field(default_factory=list)
-    poster_url: Optional[str] = Field(default=None)
-    ratings: dict[str, Any] = Field(default_factory=dict)
-    track_count: int = Field(default=0)
-    duration_ms: int = Field(default=0, description="Total album duration in milliseconds")
-
-    # Lidarr-specific
-    lidarr_id: Optional[int] = Field(default=None, description="ID in Lidarr if already added")
-    has_file: bool = Field(default=False)
-
-
 class MetadataProfile(BaseModel):
     """Lidarr metadata profile (controls what album types are grabbed)."""
 
@@ -255,12 +237,13 @@ class User(BaseModel):
 
 
 # Union type with discriminator for content info
+# DEAD-09: AlbumInfo was removed from this union — Lidarr's _parse_album (its
+# only producer) had no production callers (no album-grab flow exists yet).
 ContentInfo = Annotated[
     Union[
         Annotated[MovieInfo, Tag("movie")],
         Annotated[SeriesInfo, Tag("series")],
         Annotated[ArtistInfo, Tag("artist")],
-        Annotated[AlbumInfo, Tag("album")],
     ],
     Discriminator("content_model_type"),
 ]
@@ -382,7 +365,7 @@ class TorrentInfo(BaseModel):
     @property
     def eta_formatted(self) -> str:
         """Get human-readable ETA."""
-        if self.eta is None or self.eta < 0 or self.eta == 8640000:
+        if self.eta is None or self.eta < 0 or self.eta == QBIT_INFINITE_ETA:
             return "∞"
         if self.eta == 0:
             return "0s"

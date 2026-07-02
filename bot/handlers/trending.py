@@ -2,6 +2,7 @@
 
 import asyncio
 import html
+import time
 
 import structlog
 from aiogram import F, Router
@@ -22,16 +23,71 @@ router = Router()
 # Menu button text
 MENU_TRENDING = "🔥 Топ"
 
-# Cache for trending data to avoid re-fetching when viewing details
-# Keyed by tmdb_id for O(1) lookup; items accumulate across requests
+# Cache for trending data to avoid re-fetching when viewing details.
+# Keyed by tmdb_id for O(1) lookup; values are the plain item (kept as a bare
+# value, not a (timestamp, item) tuple, so anything that still reads/writes
+# the dict directly — including some pre-existing tests — keeps working).
+# BUG-10/PERF-12: entries are TTL'd (6h) and evicted oldest-first on overflow
+# instead of being clear()'d wholesale (which used to reset every other
+# user's active list, not just stale ones).
 _trending_movies_cache: dict[int, Any] = {}
 _trending_series_cache: dict[int, Any] = {}
+
+# Insertion timestamps live in a parallel side-table (same keys) so the main
+# cache dicts stay plain `{key: value}` — direct pokes from other code/tests
+# just won't get TTL tracking (treated as fresh) until they go through a
+# _cache_put/_cache_get.
+_trending_movies_inserted_at: dict[int, float] = {}
+_trending_series_inserted_at: dict[int, float] = {}
+
+_TIMESTAMPS = {
+    id(_trending_movies_cache): _trending_movies_inserted_at,
+    id(_trending_series_cache): _trending_series_inserted_at,
+}
 
 # Limit cache size to prevent unbounded growth
 _MAX_CACHE_SIZE = 200
 
+# PERF-12: trending items go stale — 6h TTL for a "yesterday's trending" click.
+_CACHE_TTL_SECONDS = 6 * 60 * 60
+
 # Lock for cache mutations (asyncio is single-threaded, but protects across awaits)
 _cache_lock = asyncio.Lock()
+
+
+def _cache_put(cache: dict[int, Any], key: int, value: Any) -> None:
+    """Insert/refresh `key`, evicting the oldest entry when at capacity.
+
+    Must be called while holding `_cache_lock`. Pops-then-reinserts so a
+    refreshed key also becomes the freshest for eviction ordering (dict
+    iteration order = insertion order in CPython).
+    """
+    timestamps = _TIMESTAMPS[id(cache)]
+    cache.pop(key, None)
+    timestamps.pop(key, None)
+    while len(cache) >= _MAX_CACHE_SIZE:
+        oldest = next(iter(cache))
+        cache.pop(oldest, None)
+        timestamps.pop(oldest, None)
+    cache[key] = value
+    timestamps[key] = time.monotonic()
+
+
+def _cache_get(cache: dict[int, Any], key: int) -> Any | None:
+    """Look up `key`, treating TTL-expired entries as a miss (and dropping them).
+
+    Entries with no recorded timestamp (inserted via a direct `cache[key] =
+    value`, bypassing `_cache_put`) are treated as always-fresh.
+    """
+    if key not in cache:
+        return None
+    timestamps = _TIMESTAMPS[id(cache)]
+    inserted_at = timestamps.get(key)
+    if inserted_at is not None and time.monotonic() - inserted_at > _CACHE_TTL_SECONDS:
+        cache.pop(key, None)
+        timestamps.pop(key, None)
+        return None
+    return cache[key]
 
 
 @router.message(F.text == MENU_TRENDING)
@@ -114,12 +170,12 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
             )
             return
 
-        # Cache movies for detail views (merge into existing cache)
+        # Cache movies for detail views (merge into existing cache).
+        # BUG-10/PERF-12: LRU-evict oldest instead of clear()'ing the whole
+        # cache — an overflow no longer wipes other users' active lists.
         async with _cache_lock:
-            global _trending_movies_cache
-            if len(_trending_movies_cache) > _MAX_CACHE_SIZE:
-                _trending_movies_cache = {}
-            _trending_movies_cache.update({movie.tmdb_id: movie for movie in movies})
+            for movie in movies:
+                _cache_put(_trending_movies_cache, movie.tmdb_id, movie)
 
         # Format and send results
         text = Formatters.format_trending_movies(movies[:10])  # Top 10
@@ -130,7 +186,7 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
         )
 
     except Exception as e:
-        logger.error("Failed to fetch trending movies", error=str(e))
+        logger.error("Failed to fetch trending movies", error=str(e), exc_info=True)
         await callback.message.edit_text(
             Formatters.format_error("Не удалось загрузить популярные фильмы"),
             parse_mode="HTML",
@@ -165,12 +221,11 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
             )
             return
 
-        # Cache series for detail views (merge into existing cache)
+        # Cache series for detail views (merge into existing cache).
+        # BUG-10/PERF-12: LRU-evict oldest instead of clear()'ing the whole cache.
         async with _cache_lock:
-            global _trending_series_cache
-            if len(_trending_series_cache) > _MAX_CACHE_SIZE:
-                _trending_series_cache = {}
-            _trending_series_cache.update({series.tmdb_id: series for series in series_list})
+            for series in series_list:
+                _cache_put(_trending_series_cache, series.tmdb_id, series)
 
         # Format and send results
         text = Formatters.format_trending_series(series_list[:10])  # Top 10
@@ -181,7 +236,7 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
         )
 
     except Exception as e:
-        logger.error("Failed to fetch trending series", error=str(e))
+        logger.error("Failed to fetch trending series", error=str(e), exc_info=True)
         await callback.message.edit_text(
             Formatters.format_error("Не удалось загрузить популярные сериалы"),
             parse_mode="HTML",
@@ -204,7 +259,7 @@ async def handle_movie_from_trending(callback: CallbackQuery) -> None:
         return
 
     # Try to get movie from cache first
-    movie = _trending_movies_cache.get(tmdb_id)
+    movie = _cache_get(_trending_movies_cache, tmdb_id)
 
     if not movie:
         # If not in cache, fetch from Radarr
@@ -212,7 +267,7 @@ async def handle_movie_from_trending(callback: CallbackQuery) -> None:
         try:
             movie = await radarr.lookup_movie_by_tmdb(tmdb_id)
         except Exception as e:
-            logger.error("Failed to lookup movie", tmdb_id=tmdb_id, error=str(e))
+            logger.error("Failed to lookup movie", tmdb_id=tmdb_id, error=str(e), exc_info=True)
             await callback.message.answer(
                 Formatters.format_error("Не удалось найти фильм"),
                 parse_mode="HTML",
@@ -235,7 +290,7 @@ async def handle_movie_from_trending(callback: CallbackQuery) -> None:
                 reply_markup=Keyboards.movie_details(movie),
             )
         except Exception as e:
-            logger.error("Failed to send poster", error=str(e))
+            logger.error("Failed to send poster", error=str(e), exc_info=True)
             # Fallback to text only
             await callback.message.answer(
                 caption,
@@ -267,7 +322,7 @@ async def handle_series_from_trending(callback: CallbackQuery) -> None:
         return
 
     # Try to get series from cache first (if from trending)
-    series = _trending_series_cache.get(series_id)
+    series = _cache_get(_trending_series_cache, series_id)
 
     if not series:
         # series_id is a TMDb ID from trending — cannot use as TVDB ID for Sonarr lookup
@@ -289,7 +344,7 @@ async def handle_series_from_trending(callback: CallbackQuery) -> None:
                 reply_markup=Keyboards.series_details(series),
             )
         except Exception as e:
-            logger.error("Failed to send poster", error=str(e))
+            logger.error("Failed to send poster", error=str(e), exc_info=True)
             # Fallback to text only
             await callback.message.answer(
                 caption,
@@ -321,7 +376,7 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
         return
 
     # Try to get movie from cache first
-    movie = _trending_movies_cache.get(tmdb_id)
+    movie = _cache_get(_trending_movies_cache, tmdb_id)
 
     if not movie:
         # If not in cache, fetch from Radarr
@@ -329,7 +384,7 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
         try:
             movie = await radarr.lookup_movie_by_tmdb(tmdb_id)
         except Exception as e:
-            logger.error("Failed to lookup movie", tmdb_id=tmdb_id, error=str(e))
+            logger.error("Failed to lookup movie", tmdb_id=tmdb_id, error=str(e), exc_info=True)
             await callback.message.answer(
                 Formatters.format_error("Не удалось найти фильм"),
                 parse_mode="HTML",
@@ -352,9 +407,12 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
         add_service = AddService(prowlarr, radarr, sonarr, qbittorrent)
 
         # Get user preferences
+        # PERF-07a: 2 independent RTTs → 1 wall-clock RTT.
+        profiles, folders = await asyncio.gather(
+            add_service.get_radarr_profiles(),
+            add_service.get_radarr_root_folders(),
+        )
         prefs = db_user.preferences
-        profiles = await add_service.get_radarr_profiles()
-        folders = await add_service.get_radarr_root_folders()
 
         if not profiles or not folders:
             await status_msg.edit_text("❌ Нет профилей качества или папок в Radarr")
@@ -386,11 +444,13 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
                 parse_mode="HTML",
             )
         else:
-            error_msg = action.error_message or "Неизвестная ошибка"
+            # BUG-12b: action.error_message can contain raw *arr error text
+            # (e.g. an unescaped "<" breaks HTML parsing under default parse_mode).
+            error_msg = html.escape(action.error_message or "Неизвестная ошибка")
             await status_msg.edit_text(f"❌ Ошибка: {error_msg}")
 
     except Exception as e:
-        logger.error("Failed to add movie from trending", tmdb_id=tmdb_id, error=str(e))
+        logger.error("Failed to add movie from trending", tmdb_id=tmdb_id, error=str(e), exc_info=True)
         await status_msg.edit_text(
             Formatters.format_error("Не удалось добавить фильм"),
             parse_mode="HTML",
@@ -413,7 +473,7 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
         return
 
     # Try to get series from cache first
-    series = _trending_series_cache.get(tmdb_id)
+    series = _cache_get(_trending_series_cache, tmdb_id)
 
     if not series:
         if not callback.message:
@@ -439,9 +499,12 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
         add_service = AddService(prowlarr, radarr, sonarr, qbittorrent)
 
         # Get user preferences
+        # PERF-07a: 2 independent RTTs → 1 wall-clock RTT.
+        profiles, folders = await asyncio.gather(
+            add_service.get_sonarr_profiles(),
+            add_service.get_sonarr_root_folders(),
+        )
         prefs = db_user.preferences
-        profiles = await add_service.get_sonarr_profiles()
-        folders = await add_service.get_sonarr_root_folders()
 
         if not profiles or not folders:
             await status_msg.edit_text("❌ Нет профилей качества или папок в Sonarr")
@@ -457,8 +520,9 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
 
         # Resolve TVDB ID if missing (TMDb trending returns tvdb_id=0)
         if not series.tvdb_id:
-            sonarr_client = await get_sonarr()
-            lookup_results = await sonarr_client.lookup_series(series.title)
+            # LOGIC-22: reuse the `sonarr` client already fetched above instead
+            # of a redundant await get_sonarr().
+            lookup_results = await sonarr.lookup_series(series.title)
             matched = None
             for lr in lookup_results:
                 if lr.tmdb_id == series.tmdb_id:
@@ -472,7 +536,7 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
                 # tvdb_id) back into the cache so a subsequent add/detail view
                 # reuses it instead of re-running the Sonarr lookup.
                 async with _cache_lock:
-                    _trending_series_cache[tmdb_id] = series
+                    _cache_put(_trending_series_cache, tmdb_id, series)
             else:
                 await status_msg.edit_text(
                     "❌ Не удалось определить TVDB ID для сериала.\n"
@@ -500,11 +564,12 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
                 parse_mode="HTML",
             )
         else:
-            error_msg = action.error_message or "Неизвестная ошибка"
+            # BUG-12b: escape *arr error text before interpolating into HTML.
+            error_msg = html.escape(action.error_message or "Неизвестная ошибка")
             await status_msg.edit_text(f"❌ Ошибка: {error_msg}")
 
     except Exception as e:
-        logger.error("Failed to add series from trending", tmdb_id=tmdb_id, error=str(e))
+        logger.error("Failed to add series from trending", tmdb_id=tmdb_id, error=str(e), exc_info=True)
         await status_msg.edit_text(
             Formatters.format_error("Не удалось добавить сериал"),
             parse_mode="HTML",

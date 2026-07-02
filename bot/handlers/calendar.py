@@ -6,6 +6,7 @@ from typing import Any
 
 import structlog
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 
 from bot.clients.registry import get_lidarr, get_radarr, get_sonarr
@@ -64,7 +65,7 @@ async def _fetch_and_send_calendar(
     payloads: dict[str, list[dict]] = {}
     for (source, _), result in zip(fetchers, results, strict=True):
         if isinstance(result, Exception):
-            logger.error(f"{source} calendar error", error=str(result))
+            logger.error("calendar_fetch_failed", service=source, error=str(result), exc_info=result)
             errors.append(f"{source}: {_html.escape(str(result))[:100]}")
         else:
             payloads[source] = result
@@ -77,11 +78,18 @@ async def _fetch_and_send_calendar(
     if errors:
         text += "\n\n⚠️ " + " | ".join(errors)
 
-    await answer_func(
-        text=text,
-        parse_mode="HTML",
-        reply_markup=Keyboards.calendar_controls(current_days=days),
-    )
+    try:
+        await answer_func(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=Keyboards.calendar_controls(current_days=days),
+        )
+    except TelegramBadRequest as e:
+        # BUG-17a: repeating the currently-active period (e.g. tapping "7 дней"
+        # again) produces identical text/markup — Telegram rejects the edit.
+        # Swallow only that specific, harmless case; anything else re-raises.
+        if "message is not modified" not in str(e):
+            raise
 
 
 @router.message(F.text == MENU_CALENDAR)

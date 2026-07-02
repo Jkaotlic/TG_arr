@@ -50,6 +50,10 @@ class ScoringWeights:
     # Subtitle bonuses
     russian_subtitle_bonus: int = 15
 
+    # DEAD-06: bonus when a release's resolution matches the user's
+    # preferred_resolution setting (previously collected but never consumed).
+    preferred_resolution_bonus: int = 15
+
     # Repack/Proper bonuses
     repack_bonus: int = 5
     proper_bonus: int = 5
@@ -114,13 +118,22 @@ class ScoringService:
     def __init__(self, weights: Optional[ScoringWeights] = None):
         self.weights = weights or ScoringWeights()
 
-    def calculate_score(self, result: SearchResult, content_type: ContentType = ContentType.UNKNOWN) -> int:
+    def calculate_score(
+        self,
+        result: SearchResult,
+        content_type: ContentType = ContentType.UNKNOWN,
+        preferred_resolution: Optional[str] = None,
+    ) -> int:
         """
         Calculate a quality score for a search result.
 
         Args:
             result: SearchResult to score
             content_type: Type of content (affects size penalties)
+            preferred_resolution: DEAD-06 — user's "Качество" setting
+                (e.g. "1080p"). When the release's resolution matches, it gets
+                a bonus on top of the base resolution scoring, so equally-good
+                releases at the preferred resolution rank above others.
 
         Returns:
             Calculated score (0-100 base, can go higher or negative)
@@ -144,6 +157,11 @@ class ScoringService:
                 score += self.weights.resolution_720p
             elif quality.resolution == "480p":
                 score += self.weights.resolution_480p
+
+            # DEAD-06: user preference bonus — "Качество" setting was collected
+            # but never fed into scoring; the pipeline now honours it.
+            if preferred_resolution and quality.resolution == preferred_resolution:
+                score += self.weights.preferred_resolution_bonus
 
         # Source scoring — LOGIC-01: REMUX is independent of whether a source
         # token was parsed (a "Title.2160p.REMUX" with no BluRay/WEB token still
@@ -255,6 +273,7 @@ class ScoringService:
         self,
         results: list[SearchResult],
         content_type: ContentType = ContentType.UNKNOWN,
+        preferred_resolution: Optional[str] = None,
     ) -> list[SearchResult]:
         """
         Sort results by calculated score (descending).
@@ -262,81 +281,22 @@ class ScoringService:
         Args:
             results: List of SearchResult objects
             content_type: Type of content for scoring adjustments
+            preferred_resolution: DEAD-06 — user's "Качество" setting, passed
+                through to calculate_score for the resolution-match bonus.
 
         Returns:
             Sorted list with calculated_score populated
+
+        PERF-08: scores are written in-place (`r.calculated_score = score`)
+        instead of `model_copy`-ing every ~25-field result just to attach a
+        score — ~100 pydantic copies per search, for nothing the caller needed.
         """
-        scored = []
         for r in results:
-            score = self.calculate_score(r, content_type)
-            scored.append(r.model_copy(update={"calculated_score": score}))
-        return sorted(scored, key=lambda x: x.calculated_score, reverse=True)
+            r.calculated_score = self.calculate_score(r, content_type, preferred_resolution)
+        results.sort(key=lambda x: x.calculated_score, reverse=True)
+        return results
 
-    def get_best_result(
-        self,
-        results: list[SearchResult],
-        content_type: ContentType = ContentType.UNKNOWN,
-        min_score: int = 0,
-    ) -> Optional[SearchResult]:
-        """
-        Get the best result above minimum score.
-
-        Args:
-            results: List of SearchResult objects
-            content_type: Type of content for scoring adjustments
-            min_score: Minimum acceptable score
-
-        Returns:
-            Best result or None if none meet criteria
-        """
-        if not results:
-            return None
-
-        sorted_results = self.sort_results(results, content_type)
-        best = sorted_results[0]
-
-        if best.calculated_score >= min_score:
-            return best
-
-        return None
-
-    def filter_by_quality(
-        self,
-        results: list[SearchResult],
-        preferred_resolution: Optional[str] = None,
-        min_seeders: int = 0,
-        exclude_cam_ts: bool = True,
-    ) -> list[SearchResult]:
-        """
-        Filter results by quality criteria.
-
-        Args:
-            results: List of SearchResult objects
-            preferred_resolution: Preferred resolution (e.g., "1080p")
-            min_seeders: Minimum number of seeders
-            exclude_cam_ts: Exclude CAM and TS releases
-
-        Returns:
-            Filtered list of results
-        """
-        filtered = []
-
-        for result in results:
-            # Check seeders
-            if result.seeders is not None and result.seeders < min_seeders:
-                continue
-
-            # Check CAM/TS
-            if exclude_cam_ts and result.quality.source:
-                source = result.quality.source.lower()
-                if source in ("cam", "ts", "telesync", "tc", "telecine"):
-                    continue
-
-            # Check resolution preference
-            if preferred_resolution and result.quality.resolution:
-                if result.quality.resolution != preferred_resolution:
-                    continue
-
-            filtered.append(result)
-
-        return filtered
+    # DEAD-06: get_best_result / filter_by_quality removed — no production
+    # caller (only their own tests exercised them). The one thing they were
+    # "on the way to" — preferred_resolution actually affecting ranking — is
+    # now handled properly inside calculate_score/sort_results above.

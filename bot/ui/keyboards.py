@@ -3,7 +3,7 @@
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from bot.ui.callbacks import PageCB
+from bot.ui.callbacks import PageCB, TorrentPageCB
 from bot.models import (
     ArtistInfo,
     ContentType,
@@ -69,7 +69,8 @@ class CallbackData:
     TORRENT_PAUSE = "t_pause:"  # t_pause:hash
     TORRENT_RESUME = "t_resume:"  # t_resume:hash
     TORRENT_DELETE = "t_delete:"  # t_delete:hash
-    TORRENT_DELETE_FILES = "t_delf:"  # t_delf:hash (delete with files)
+    TORRENT_DELETE_FILES = "t_delf:"  # t_delf:hash (delete with files) — shows confirm
+    TORRENT_DELETE_FILES_CONFIRM = "t_delfc:"  # t_delfc:hash — confirmed, actually deletes
     TORRENT_REFRESH = "t_refresh"  # Refresh torrent list
     TORRENT_FILTER = "t_filter:"  # t_filter:downloading
     TORRENT_PAGE = "t_page:"  # t_page:2
@@ -468,14 +469,16 @@ class Keyboards:
         total_pages: int = 1,
         current_filter: TorrentFilter = TorrentFilter.ALL,
     ) -> InlineKeyboardMarkup:
-        """Create keyboard for torrent list with pagination."""
-        # torrents is already a page slice, use passed total_pages
-        page_torrents = torrents
+        """Create keyboard for torrent list with pagination.
 
+        LOGIC-01: pagination buttons carry ``current_filter`` via the typed
+        ``TorrentPageCB`` so paging through a filtered list doesn't silently
+        fall back to the unfiltered "all" view.
+        """
         keyboard = []
 
-        # Torrent buttons
-        for torrent in page_torrents:
+        # Torrent buttons — torrents is already the page slice
+        for torrent in torrents:
             # Format: emoji progress% name (speed)
             progress = f"{torrent.progress_percent}%"
             speed = ""
@@ -492,7 +495,11 @@ class Keyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=label,
-                    callback_data=f"{CallbackData.TORRENT}{torrent.hash[:16]}",
+                    # PERF-05: full 40-hex hash fits comfortably under the 64-byte
+                    # callback_data limit ("t:" + 40 hex = 42 bytes), so lookups
+                    # can use the targeted get_torrent(hash) instead of scanning
+                    # the whole list for a short-hash prefix match.
+                    callback_data=f"{CallbackData.TORRENT}{torrent.hash}",
                 )
             ])
 
@@ -501,20 +508,29 @@ class Keyboards:
             nav_buttons = []
             if current_page > 0:
                 nav_buttons.append(
-                    InlineKeyboardButton(text="◀️", callback_data=f"{CallbackData.TORRENT_PAGE}{current_page - 1}")
+                    InlineKeyboardButton(
+                        text="◀️",
+                        callback_data=TorrentPageCB(page=current_page - 1, flt=current_filter.value).pack(),
+                    )
                 )
             nav_buttons.append(
                 InlineKeyboardButton(text=f"{current_page + 1}/{total_pages}", callback_data="noop")
             )
             if current_page < total_pages - 1:
                 nav_buttons.append(
-                    InlineKeyboardButton(text="▶️", callback_data=f"{CallbackData.TORRENT_PAGE}{current_page + 1}")
+                    InlineKeyboardButton(
+                        text="▶️",
+                        callback_data=TorrentPageCB(page=current_page + 1, flt=current_filter.value).pack(),
+                    )
                 )
             keyboard.append(nav_buttons)
 
         # Filter and action buttons
         keyboard.append([
-            InlineKeyboardButton(text="🔄 Обновить", callback_data=CallbackData.TORRENT_REFRESH),
+            InlineKeyboardButton(
+                text="🔄 Обновить",
+                callback_data=TorrentPageCB(page=current_page, flt=current_filter.value).pack(),
+            ),
             InlineKeyboardButton(text="🔍 Фильтр", callback_data=f"{CallbackData.TORRENT_FILTER}menu"),
         ])
 
@@ -534,31 +550,44 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
-    def torrent_details(torrent: TorrentInfo) -> InlineKeyboardMarkup:
-        """Create keyboard for torrent details view."""
+    def torrent_details(
+        torrent: TorrentInfo,
+        current_filter: TorrentFilter = TorrentFilter.ALL,
+    ) -> InlineKeyboardMarkup:
+        """Create keyboard for torrent details view.
+
+        LOGIC-01: ``current_filter`` (defaults to ALL when the caller doesn't
+        know it — e.g. reached via a legacy ``t_page:`` callback) is threaded
+        into the "back to list" button so returning from details doesn't
+        silently drop the user's active filter.
+        """
         keyboard = []
-        hash_short = torrent.hash[:16]
+        # PERF-05: full hash — see torrent_list for the byte-budget rationale.
+        full_hash = torrent.hash
 
         # Pause/Resume based on state
         from bot.models import TorrentState
         if torrent.state in (TorrentState.PAUSED, TorrentState.QUEUED):
             keyboard.append([
-                InlineKeyboardButton(text="▶️ Возобновить", callback_data=f"{CallbackData.TORRENT_RESUME}{hash_short}"),
+                InlineKeyboardButton(text="▶️ Возобновить", callback_data=f"{CallbackData.TORRENT_RESUME}{full_hash}"),
             ])
         else:
             keyboard.append([
-                InlineKeyboardButton(text="⏸ Пауза", callback_data=f"{CallbackData.TORRENT_PAUSE}{hash_short}"),
+                InlineKeyboardButton(text="⏸ Пауза", callback_data=f"{CallbackData.TORRENT_PAUSE}{full_hash}"),
             ])
 
         # Delete options
         keyboard.append([
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"{CallbackData.TORRENT_DELETE}{hash_short}"),
-            InlineKeyboardButton(text="🗑 + Файлы", callback_data=f"{CallbackData.TORRENT_DELETE_FILES}{hash_short}"),
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"{CallbackData.TORRENT_DELETE}{full_hash}"),
+            InlineKeyboardButton(text="🗑 + Файлы", callback_data=f"{CallbackData.TORRENT_DELETE_FILES}{full_hash}"),
         ])
 
-        # Back button
+        # Back button — carries the filter so the list redraw stays filtered.
         keyboard.append([
-            InlineKeyboardButton(text="◀️ К списку", callback_data=CallbackData.TORRENT_BACK),
+            InlineKeyboardButton(
+                text="◀️ К списку",
+                callback_data=TorrentPageCB(page=0, flt=current_filter.value).pack(),
+            ),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -603,11 +632,41 @@ class Keyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
+    def _speed_preset_row(
+        presets: list[tuple[int, str]],
+        direction: str,
+        current_limit: int,
+    ) -> list[InlineKeyboardButton]:
+        """Build one row of speed-limit preset buttons (LOGIC-03 helper).
+
+        Collapses what used to be 4 near-identical copies of this loop (two
+        rows each for download/upload) into a single implementation. The
+        "✓ " marker is honest: it compares against the caller-supplied
+        ``current_limit`` (bytes/s) instead of always defaulting to 0.
+        """
+        row = []
+        for speed_kb, label in presets:
+            marker = "✓ " if current_limit == speed_kb * 1024 else ""
+            row.append(
+                InlineKeyboardButton(
+                    text=f"{marker}{label}",
+                    callback_data=f"{CallbackData.SPEED_LIMIT}{direction}:{speed_kb}",
+                )
+            )
+        return row
+
+    @staticmethod
     def speed_limits_menu(
         current_dl_limit: int = 0,
         current_ul_limit: int = 0,
     ) -> InlineKeyboardMarkup:
-        """Create keyboard for speed limit presets."""
+        """Create keyboard for speed limit presets.
+
+        LOGIC-03: callers must pass the qBittorrent-reported current limits
+        (bytes/s) so the "✓" marker reflects reality — previously this was
+        always called with the 0/0 defaults, which happened to always match
+        the "unlimited" preset regardless of the real setting.
+        """
         # Presets in KB/s (0 = unlimited)
         presets = [
             (0, "∞ Без лимита"),
@@ -618,77 +677,36 @@ class Keyboards:
             (10240, "10 МБ/с"),
         ]
 
-        keyboard = []
-
-        # Download limits
-        keyboard.append([
-            InlineKeyboardButton(text="⬇️ Лимит загрузки:", callback_data="noop"),
-        ])
-
-        dl_row = []
-        for speed_kb, label in presets[:3]:
-            marker = "✓ " if current_dl_limit == speed_kb * 1024 else ""
-            dl_row.append(
-                InlineKeyboardButton(
-                    text=f"{marker}{label}",
-                    callback_data=f"{CallbackData.SPEED_LIMIT}dl:{speed_kb}",
-                )
-            )
-        keyboard.append(dl_row)
-
-        dl_row2 = []
-        for speed_kb, label in presets[3:]:
-            marker = "✓ " if current_dl_limit == speed_kb * 1024 else ""
-            dl_row2.append(
-                InlineKeyboardButton(
-                    text=f"{marker}{label}",
-                    callback_data=f"{CallbackData.SPEED_LIMIT}dl:{speed_kb}",
-                )
-            )
-        keyboard.append(dl_row2)
-
-        # Upload limits
-        keyboard.append([
-            InlineKeyboardButton(text="⬆️ Лимит отдачи:", callback_data="noop"),
-        ])
-
-        ul_row = []
-        for speed_kb, label in presets[:3]:
-            marker = "✓ " if current_ul_limit == speed_kb * 1024 else ""
-            ul_row.append(
-                InlineKeyboardButton(
-                    text=f"{marker}{label}",
-                    callback_data=f"{CallbackData.SPEED_LIMIT}ul:{speed_kb}",
-                )
-            )
-        keyboard.append(ul_row)
-
-        ul_row2 = []
-        for speed_kb, label in presets[3:]:
-            marker = "✓ " if current_ul_limit == speed_kb * 1024 else ""
-            ul_row2.append(
-                InlineKeyboardButton(
-                    text=f"{marker}{label}",
-                    callback_data=f"{CallbackData.SPEED_LIMIT}ul:{speed_kb}",
-                )
-            )
-        keyboard.append(ul_row2)
-
-        keyboard.append([
-            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TORRENT_BACK),
-        ])
+        keyboard = [
+            [InlineKeyboardButton(text="⬇️ Лимит загрузки:", callback_data="noop")],
+            Keyboards._speed_preset_row(presets[:3], "dl", current_dl_limit),
+            Keyboards._speed_preset_row(presets[3:], "dl", current_dl_limit),
+            [InlineKeyboardButton(text="⬆️ Лимит отдачи:", callback_data="noop")],
+            Keyboards._speed_preset_row(presets[:3], "ul", current_ul_limit),
+            Keyboards._speed_preset_row(presets[3:], "ul", current_ul_limit),
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TORRENT_BACK)],
+        ]
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
     def confirm_delete_torrent(torrent_hash: str, with_files: bool = False) -> InlineKeyboardMarkup:
-        """Create confirmation keyboard for deleting a torrent."""
-        hash_short = torrent_hash[:16]
+        """Create confirmation keyboard for deleting a torrent.
+
+        BUG-14/DEAD-03: previously generated ``t_delete:confirm:<hash16>`` /
+        ``t_delf:confirm:<hash16>``, which the handlers would have parsed as
+        a (nonexistent) short-hash "confirm" — this keyboard was unreachable
+        AND broken. Now wired for the "delete with files" flow only (the
+        irreversible one): confirm uses the dedicated ``t_delfc:`` prefix,
+        cancel goes back to the torrent card via ``t:<hash>``. Plain delete
+        (keep files, reversible) still fires immediately without this step.
+        """
+        full_hash = torrent_hash
         if with_files:
-            confirm_callback = f"{CallbackData.TORRENT_DELETE_FILES}confirm:{hash_short}"
+            confirm_callback = f"{CallbackData.TORRENT_DELETE_FILES_CONFIRM}{full_hash}"
             text = "⚠️ Да, удалить с файлами"
         else:
-            confirm_callback = f"{CallbackData.TORRENT_DELETE}confirm:{hash_short}"
+            confirm_callback = f"{CallbackData.TORRENT_DELETE}{full_hash}"
             text = "Да, удалить торрент"
 
         return InlineKeyboardMarkup(
@@ -697,7 +715,9 @@ class Keyboards:
                     InlineKeyboardButton(text=text, callback_data=confirm_callback),
                 ],
                 [
-                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.TORRENT_BACK),
+                    InlineKeyboardButton(
+                        text="❌ Отмена", callback_data=f"{CallbackData.TORRENT}{full_hash}"
+                    ),
                 ],
             ]
         )

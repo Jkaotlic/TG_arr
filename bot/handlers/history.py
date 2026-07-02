@@ -39,5 +39,5 @@ async def cmd_history(message: Message, db_user: User, db: Database, is_admin: b
         await message.answer(text, parse_mode="HTML")
 
     except Exception as e:
-        logger.error("Failed to load history", error=str(e))
+        logger.error("Failed to load history", error=str(e), exc_info=True)
         await message.answer(Formatters.format_error("Не удалось загрузить историю"))
