@@ -14,6 +14,7 @@ from bot.clients.registry import get_tmdb, get_radarr, get_sonarr, get_qbittorre
 from bot.db import Database
 from bot.models import User
 from bot.services.add_service import AddService
+from bot.ui.callbacks import AddContentCB, TrendingItemCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.menu import MENU_TRENDING
@@ -241,17 +242,15 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
         )
 
 
-@router.callback_query(F.data.startswith(CallbackData.TRENDING_MOVIE))
-async def handle_movie_from_trending(callback: CallbackQuery) -> None:
+@router.callback_query(TrendingItemCB.filter(F.kind == "movie"))
+async def handle_movie_from_trending(callback: CallbackQuery, callback_data: TrendingItemCB) -> None:
     """Show movie details with poster when clicked from trending list."""
     await callback.answer()
     if not callback.message:
         return
 
-    # Extract TMDB ID from callback data
-    tmdb_id_str = callback.data.removeprefix(CallbackData.TRENDING_MOVIE)
     try:
-        tmdb_id = int(tmdb_id_str)
+        tmdb_id = int(callback_data.item_id)
     except ValueError:
         await callback.message.answer("❌ Неверный ID фильма")
         return
@@ -304,17 +303,15 @@ async def handle_movie_from_trending(callback: CallbackQuery) -> None:
         )
 
 
-@router.callback_query(F.data.startswith(CallbackData.TRENDING_SERIES_ITEM))
-async def handle_series_from_trending(callback: CallbackQuery) -> None:
+@router.callback_query(TrendingItemCB.filter(F.kind == "series"))
+async def handle_series_from_trending(callback: CallbackQuery, callback_data: TrendingItemCB) -> None:
     """Show series details with poster when clicked from trending list."""
     await callback.answer()
     if not callback.message:
         return
 
-    # Extract TMDB ID from callback data
-    series_id_str = callback.data.removeprefix(CallbackData.TRENDING_SERIES_ITEM)
     try:
-        series_id = int(series_id_str)
+        series_id = int(callback_data.item_id)
     except ValueError:
         await callback.message.answer("❌ Неверный ID сериала")
         return
@@ -358,20 +355,16 @@ async def handle_series_from_trending(callback: CallbackQuery) -> None:
         )
 
 
-@router.callback_query(F.data.startswith(CallbackData.ADD_MOVIE))
-async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User, db: Database) -> None:
+@router.callback_query(AddContentCB.filter(F.kind == "movie"))
+async def handle_add_movie_from_trending(
+    callback: CallbackQuery, callback_data: AddContentCB, db_user: User, db: Database
+) -> None:
     """Add movie to Radarr from trending list."""
     await callback.answer()
     if not callback.message:
         return
 
-    # Extract TMDB ID from callback data
-    tmdb_id_str = callback.data.removeprefix(CallbackData.ADD_MOVIE)
-    try:
-        tmdb_id = int(tmdb_id_str)
-    except ValueError:
-        await callback.message.answer("❌ Неверный ID фильма")
-        return
+    tmdb_id = callback_data.tmdb_id
 
     # Try to get movie from cache first
     movie = _cache_get(_trending_movies_cache, tmdb_id)
@@ -455,20 +448,16 @@ async def handle_add_movie_from_trending(callback: CallbackQuery, db_user: User,
         )
 
 
-@router.callback_query(F.data.startswith(CallbackData.ADD_SERIES))
-async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User, db: Database) -> None:
+@router.callback_query(AddContentCB.filter(F.kind == "series"))
+async def handle_add_series_from_trending(
+    callback: CallbackQuery, callback_data: AddContentCB, db_user: User, db: Database
+) -> None:
     """Add series to Sonarr from trending list."""
     await callback.answer()
     if not callback.message:
         return
 
-    # Extract TMDB ID from callback data
-    tmdb_id_str = callback.data.removeprefix(CallbackData.ADD_SERIES)
-    try:
-        tmdb_id = int(tmdb_id_str)
-    except ValueError:
-        await callback.message.answer("❌ Неверный ID сериала")
-        return
+    tmdb_id = callback_data.tmdb_id
 
     # Try to get series from cache first
     series = _cache_get(_trending_series_cache, tmdb_id)
@@ -572,3 +561,21 @@ async def handle_add_series_from_trending(callback: CallbackQuery, db_user: User
             Formatters.format_error("Не удалось добавить сериал"),
             parse_mode="HTML",
         )
+
+
+# ---------------------------------------------------------------------------
+# r5: legacy string-callback fallbacks — trend_m:/trend_s:/add_movie:/
+# add_series: buttons from messages sent before the TrendingItemCB/
+# AddContentCB migration. TRENDING_ARTIST's legacy fallback lives in
+# music.py (it owns that handler family).
+# ---------------------------------------------------------------------------
+@router.callback_query(F.data.startswith(CallbackData.TRENDING_MOVIE))
+@router.callback_query(F.data.startswith(CallbackData.TRENDING_SERIES_ITEM))
+@router.callback_query(F.data.startswith(CallbackData.ADD_MOVIE))
+@router.callback_query(F.data.startswith(CallbackData.ADD_SERIES))
+async def handle_legacy_trending_item(callback: CallbackQuery) -> None:
+    """r5: legacy ``trend_m:``/``trend_s:``/``add_movie:``/``add_series:``
+    string buttons — surface an explicit alert instead of falling through
+    unhandled.
+    """
+    await callback.answer("Кнопка устарела — обновите список", show_alert=True)

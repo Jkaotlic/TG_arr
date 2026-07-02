@@ -31,6 +31,7 @@ def test_season_presets_keyboard_offers_all_presets():
 @pytest.mark.asyncio
 async def test_handle_season_preset_stores_choice_in_session():
     from bot.handlers import search
+    from bot.ui.callbacks import SeasonPresetCB
 
     session = SearchSession(
         user_id=1, query="q", content_type=ContentType.SERIES,
@@ -42,14 +43,14 @@ async def test_handle_season_preset_stores_choice_in_session():
     db.session_lock = MagicMock(return_value=asyncio.Lock())  # DB-02: real lock, not AsyncMock
 
     cb = MagicMock()
-    cb.data = "season_set:future"
+    cb.data = None
     cb.from_user = MagicMock(id=1)
     cb.message = MagicMock()
     cb.message.edit_text = AsyncMock()
     cb.answer = AsyncMock()
 
     with patch.object(search, "get_services", AsyncMock(return_value=(MagicMock(), MagicMock()))):
-        await search.handle_season_preset(cb, db_user=MagicMock(), db=db)
+        await search.handle_season_preset(cb, SeasonPresetCB(preset="future"), db_user=MagicMock(), db=db)
 
     assert session.monitor_type == "future"
     db.update_session.assert_awaited()

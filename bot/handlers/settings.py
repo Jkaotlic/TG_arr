@@ -9,8 +9,11 @@ handlers (``handle_settings_menu`` / ``handle_settings_set``). Resolution and
 auto-grab keep dedicated handlers (different shape: no *arr API call), but
 now go through the same render helper and point-update as everything else.
 
-callback_data strings are unchanged (see ``CallbackData`` in
-``bot/ui/keyboards.py``) — only the Python-side dispatch changed.
+r5: the "set:*" value picks (``set:rp:``/``rf:``/``sp:``/``sf:``/``lp:``/
+``lm:``/``lf:``/``res:``/``ag:``) are now the typed ``SettingCB`` — ``key``
+replaces the old per-setting string prefix (it *is* the UserPreferences
+field name), so the dispatch table's ``pref_key`` doubles as the callback
+key with no separate prefix to keep in sync.
 """
 
 from dataclasses import dataclass
@@ -32,6 +35,7 @@ from bot.config import get_settings
 from bot.db import Database
 from bot.models import User
 from bot.services.add_service import AddService
+from bot.ui.callbacks import SettingCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.menu import MENU_SETTINGS
@@ -115,17 +119,18 @@ class _SettingsEntry:
     """One row of the settings dispatch table.
 
     menu_callback: exact callback_data that opens the picker (e.g. "settings:radarr_profile").
-    set_prefix: CallbackData prefix for the corresponding "set:*" callback.
     getter: AddService coroutine method returning the list of choices.
     keyboard_builder: Keyboards static method building the picker keyboard.
     pref_key: UserPreferences field name to point-update (DB-05, json_set).
+        r5: also doubles as the typed ``SettingCB.key`` — the picker keyboard
+        and ``handle_settings_set`` both key off this one string, so there is
+        no separate "set:*" prefix to keep in sync with it.
     not_found_msg: alert shown when the getter returns an empty list.
     picker_title: HTML header shown above the picker keyboard.
     success_msg: toast shown after a successful set.
     """
 
     menu_callback: str
-    set_prefix: str
     getter: Callable[[AddService], Awaitable[list]]
     keyboard_builder: Callable[[list, str], object]
     pref_key: str
@@ -139,7 +144,6 @@ _SETTINGS_MAP: dict[str, _SettingsEntry] = {
     for entry in (
         _SettingsEntry(
             menu_callback="settings:radarr_profile",
-            set_prefix=CallbackData.SET_RADARR_PROFILE,
             getter=lambda svc: svc.get_radarr_profiles(),
             keyboard_builder=Keyboards.quality_profiles,
             pref_key="radarr_quality_profile_id",
@@ -149,7 +153,6 @@ _SETTINGS_MAP: dict[str, _SettingsEntry] = {
         ),
         _SettingsEntry(
             menu_callback="settings:radarr_folder",
-            set_prefix=CallbackData.SET_RADARR_FOLDER,
             getter=lambda svc: svc.get_radarr_root_folders(),
             keyboard_builder=Keyboards.root_folders,
             pref_key="radarr_root_folder_id",
@@ -159,7 +162,6 @@ _SETTINGS_MAP: dict[str, _SettingsEntry] = {
         ),
         _SettingsEntry(
             menu_callback="settings:sonarr_profile",
-            set_prefix=CallbackData.SET_SONARR_PROFILE,
             getter=lambda svc: svc.get_sonarr_profiles(),
             keyboard_builder=Keyboards.quality_profiles,
             pref_key="sonarr_quality_profile_id",
@@ -169,7 +171,6 @@ _SETTINGS_MAP: dict[str, _SettingsEntry] = {
         ),
         _SettingsEntry(
             menu_callback="settings:sonarr_folder",
-            set_prefix=CallbackData.SET_SONARR_FOLDER,
             getter=lambda svc: svc.get_sonarr_root_folders(),
             keyboard_builder=Keyboards.root_folders,
             pref_key="sonarr_root_folder_id",
@@ -179,7 +180,6 @@ _SETTINGS_MAP: dict[str, _SettingsEntry] = {
         ),
         _SettingsEntry(
             menu_callback="settings:lidarr_profile",
-            set_prefix=CallbackData.SET_LIDARR_PROFILE,
             getter=lambda svc: svc.get_lidarr_profiles(),
             keyboard_builder=Keyboards.quality_profiles,
             pref_key="lidarr_quality_profile_id",
@@ -189,7 +189,6 @@ _SETTINGS_MAP: dict[str, _SettingsEntry] = {
         ),
         _SettingsEntry(
             menu_callback="settings:lidarr_meta",
-            set_prefix=CallbackData.SET_LIDARR_META,
             getter=lambda svc: svc.get_lidarr_metadata_profiles(),
             keyboard_builder=Keyboards.metadata_profiles,
             pref_key="lidarr_metadata_profile_id",
@@ -199,7 +198,6 @@ _SETTINGS_MAP: dict[str, _SettingsEntry] = {
         ),
         _SettingsEntry(
             menu_callback="settings:lidarr_folder",
-            set_prefix=CallbackData.SET_LIDARR_FOLDER,
             getter=lambda svc: svc.get_lidarr_root_folders(),
             keyboard_builder=Keyboards.root_folders,
             pref_key="lidarr_root_folder_id",
@@ -210,9 +208,9 @@ _SETTINGS_MAP: dict[str, _SettingsEntry] = {
     )
 }
 
-# Reverse lookup: set-callback prefix -> table entry, for handle_settings_set.
+# Reverse lookup: SettingCB.key -> table entry, for handle_settings_set.
 _SETTINGS_SET_MAP: dict[str, _SettingsEntry] = {
-    entry.set_prefix: entry for entry in _SETTINGS_MAP.values()
+    entry.pref_key: entry for entry in _SETTINGS_MAP.values()
 }
 
 
@@ -234,7 +232,7 @@ async def handle_settings_menu(callback: CallbackQuery) -> None:
 
         await callback.message.edit_text(
             entry.picker_title,
-            reply_markup=entry.keyboard_builder(choices, entry.set_prefix),
+            reply_markup=entry.keyboard_builder(choices, entry.pref_key),
             parse_mode="HTML",
         )
         await callback.answer()
@@ -249,12 +247,14 @@ async def handle_settings_menu(callback: CallbackQuery) -> None:
         await callback.answer("Ошибка загрузки", show_alert=True)
 
 
-def _matches_settings_set_prefix(data: str) -> bool:
-    return any(data.startswith(prefix) for prefix in _SETTINGS_SET_MAP)
+def _matches_settings_set_key(callback_data: SettingCB) -> bool:
+    return callback_data.key in _SETTINGS_SET_MAP
 
 
-@router.callback_query(F.data.func(_matches_settings_set_prefix))
-async def handle_settings_set(callback: CallbackQuery, db_user: User, db: Database) -> None:
+@router.callback_query(SettingCB.filter(F.func(_matches_settings_set_key)))
+async def handle_settings_set(
+    callback: CallbackQuery, callback_data: SettingCB, db_user: User, db: Database
+) -> None:
     """Generic set handler: point-update the matching preference key.
 
     BUG-04b: exactly one ``callback.answer()`` per callback — the toast is
@@ -266,14 +266,13 @@ async def handle_settings_set(callback: CallbackQuery, db_user: User, db: Databa
     ``preferences`` blob, so two concurrent settings changes on different
     keys can't clobber each other.
     """
-    if not callback.data or not callback.message:
+    if not callback.message:
         return
 
-    prefix = next(p for p in _SETTINGS_SET_MAP if callback.data.startswith(p))
-    entry = _SETTINGS_SET_MAP[prefix]
+    entry = _SETTINGS_SET_MAP[callback_data.key]
 
     try:
-        value = int(callback.data.removeprefix(prefix))
+        value = int(callback_data.value)
     except ValueError:
         await callback.answer("Неверное значение", show_alert=True)
         return
@@ -315,14 +314,16 @@ async def handle_resolution_menu(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith(CallbackData.SET_RESOLUTION))
-async def handle_set_resolution(callback: CallbackQuery, db_user: User, db: Database) -> None:
+@router.callback_query(SettingCB.filter(F.key == "preferred_resolution"))
+async def handle_set_resolution(
+    callback: CallbackQuery, callback_data: SettingCB, db_user: User, db: Database
+) -> None:
     """Set preferred resolution."""
-    if not callback.data or not callback.message:
+    if not callback.message:
         return
 
     try:
-        resolution = callback.data.removeprefix(CallbackData.SET_RESOLUTION)
+        resolution = callback_data.value
         if resolution == "any":
             resolution = None
 
@@ -358,15 +359,16 @@ async def handle_auto_grab_menu(callback: CallbackQuery, db_user: User) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith(CallbackData.SET_AUTO_GRAB))
-async def handle_set_auto_grab(callback: CallbackQuery, db_user: User, db: Database) -> None:
+@router.callback_query(SettingCB.filter(F.key == "auto_grab_enabled"))
+async def handle_set_auto_grab(
+    callback: CallbackQuery, callback_data: SettingCB, db_user: User, db: Database
+) -> None:
     """Toggle auto-grab setting."""
-    if not callback.data or not callback.message:
+    if not callback.message:
         return
 
     try:
-        value = callback.data.removeprefix(CallbackData.SET_AUTO_GRAB)
-        enabled = value == "1"
+        enabled = callback_data.value == "1"
 
         await db.update_user_preference(db_user.tg_id, "auto_grab_enabled", enabled)
         db_user.preferences.auto_grab_enabled = enabled
@@ -380,3 +382,16 @@ async def handle_set_auto_grab(callback: CallbackQuery, db_user: User, db: Datab
         return
 
     await callback.answer(f"Авто-загрузка {'включена' if enabled else 'выключена'}!")
+
+
+@router.callback_query(F.data.startswith("set:"))
+async def handle_legacy_setting_set(callback: CallbackQuery) -> None:
+    """r5: legacy ``set:rp:``/``rf:``/``sp:``/``sf:``/``lp:``/``lm:``/``lf:``/
+    ``res:``/``ag:`` string buttons from messages sent before the SettingCB
+    migration — surface an explicit alert instead of falling through
+    unhandled. Registered last so it only catches callbacks the typed
+    ``SettingCB.filter()`` handlers above didn't already claim (aiogram's
+    typed CallbackData still serializes with the same "set:" text prefix,
+    but structural unpacking there always wins first).
+    """
+    await callback.answer("Кнопка устарела — откройте настройки заново", show_alert=True)

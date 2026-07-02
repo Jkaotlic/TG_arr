@@ -275,7 +275,9 @@ async def test_trending_add_series_caches_resolved_tvdb():
     trending._trending_series_cache[tmdb_id] = unresolved
 
     cb, _ = _callback_with_status()
-    cb.data = f"add_series:{tmdb_id}"
+    cb.data = None
+
+    from bot.ui.callbacks import AddContentCB
 
     with patch.object(trending, "get_prowlarr", AsyncMock()), \
          patch.object(trending, "get_radarr", AsyncMock()), \
@@ -283,7 +285,9 @@ async def test_trending_add_series_caches_resolved_tvdb():
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
         # First add: must perform the Sonarr lookup to resolve tvdb.
-        await trending.handle_add_series_from_trending(cb, db_user=db_user, db=db)
+        await trending.handle_add_series_from_trending(
+            cb, AddContentCB(kind="series", tmdb_id=tmdb_id), db_user=db_user, db=db
+        )
         assert sonarr_client.lookup_series.await_count == 1
 
         # Cache must now hold the *resolved* series (with a real tvdb_id).
@@ -292,8 +296,10 @@ async def test_trending_add_series_caches_resolved_tvdb():
 
         # Second add: cache already resolved → no further lookup_series call.
         cb2, _ = _callback_with_status()
-        cb2.data = f"add_series:{tmdb_id}"
-        await trending.handle_add_series_from_trending(cb2, db_user=db_user, db=db)
+        cb2.data = None
+        await trending.handle_add_series_from_trending(
+            cb2, AddContentCB(kind="series", tmdb_id=tmdb_id), db_user=db_user, db=db
+        )
         assert sonarr_client.lookup_series.await_count == 1  # unchanged
 
     trending._trending_series_cache.clear()
@@ -325,14 +331,18 @@ async def test_trending_add_series_already_resolved_skips_lookup():
     trending._trending_series_cache[tmdb_id] = resolved
 
     cb, _ = _callback_with_status()
-    cb.data = f"add_series:{tmdb_id}"
+    cb.data = None
+
+    from bot.ui.callbacks import AddContentCB
 
     with patch.object(trending, "get_prowlarr", AsyncMock()), \
          patch.object(trending, "get_radarr", AsyncMock()), \
          patch.object(trending, "get_sonarr", AsyncMock(return_value=sonarr_client)), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
-        await trending.handle_add_series_from_trending(cb, db_user=db_user, db=db)
+        await trending.handle_add_series_from_trending(
+            cb, AddContentCB(kind="series", tmdb_id=tmdb_id), db_user=db_user, db=db
+        )
 
     sonarr_client.lookup_series.assert_not_awaited()
     trending._trending_series_cache.clear()
@@ -356,17 +366,21 @@ async def test_trending_add_movie_still_works():
     db_user.preferences = MagicMock(radarr_quality_profile_id=None, radarr_root_folder_id=None)
 
     cb, status_msg = _callback_with_status()
-    cb.data = "add_movie:321"
+    cb.data = None
 
     trending._trending_movies_cache.clear()
     trending._trending_movies_cache[321] = added
+
+    from bot.ui.callbacks import AddContentCB
 
     with patch.object(trending, "get_prowlarr", AsyncMock()), \
          patch.object(trending, "get_radarr", AsyncMock()), \
          patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
-        await trending.handle_add_movie_from_trending(cb, db_user=db_user, db=db)
+        await trending.handle_add_movie_from_trending(
+            cb, AddContentCB(kind="movie", tmdb_id=321), db_user=db_user, db=db
+        )
 
     add_service.add_movie.assert_awaited_once()
     sent = status_msg.edit_text.await_args_list[-1].args[0]

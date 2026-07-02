@@ -37,20 +37,40 @@ def _make_callback(data: str) -> MagicMock:
     return cb
 
 
+def _action_cb(action: str, h: str) -> MagicMock:
+    """Build a CallbackQuery-like mock carrying a packed TorrentActionCB."""
+    from bot.ui.callbacks import TorrentActionCB
+
+    cb = MagicMock()
+    cb.data = TorrentActionCB(action=action, h=h).pack()
+    cb.answer = AsyncMock()
+    message = MagicMock()
+    message.edit_text = AsyncMock()
+    cb.message = message
+    return cb
+
+
+async def _run_action(downloads, cb, is_admin: bool = False) -> None:
+    from bot.ui.callbacks import TorrentActionCB
+
+    await downloads.handle_torrent_action(cb, TorrentActionCB.unpack(cb.data), is_admin=is_admin)
+
+
 @pytest.mark.asyncio
 async def test_handle_pause_torrent_calls_answer_once(fake_torrent):
     """BUG-15: pause handler must call callback.answer exactly once."""
     from bot.handlers import downloads
 
     qbt = AsyncMock()
+    qbt.get_torrent = AsyncMock(return_value=fake_torrent)
     qbt.get_torrent_by_short_hash = AsyncMock(return_value=fake_torrent)
     qbt.pause = AsyncMock()
     qbt.get_torrents = AsyncMock(return_value=[fake_torrent])
 
-    cb = _make_callback(f"t_pause:{fake_torrent.hash[:8]}")
+    cb = _action_cb("pause", fake_torrent.hash)
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
-        await downloads.handle_pause_torrent(cb)
+        await _run_action(downloads, cb)
 
     assert cb.answer.call_count == 1, (
         f"callback.answer was called {cb.answer.call_count} times "
@@ -65,14 +85,15 @@ async def test_handle_resume_torrent_calls_answer_once(fake_torrent):
     from bot.handlers import downloads
 
     qbt = AsyncMock()
+    qbt.get_torrent = AsyncMock(return_value=fake_torrent)
     qbt.get_torrent_by_short_hash = AsyncMock(return_value=fake_torrent)
     qbt.resume = AsyncMock()
     qbt.get_torrents = AsyncMock(return_value=[fake_torrent])
 
-    cb = _make_callback(f"t_resume:{fake_torrent.hash[:8]}")
+    cb = _action_cb("resume", fake_torrent.hash)
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
-        await downloads.handle_resume_torrent(cb)
+        await _run_action(downloads, cb)
 
     assert cb.answer.call_count == 1
     qbt.resume.assert_awaited_once()
@@ -84,14 +105,15 @@ async def test_handle_delete_torrent_calls_answer_once(fake_torrent):
     from bot.handlers import downloads
 
     qbt = AsyncMock()
+    qbt.get_torrent = AsyncMock(return_value=fake_torrent)
     qbt.get_torrent_by_short_hash = AsyncMock(return_value=fake_torrent)
     qbt.delete = AsyncMock()
     qbt.get_torrents = AsyncMock(return_value=[])
 
-    cb = _make_callback(f"t_delete:{fake_torrent.hash[:8]}")
+    cb = _action_cb("delete", fake_torrent.hash)
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
-        await downloads.handle_delete_torrent(cb, is_admin=True)
+        await _run_action(downloads, cb, is_admin=True)
 
     assert cb.answer.call_count == 1
     qbt.delete.assert_awaited_once()
@@ -107,10 +129,10 @@ async def test_handle_delete_with_files_shows_confirmation(fake_torrent):
     qbt.get_torrent = AsyncMock(return_value=fake_torrent)
     qbt.delete = AsyncMock()
 
-    cb = _make_callback(f"t_delf:{fake_torrent.hash}")
+    cb = _action_cb("delf", fake_torrent.hash)
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
-        await downloads.handle_delete_with_files(cb, is_admin=True)
+        await _run_action(downloads, cb, is_admin=True)
 
     assert cb.answer.call_count == 1
     qbt.delete.assert_not_awaited()
@@ -123,7 +145,7 @@ async def test_handle_delete_with_files_shows_confirmation(fake_torrent):
         for btn in row
         if btn.callback_data
     ]
-    assert any(c.startswith("t_delfc:") for c in confirm_cbs)
+    assert any(c.startswith("ta:delfc:") for c in confirm_cbs)
 
 
 @pytest.mark.asyncio
@@ -137,10 +159,10 @@ async def test_handle_delete_with_files_confirm_calls_answer_once(fake_torrent):
     qbt.delete = AsyncMock()
     qbt.get_torrents = AsyncMock(return_value=[])
 
-    cb = _make_callback(f"t_delfc:{fake_torrent.hash}")
+    cb = _action_cb("delfc", fake_torrent.hash)
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
-        await downloads.handle_delete_with_files_confirm(cb, is_admin=True)
+        await _run_action(downloads, cb, is_admin=True)
 
     assert cb.answer.call_count == 1
     qbt.delete.assert_awaited_once_with([fake_torrent.hash], delete_files=True)
@@ -154,10 +176,10 @@ async def test_handle_delete_with_files_confirm_requires_admin(fake_torrent):
     qbt = AsyncMock()
     qbt.delete = AsyncMock()
 
-    cb = _make_callback(f"t_delfc:{fake_torrent.hash}")
+    cb = _action_cb("delfc", fake_torrent.hash)
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
-        await downloads.handle_delete_with_files_confirm(cb, is_admin=False)
+        await _run_action(downloads, cb, is_admin=False)
 
     qbt.delete.assert_not_awaited()
     cb.answer.assert_awaited_once()
@@ -607,10 +629,10 @@ async def test_handle_torrent_details_full_hash_uses_targeted_lookup():
     qbt.get_torrent = AsyncMock(return_value=fake)
     qbt.get_torrent_by_short_hash = AsyncMock(side_effect=AssertionError("should not scan full list"))
 
-    cb = _make_callback(f"t:{full_hash}")
+    cb = _action_cb("view", full_hash)
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
-        await downloads.handle_torrent_details(cb)
+        await _run_action(downloads, cb)
 
     qbt.get_torrent.assert_awaited_once_with(full_hash)
     qbt.get_torrent_by_short_hash.assert_not_called()
@@ -626,9 +648,9 @@ async def test_handle_torrent_details_short_hash_falls_back_to_scan():
     qbt = AsyncMock()
     qbt.get_torrent_by_short_hash = AsyncMock(return_value=fake)
 
-    cb = _make_callback(f"t:{short_hash}")
+    cb = _action_cb("view", short_hash)
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
-        await downloads.handle_torrent_details(cb)
+        await _run_action(downloads, cb)
 
     qbt.get_torrent_by_short_hash.assert_awaited_once_with(short_hash)

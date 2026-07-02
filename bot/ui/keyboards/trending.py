@@ -10,6 +10,7 @@ circular import between this module and the package ``__init__.py``.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import MovieInfo, SeriesInfo
+from bot.ui.callbacks import AddContentCB, TrendingItemCB
 from bot.ui.keyboards._constants import CallbackData
 from bot.ui.keyboards.search import _SearchKeyboards
 
@@ -42,7 +43,7 @@ class _TrendingKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=label,
-                    callback_data=f"{CallbackData.TRENDING_ARTIST}{i}",
+                    callback_data=TrendingItemCB(kind="artist", item_id=str(i)).pack(),
                 )
             ])
         keyboard.append([
@@ -62,7 +63,7 @@ class _TrendingKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=title,
-                    callback_data=f"{CallbackData.TRENDING_MOVIE}{movie.tmdb_id}",
+                    callback_data=TrendingItemCB(kind="movie", item_id=str(movie.tmdb_id)).pack(),
                 )
             ])
 
@@ -84,7 +85,7 @@ class _TrendingKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=title,
-                    callback_data=f"{CallbackData.TRENDING_SERIES_ITEM}{series.tmdb_id}",
+                    callback_data=TrendingItemCB(kind="series", item_id=str(series.tmdb_id)).pack(),
                 )
             ])
 
@@ -101,7 +102,12 @@ class _TrendingKeyboards:
         links = _SearchKeyboards._external_links(movie)
         if links:
             keyboard.append(links)
-        keyboard.append([InlineKeyboardButton(text="➕ Добавить в Radarr", callback_data=f"{CallbackData.ADD_MOVIE}{movie.tmdb_id}")])
+        keyboard.append([
+            InlineKeyboardButton(
+                text="➕ Добавить в Radarr",
+                callback_data=AddContentCB(kind="movie", tmdb_id=movie.tmdb_id).pack(),
+            )
+        ])
         keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_MOVIES)])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -112,6 +118,11 @@ class _TrendingKeyboards:
         links = _SearchKeyboards._external_links(series)
         if links:
             keyboard.append(links)
-        keyboard.append([InlineKeyboardButton(text="➕ Добавить в Sonarr", callback_data=f"{CallbackData.ADD_SERIES}{series.tmdb_id}")])
+        keyboard.append([
+            InlineKeyboardButton(
+                text="➕ Добавить в Sonarr",
+                callback_data=AddContentCB(kind="series", tmdb_id=series.tmdb_id).pack(),
+            )
+        ])
         keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_SERIES)])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)

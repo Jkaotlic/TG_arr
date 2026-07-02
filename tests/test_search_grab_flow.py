@@ -385,7 +385,7 @@ async def test_release_selection_acks_before_lookup():
     )
     db = _make_db(session)
     db_user = _make_db_user()
-    callback = _make_callback(data=search.CallbackData.RELEASE + "0")
+    callback = _make_callback()
 
     call_order = []
 
@@ -408,7 +408,7 @@ async def test_release_selection_acks_before_lookup():
 
     with patch.object(search, "get_services", AsyncMock(return_value=services)), \
          patch.object(search, "get_emby", AsyncMock(return_value=None)):
-        await search.handle_release_selection(callback, db_user, db)
+        await search.handle_release_selection(callback, search.ReleaseCB(idx=0), db_user, db)
 
     assert call_order == ["answer", "lookup_movie"], call_order
 
@@ -432,7 +432,7 @@ async def test_release_selection_reuses_cached_lookup_candidates_no_network_call
     )
     db = _make_db(session)
     db_user = _make_db_user()
-    callback = _make_callback(data=search.CallbackData.RELEASE + "0")
+    callback = _make_callback()
 
     search_service = MagicMock()
     search_service.parse_query = MagicMock(return_value={"title": "interstellar", "year": None})
@@ -444,7 +444,7 @@ async def test_release_selection_reuses_cached_lookup_candidates_no_network_call
 
     with patch.object(search, "get_services", AsyncMock(return_value=services)), \
          patch.object(search, "get_emby", AsyncMock(return_value=None)):
-        await search.handle_release_selection(callback, db_user, db)
+        await search.handle_release_selection(callback, search.ReleaseCB(idx=0), db_user, db)
 
     search_service.lookup_movie.assert_not_awaited()
     sent = callback.message.edit_text.await_args_list[-1].args[0]
@@ -465,7 +465,7 @@ async def test_release_selection_falls_back_to_lookup_when_no_cached_candidates(
     )
     db = _make_db(session)
     db_user = _make_db_user()
-    callback = _make_callback(data=search.CallbackData.RELEASE + "0")
+    callback = _make_callback()
 
     fetched_movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
     search_service = MagicMock()
@@ -478,7 +478,7 @@ async def test_release_selection_falls_back_to_lookup_when_no_cached_candidates(
 
     with patch.object(search, "get_services", AsyncMock(return_value=services)), \
          patch.object(search, "get_emby", AsyncMock(return_value=None)):
-        await search.handle_release_selection(callback, db_user, db)
+        await search.handle_release_selection(callback, search.ReleaseCB(idx=0), db_user, db)
 
     search_service.lookup_movie.assert_awaited_once()
 

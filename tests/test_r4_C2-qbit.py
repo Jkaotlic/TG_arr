@@ -263,42 +263,57 @@ class TestHandlerSingleFetch:
         cb.message = AsyncMock()
         return cb
 
+    def _make_action_callback(self, action, h):
+        from bot.ui.callbacks import TorrentActionCB
+
+        return self._make_callback(TorrentActionCB(action=action, h=h).pack())
+
     @pytest.mark.asyncio
     async def test_pause_does_not_refetch_full_list(self):
+        """PERF-01/PERF-05: with a full-hash TorrentActionCB, both the initial
+        resolve and the post-pause redraw use the targeted get_torrent fetch
+        (never the full-list scan / short-hash fallback)."""
         from bot.handlers import downloads
+        from bot.ui.callbacks import TorrentActionCB
 
         qbt, torrent = self._make_qbt()
-        cb = self._make_callback("t_pause:abc123de")
+        cb = self._make_action_callback("pause", torrent.hash)
 
         with patch.object(downloads, "get_qbittorrent",
                           new=AsyncMock(return_value=qbt)), \
                 patch.object(downloads, "_render_torrent_details",
                              new=AsyncMock()):
-            await downloads.handle_pause_torrent(cb)
+            await downloads.handle_torrent_action(cb, TorrentActionCB.unpack(cb.data))
 
         # Pause was applied to the located torrent.
         qbt.pause.assert_awaited_once_with([torrent.hash])
-        # The full list is never re-listed; the post-action redraw uses the
-        # targeted single-torrent fetch instead.
+        # The full list is never re-listed; both the resolve and the
+        # post-action redraw use the targeted single-torrent fetch.
         assert qbt.get_torrents.await_count == 0
-        qbt.get_torrent.assert_awaited_once_with(torrent.hash)
+        assert qbt.get_torrent.await_count == 2
+        qbt.get_torrent.assert_awaited_with(torrent.hash)
+        qbt.get_torrent_by_short_hash.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_resume_does_not_refetch_full_list(self):
+        """PERF-01/PERF-05: see test_pause_does_not_refetch_full_list."""
         from bot.handlers import downloads
+        from bot.ui.callbacks import TorrentActionCB
 
         qbt, torrent = self._make_qbt()
-        cb = self._make_callback("t_resume:abc123de")
+        cb = self._make_action_callback("resume", torrent.hash)
 
         with patch.object(downloads, "get_qbittorrent",
                           new=AsyncMock(return_value=qbt)), \
                 patch.object(downloads, "_render_torrent_details",
                              new=AsyncMock()):
-            await downloads.handle_resume_torrent(cb)
+            await downloads.handle_torrent_action(cb, TorrentActionCB.unpack(cb.data))
 
         qbt.resume.assert_awaited_once_with([torrent.hash])
         assert qbt.get_torrents.await_count == 0
-        qbt.get_torrent.assert_awaited_once_with(torrent.hash)
+        assert qbt.get_torrent.await_count == 2
+        qbt.get_torrent.assert_awaited_with(torrent.hash)
+        qbt.get_torrent_by_short_hash.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

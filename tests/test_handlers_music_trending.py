@@ -238,8 +238,7 @@ async def test_render_artist_list_respects_results_per_page_setting(monkeypatch)
         # total_pages > 1 for 5 artists @ per_page=3) — count artist rows only.
         artist_button_rows = [
             row for row in keyboard.inline_keyboard
-            if len(row) == 1 and row[0].callback_data.startswith(music.CallbackData.ARTIST)
-            and not row[0].callback_data.startswith(music.CallbackData.ARTIST_PAGE)
+            if len(row) == 1 and row[0].callback_data.startswith("art:")
         ]
         assert len(artist_button_rows) == 3
     finally:
@@ -393,17 +392,19 @@ async def test_add_movie_from_trending_escapes_error_message():
     db_user.tg_id = 1
     db_user.preferences = MagicMock(radarr_quality_profile_id=None, radarr_root_folder_id=None)
 
-    cb = _make_callback(f"{trending.CallbackData.ADD_MOVIE}99")
+    cb = _make_callback(None)
     status_msg = MagicMock()
     status_msg.edit_text = AsyncMock()
     cb.message.answer = AsyncMock(return_value=status_msg)
+
+    from bot.ui.callbacks import AddContentCB
 
     with patch.object(trending, "get_prowlarr", AsyncMock()), \
          patch.object(trending, "get_radarr", AsyncMock()), \
          patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
-        await trending.handle_add_movie_from_trending(cb, db_user, db)
+        await trending.handle_add_movie_from_trending(cb, AddContentCB(kind="movie", tmdb_id=99), db_user, db)
 
     sent_text = status_msg.edit_text.call_args.args[0]
     assert "<script>" not in sent_text, "raw HTML in error_message must be escaped (BUG-12b)"
@@ -459,17 +460,19 @@ async def test_add_series_from_trending_does_not_call_get_sonarr_twice():
     db_user.tg_id = 1
     db_user.preferences = MagicMock(sonarr_quality_profile_id=None, sonarr_root_folder_id=None)
 
-    cb = _make_callback(f"{trending.CallbackData.ADD_SERIES}55")
+    cb = _make_callback(None)
     status_msg = MagicMock()
     status_msg.edit_text = AsyncMock()
     cb.message.answer = AsyncMock(return_value=status_msg)
+
+    from bot.ui.callbacks import AddContentCB
 
     with patch.object(trending, "get_prowlarr", AsyncMock()), \
          patch.object(trending, "get_radarr", AsyncMock()), \
          patch.object(trending, "get_sonarr", get_sonarr_mock), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
-        await trending.handle_add_series_from_trending(cb, db_user, db)
+        await trending.handle_add_series_from_trending(cb, AddContentCB(kind="series", tmdb_id=55), db_user, db)
 
     # get_sonarr() is called exactly once (to build AddService's sonarr client),
     # not a second time inside the TVDB-resolution branch (LOGIC-22).

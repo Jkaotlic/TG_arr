@@ -19,6 +19,7 @@ and call `_search.get_services()`, so a patch on this package's attribute is
 observed by every submodule at call time.
 """
 
+from bot.ui.callbacks import ReleaseCB  # noqa: F401 -- re-exported, used by tests/callers as search.ReleaseCB
 from bot.ui.keyboards import CallbackData  # noqa: F401 -- re-exported, used by tests/callers as search.CallbackData
 
 from .services import (  # noqa: F401

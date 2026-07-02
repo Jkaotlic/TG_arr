@@ -3,6 +3,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import ArtistInfo
+from bot.ui.callbacks import ArtistCB
 from bot.ui.keyboards._constants import CallbackData
 
 
@@ -30,7 +31,7 @@ class _MusicKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=label,
-                    callback_data=f"{CallbackData.ARTIST}{idx}",
+                    callback_data=ArtistCB(idx=idx).pack(),
                 )
             ])
 
