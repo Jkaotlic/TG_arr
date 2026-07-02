@@ -136,6 +136,12 @@ class DetectionResult(NamedTuple):
     confidence: float                       # 0.0..1.0
     reason: str                             # short label for logs
     candidates: dict[str, list[str]]        # {"movie": [...titles], "series": [...], "music": [...]}
+    # LOGIC-06: the *full* lookup objects behind `candidates["movie"/"series"]`
+    # (titles-only) for the winning content_type — so callers that already ran
+    # detection don't have to re-hit Radarr/Sonarr lookup for the same query.
+    # Empty for MUSIC/UNKNOWN winners or when detection short-circuited before
+    # a lookup ran (e.g. "series_pattern"/"too_short"/"lookup_timeout").
+    lookup_results: list = []
 
 
 class SearchService:
@@ -154,11 +160,6 @@ class SearchService:
         self.sonarr = sonarr
         self.lidarr = lidarr
         self.scoring = scoring or ScoringService()
-
-    async def detect_content_type(self, query: str) -> ContentType:
-        """Backward-compatible wrapper around detect_with_confidence."""
-        result = await self.detect_with_confidence(query)
-        return result.content_type
 
     async def detect_with_confidence(self, query: str) -> DetectionResult:
         """
@@ -304,7 +305,14 @@ class SearchService:
         elif top_score - runner_up_score < 0.05 and runner_up_score > 0.6:
             result = DetectionResult(ContentType.UNKNOWN, top_score, "ambiguous", candidates)
         else:
-            result = DetectionResult(top_type, top_score, reason, candidates)
+            # LOGIC-06: carry the full lookup objects for the winning type so
+            # the caller (process_search -> SearchSession.lookup_candidates)
+            # can skip a second identical Radarr/Sonarr lookup later in the
+            # same flow (release selection / grab_best).
+            winning_lookup = movies if top_type == ContentType.MOVIE else (
+                series if top_type == ContentType.SERIES else []
+            )
+            result = DetectionResult(top_type, top_score, reason, candidates, list(winning_lookup))
 
         # PERF-01: cache the classification (even UNKNOWN/low-confidence — a
         # repeat of the exact same ambiguous query would just burn another

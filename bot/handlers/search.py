@@ -253,6 +253,10 @@ async def process_search(
     # message ("Ищу релизы...") instead of leaving it hanging and sending a
     # brand-new error message underneath it.
     status_msg: Optional[Message] = None
+    # LOGIC-06: only set when content_type was UNKNOWN and detection ran;
+    # carries lookup_results forward into the session below so a later grab
+    # doesn't repeat the same Radarr/Sonarr lookup.
+    detection = None
 
     try:
         parsed = search_service.parse_query(query)
@@ -355,12 +359,19 @@ async def process_search(
         # into `sessions` right below) — never read by any handler. Dropped
         # from the hot path; `actions` (ActionType.SEARCH, logged below)
         # already covers search history.
+        # LOGIC-06: forward detection's lookup_results (if any) so
+        # handle_release_selection/_execute_grab can reuse them instead of
+        # repeating the same Radarr/Sonarr lookup.
+        lookup_candidates = (
+            detection.lookup_results if detection and detection.lookup_results else None
+        )
         session = SearchSession(
             user_id=user_id,
             query=query,
             content_type=content_type,
             results=results,
             current_page=0,
+            lookup_candidates=lookup_candidates,
         )
         await db.save_session(user_id, session)
 
@@ -463,26 +474,30 @@ async def handle_pagination(
 
     settings = get_settings()
     user_id = callback.from_user.id
-    session = await db.get_session(user_id)
 
-    if not session or not session.results:
-        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-        return
+    # DB-02: lock the read-modify-write cycle — a double-tap on pagination
+    # races two concurrent get_session/save_session pairs otherwise.
+    async with db.session_lock(user_id):
+        session = await db.get_session(user_id)
 
-    page = callback_data.page
+        if not session or not session.results:
+            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+            return
 
-    per_page = settings.results_per_page
-    total_pages = (len(session.results) + per_page - 1) // per_page
+        page = callback_data.page
 
-    if page < 0 or page >= total_pages:
-        await callback.answer("Неверная страница", show_alert=True)
-        return
+        per_page = settings.results_per_page
+        total_pages = (len(session.results) + per_page - 1) // per_page
 
-    # PERF-06: persist current_page only when it actually changed. Re-tapping the
-    # current page (or a no-op nav) must not re-serialize the whole session to SQLite.
-    if page != session.current_page:
-        session.current_page = page
-        await db.save_session(user_id, session)
+        if page < 0 or page >= total_pages:
+            await callback.answer("Неверная страница", show_alert=True)
+            return
+
+        # PERF-06: persist current_page only when it actually changed. Re-tapping the
+        # current page (or a no-op nav) must not re-serialize the whole session to SQLite.
+        if page != session.current_page:
+            session.current_page = page
+            await db.save_session(user_id, session)
 
     # LOGIC-04/BUG-03: shared renderer — also swallows "message is not
     # modified" from a fast double-tap on the same page.
@@ -510,32 +525,39 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
     search_service, add_service = await get_services()
 
     user_id = callback.from_user.id
-    session = await db.get_session(user_id)
 
-    if not session or not session.results:
-        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-        return
+    # DB-02: lock the read-modify-write cycle so a double-tap (two concurrent
+    # release selections) can't have the second save_session clobber the
+    # first's `selected_result`. Scoped to just the read+mutate+save below —
+    # not the (potentially 30-95s) *arr lookup that follows, which uses its
+    # own narrow lock around each update_session call.
+    async with db.session_lock(user_id):
+        session = await db.get_session(user_id)
 
-    # Parse release index
-    try:
-        idx = int(callback.data.removeprefix(CallbackData.RELEASE))
-    except ValueError:
-        await callback.answer("Неверный выбор", show_alert=True)
-        return
+        if not session or not session.results:
+            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+            return
 
-    if idx < 0 or idx >= len(session.results):
-        await callback.answer("Неверный выбор", show_alert=True)
-        return
+        # Parse release index
+        try:
+            idx = int(callback.data.removeprefix(CallbackData.RELEASE))
+        except ValueError:
+            await callback.answer("Неверный выбор", show_alert=True)
+            return
 
-    # BUG-07: ack right after validation — the lookup below can take up to
-    # HTTP_TIMEOUT × retries (30-95s when *arr is degraded), and Telegram
-    # rejects answerCallbackQuery once the query is "too old" (~15-30s). The
-    # user's tap-feedback (spinner) must not depend on a slow *arr response.
-    await callback.answer()
+        if idx < 0 or idx >= len(session.results):
+            await callback.answer("Неверный выбор", show_alert=True)
+            return
 
-    result = session.results[idx]
-    session.selected_result = result
-    await db.save_session(user_id, session)
+        # BUG-07: ack right after validation — the lookup below can take up to
+        # HTTP_TIMEOUT × retries (30-95s when *arr is degraded), and Telegram
+        # rejects answerCallbackQuery once the query is "too old" (~15-30s). The
+        # user's tap-feedback (spinner) must not depend on a slow *arr response.
+        await callback.answer()
+
+        result = session.results[idx]
+        session.selected_result = result
+        await db.save_session(user_id, session)
 
     # Show release details
     text = Formatters.format_release_details(result)
@@ -556,15 +578,18 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
     lookup_term = (parsed.get("title") or "").strip() or session.query
     try:
         if session.content_type == ContentType.MOVIE:
-            movies = await search_service.lookup_movie(lookup_term)
-            movie = _pick_by_year(movies, result.detected_year, parsed.get("year"))
+            movie = await _resolve_movie(
+                session, search_service, lookup_term, result.detected_year, parsed.get("year")
+            )
             if movie:
                 session.selected_content = movie
                 # RACE-04: UPDATE-only — if Cancel/grab deleted the session during
                 # the (slow) lookup, don't resurrect it; abort instead.
-                if not await db.update_session(user_id, session):
-                    await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-                    return
+                # DB-02: lock just this mutate+update_session pair.
+                async with db.session_lock(user_id):
+                    if not await db.update_session(user_id, session):
+                        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+                        return
 
                 movie_text = Formatters.format_movie_info(movie)
                 emby_note = await _emby_library_note(movie)
@@ -580,14 +605,17 @@ async def handle_release_selection(callback: CallbackQuery, db_user: User, db: D
                     parse_mode="HTML",
                 )
         else:
-            series_list = await search_service.lookup_series(lookup_term)
-            series = _pick_by_year(series_list, result.detected_year, parsed.get("year"))
+            series = await _resolve_series(
+                session, search_service, lookup_term, result.detected_year, parsed.get("year")
+            )
             if series:
                 session.selected_content = series
                 # RACE-04: UPDATE-only — don't resurrect a session deleted mid-lookup.
-                if not await db.update_session(user_id, session):
-                    await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-                    return
+                # DB-02: lock just this mutate+update_session pair.
+                async with db.session_lock(user_id):
+                    if not await db.update_session(user_id, session):
+                        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+                        return
 
                 series_text = Formatters.format_series_info(series)
                 emby_note = await _emby_library_note(series)
@@ -651,6 +679,46 @@ def _pick_by_year(items: list, release_year, query_year):
             if cand_year and abs(int(cand_year) - int(target_year)) <= 1:
                 return it
     return items[0]
+
+
+async def _resolve_movie(
+    session: SearchSession,
+    search_service: SearchService,
+    lookup_term: str,
+    release_year,
+    query_year,
+) -> Optional[MovieInfo]:
+    """LOGIC-06: pick a MovieInfo from `session.lookup_candidates` (already
+    fetched during content-type detection) when available, instead of
+    repeating the Radarr lookup. Falls back to a fresh lookup on a miss
+    (candidates absent, wrong type, or no year-matching entry among them).
+    """
+    if session.lookup_candidates:
+        cached_movies = [c for c in session.lookup_candidates if isinstance(c, MovieInfo)]
+        if cached_movies:
+            picked = _pick_by_year(cached_movies, release_year, query_year)
+            if picked:
+                return picked
+    movies = await search_service.lookup_movie(lookup_term)
+    return _pick_by_year(movies, release_year, query_year)
+
+
+async def _resolve_series(
+    session: SearchSession,
+    search_service: SearchService,
+    lookup_term: str,
+    release_year,
+    query_year,
+) -> Optional[SeriesInfo]:
+    """LOGIC-06: series counterpart of `_resolve_movie`."""
+    if session.lookup_candidates:
+        cached_series = [c for c in session.lookup_candidates if isinstance(c, SeriesInfo)]
+        if cached_series:
+            picked = _pick_by_year(cached_series, release_year, query_year)
+            if picked:
+                return picked
+    series_list = await search_service.lookup_series(lookup_term)
+    return _pick_by_year(series_list, release_year, query_year)
 
 
 @router.callback_query(F.data == CallbackData.GRAB_BEST)
@@ -805,11 +873,15 @@ async def _execute_grab(
         if session.content_type == ContentType.MOVIE:
             movie = session.selected_content
             if not isinstance(movie, MovieInfo):
-                movies = await search_service.lookup_movie(lookup_term)
-                if not movies:
+                # LOGIC-06: reuse detection's lookup_candidates when possible
+                # (grab_best skips handle_release_selection entirely, so this
+                # is otherwise always a fresh lookup).
+                movie = await _resolve_movie(
+                    session, search_service, lookup_term, result.detected_year, parsed.get("year")
+                )
+                if not movie:
                     await message.edit_text(Formatters.format_error("Не удалось найти фильм в Radarr"))
                     return
-                movie = _pick_by_year(movies, result.detected_year, parsed.get("year"))
 
             # PERF-07b: independent reads — one RTT instead of two sequential ones.
             profiles, folders = await asyncio.gather(
@@ -845,11 +917,13 @@ async def _execute_grab(
         else:
             series = session.selected_content
             if not isinstance(series, SeriesInfo):
-                series_list = await search_service.lookup_series(lookup_term)
-                if not series_list:
+                # LOGIC-06: reuse detection's lookup_candidates when possible.
+                series = await _resolve_series(
+                    session, search_service, lookup_term, result.detected_year, parsed.get("year")
+                )
+                if not series:
                     await message.edit_text(Formatters.format_error("Не удалось найти сериал в Sonarr"))
                     return
-                series = _pick_by_year(series_list, result.detected_year, parsed.get("year"))
 
             # PERF-07b: independent reads — one RTT instead of two sequential ones.
             profiles, folders = await asyncio.gather(
@@ -908,19 +982,22 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
 
     settings = get_settings()
     user_id = callback.from_user.id
-    session = await db.get_session(user_id)
 
-    if not session or not session.results:
-        await callback.answer("Сессия истекла", show_alert=True)
-        return
+    # DB-02: lock the read-modify-write cycle around clearing the selection.
+    async with db.session_lock(user_id):
+        session = await db.get_session(user_id)
 
-    # Clear selection and go back to results.
-    # PERF-06: only re-serialize the session when there is actually a selection
-    # to clear — pressing Back with nothing selected is a no-op write.
-    if session.selected_result is not None or session.selected_content is not None:
-        session.selected_result = None
-        session.selected_content = None
-        await db.save_session(user_id, session)
+        if not session or not session.results:
+            await callback.answer("Сессия истекла", show_alert=True)
+            return
+
+        # Clear selection and go back to results.
+        # PERF-06: only re-serialize the session when there is actually a selection
+        # to clear — pressing Back with nothing selected is a no-op write.
+        if session.selected_result is not None or session.selected_content is not None:
+            session.selected_result = None
+            session.selected_content = None
+            await db.save_session(user_id, session)
 
     # Show results page
     per_page = settings.results_per_page
@@ -1014,20 +1091,23 @@ async def handle_season_preset(callback: CallbackQuery, db_user: User, db: Datab
     if not callback.data or not callback.message:
         return
     user_id = callback.from_user.id
-    session = await db.get_session(user_id)
-    if not session or not session.selected_result:
-        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-        return
 
-    preset = callback.data.removeprefix(CallbackData.SEASON_PRESET)
-    if preset not in _SEASON_PRESETS:
-        await callback.answer("Неверный выбор", show_alert=True)
-        return
+    # DB-02: lock the read-modify-write cycle around the season preset choice.
+    async with db.session_lock(user_id):
+        session = await db.get_session(user_id)
+        if not session or not session.selected_result:
+            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+            return
 
-    session.monitor_type = preset
-    if not await db.update_session(user_id, session):
-        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-        return
+        preset = callback.data.removeprefix(CallbackData.SEASON_PRESET)
+        if preset not in _SEASON_PRESETS:
+            await callback.answer("Неверный выбор", show_alert=True)
+            return
+
+        session.monitor_type = preset
+        if not await db.update_session(user_id, session):
+            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+            return
 
     await callback.answer(f"Мониторинг: {preset}")
     _, add_service = await get_services()
@@ -1036,6 +1116,39 @@ async def handle_season_preset(callback: CallbackQuery, db_user: User, db: Datab
     text = Formatters.format_release_details(result)
     await callback.message.edit_text(
         f"{text}\n\n📺 Мониторинг: <b>{preset}</b>",
+        reply_markup=Keyboards.release_details(
+            result, session.content_type,
+            show_force_grab=has_qbittorrent,
+            content=session.selected_content,
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == CallbackData.SEASON_BACK)
+async def handle_season_back(callback: CallbackQuery, db_user: User, db: Database) -> None:
+    """BUG-16: "Назад" from the season-monitoring picker must return to the
+    release card WITHOUT clearing the user's selection — the generic
+    CallbackData.BACK handler (handle_back) clears selected_result/
+    selected_content and jumps back to the results list, which throws away
+    the release the user was configuring. Re-renders the same card
+    handle_release_selection/handle_season_preset show, by the same pattern.
+    """
+    if not callback.message:
+        return
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    if not session or not session.selected_result:
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+
+    await callback.answer()
+    _, add_service = await get_services()
+    has_qbittorrent = add_service.qbittorrent is not None
+    result = session.selected_result
+    text = Formatters.format_release_details(result)
+    await callback.message.edit_text(
+        text,
         reply_markup=Keyboards.release_details(
             result, session.content_type,
             show_force_grab=has_qbittorrent,

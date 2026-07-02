@@ -84,14 +84,18 @@ class TestSearchService:
 
     @pytest.mark.asyncio
     async def test_detect_content_type_with_season(self, search_service):
-        """Test content type detection with season in query."""
-        content_type = await search_service.detect_content_type("Show S01")
+        """Test content type detection with season in query.
+
+        DEAD-07: detect_content_type wrapper removed — use
+        detect_with_confidence(...).content_type directly (same as prod).
+        """
+        content_type = (await search_service.detect_with_confidence("Show S01")).content_type
         assert content_type == ContentType.SERIES
 
     @pytest.mark.asyncio
     async def test_detect_content_type_with_episode(self, search_service):
         """Test content type detection with episode in query."""
-        content_type = await search_service.detect_content_type("Show S01E05")
+        content_type = (await search_service.detect_with_confidence("Show S01E05")).content_type
         assert content_type == ContentType.SERIES
 
     @pytest.mark.asyncio

@@ -172,32 +172,31 @@
 - [ ] TEST-11/DEAD-15: удалить 4 мёртвые фикстуры из conftest.py
 - [ ] TEST-15: убрать литерал «3.27.0» из guard-теста (сравнение README ↔ requirements.txt остаётся)
 
-## Wave 2 — cross-cutting (после мержа Wave 1, 2 параллельных агента)
+## Wave 2 — cross-cutting behaviour-фиксы (СДЕЛАНО, коммит после Wave 1)
 
-### Task H: межкластерные фиксы
-- [ ] * DB-02: per-user `asyncio.Lock` на цикл get_session→мутация→save_session (реестр локов в db.py, использование в search.py/music.py hot-path'ах)
-- [ ] LOGIC-06: сохранить lookup-кандидатов detection в SearchSession → убрать повторные lookup'ы в handle_release_selection/_execute_grab (grab_best-путь)
-- [ ] LOGIC-07/DEAD-10: `bot/ui/menu.py` — единый источник текстов кнопок; MENU_BUTTONS = frozenset; main_menu и все 8 модулей импортируют оттуда; удалить мёртвые MENU_* из start.py
-- [ ] LOGIC-13: общий `_strip_command` (режет `@botname`) в `bot/handlers/common.py`; использовать в search/downloads/music
-- [ ] LOGIC-15: `safe_edit(message, text, **kw)` там же; заменить ~10 копий try/except «not modified»
-- [ ] LOGIC-14b: per_page музыкальной пагинации из settings.results_per_page (music.py + keyboards.py)
-- [ ] BUG-16: `season_back` → перерисовка карточки релиза вместо сброса выбора
-- [ ] DEAD-07: удалить `detect_content_type`-обёртку; тесты на `detect_with_confidence(...).content_type`
-- [ ] DEAD-08: удалить `force_check` (get_stats/unsubscribe_user теперь используются E)
-- [ ] OBS-07 (финал): унификация имён событий snake_case (`health_check_failed` с service=, `search_completed` vs prowlarr — по списку из 07-observability.md)
-- [ ] PERF-04 (транспарентный): in-process write-through кэш активных сессий внутри Database.get_session/save_session (cap 50, инвалидация в delete/update)
+- [x] DB-02: per-user `asyncio.Lock` (реестр в db.py, обёрнуты hot-path'ы search.py/music.py) — RED/GREEN тест
+- [x] LOGIC-06: lookup-кандидаты detection сохраняются в `SearchSession.lookup_candidates`; переиспользование в handle_release_selection/_execute_grab (убраны повторные lookup'ы)
+- [x] BUG-16: `season_back` перерисовывает карточку релиза без сброса выбора
+- [x] DEAD-07: удалена `detect_content_type`-обёртка; тесты на `detect_with_confidence(...).content_type`
+- [x] DEAD-08: удалён `force_check` (get_stats/unsubscribe_user оставлены)
 
-### Task I: тест-гигиена
-- [ ] * TEST-09: sleep-гонки → asyncio.Event/Barrier (3 файла)
-- [ ] TEST-12: хелперы-дубли → conftest.py; убрать дублирующие парсинг-тесты из test_clients.py
-- [ ] TEST-13: переименовать r4-файлы по смыслу (дефисы → подчёркивания), ID в docstring
-- [ ] TEST-14: заменить тест-присваивание wiring-тестом
-- [ ] TEST-16: autouse-фикстура очистки trending-кэшей
-- [ ] * TEST-17: parametrize-кейсы эмодзи/300-символьных названий; тест пустого ответа Prowlarr
+## Отложено в follow-up PR (дедуп-рефактор без изменения поведения — НЕ в этом цикле)
 
-## Wave 3 — зависимости (отдельный коммит)
+⚠️ Ниже по риску, правильнее отдельным циклом с прогоном на Pi. Ничего не потеряно — перечислено здесь.
 
-- [ ] DEP-05: aiogram 3.27.0→3.29.1, pydantic 2.12.5→2.13.4 (поднять cap в pyproject до <2.14), pydantic-settings→2.14.2, structlog 25.5→26.1 (cap <27), pytest 9.0.2→9.1.1, pytest-asyncio→1.4.0, ruff→0.15.20 (диапазон уже покрывает); обновить README-упоминания; полный прогон тестов; при любом падении — откат пина виновника
+- [ ] LOGIC-07/DEAD-10: `bot/ui/menu.py` — единый источник текстов кнопок (main_menu + 8 модулей + MENU_BUTTONS frozenset); удалить мёртвые MENU_* из start.py
+- [ ] LOGIC-13: общий `_strip_command` (режет `@botname`) в `bot/handlers/common.py`
+- [ ] LOGIC-15: `safe_edit(message, text, **kw)` — заменить ~10 копий try/except «not modified»
+- [ ] LOGIC-14b: per_page музыкальной пагинации из settings.results_per_page
+- [ ] OBS-07 (финал): унификация имён событий snake_case по списку из 07-observability.md
+- [ ] PERF-04: in-process write-through кэш активных сессий в Database.get_session/save_session
+- [ ] Тест-гигиена: TEST-09 (sleep-гонки→Event/Barrier), TEST-12 (хелперы→conftest), TEST-13 (переименование r4-файлов), TEST-14, TEST-16
+
+## Wave 3 — бандл-апгрейд зависимостей (отложено в follow-up PR)
+
+⚠️ Требует прогона на Pi (локальный env — Python 3.14 ≠ прод 3.12, локальный pass — слабый сигнал для dep-bump). Есть `make rollback`.
+
+- [ ] DEP-05: aiogram 3.27.0→3.29.1, pydantic 2.12.5→2.13.4 (cap→<2.14), pydantic-settings→2.14.2, structlog 25.5→26.1 (cap <27), pytest 9.0.2→9.1.1, pytest-asyncio→1.4.0, ruff→0.15.20; обновить README; полный прогон; при падении — откат виновника
 
 ## Верификация (verification-before-completion)
 

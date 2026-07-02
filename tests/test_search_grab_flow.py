@@ -25,6 +25,7 @@ from bot.models import (
     RootFolder,
     SearchResult,
     SearchSession,
+    SeriesInfo,
     User,
     UserPreferences,
 )
@@ -410,3 +411,149 @@ async def test_release_selection_acks_before_lookup():
         await search.handle_release_selection(callback, db_user, db)
 
     assert call_order == ["answer", "lookup_movie"], call_order
+
+
+# ---------------------------------------------------------------------------
+# LOGIC-06: detection's lookup_results are cached on the session so a grab
+# doesn't repeat the same Radarr/Sonarr lookup 2-3 times.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_release_selection_reuses_cached_lookup_candidates_no_network_call():
+    """When session.lookup_candidates already has the matching MovieInfo
+    (from detect_with_confidence), handle_release_selection must NOT call
+    search_service.lookup_movie again."""
+    from bot.handlers import search
+
+    result = SearchResult(guid="g1", title="Test.Release", calculated_score=50, detected_year=2014)
+    cached_movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
+    session = SearchSession(
+        user_id=42, query="interstellar", content_type=ContentType.MOVIE, results=[result],
+        lookup_candidates=[cached_movie],
+    )
+    db = _make_db(session)
+    db_user = _make_db_user()
+    callback = _make_callback(data=search.CallbackData.RELEASE + "0")
+
+    search_service = MagicMock()
+    search_service.parse_query = MagicMock(return_value={"title": "interstellar", "year": None})
+    search_service.lookup_movie = AsyncMock(side_effect=AssertionError("must not be called"))
+
+    add_service = MagicMock()
+    add_service.qbittorrent = None
+    services = (search_service, add_service)
+
+    with patch.object(search, "get_services", AsyncMock(return_value=services)), \
+         patch.object(search, "get_emby", AsyncMock(return_value=None)):
+        await search.handle_release_selection(callback, db_user, db)
+
+    search_service.lookup_movie.assert_not_awaited()
+    sent = callback.message.edit_text.await_args_list[-1].args[0]
+    assert "Interstellar" in sent
+
+
+@pytest.mark.asyncio
+async def test_release_selection_falls_back_to_lookup_when_no_cached_candidates():
+    """No lookup_candidates on the session (e.g. detection never ran, or
+    returned no movie matches) — handle_release_selection must fall back to
+    the network lookup exactly as before."""
+    from bot.handlers import search
+
+    result = SearchResult(guid="g1", title="Test.Release", calculated_score=50, detected_year=2014)
+    session = SearchSession(
+        user_id=42, query="interstellar", content_type=ContentType.MOVIE, results=[result],
+        lookup_candidates=None,
+    )
+    db = _make_db(session)
+    db_user = _make_db_user()
+    callback = _make_callback(data=search.CallbackData.RELEASE + "0")
+
+    fetched_movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
+    search_service = MagicMock()
+    search_service.parse_query = MagicMock(return_value={"title": "interstellar", "year": None})
+    search_service.lookup_movie = AsyncMock(return_value=[fetched_movie])
+
+    add_service = MagicMock()
+    add_service.qbittorrent = None
+    services = (search_service, add_service)
+
+    with patch.object(search, "get_services", AsyncMock(return_value=services)), \
+         patch.object(search, "get_emby", AsyncMock(return_value=None)):
+        await search.handle_release_selection(callback, db_user, db)
+
+    search_service.lookup_movie.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_grab_best_path_reuses_cached_lookup_candidates_no_network_call():
+    """grab_best skips handle_release_selection entirely (selected_content is
+    never set) — _execute_grab must still reuse session.lookup_candidates
+    instead of calling search_service.lookup_movie."""
+    from bot.handlers import search
+
+    result = SearchResult(guid="g1", title="Test.Movie.Release", calculated_score=80, detected_year=2014)
+    cached_movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
+    session = SearchSession(
+        user_id=42, query="interstellar", content_type=ContentType.MOVIE, results=[result],
+        selected_result=result,
+        lookup_candidates=[cached_movie],
+    )
+    db = _make_db(session)
+    db_user = _make_db_user()
+    message = MagicMock()
+    message.edit_text = AsyncMock()
+
+    search_service = MagicMock()
+    search_service.parse_query = MagicMock(return_value={"title": "interstellar", "year": None})
+    search_service.lookup_movie = AsyncMock(side_effect=AssertionError("must not be called"))
+
+    add_service = MagicMock()
+    add_service.get_radarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="HD")])
+    add_service.get_radarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/movies")])
+    action = MagicMock(success=True, error_message=None)
+    add_service.grab_movie_release = AsyncMock(return_value=(True, action, "OK"))
+
+    await search._execute_grab(message, session, db_user, db, search_service, add_service)
+
+    search_service.lookup_movie.assert_not_awaited()
+    add_service.grab_movie_release.assert_awaited_once()
+    call_kwargs = add_service.grab_movie_release.await_args.kwargs
+    assert call_kwargs["movie"] is cached_movie
+
+
+@pytest.mark.asyncio
+async def test_execute_grab_best_path_series_reuses_cached_lookup_candidates():
+    """Series counterpart: _execute_grab's series branch reuses
+    session.lookup_candidates instead of calling search_service.lookup_series."""
+    from bot.handlers import search
+
+    result = SearchResult(
+        guid="g1", title="Test.Series.Release", calculated_score=80,
+        detected_year=2016, is_season_pack=True,
+    )
+    cached_series = SeriesInfo(title="Stranger Things", tvdb_id=305288, year=2016)
+    session = SearchSession(
+        user_id=42, query="stranger things", content_type=ContentType.SERIES, results=[result],
+        selected_result=result,
+        lookup_candidates=[cached_series],
+    )
+    db = _make_db(session)
+    db_user = _make_db_user()
+    message = MagicMock()
+    message.edit_text = AsyncMock()
+
+    search_service = MagicMock()
+    search_service.parse_query = MagicMock(return_value={"title": "stranger things", "year": None})
+    search_service.lookup_series = AsyncMock(side_effect=AssertionError("must not be called"))
+
+    add_service = MagicMock()
+    add_service.get_sonarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="HD")])
+    add_service.get_sonarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/tv")])
+    action = MagicMock(success=True, error_message=None)
+    add_service.grab_series_release = AsyncMock(return_value=(True, action, "OK"))
+
+    await search._execute_grab(message, session, db_user, db, search_service, add_service)
+
+    search_service.lookup_series.assert_not_awaited()
+    add_service.grab_series_release.assert_awaited_once()
+    call_kwargs = add_service.grab_series_release.await_args.kwargs
+    assert call_kwargs["series"] is cached_series

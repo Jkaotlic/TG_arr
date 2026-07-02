@@ -51,6 +51,11 @@ class CallbackData:
     # Season monitoring (#2)
     SEASON_MENU = "season_menu"     # open the season-monitoring preset picker
     SEASON_PRESET = "season_set:"   # season_set:all / future / firstSeason / latestSeason
+    # BUG-16: dedicated back button from the season-preset picker — re-renders
+    # the release card (like handle_season_preset does) instead of falling
+    # through to the generic CallbackData.BACK, which clears selected_result/
+    # selected_content and returns to the results list.
+    SEASON_BACK = "season_back"
 
     # Settings
     SETTINGS = "settings"
@@ -260,13 +265,18 @@ class Keyboards:
 
     @staticmethod
     def season_presets() -> InlineKeyboardMarkup:
-        """Feature #2: Sonarr season-monitoring preset picker."""
+        """Feature #2: Sonarr season-monitoring preset picker.
+
+        BUG-16: "Назад" uses the dedicated SEASON_BACK callback, not the
+        generic BACK — the latter clears the release selection and returns to
+        the results list, which is not what a user expects from a submenu.
+        """
         rows = [
             [InlineKeyboardButton(text="📺 Все сезоны", callback_data=f"{CallbackData.SEASON_PRESET}all")],
             [InlineKeyboardButton(text="🔮 Только будущие", callback_data=f"{CallbackData.SEASON_PRESET}future")],
             [InlineKeyboardButton(text="1️⃣ Первый сезон", callback_data=f"{CallbackData.SEASON_PRESET}firstSeason")],
             [InlineKeyboardButton(text="🔚 Последний сезон", callback_data=f"{CallbackData.SEASON_PRESET}latestSeason")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK)],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.SEASON_BACK)],
         ]
         return InlineKeyboardMarkup(inline_keyboard=rows)
 

@@ -659,32 +659,6 @@ class TestNotificationService:
         assert stats["subscribed_users"] == 1
         assert stats["tracked_torrents"] == 0
 
-    @pytest.mark.asyncio
-    async def test_force_check(self, service, mock_qbittorrent):
-        """Test force check for completions."""
-        # Add a completing torrent
-        mock_qbittorrent.get_torrents.return_value = [
-            TorrentInfo(
-                hash="abc123",
-                name="Test Torrent",
-                progress=1.0,
-                state=TorrentState.COMPLETED,
-            )
-        ]
-
-        # First sync to populate tracked torrents
-        service._tracked_torrents["abc123"] = {
-            "completed": False,
-            "notified": False,
-            "name": "Test Torrent",
-            "added_on": None,
-        }
-
-        newly_completed = await service.force_check()
-
-        assert len(newly_completed) == 1
-        assert newly_completed[0].hash == "abc123"
-
 
 class TestUtilityFunctions:
     """Test utility functions."""

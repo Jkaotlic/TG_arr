@@ -296,44 +296,6 @@ class NotificationService:
                     torrent_name=torrent.name,
                 )
 
-    async def force_check(self) -> list[TorrentInfo]:
-        """
-        Force an immediate check for completed downloads.
-
-        Returns newly completed torrents. Does NOT send notifications --
-        caller must handle notification delivery.
-
-        Returns:
-            List of newly completed torrents.
-        """
-        newly_completed = []
-
-        try:
-            torrents = await self.qbittorrent.get_torrents()
-
-            for torrent in torrents:
-                is_complete = torrent.progress >= 1.0 or torrent.state == TorrentState.COMPLETED
-
-                if torrent.hash in self._tracked_torrents:
-                    tracked = self._tracked_torrents[torrent.hash]
-
-                    if is_complete and not tracked["completed"]:
-                        tracked["completed"] = True
-                        tracked["notified"] = True
-                        newly_completed.append(torrent)
-                else:
-                    self._tracked_torrents[torrent.hash] = {
-                        "completed": is_complete,
-                        "notified": True,
-                        "name": torrent.name,
-                        "added_on": torrent.added_on,
-                    }
-
-        except Exception as e:
-            logger.error("Error in force check", error=str(e), exc_info=True)
-
-        return newly_completed
-
     def get_stats(self) -> dict:
         """Get notification service statistics."""
         return {

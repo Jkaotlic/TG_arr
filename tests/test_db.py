@@ -1,5 +1,6 @@
 """Tests for database operations."""
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -595,3 +596,74 @@ class TestRunMaintenance:
         """In-memory DB (used by most tests) has no on-disk path to back up."""
         result = await db.run_maintenance(backup=True)
         assert result["backup"] == 0
+
+
+@pytest.mark.asyncio
+class TestSessionLock:
+    """DB-02: per-user lock guarding the get_session -> mutate -> save_session
+    read-modify-write cycle used by handlers (search.py/music.py hot paths)."""
+
+    async def test_session_lock_returns_same_lock_for_same_user(self, db):
+        lock_a = db.session_lock(111)
+        lock_b = db.session_lock(111)
+        assert lock_a is lock_b
+
+    async def test_session_lock_returns_different_locks_for_different_users(self, db):
+        assert db.session_lock(111) is not db.session_lock(222)
+
+    async def test_concurrent_read_modify_write_without_lock_loses_an_update(self, db):
+        """Control case: two concurrent callbacks racing get_session ->
+        mutate -> save_session WITHOUT the lock — the loser's field is lost.
+        This documents the exact failure DB-02 fixes; it is not itself a
+        regression guard (it asserts the *bug*, not the fix)."""
+        user_id = 999
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+
+        async def racer_a():
+            s = await db.get_session(user_id)
+            await asyncio.sleep(0.02)  # let racer_b read the same pre-mutation state
+            s.current_page = 1
+            await db.save_session(user_id, s)
+
+        async def racer_b():
+            s = await db.get_session(user_id)
+            s.monitor_type = "all"
+            await db.save_session(user_id, s)  # commits first, has no current_page change
+
+        await asyncio.gather(racer_a(), racer_b())
+
+        final = await db.get_session(user_id)
+        # racer_b's save happened first (no sleep) and lacked racer_a's page
+        # change at read time; racer_a's later save overwrites monitor_type
+        # back to None because it read the session before racer_b wrote it.
+        assert final.current_page == 1
+        assert final.monitor_type is None  # lost update — this is the bug
+
+    async def test_concurrent_read_modify_write_with_lock_preserves_both_updates(self, db):
+        """RED->GREEN: wrapping the same race in `async with db.session_lock(user_id):`
+        serializes the two read-modify-write cycles so both mutations survive."""
+        user_id = 1000
+        await db.create_user(User(tg_id=user_id))
+        session = SearchSession(user_id=user_id, query="q", content_type=ContentType.MOVIE)
+        await db.save_session(user_id, session)
+
+        async def racer_a():
+            async with db.session_lock(user_id):
+                s = await db.get_session(user_id)
+                await asyncio.sleep(0.02)
+                s.current_page = 1
+                await db.save_session(user_id, s)
+
+        async def racer_b():
+            async with db.session_lock(user_id):
+                s = await db.get_session(user_id)
+                s.monitor_type = "all"
+                await db.save_session(user_id, s)
+
+        await asyncio.gather(racer_a(), racer_b())
+
+        final = await db.get_session(user_id)
+        assert final.current_page == 1
+        assert final.monitor_type == "all"

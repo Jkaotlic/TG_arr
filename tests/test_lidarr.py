@@ -329,7 +329,11 @@ class TestDownloadUrlValidation:
 
 
 class TestSearchServiceMusicDetection:
-    """SearchService.detect_content_type returns MUSIC when Lidarr finds an artist."""
+    """SearchService.detect_with_confidence returns MUSIC when Lidarr finds an artist.
+
+    DEAD-07: detect_content_type (a thin content_type-only wrapper) was
+    removed — production only ever calls detect_with_confidence.
+    """
 
     async def test_music_detected_when_artist_matches(self):
         from bot.services.scoring import ScoringService
@@ -346,7 +350,7 @@ class TestSearchServiceMusicDetection:
         ])
 
         svc = SearchService(prowlarr, radarr, sonarr, ScoringService(), lidarr=lidarr)
-        ct = await svc.detect_content_type("Metallica")
+        ct = (await svc.detect_with_confidence("Metallica")).content_type
         assert ct == ContentType.MUSIC
 
     async def test_unknown_when_no_lidarr(self):
@@ -360,7 +364,7 @@ class TestSearchServiceMusicDetection:
         sonarr.lookup_series = AsyncMock(return_value=[])
 
         svc = SearchService(prowlarr, radarr, sonarr, ScoringService(), lidarr=None)
-        ct = await svc.detect_content_type("NoSuchArtist")
+        ct = (await svc.detect_with_confidence("NoSuchArtist")).content_type
         assert ct == ContentType.UNKNOWN
 
 

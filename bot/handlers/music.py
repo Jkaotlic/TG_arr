@@ -263,11 +263,13 @@ async def handle_artist_selection(callback: CallbackQuery, db_user: User, db: Da
 
     artist = artists[idx]
 
-    session = await db.get_session(user_id)
-    if session is None:
-        session = SearchSession(user_id=user_id, query=artist.name, content_type=ContentType.MUSIC)
-    session.selected_content = artist
-    await db.save_session(user_id, session)
+    # DB-02: lock the read-modify-write cycle around storing the selected artist.
+    async with db.session_lock(user_id):
+        session = await db.get_session(user_id)
+        if session is None:
+            session = SearchSession(user_id=user_id, query=artist.name, content_type=ContentType.MUSIC)
+        session.selected_content = artist
+        await db.save_session(user_id, session)
 
     await callback.answer()
     await callback.message.edit_text(
