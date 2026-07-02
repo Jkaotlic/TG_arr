@@ -199,12 +199,21 @@
 - [x] God-file split: `formatters.py`→пакет, `search.py`→пакет, `keyboards.py`→пакет (API 1:1)
 - [x] Полная миграция payload-CallbackData: ReleaseCB/ArtistCB/AddContentCB/SettingCB/SeasonPresetCB/TrendingItemCB/TorrentActionCB/CalCB + legacy-заглушки
 
-## Осталось отложенным (осознанно, следующий заход)
+## Финальный заход (СДЕЛАНО, задеплоено — коммиты e56f6d1/8001097)
 
-- [ ] PERF-02 full: qBittorrent `sync/maindata` delta-протокол (минимальная версия — опрос DOWNLOADING — уже в проде)
-- [ ] DEP-02 lock-файл с `--require-hashes` (риск сломать arm64-сборку ради малого — верхние deps и base-image уже пиненые)
-- [ ] Тест-гигиена: TEST-09 (sleep-гонки→Event/Barrier), TEST-12 (хелперы→conftest), TEST-13 (переименование r4-файлов), TEST-14, TEST-16
-- [ ] LOGIC-11/18a/19/21 (мелкий рефактор слоёв), унификация grab_movie/series шаблонным методом, константные колбэки (back/type/emby_*) — низкий приоритет
+- [x] PERF-02 full: qBittorrent `sync/maindata?rid` delta-протокол (на живом qBit работает — Initial sync через get_maindata(0))
+- [x] LOGIC-11: resolve_profile/resolve_root_folder/resolve_series_tvdb_id в AddService (−4 копии)
+- [x] Унификация grab_movie/series_release → `_grab_release` (−150 строк); LOGIC-19: format_emby_status(EmbyServerInfo)
+- [x] Тест-гигиена: TEST-09 (барьеры вместо sleep), TEST-12 (хелперы→conftest, −14 дублей), TEST-16 (autouse-очистка), LOGIC-21 (общий _cache.py)
+- [x] DEP-02: requirements.lock (полный резолв arm64/py3.12), Dockerfile ставит из lock
+
+## Осталось тривиальное (без пользы юзеру — осознанно не делаю)
+
+- [ ] calendar `_user_period`: clear-on-overflow → LRU (смена наблюдаемого поведения, не чистый рефактор)
+- [ ] LOGIC-18a: Formatters из notification_service → колбэк (чистота слоёв; риск трогать maindata-код ради нуля)
+- [ ] Константные колбэки (back/cancel/type/emby_*/trending_*): типизация ничего не даёт
+- [ ] TEST-13 (переименование r4-файлов): churn, теряет git-историю
+- [ ] Webhooks (#8): код готов, `WEBHOOK_ENABLED=false` — включение = юзер-конфиг (Radarr/Sonarr Connect→Webhook)
 
 ## Верификация (verification-before-completion)
 
