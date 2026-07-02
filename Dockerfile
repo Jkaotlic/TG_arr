@@ -4,8 +4,12 @@
 # Refresh with: docker buildx imagetools inspect python:3.12-slim
 FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf AS builder
 WORKDIR /build
-COPY requirements.txt .
-RUN pip install --user --no-cache-dir -r requirements.txt
+# DEP-02: install from the fully-resolved lock (top-level + transitive, pinned
+# to the exact arm64/py3.12 versions) for reproducible builds. requirements.txt
+# is copied too so it stays present as the human-readable source of top-level
+# pins; the lock is what pip actually resolves against.
+COPY requirements.txt requirements.lock ./
+RUN pip install --user --no-cache-dir -r requirements.lock
 
 FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 # DEPLOY-07: tzdata is needed for ZoneInfo(settings.timezone) — used to render

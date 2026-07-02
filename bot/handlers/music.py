@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, Message
 from bot.clients.registry import get_deezer, get_lidarr, get_prowlarr, get_qbittorrent, get_radarr, get_sonarr
 from bot.config import get_settings
 from bot.db import Database
+from bot.handlers._cache import remember_lru
 from bot.handlers.common import safe_edit, strip_command
 from bot.models import (
     ActionLog,
@@ -38,20 +39,16 @@ from bot.handlers.search import _SCORING_SERVICE  # noqa: E402
 _MAX_ARTIST_CANDIDATES = 100
 
 
-def _cleanup_if_overflow(cache: dict) -> None:
-    """BUG-10/PERF-12: evict the oldest entry (dict insertion order) instead of
-    clearing the whole cache — a single overflow no longer kicks every other
-    user mid-selection back to "Список истёк"."""
-    while len(cache) >= _MAX_ARTIST_CANDIDATES:
-        cache.pop(next(iter(cache)))
-
-
 def _remember(cache: dict, key, value) -> None:
-    """Insert/update `key` while keeping it "freshest" for LRU eviction order —
-    pop first so a re-insert moves the key to the end of iteration order."""
-    cache.pop(key, None)
-    _cleanup_if_overflow(cache)
-    cache[key] = value
+    """Insert/update `key`, evicting the oldest entry (dict insertion order)
+    when at capacity — a single overflow no longer kicks every other user
+    mid-selection back to "Список истёк" (BUG-10/PERF-12).
+
+    Thin wrapper around the shared LRU cache helper (LOGIC-21) — kept as a
+    module-level function since existing tests call ``music._remember``
+    directly.
+    """
+    remember_lru(cache, key, value, _MAX_ARTIST_CANDIDATES)
 
 # Session key: store artist candidates list separately from SearchResult list
 # We reuse SearchSession.results (as search releases) and selected_content (ArtistInfo)

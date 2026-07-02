@@ -105,129 +105,21 @@ class TestBaseAPIClient:
 
 
 class TestProwlarrClient:
-    """Test Prowlarr client functionality."""
+    """Test Prowlarr client functionality.
+
+    TEST-12: title/quality parsing (_parse_quality, _extract_year,
+    _extract_season_episode, _is_season_pack) and _normalize_result are
+    covered far more thoroughly (parametrized, many more cases) by
+    test_parsing.py — see TestQualityParsing/TestYearParsing/
+    TestSeasonEpisodeParsing/TestSeasonPackDetection/TestResultNormalization
+    there. Only the retry/timeout behaviour unique to this module (not
+    parsing) is kept here.
+    """
 
     @pytest.fixture
     def client(self):
         """Create a Prowlarr client for testing."""
         return ProwlarrClient("http://localhost:9696", "test-api-key")
-
-    def test_parse_quality_full(self, client):
-        """Test parsing quality from a complete title."""
-        quality = client._parse_quality(
-            "Movie.2024.2160p.UHD.BluRay.REMUX.HDR10.DV.TrueHD.Atmos.x265-GROUP"
-        )
-
-        assert quality.resolution == "2160p"
-        assert quality.source == "BluRay"
-        assert quality.codec == "x265"
-        assert quality.is_remux is True
-        assert "DV" in quality.hdr
-        assert quality.audio == "Atmos"
-
-    def test_parse_quality_minimal(self, client):
-        """Test parsing quality from a minimal title."""
-        quality = client._parse_quality("Movie.2024")
-
-        assert quality.resolution is None
-        assert quality.source is None
-        assert quality.codec is None
-
-    def test_extract_year_parentheses(self, client):
-        """Test year extraction with parentheses."""
-        assert client._extract_year("Movie (2024)") == 2024
-
-    def test_extract_year_brackets(self, client):
-        """Test year extraction with brackets."""
-        assert client._extract_year("Movie [2024]") == 2024
-
-    def test_extract_year_dots(self, client):
-        """Test year extraction with dots."""
-        assert client._extract_year("Movie.2024.1080p") == 2024
-
-    def test_extract_year_none(self, client):
-        """Test year extraction when no year present."""
-        assert client._extract_year("Movie.1080p") is None
-
-    def test_extract_season_episode_standard(self, client):
-        """Test S01E01 format extraction."""
-        season, episode = client._extract_season_episode("Show.S01E05.1080p")
-        assert season == 1
-        assert episode == 5
-
-    def test_extract_season_only(self, client):
-        """Test season-only extraction."""
-        season, episode = client._extract_season_episode("Show.S02.Complete")
-        assert season == 2
-        assert episode is None
-
-    def test_extract_season_episode_1x01(self, client):
-        """Test 1x01 format extraction."""
-        season, episode = client._extract_season_episode("Show.3x10.720p")
-        assert season == 3
-        assert episode == 10
-
-    def test_is_season_pack_true(self, client):
-        """Test season pack detection - true cases."""
-        assert client._is_season_pack("Show.S01.Complete.1080p") is True
-        assert client._is_season_pack("Show.S02.1080p.WEB-DL") is True
-        assert client._is_season_pack("Show.Season.1.Complete") is True
-
-    def test_is_season_pack_false(self, client):
-        """Test season pack detection - false cases."""
-        assert client._is_season_pack("Show.S01E01.1080p") is False
-        assert client._is_season_pack("Movie.2024.1080p") is False
-
-    def test_normalize_result_movie(self, client):
-        """Test normalizing a movie result."""
-        raw = {
-            "guid": "test-guid",
-            "title": "Test.Movie.2024.1080p.BluRay.x264-GROUP",
-            "size": 5000000000,
-            "seeders": 100,
-            "leechers": 20,
-            "indexer": "TestIndexer",
-            "indexerId": 1,
-            "protocol": "torrent",
-            "categories": [{"id": 2000, "name": "Movies"}],
-        }
-
-        result = client._normalize_result(raw)
-
-        assert result is not None
-        assert result.guid == "test-guid"
-        assert result.detected_type == ContentType.MOVIE
-        assert result.detected_year == 2024
-        assert result.quality.resolution == "1080p"
-
-    def test_normalize_result_series(self, client):
-        """Test normalizing a series result."""
-        raw = {
-            "guid": "test-guid",
-            "title": "Show.S03E05.1080p.WEB-DL.x265-GROUP",
-            "size": 1500000000,
-            "seeders": 50,
-            "indexer": "TestIndexer",
-            "indexerId": 1,
-            "protocol": "torrent",
-            "categories": [{"id": 5000, "name": "TV"}],
-        }
-
-        result = client._normalize_result(raw)
-
-        assert result is not None
-        assert result.detected_type == ContentType.SERIES
-        assert result.detected_season == 3
-        assert result.detected_episode == 5
-        assert result.is_season_pack is False
-
-    def test_normalize_result_invalid(self, client):
-        """Test normalizing an invalid result."""
-        # Missing guid
-        assert client._normalize_result({"title": "Test"}) is None
-
-        # Missing title
-        assert client._normalize_result({"guid": "test"}) is None
 
     @pytest.mark.asyncio
     async def test_search_retries_on_timeout_then_succeeds(self, client):

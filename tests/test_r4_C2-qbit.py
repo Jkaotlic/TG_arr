@@ -21,6 +21,7 @@ from bot.clients.qbittorrent import (
     QBittorrentError,
 )
 from bot.models import QBittorrentStatus, TorrentInfo, TorrentState
+from tests.conftest import mock_http_with_cookie
 
 
 @pytest.fixture
@@ -84,18 +85,32 @@ class TestGetStatusParallel:
 
     @pytest.mark.asyncio
     async def test_get_status_runs_calls_concurrently(self, client):
-        """The independent fetches must run concurrently, not sequentially."""
-        in_flight = 0
-        max_in_flight = 0
+        """The independent fetches must run concurrently, not sequentially.
+
+        TEST-09: deterministic barrier instead of a real asyncio.sleep race.
+        get_status() fans out to exactly 4 independent calls (3 via
+        `_request`, 1 via `get_torrents`); each fake implementation marks
+        itself "started" and then waits until *all 4* have started before
+        returning. If get_status() actually ran them sequentially, the 2nd
+        call would deadlock waiting for the 3rd/4th to start — so reaching
+        the `await client.get_status()` return proves all 4 were in flight
+        at once, with zero reliance on wall-clock timing.
+        """
+        total_calls = 4
+        started = 0
+        all_started = asyncio.Event()
+        lock = asyncio.Lock()
+
+        async def _mark_started_and_wait():
+            nonlocal started
+            async with lock:
+                started += 1
+                if started == total_calls:
+                    all_started.set()
+            await asyncio.wait_for(all_started.wait(), timeout=5)
 
         async def fake_request(method, endpoint, data=None, params=None):
-            nonlocal in_flight, max_in_flight
-            in_flight += 1
-            max_in_flight = max(max_in_flight, in_flight)
-            try:
-                await asyncio.sleep(0.02)
-            finally:
-                in_flight -= 1
+            await _mark_started_and_wait()
             if endpoint == "/api/v2/app/version":
                 return "4.6.0"
             if endpoint == "/api/v2/transfer/info":
@@ -105,21 +120,17 @@ class TestGetStatusParallel:
             raise AssertionError(f"unexpected endpoint {endpoint}")
 
         async def fake_get_torrents(*a, **k):
-            nonlocal in_flight, max_in_flight
-            in_flight += 1
-            max_in_flight = max(max_in_flight, in_flight)
-            try:
-                await asyncio.sleep(0.02)
-            finally:
-                in_flight -= 1
+            await _mark_started_and_wait()
             return []
 
         with patch.object(client, "_request", side_effect=fake_request), \
                 patch.object(client, "get_torrents", side_effect=fake_get_torrents):
+            # If the 4 fetches were sequential, this would hang until the
+            # 5s timeout inside _mark_started_and_wait and raise
+            # asyncio.TimeoutError instead of completing.
             await client.get_status()
 
-        # 4 independent fetches should overlap -> more than one in flight at once.
-        assert max_in_flight >= 2
+        assert started == total_calls
 
 
 # ---------------------------------------------------------------------------
@@ -128,23 +139,9 @@ class TestGetStatusParallel:
 
 
 class TestLoginFailureLogging:
-    def _mock_http(self, status_code, text, cookie_name=None):
-        mock_http = AsyncMock()
-        resp = MagicMock()
-        resp.status_code = status_code
-        resp.text = text
-        mock_http.post.return_value = resp
-        jar = []
-        if cookie_name:
-            c = MagicMock()
-            c.name = cookie_name
-            jar.append(c)
-        mock_http.cookies.jar = jar
-        return mock_http
-
     @pytest.mark.asyncio
     async def test_login_auth_failure_logs(self, client):
-        mock_http = self._mock_http(403, "Fails.")
+        mock_http = mock_http_with_cookie(403, "Fails.", cookie_name=None)
         with patch.object(client, "_get_client", new=AsyncMock(return_value=mock_http)), \
                 patch("bot.clients.qbittorrent.logger") as mock_logger:
             bound = MagicMock()
@@ -155,7 +152,7 @@ class TestLoginFailureLogging:
 
     @pytest.mark.asyncio
     async def test_login_no_cookie_logs(self, client):
-        mock_http = self._mock_http(204, "", cookie_name=None)
+        mock_http = mock_http_with_cookie(204, "", cookie_name=None)
         with patch.object(client, "_get_client", new=AsyncMock(return_value=mock_http)), \
                 patch("bot.clients.qbittorrent.logger") as mock_logger:
             bound = MagicMock()
