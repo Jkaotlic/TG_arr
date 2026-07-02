@@ -5,14 +5,16 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import APIError, BaseAPIClient
-from bot.models import ArtistInfo, MetadataProfile, QualityProfile, RootFolder
+from bot.clients.base import APIError, ArrBaseClient
+from bot.models import ArtistInfo, MetadataProfile
 
 logger = structlog.get_logger()
 
 
-class LidarrClient(BaseAPIClient):
+class LidarrClient(ArrBaseClient):
     """Client for Lidarr API (music)."""
+
+    _api_prefix = "/api/v1"
 
     def __init__(self, base_url: str, api_key: str):
         super().__init__(base_url, api_key, "Lidarr")
@@ -104,29 +106,6 @@ class LidarrClient(BaseAPIClient):
 
         raise APIError("Не удалось добавить артиста в Lidarr")
 
-    async def push_release(
-        self,
-        title: str,
-        download_url: str,
-        protocol: str = "torrent",
-        publish_date: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """Push a release to Lidarr for processing."""
-        payload: dict[str, Any] = {
-            "title": title,
-            "downloadUrl": download_url,
-            "protocol": protocol.capitalize(),
-        }
-        if publish_date:
-            payload["publishDate"] = publish_date
-
-        result = await self._post_no_retry("/api/v1/release/push", json_data=payload)
-        # BUG-01: Lidarr's POST /release/push returns List<ReleaseResource>,
-        # not a single object — unwrap it so callers can read `approved`.
-        if isinstance(result, list):
-            return result[0] if result and isinstance(result[0], dict) else {}
-        return result if isinstance(result, dict) else {}
-
     async def search_artist(self, artist_id: int) -> dict[str, Any]:
         """Trigger a search for all albums of an artist."""
         payload = {"name": "ArtistSearch", "artistId": artist_id}
@@ -167,23 +146,6 @@ class LidarrClient(BaseAPIClient):
 
         return albums
 
-    async def get_quality_profiles(self) -> list[QualityProfile]:
-        """Get all quality profiles (PERF-07: cached for _PROFILE_CACHE_TTL)."""
-        return await self._ttl_cached(
-            "quality_profiles", self._PROFILE_CACHE_TTL, self._fetch_quality_profiles,
-        )
-
-    async def _fetch_quality_profiles(self) -> list[QualityProfile]:
-        results = await self.get("/api/v1/qualityprofile")
-        profiles = []
-        if isinstance(results, list):
-            for item in results:
-                try:
-                    profiles.append(QualityProfile(id=item["id"], name=item["name"]))
-                except (KeyError, TypeError) as e:
-                    logger.warning("Skipping malformed profile", error=str(e))
-        return profiles
-
     async def get_metadata_profiles(self) -> list[MetadataProfile]:
         """Get all metadata profiles (Lidarr-specific; PERF-07 cached)."""
         return await self._ttl_cached(
@@ -200,27 +162,6 @@ class LidarrClient(BaseAPIClient):
                 except (KeyError, TypeError) as e:
                     logger.warning("Skipping malformed metadata profile", error=str(e))
         return profiles
-
-    async def get_root_folders(self) -> list[RootFolder]:
-        """Get all root folders (PERF-07: cached for _PROFILE_CACHE_TTL)."""
-        return await self._ttl_cached(
-            "root_folders", self._PROFILE_CACHE_TTL, self._fetch_root_folders,
-        )
-
-    async def _fetch_root_folders(self) -> list[RootFolder]:
-        results = await self.get("/api/v1/rootfolder")
-        folders = []
-        if isinstance(results, list):
-            for item in results:
-                try:
-                    folders.append(RootFolder(
-                        id=item["id"],
-                        path=item["path"],
-                        free_space=item.get("freeSpace"),
-                    ))
-                except (KeyError, TypeError) as e:
-                    logger.warning("Skipping malformed root folder", error=str(e))
-        return folders
 
     def _parse_artist(self, item: dict[str, Any]) -> Optional[ArtistInfo]:
         """Parse Lidarr artist response to ArtistInfo."""
@@ -271,6 +212,8 @@ class LidarrClient(BaseAPIClient):
             root_folder_path=item.get("rootFolderPath") or item.get("path"),
         )
 
-    # LOGIC-10c: no check_connection override — BaseAPIClient's default hits
-    # the same "/api/v1/system/status" endpoint Lidarr uses, so the override
-    # was a verbatim duplicate (down to the health_check_failed log event).
+    # check_connection/push_release/get_quality_profiles/get_root_folders
+    # inherited from ArrBaseClient (r5 follow-up: ArrBaseClient dedup; folds in
+    # LOGIC-10c, which already established that Lidarr's health check is a
+    # verbatim duplicate of the shared "/api/v1/system/status" default) —
+    # Lidarr sets _api_prefix = "/api/v1".

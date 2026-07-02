@@ -1,19 +1,20 @@
 """Radarr API client."""
 
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import APIError, BaseAPIClient
-from bot.models import MovieInfo, QualityProfile, RootFolder
+from bot.clients.base import APIError, ArrBaseClient
+from bot.models import MovieInfo
 
 logger = structlog.get_logger()
 
 
-class RadarrClient(BaseAPIClient):
+class RadarrClient(ArrBaseClient):
     """Client for Radarr API."""
+
+    _api_prefix = "/api/v3"
 
     def __init__(self, base_url: str, api_key: str):
         super().__init__(base_url, api_key, "Radarr")
@@ -126,41 +127,6 @@ class RadarrClient(BaseAPIClient):
 
         raise APIError("Не удалось добавить фильм в Radarr")
 
-    async def push_release(
-        self,
-        title: str,
-        download_url: str,
-        protocol: str = "torrent",
-        publish_date: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """
-        Push a release to Radarr for processing.
-
-        Args:
-            title: Release title
-            download_url: Download URL
-            protocol: Protocol (torrent or usenet)
-            publish_date: Publication date ISO string
-
-        Returns:
-            Push result
-        """
-        payload = {
-            "title": title,
-            "downloadUrl": download_url,
-            "protocol": protocol.capitalize(),
-        }
-
-        if publish_date:
-            payload["publishDate"] = publish_date
-
-        result = await self._post_no_retry("/api/v3/release/push", json_data=payload)
-        # BUG-01: Radarr's POST /release/push returns List<ReleaseResource>,
-        # not a single object — unwrap it so callers can read `approved`.
-        if isinstance(result, list):
-            return result[0] if result and isinstance(result[0], dict) else {}
-        return result if isinstance(result, dict) else {}
-
     async def search_movie(self, movie_id: int) -> dict[str, Any]:
         """Trigger a search for a movie."""
         payload = {
@@ -217,47 +183,6 @@ class RadarrClient(BaseAPIClient):
 
         return movies
 
-    async def get_quality_profiles(self) -> list[QualityProfile]:
-        """Get all quality profiles (PERF-07: cached for _PROFILE_CACHE_TTL)."""
-        return await self._ttl_cached(
-            "quality_profiles", self._PROFILE_CACHE_TTL, self._fetch_quality_profiles,
-        )
-
-    async def _fetch_quality_profiles(self) -> list[QualityProfile]:
-        results = await self.get("/api/v3/qualityprofile")
-        profiles = []
-        if isinstance(results, list):
-            for item in results:
-                try:
-                    profiles.append(QualityProfile(
-                        id=item["id"],
-                        name=item["name"],
-                    ))
-                except (KeyError, TypeError) as e:
-                    logger.warning("Skipping malformed profile", error=str(e))
-        return profiles
-
-    async def get_root_folders(self) -> list[RootFolder]:
-        """Get all root folders (PERF-07: cached for _PROFILE_CACHE_TTL)."""
-        return await self._ttl_cached(
-            "root_folders", self._PROFILE_CACHE_TTL, self._fetch_root_folders,
-        )
-
-    async def _fetch_root_folders(self) -> list[RootFolder]:
-        results = await self.get("/api/v3/rootfolder")
-        folders = []
-        if isinstance(results, list):
-            for item in results:
-                try:
-                    folders.append(RootFolder(
-                        id=item["id"],
-                        path=item["path"],
-                        free_space=item.get("freeSpace"),
-                    ))
-                except (KeyError, TypeError) as e:
-                    logger.warning("Skipping malformed root folder", error=str(e))
-        return folders
-
     def _parse_movie(self, item: dict[str, Any]) -> Optional[MovieInfo]:
         """Parse Radarr movie response to MovieInfo."""
         tmdb_id = item.get("tmdbId")
@@ -306,15 +231,6 @@ class RadarrClient(BaseAPIClient):
             root_folder_path=item.get("rootFolderPath") or item.get("path"),
         )
 
-    async def check_connection(self) -> tuple[bool, str | None, float | None]:
-        """Check if Radarr is available. Uses v3 API."""
-        start_time = time.monotonic()
-        try:
-            result = await self.get("/api/v3/system/status")
-            elapsed = (time.monotonic() - start_time) * 1000
-            version = result.get("version") if isinstance(result, dict) else None
-            return True, version, round(elapsed, 2)
-        except Exception as e:
-            elapsed = (time.monotonic() - start_time) * 1000
-            logger.warning("health_check_failed", service=self.service_name, error=str(e))
-            return False, None, round(elapsed, 2)
+    # check_connection/push_release/get_quality_profiles/get_root_folders
+    # inherited from ArrBaseClient (r5 follow-up: ArrBaseClient dedup) — Radarr
+    # uses the default _api_prefix = "/api/v3" set on ArrBaseClient.

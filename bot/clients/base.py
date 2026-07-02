@@ -16,6 +16,7 @@ from tenacity import (
 )
 
 from bot.config import get_settings
+from bot.models import QualityProfile, RootFolder
 
 logger = structlog.get_logger()
 
@@ -381,3 +382,107 @@ class BaseAPIClient:
             elapsed = (time.monotonic() - start_time) * 1000
             logger.warning("health_check_failed", service=self.service_name, error=str(e))
             return False, None, round(elapsed, 2)
+
+
+class ArrBaseClient(BaseAPIClient):
+    """Common base for the Radarr/Sonarr/Lidarr *arr clients.
+
+    r5 follow-up (ArrBaseClient dedup): these three clients are almost
+    verbatim duplicates for push/profiles/root-folders/health-check, differing
+    only in their API version prefix (`/api/v3` for Radarr & Sonarr, `/api/v1`
+    for Lidarr). Subclasses set `_api_prefix` and get the shared methods below
+    for free; only lookup/add/parse logic (which genuinely differs per media
+    type) stays in the subclass.
+    """
+
+    #: API version prefix, e.g. "/api/v3" or "/api/v1". Must be set by subclasses.
+    _api_prefix: str = "/api/v3"
+
+    async def check_connection(self) -> tuple[bool, Optional[str], Optional[float]]:
+        """Check if service is available. Returns (available, version, response_time_ms)."""
+        start_time = time.monotonic()
+        try:
+            result = await self.get(f"{self._api_prefix}/system/status")
+            elapsed = (time.monotonic() - start_time) * 1000
+            version = result.get("version") if isinstance(result, dict) else None
+            return True, version, round(elapsed, 2)
+        except Exception as e:
+            elapsed = (time.monotonic() - start_time) * 1000
+            logger.warning("health_check_failed", service=self.service_name, error=str(e))
+            return False, None, round(elapsed, 2)
+
+    async def push_release(
+        self,
+        title: str,
+        download_url: str,
+        protocol: str = "torrent",
+        publish_date: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Push a release to the *arr service for processing.
+
+        Args:
+            title: Release title
+            download_url: Download URL
+            protocol: Protocol (torrent or usenet)
+            publish_date: Publication date ISO string
+
+        Returns:
+            Push result
+        """
+        payload: dict[str, Any] = {
+            "title": title,
+            "downloadUrl": download_url,
+            "protocol": protocol.capitalize(),
+        }
+
+        if publish_date:
+            payload["publishDate"] = publish_date
+
+        result = await self._post_no_retry(f"{self._api_prefix}/release/push", json_data=payload)
+        # BUG-01: POST /release/push returns List<ReleaseResource>, not a
+        # single object — unwrap it so callers can read `approved`.
+        if isinstance(result, list):
+            return result[0] if result and isinstance(result[0], dict) else {}
+        return result if isinstance(result, dict) else {}
+
+    async def get_quality_profiles(self) -> list[QualityProfile]:
+        """Get all quality profiles (PERF-07: cached for _PROFILE_CACHE_TTL)."""
+        return await self._ttl_cached(
+            "quality_profiles", self._PROFILE_CACHE_TTL, self._fetch_quality_profiles,
+        )
+
+    async def _fetch_quality_profiles(self) -> list[QualityProfile]:
+        results = await self.get(f"{self._api_prefix}/qualityprofile")
+        profiles = []
+        if isinstance(results, list):
+            for item in results:
+                try:
+                    profiles.append(QualityProfile(
+                        id=item["id"],
+                        name=item["name"],
+                    ))
+                except (KeyError, TypeError) as e:
+                    logger.warning("Skipping malformed profile", error=str(e))
+        return profiles
+
+    async def get_root_folders(self) -> list[RootFolder]:
+        """Get all root folders (PERF-07: cached for _PROFILE_CACHE_TTL)."""
+        return await self._ttl_cached(
+            "root_folders", self._PROFILE_CACHE_TTL, self._fetch_root_folders,
+        )
+
+    async def _fetch_root_folders(self) -> list[RootFolder]:
+        results = await self.get(f"{self._api_prefix}/rootfolder")
+        folders = []
+        if isinstance(results, list):
+            for item in results:
+                try:
+                    folders.append(RootFolder(
+                        id=item["id"],
+                        path=item["path"],
+                        free_space=item.get("freeSpace"),
+                    ))
+                except (KeyError, TypeError) as e:
+                    logger.warning("Skipping malformed root folder", error=str(e))
+        return folders
