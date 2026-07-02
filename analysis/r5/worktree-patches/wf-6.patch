@@ -1,0 +1,285 @@
+diff --git a/bot/db.py b/bot/db.py
+index 7874482..cd93497 100644
+--- a/bot/db.py
++++ b/bot/db.py
+@@ -69,8 +69,18 @@ class Database:
+             logger.info("Database connected", path=self.db_path)
+ 
+     async def close(self) -> None:
+-        """Close database connection."""
++        """Close database connection.
++
++        DB-04: checkpoint the WAL with TRUNCATE before closing so the
++        bot.db-wal sidecar file doesn't persist/grow across restarts (SD-card
++        wear on rpie4). Best-effort — a checkpoint failure must not prevent
++        the connection from closing.
++        """
+         if self._connection:
++            try:
++                await self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
++            except Exception as e:
++                logger.warning("WAL checkpoint on close failed", error=str(e))
+             await self._connection.close()
+             self._connection = None
+             logger.info("Database connection closed")
+@@ -432,7 +442,12 @@ class Database:
+                 ),
+             )
+             await self.conn.commit()
+-            return cursor.lastrowid
++            # DB-07: cursor.lastrowid is Optional per DB-API; the contract here
++            # is an int action id, so guard against None instead of lying.
++            row_id = cursor.lastrowid
++            if row_id is None:
++                raise RuntimeError("Failed to insert action record")
++            return row_id
+ 
+     async def get_user_actions(self, user_id: int, limit: int = 20) -> list[ActionLog]:
+         """Get recent actions for a user."""
+@@ -503,6 +518,22 @@ class Database:
+             await self.conn.commit()
+             return cursor.rowcount
+ 
++    async def cleanup_old_actions(self, days: int = 90) -> int:
++        """Delete actions older than specified days. Returns count deleted.
++
++        DB-02: the ``actions`` table otherwise grows unbounded (every search /
++        download appends a row). 90 days keeps the /history admin view useful
++        while bounding SD-card usage.
++        """
++        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
++
++        async with self._write_lock:
++            cursor = await self.conn.execute(
++                "DELETE FROM actions WHERE created_at < ?", (cutoff,)
++            )
++            await self.conn.commit()
++            return cursor.rowcount
++
+     async def cleanup_old_searches(self, days: int = 7) -> int:
+         """Delete searches older than specified days. Returns count deleted."""
+         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+diff --git a/bot/main.py b/bot/main.py
+index 427a18f..933c157 100644
+--- a/bot/main.py
++++ b/bot/main.py
+@@ -16,8 +16,8 @@ from aiogram import Bot, Dispatcher
+ from aiogram.client.default import DefaultBotProperties
+ from aiogram.enums import ParseMode
+ 
+-from bot.clients.qbittorrent import QBittorrentClient
+ from bot.clients.registry import close_all as close_all_clients
++from bot.clients.registry import get_qbittorrent
+ from bot.config import get_settings
+ from bot.db import Database
+ from bot.handlers import setup_routers
+@@ -166,11 +166,14 @@ async def _periodic_cleanup(db: Database, logger) -> None:
+             await asyncio.sleep(interval)
+             sessions = await db.cleanup_old_sessions(hours=24)
+             searches = await db.cleanup_old_searches(days=7)
+-            if sessions or searches:
++            # DB-02: prune the otherwise unbounded actions table too.
++            actions = await db.cleanup_old_actions(days=90)
++            if sessions or searches or actions:
+                 logger.info(
+                     "periodic_cleanup",
+                     sessions_removed=sessions,
+                     searches_removed=searches,
++                    actions_removed=actions,
+                 )
+         except asyncio.CancelledError:
+             break
+@@ -182,7 +185,6 @@ async def on_shutdown(
+     bot: Bot,
+     db: Database,
+     notification_service: Optional[NotificationService],
+-    qbittorrent: Optional[QBittorrentClient],
+ ) -> None:
+     """Shutdown handler."""
+     logger = structlog.get_logger()
+@@ -193,10 +195,8 @@ async def on_shutdown(
+         await notification_service.stop()
+         logger.info("Notification service stopped")
+ 
+-    # Close qBittorrent client (for notification service)
+-    if qbittorrent:
+-        await qbittorrent.close()
+-
++    # RACE-05: the qBittorrent client used by the notification service is the
++    # registry singleton, so close_all_clients() below closes it exactly once.
+     # Close all singleton clients from registry
+     await close_all_clients()
+ 
+@@ -234,17 +234,15 @@ async def main() -> None:
+     )
+ 
+     # Initialize qBittorrent client and notification service if configured
+-    qbittorrent: Optional[QBittorrentClient] = None
+     notification_service: Optional[NotificationService] = None
+ 
+     if settings.qbittorrent_enabled:
+         logger.info("qBittorrent integration enabled", url=settings.qbittorrent_url)
+-        qbittorrent = QBittorrentClient(
+-            settings.qbittorrent_url,
+-            settings.qbittorrent_username,
+-            settings.qbittorrent_password,
+-            timeout=settings.qbittorrent_timeout,
+-        )
++        # RACE-05: reuse the registry's qBittorrent singleton (the same client
++        # the download handlers use) instead of constructing a second one, so
++        # there is ONE qBittorrent client / auth session. Its lifecycle is owned
++        # by the registry — close_all() handles shutdown.
++        qbittorrent = await get_qbittorrent()
+ 
+         # Create notification sender function
+         async def send_notification(user_id: int, message: str) -> None:
+@@ -257,7 +255,8 @@ async def main() -> None:
+                     error=str(e),
+                 )
+ 
+-        notification_service = NotificationService(qbittorrent, send_notification)
++        if qbittorrent is not None:
++            notification_service = NotificationService(qbittorrent, send_notification)
+     else:
+         logger.info("qBittorrent integration disabled")
+ 
+@@ -282,7 +281,7 @@ async def main() -> None:
+         await on_startup(bot, db, notification_service)
+ 
+     async def _on_shutdown(*_: object, **__: object) -> None:
+-        await on_shutdown(bot, db, notification_service, qbittorrent)
++        await on_shutdown(bot, db, notification_service)
+ 
+     dp.startup.register(_on_startup)
+     dp.shutdown.register(_on_shutdown)
+diff --git a/tests/test_r4_C6-db-notify.py b/tests/test_r4_C6-db-notify.py
+new file mode 100644
+index 0000000..bd2705c
+--- /dev/null
++++ b/tests/test_r4_C6-db-notify.py
+@@ -0,0 +1,125 @@
++"""Tests for C6-db-notify cluster (DB-02, DB-04, DB-07, RACE-05)."""
++
++from datetime import datetime, timedelta, timezone
++from unittest.mock import AsyncMock
++
++import pytest
++import pytest_asyncio
++
++from bot.db import Database
++from bot.models import ActionLog, ActionType, ContentType, User
++from bot.services.notification_service import NotificationService
++
++
++@pytest_asyncio.fixture
++async def db():
++    """Create an in-memory database for testing."""
++    database = Database(":memory:")
++    await database.connect()
++    # actions/searches have a FK to users(tg_id)
++    await database.create_user(User(tg_id=123456789))
++    yield database
++    await database.close()
++
++
++def _make_action(user_id: int = 123456789) -> ActionLog:
++    return ActionLog(
++        user_id=user_id,
++        action_type=ActionType.SEARCH,
++        content_type=ContentType.MOVIE,
++        query="test",
++    )
++
++
++@pytest.mark.asyncio
++class TestLogActionContract:
++    """DB-07: log_action must honestly return an int."""
++
++    async def test_log_action_returns_int(self, db):
++        action_id = await db.log_action(_make_action())
++        assert isinstance(action_id, int)
++        assert action_id > 0
++
++
++@pytest.mark.asyncio
++class TestCleanupOldActions:
++    """DB-02: actions table must be prunable."""
++
++    async def test_cleanup_removes_old_keeps_recent(self, db):
++        # Recent action via the normal path
++        await db.log_action(_make_action())
++
++        # Old action — inject directly with an old created_at
++        old_ts = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
++        async with db._write_lock:
++            await db.conn.execute(
++                """
++                INSERT INTO actions (
++                    user_id, action_type, content_type, query, content_title,
++                    content_id, release_title, success, error_message, details, created_at
++                )
++                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++                """,
++                (
++                    123456789,
++                    ActionType.SEARCH.value,
++                    ContentType.MOVIE.value,
++                    "old",
++                    None,
++                    None,
++                    None,
++                    1,
++                    None,
++                    None,
++                    old_ts,
++                ),
++            )
++            await db.conn.commit()
++
++        deleted = await db.cleanup_old_actions(days=90)
++        assert deleted == 1
++
++        remaining = await db.get_all_actions(limit=50)
++        assert len(remaining) == 1
++        assert remaining[0].query == "test"
++
++    async def test_cleanup_returns_zero_when_nothing_old(self, db):
++        await db.log_action(_make_action())
++        deleted = await db.cleanup_old_actions(days=90)
++        assert deleted == 0
++
++
++@pytest.mark.asyncio
++class TestWalCheckpointOnClose:
++    """DB-04: close() must checkpoint the WAL before closing."""
++
++    async def test_close_issues_wal_checkpoint(self):
++        database = Database(":memory:")
++        await database.connect()
++
++        executed: list[str] = []
++        real_execute = database._connection.execute
++
++        async def spy_execute(sql, *args, **kwargs):
++            executed.append(sql)
++            return await real_execute(sql, *args, **kwargs)
++
++        database._connection.execute = spy_execute  # type: ignore[assignment]
++        await database.close()
++
++        assert any("wal_checkpoint(TRUNCATE)" in sql for sql in executed)
++
++
++@pytest.mark.asyncio
++class TestNotificationServiceUsesInjectedClient:
++    """RACE-05: the service must use the exact qBittorrent client injected.
++
++    Startup injects the registry singleton (await get_qbittorrent()) so there
++    is a single qBittorrent client; the service must not wrap/replace it.
++    """
++
++    async def test_uses_injected_qbittorrent_instance(self):
++        sentinel_client = AsyncMock()
++        sender = AsyncMock()
++        service = NotificationService(sentinel_client, sender)
++        assert service.qbittorrent is sentinel_client

@@ -1,0 +1,532 @@
+diff --git a/bot/clients/qbittorrent.py b/bot/clients/qbittorrent.py
+index 2146e4d..7aa4283 100644
+--- a/bot/clients/qbittorrent.py
++++ b/bot/clients/qbittorrent.py
+@@ -1,5 +1,6 @@
+ """qBittorrent Web API client."""
+ 
++import asyncio
+ import json
+ import time
+ from datetime import datetime, timezone
+@@ -120,6 +121,12 @@ class QBittorrentClient:
+             )
+ 
+             if response.status_code == 403 or "Fails" in response.text:
++                # OBS-01: surface the failure before raising so the cause is
++                # visible in logs (bad credentials / banned IP).
++                log.warning(
++                    "qBittorrent login rejected (bad credentials or banned IP)",
++                    status_code=response.status_code,
++                )
+                 raise QBittorrentAuthError(
+                     "Неверный логин или пароль",
+                     status_code=response.status_code,
+@@ -136,6 +143,12 @@ class QBittorrentClient:
+                 log.info("Successfully logged in to qBittorrent")
+                 return True
+ 
++            # OBS-01: a 2xx without a session cookie (or any other unexpected
++            # status) is an auth failure too — log it before raising.
++            log.error(
++                "qBittorrent login failed: no session cookie set",
++                status_code=response.status_code,
++            )
+             raise QBittorrentError(
+                 "Ошибка авторизации в qBittorrent",
+                 status_code=response.status_code,
+@@ -166,6 +179,12 @@ class QBittorrentClient:
+ 
+             # Session expired
+             if response.status_code == 403:
++                # OBS-05: the mid-request re-auth was previously silent; log it
++                # so session churn is observable.
++                logger.info(
++                    "qBittorrent session expired, re-authenticating",
++                    endpoint=endpoint,
++                )
+                 self._authenticated = False
+                 try:
+                     await self._ensure_authenticated()
+@@ -221,19 +240,17 @@ class QBittorrentClient:
+         log.debug("Getting qBittorrent status")
+ 
+         try:
+-            # Get version
+-            version = await self.get_version()
+-
+-            # Get transfer info
+-            transfer = await self.get_transfer_info()
+-
+-            # Get maindata for additional info
+-            maindata = await self._request("GET", "/api/v2/sync/maindata")
++            # PERF-05: the four endpoints are independent, so fetch them
++            # concurrently instead of serially (4 round-trips → 1 wall-clock
++            # round-trip). The aggregated result is identical.
++            version, transfer, maindata, torrents = await asyncio.gather(
++                self.get_version(),
++                self.get_transfer_info(),
++                self._request("GET", "/api/v2/sync/maindata"),
++                self.get_torrents(),
++            )
+             server_state = maindata.get("server_state", {}) if maindata else {}
+ 
+-            # Get torrent counts
+-            torrents = await self.get_torrents()
+-
+             active_downloads = sum(
+                 1 for t in torrents if t.state == TorrentState.DOWNLOADING
+             )
+@@ -308,6 +325,33 @@ class QBittorrentClient:
+                 return t
+         return None
+ 
++    async def get_torrent(self, full_hash: str) -> Optional[TorrentInfo]:
++        """Fetch a single torrent by its full hash.
++
++        PERF-01: uses qBittorrent's server-side ``hashes`` filter on
++        ``/torrents/info`` so callers needing one torrent (e.g. the post-action
++        redraw after pause/resume) do not pull and parse the entire list.
++        """
++        result = await self._request(
++            "GET",
++            "/api/v2/torrents/info",
++            params={"hashes": full_hash},
++        )
++
++        if not isinstance(result, list) or not result:
++            return None
++
++        for item in result:
++            if str(item.get("hash", "")).lower() == full_hash.lower():
++                try:
++                    return self._parse_torrent(item)
++                except Exception as e:
++                    logger.warning(
++                        "Failed to parse torrent", error=str(e), name=item.get("name")
++                    )
++                    return None
++        return None
++
+     async def pause(self, hashes: list[str] | str = "all") -> None:
+         """Pause torrent(s). Use 'all' to pause all."""
+         if isinstance(hashes, list):
+@@ -318,6 +362,11 @@ class QBittorrentClient:
+             await self._request("POST", "/api/v2/torrents/stop", data={"hashes": hashes})
+         except QBittorrentError as e:
+             if e.status_code == 404:
++                # OBS-04: make the legacy-endpoint fallback visible.
++                logger.info(
++                    "qBittorrent /torrents/stop unavailable (404), "
++                    "falling back to legacy /torrents/pause",
++                )
+                 await self._request("POST", "/api/v2/torrents/pause", data={"hashes": hashes})
+             else:
+                 raise
+@@ -333,6 +382,11 @@ class QBittorrentClient:
+             await self._request("POST", "/api/v2/torrents/start", data={"hashes": hashes})
+         except QBittorrentError as e:
+             if e.status_code == 404:
++                # OBS-04: make the legacy-endpoint fallback visible.
++                logger.info(
++                    "qBittorrent /torrents/start unavailable (404), "
++                    "falling back to legacy /torrents/resume",
++                )
+                 await self._request("POST", "/api/v2/torrents/resume", data={"hashes": hashes})
+             else:
+                 raise
+diff --git a/bot/handlers/downloads.py b/bot/handlers/downloads.py
+index bc4d92a..4367522 100644
+--- a/bot/handlers/downloads.py
++++ b/bot/handlers/downloads.py
+@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, Message
+ 
+ from bot.clients.qbittorrent import QBittorrentError
+ from bot.clients.registry import get_qbittorrent
+-from bot.models import TorrentFilter, User, format_speed
++from bot.models import TorrentFilter, TorrentInfo, User, format_speed
+ from bot.ui.formatters import Formatters
+ from bot.ui.keyboards import CallbackData, Keyboards
+ 
+@@ -275,6 +275,26 @@ async def _render_torrent_list(message: Message, qbt) -> None:
+             raise
+ 
+ 
++async def _refetch_one(qbt, torrent, short_hash: str):
++    """Re-fetch a single torrent after a mutating action (PERF-01).
++
++    Prefers ``qbt.get_torrent(full_hash)`` which uses qBittorrent's server-side
++    ``hashes`` filter (one targeted row) instead of pulling and parsing the whole
++    list. Falls back to the short-hash lookup when the targeted fetch is
++    unavailable or yields a non-``TorrentInfo`` result, so the redraw always has
++    a usable torrent.
++    """
++    get_one = getattr(qbt, "get_torrent", None)
++    if get_one is not None:
++        try:
++            refreshed = await get_one(torrent.hash)
++        except Exception:  # pragma: no cover - defensive
++            refreshed = None
++        if isinstance(refreshed, TorrentInfo):
++            return refreshed
++    return await qbt.get_torrent_by_short_hash(short_hash)
++
++
+ async def _render_torrent_details(message: Message, torrent) -> None:
+     """Render torrent details into ``message``.
+ 
+@@ -346,8 +366,11 @@ async def handle_pause_torrent(callback: CallbackQuery) -> None:
+         # BUG-15: redraw details directly — do NOT call handle_torrent_details,
+         # which would ack the callback a second time.
+         if callback.message:
+-            # Re-fetch to show updated state (speed=0, state=paused)
+-            refreshed = await qbt.get_torrent_by_short_hash(short_hash)
++            # PERF-01: re-fetch only this torrent (server-side ``hashes`` filter)
++            # to show the updated state (speed=0, state=paused) instead of
++            # pulling and parsing the whole list again. Fall back to a
++            # short-hash lookup if the targeted fetch returns nothing.
++            refreshed = await _refetch_one(qbt, torrent, short_hash)
+             await _render_torrent_details(callback.message, refreshed or torrent)
+ 
+     except Exception as e:
+@@ -378,7 +401,8 @@ async def handle_resume_torrent(callback: CallbackQuery) -> None:
+ 
+         # BUG-15: redraw details directly — do NOT call handle_torrent_details.
+         if callback.message:
+-            refreshed = await qbt.get_torrent_by_short_hash(short_hash)
++            # PERF-01: targeted single-torrent re-fetch (see _refetch_one).
++            refreshed = await _refetch_one(qbt, torrent, short_hash)
+             await _render_torrent_details(callback.message, refreshed or torrent)
+ 
+     except Exception as e:
+diff --git a/tests/test_r4_C2-qbit.py b/tests/test_r4_C2-qbit.py
+new file mode 100644
+index 0000000..ae5eb24
+--- /dev/null
++++ b/tests/test_r4_C2-qbit.py
+@@ -0,0 +1,325 @@
++"""R4 cluster C2-qbit: perf + observability for qBittorrent client/handlers.
++
++Covers:
++- PERF-05: get_status() parallelizes its 4 API calls via asyncio.gather while
++  producing the identical QBittorrentStatus.
++- PERF-01: pause/resume/delete callbacks fetch the torrent list at most once and
++  use a targeted single-torrent fetch for the post-action redraw.
++- OBS-01: login() logs a warning/error on the failure paths before raising.
++- OBS-04: pause()/resume() log when falling back to the legacy endpoint.
++- OBS-05: _request logs when re-authenticating mid-request after a 403.
++"""
++
++import asyncio
++from unittest.mock import AsyncMock, MagicMock, patch
++
++import pytest
++
++from bot.clients.qbittorrent import (
++    QBittorrentAuthError,
++    QBittorrentClient,
++    QBittorrentError,
++)
++from bot.models import QBittorrentStatus, TorrentInfo, TorrentState
++
++
++@pytest.fixture
++def client():
++    return QBittorrentClient("http://localhost:8080", "admin", "password123")
++
++
++# ---------------------------------------------------------------------------
++# PERF-05: get_status parallelization
++# ---------------------------------------------------------------------------
++
++
++class TestGetStatusParallel:
++    @pytest.mark.asyncio
++    async def test_get_status_aggregates_identically(self, client):
++        """get_status produces the same QBittorrentStatus from the 4 endpoints."""
++        torrents = [
++            TorrentInfo(hash="a" * 40, name="dl", progress=0.5,
++                        state=TorrentState.DOWNLOADING),
++            TorrentInfo(hash="b" * 40, name="up", progress=1.0,
++                        state=TorrentState.SEEDING),
++            TorrentInfo(hash="c" * 40, name="up2", progress=1.0,
++                        state=TorrentState.SEEDING),
++            TorrentInfo(hash="d" * 40, name="paused", progress=0.3,
++                        state=TorrentState.PAUSED),
++        ]
++
++        async def fake_request(method, endpoint, data=None, params=None):
++            if endpoint == "/api/v2/app/version":
++                return "4.6.0"
++            if endpoint == "/api/v2/transfer/info":
++                return {
++                    "connection_status": "connected",
++                    "dl_info_speed": 5000000,
++                    "up_info_speed": 1000000,
++                    "dl_rate_limit": 10000000,
++                    "up_rate_limit": 0,
++                }
++            if endpoint == "/api/v2/sync/maindata":
++                return {"server_state": {"free_space_on_disk": 999, "dht_nodes": 321}}
++            raise AssertionError(f"unexpected endpoint {endpoint}")
++
++        with patch.object(client, "_request", side_effect=fake_request), \
++                patch.object(client, "get_torrents",
++                             new=AsyncMock(return_value=torrents)):
++            status = await client.get_status()
++
++        assert isinstance(status, QBittorrentStatus)
++        assert status.version == "4.6.0"
++        assert status.connection_status == "connected"
++        assert status.download_speed == 5000000
++        assert status.upload_speed == 1000000
++        assert status.download_limit == 10000000
++        assert status.upload_limit == 0
++        assert status.free_space == 999
++        assert status.dht_nodes == 321
++        assert status.active_downloads == 1
++        assert status.active_uploads == 2
++        assert status.paused_torrents == 1
++        assert status.total_torrents == 4
++
++    @pytest.mark.asyncio
++    async def test_get_status_runs_calls_concurrently(self, client):
++        """The independent fetches must run concurrently, not sequentially."""
++        in_flight = 0
++        max_in_flight = 0
++
++        async def fake_request(method, endpoint, data=None, params=None):
++            nonlocal in_flight, max_in_flight
++            in_flight += 1
++            max_in_flight = max(max_in_flight, in_flight)
++            try:
++                await asyncio.sleep(0.02)
++            finally:
++                in_flight -= 1
++            if endpoint == "/api/v2/app/version":
++                return "4.6.0"
++            if endpoint == "/api/v2/transfer/info":
++                return {}
++            if endpoint == "/api/v2/sync/maindata":
++                return {"server_state": {}}
++            raise AssertionError(f"unexpected endpoint {endpoint}")
++
++        async def fake_get_torrents(*a, **k):
++            nonlocal in_flight, max_in_flight
++            in_flight += 1
++            max_in_flight = max(max_in_flight, in_flight)
++            try:
++                await asyncio.sleep(0.02)
++            finally:
++                in_flight -= 1
++            return []
++
++        with patch.object(client, "_request", side_effect=fake_request), \
++                patch.object(client, "get_torrents", side_effect=fake_get_torrents):
++            await client.get_status()
++
++        # 4 independent fetches should overlap -> more than one in flight at once.
++        assert max_in_flight >= 2
++
++
++# ---------------------------------------------------------------------------
++# OBS-01: login failure logging
++# ---------------------------------------------------------------------------
++
++
++class TestLoginFailureLogging:
++    def _mock_http(self, status_code, text, cookie_name=None):
++        mock_http = AsyncMock()
++        resp = MagicMock()
++        resp.status_code = status_code
++        resp.text = text
++        mock_http.post.return_value = resp
++        jar = []
++        if cookie_name:
++            c = MagicMock()
++            c.name = cookie_name
++            jar.append(c)
++        mock_http.cookies.jar = jar
++        return mock_http
++
++    @pytest.mark.asyncio
++    async def test_login_auth_failure_logs(self, client):
++        mock_http = self._mock_http(403, "Fails.")
++        with patch.object(client, "_get_client", new=AsyncMock(return_value=mock_http)), \
++                patch("bot.clients.qbittorrent.logger") as mock_logger:
++            bound = MagicMock()
++            mock_logger.bind.return_value = bound
++            with pytest.raises(QBittorrentAuthError):
++                await client.login()
++            assert bound.warning.called or bound.error.called
++
++    @pytest.mark.asyncio
++    async def test_login_no_cookie_logs(self, client):
++        mock_http = self._mock_http(204, "", cookie_name=None)
++        with patch.object(client, "_get_client", new=AsyncMock(return_value=mock_http)), \
++                patch("bot.clients.qbittorrent.logger") as mock_logger:
++            bound = MagicMock()
++            mock_logger.bind.return_value = bound
++            with pytest.raises(QBittorrentError):
++                await client.login()
++            assert bound.warning.called or bound.error.called
++
++
++# ---------------------------------------------------------------------------
++# OBS-04: pause/resume legacy-endpoint fallback logging
++# ---------------------------------------------------------------------------
++
++
++class TestFallbackLogging:
++    @pytest.mark.asyncio
++    async def test_pause_logs_on_legacy_fallback(self, client):
++        calls = []
++
++        async def fake_request(method, endpoint, data=None, params=None):
++            calls.append(endpoint)
++            if endpoint == "/api/v2/torrents/stop":
++                raise QBittorrentError("not found", status_code=404)
++            return None
++
++        with patch.object(client, "_request", side_effect=fake_request), \
++                patch("bot.clients.qbittorrent.logger") as mock_logger:
++            await client.pause(["abc"])
++        assert "/api/v2/torrents/pause" in calls
++        assert mock_logger.info.called or mock_logger.debug.called
++
++    @pytest.mark.asyncio
++    async def test_resume_logs_on_legacy_fallback(self, client):
++        calls = []
++
++        async def fake_request(method, endpoint, data=None, params=None):
++            calls.append(endpoint)
++            if endpoint == "/api/v2/torrents/start":
++                raise QBittorrentError("not found", status_code=404)
++            return None
++
++        with patch.object(client, "_request", side_effect=fake_request), \
++                patch("bot.clients.qbittorrent.logger") as mock_logger:
++            await client.resume(["abc"])
++        assert "/api/v2/torrents/resume" in calls
++        assert mock_logger.info.called or mock_logger.debug.called
++
++
++# ---------------------------------------------------------------------------
++# OBS-05: _request re-auth logging
++# ---------------------------------------------------------------------------
++
++
++class TestReauthLogging:
++    @pytest.mark.asyncio
++    async def test_request_logs_on_reauth(self, client):
++        client._authenticated = True
++
++        resp_403 = MagicMock()
++        resp_403.status_code = 403
++        resp_ok = MagicMock()
++        resp_ok.status_code = 200
++        resp_ok.text = "Ok."
++        resp_ok.json.side_effect = ValueError("not json")
++
++        mock_http = AsyncMock()
++        mock_http.request.side_effect = [resp_403, resp_ok]
++
++        async def fake_ensure():
++            client._authenticated = True
++
++        with patch.object(client, "_get_client", new=AsyncMock(return_value=mock_http)), \
++                patch.object(client, "_ensure_authenticated",
++                             new=AsyncMock(side_effect=fake_ensure)), \
++                patch("bot.clients.qbittorrent.logger") as mock_logger:
++            await client._request("GET", "/api/v2/app/version")
++        assert mock_logger.info.called or mock_logger.warning.called
++
++
++# ---------------------------------------------------------------------------
++# PERF-01: handlers fetch the list at most once + targeted refresh
++# ---------------------------------------------------------------------------
++
++
++class TestHandlerSingleFetch:
++    def _make_qbt(self):
++        torrent = TorrentInfo(
++            hash="abc123def456" + "0" * 28,
++            name="Test Torrent",
++            progress=0.5,
++            state=TorrentState.DOWNLOADING,
++        )
++        qbt = AsyncMock()
++        qbt.get_torrents = AsyncMock(return_value=[torrent])
++        qbt.get_torrent = AsyncMock(return_value=torrent)
++        qbt.get_torrent_by_short_hash = AsyncMock(return_value=torrent)
++        qbt.pause = AsyncMock()
++        qbt.resume = AsyncMock()
++        qbt.delete = AsyncMock()
++        return qbt, torrent
++
++    def _make_callback(self, data):
++        cb = AsyncMock()
++        cb.data = data
++        cb.message = AsyncMock()
++        return cb
++
++    @pytest.mark.asyncio
++    async def test_pause_does_not_refetch_full_list(self):
++        from bot.handlers import downloads
++
++        qbt, torrent = self._make_qbt()
++        cb = self._make_callback("t_pause:abc123de")
++
++        with patch.object(downloads, "get_qbittorrent",
++                          new=AsyncMock(return_value=qbt)), \
++                patch.object(downloads, "_render_torrent_details",
++                             new=AsyncMock()):
++            await downloads.handle_pause_torrent(cb)
++
++        # Pause was applied to the located torrent.
++        qbt.pause.assert_awaited_once_with([torrent.hash])
++        # The full list is never re-listed; the post-action redraw uses the
++        # targeted single-torrent fetch instead.
++        assert qbt.get_torrents.await_count == 0
++        qbt.get_torrent.assert_awaited_once_with(torrent.hash)
++
++    @pytest.mark.asyncio
++    async def test_resume_does_not_refetch_full_list(self):
++        from bot.handlers import downloads
++
++        qbt, torrent = self._make_qbt()
++        cb = self._make_callback("t_resume:abc123de")
++
++        with patch.object(downloads, "get_qbittorrent",
++                          new=AsyncMock(return_value=qbt)), \
++                patch.object(downloads, "_render_torrent_details",
++                             new=AsyncMock()):
++            await downloads.handle_resume_torrent(cb)
++
++        qbt.resume.assert_awaited_once_with([torrent.hash])
++        assert qbt.get_torrents.await_count == 0
++        qbt.get_torrent.assert_awaited_once_with(torrent.hash)
++
++
++# ---------------------------------------------------------------------------
++# get_torrent helper (single targeted fetch used by PERF-01)
++# ---------------------------------------------------------------------------
++
++
++class TestGetTorrent:
++    @pytest.mark.asyncio
++    async def test_get_torrent_filters_by_hash(self, client):
++        raw = [{"hash": "f" * 40, "name": "x", "state": "downloading"}]
++        with patch.object(client, "_request",
++                          new=AsyncMock(return_value=raw)) as mock_req:
++            t = await client.get_torrent("f" * 40)
++        assert t is not None
++        assert t.hash == "f" * 40
++        # Should have passed the hash through as a server-side filter.
++        _, kwargs = mock_req.call_args
++        assert kwargs["params"]["hashes"] == "f" * 40
++
++    @pytest.mark.asyncio
++    async def test_get_torrent_missing_returns_none(self, client):
++        with patch.object(client, "_request", new=AsyncMock(return_value=[])):
++            assert await client.get_torrent("f" * 40) is None
