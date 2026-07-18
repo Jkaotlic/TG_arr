@@ -51,6 +51,12 @@ class EmbyAuthError(EmbyError):
     pass
 
 
+class EmbyConnectionError(EmbyError):
+    """Transient transport failure; safe for the request retry policy."""
+
+    pass
+
+
 class EmbyClient:
     """Client for Emby Media Server API."""
 
@@ -93,7 +99,7 @@ class EmbyClient:
         }
 
     @retry(
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError, EmbyConnectionError)),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
@@ -135,10 +141,10 @@ class EmbyClient:
             except Exception:
                 return response.text
 
-        except httpx.TimeoutException:
-            raise EmbyError("Таймаут соединения с Emby")
-        except httpx.ConnectError:
-            raise EmbyError(f"Не удалось подключиться к Emby ({self.base_url})")
+        except httpx.TimeoutException as exc:
+            raise EmbyConnectionError("Таймаут соединения с Emby") from exc
+        except httpx.ConnectError as exc:
+            raise EmbyConnectionError(f"Не удалось подключиться к Emby ({self.base_url})") from exc
 
     async def get_server_info(self) -> EmbyServerInfo:
         """Get server information."""
