@@ -124,7 +124,9 @@ async def _guarded_lookup(service: str, coro_factory):
     async with _DETECT_SEMAPHORE:
         try:
             return await coro_factory()
-        except BaseException as exc:  # noqa: BLE001 - surfaced to gather(return_exceptions=True) caller
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
             if _is_service_down_error(exc):
                 _breaker_trip(service)
             return exc

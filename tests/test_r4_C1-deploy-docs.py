@@ -140,6 +140,16 @@ def test_compose_resource_comment_not_swarm_only() -> None:
     assert "Compose V2" in text
 
 
+def test_deploy_and_rollback_wait_for_container_health() -> None:
+    """DEPLOY-01: a finished build is not a successful rollout."""
+    text = _read("Makefile")
+    for target in ("deploy", "rollback"):
+        match = re.search(rf"^{target}:\n((?:\t.*\n?)+)", text, re.MULTILINE)
+        assert match, f"Makefile is missing `{target}`"
+        recipe = match.group(1)
+        assert "--wait" in recipe and "--wait-timeout" in recipe
+
+
 # ---------------------------------------------------------------------------
 # DEPLOY-05: dev compose defines the bot-data volume it mounts.
 # ---------------------------------------------------------------------------

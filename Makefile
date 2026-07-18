@@ -88,12 +88,12 @@ IMAGE_PREV := tg-arr-bot:prev
 deploy:
 	docker compose build
 	-docker tag $(IMAGE) $(IMAGE_PREV)
-	docker compose up -d
+	docker compose up -d --wait --wait-timeout 180 || { docker compose logs --tail 100 tg-arr-bot; exit 1; }
 	docker compose ps
 
 rollback:
 	docker tag $(IMAGE_PREV) $(IMAGE)
-	docker compose up -d
+	docker compose up -d --wait --wait-timeout 180 || { docker compose logs --tail 100 tg-arr-bot; exit 1; }
 	docker compose ps
 
 # DEP-08: the base image is pinned by digest (see Dockerfile) for

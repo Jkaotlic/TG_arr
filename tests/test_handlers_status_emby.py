@@ -270,13 +270,28 @@ async def test_handle_scan_all_calls_answer_once():
     with patch.object(emby_handler, "get_emby", AsyncMock(return_value=emby_client)), \
          patch.object(emby_handler.Formatters, "format_emby_status", return_value="TXT"), \
          patch.object(emby_handler.Keyboards, "emby_main", return_value="KB"):
-        await emby_handler.handle_scan_all(cb)
+        await emby_handler.handle_scan_all(cb, is_admin=True)
 
     assert cb.answer.call_count == 1, (
         f"callback.answer called {cb.answer.call_count} times (expected 1) — BUG-04c regression"
     )
     emby_client.scan_library.assert_awaited_once()
     cb.message.edit_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_scan_all_rejects_non_admin_without_touching_emby():
+    """LOGIC-01: allowed users must not trigger library-wide maintenance."""
+    from bot.handlers import emby as emby_handler
+
+    cb = _make_callback()
+    get_emby = AsyncMock()
+    with patch.object(emby_handler, "get_emby", get_emby):
+        await emby_handler.handle_scan_all(cb, is_admin=False)
+
+    get_emby.assert_not_awaited()
+    cb.answer.assert_awaited_once()
+    assert cb.answer.call_args.kwargs["show_alert"] is True
 
 
 @pytest.mark.asyncio
@@ -299,7 +314,7 @@ async def test_handle_scan_movies_calls_answer_once():
     with patch.object(emby_handler, "get_emby", AsyncMock(return_value=emby_client)), \
          patch.object(emby_handler.Formatters, "format_emby_status", return_value="TXT"), \
          patch.object(emby_handler.Keyboards, "emby_main", return_value="KB"):
-        await emby_handler.handle_scan_movies(cb)
+        await emby_handler.handle_scan_movies(cb, is_admin=True)
 
     assert cb.answer.call_count == 1
     cb.message.edit_text.assert_awaited_once()
