@@ -1,11 +1,25 @@
 """Tests for service layer."""
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock
 
 from bot.models import ContentType, MovieInfo, QualityInfo, SearchResult, SeriesInfo
 from bot.services.scoring import ScoringService
 from bot.services.search_service import SearchService
+
+
+@pytest.mark.asyncio
+async def test_guarded_lookup_propagates_task_cancellation():
+    """BUG-04: shutdown cancellation must not become a normal lookup result."""
+    from bot.services.search_service import _guarded_lookup
+
+    async def cancelled_lookup():
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await _guarded_lookup("cancel-test", cancelled_lookup)
 
 
 class TestSearchService:

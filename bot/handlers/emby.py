@@ -119,8 +119,12 @@ async def handle_close(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == CallbackData.EMBY_SCAN_ALL)
-async def handle_scan_all(callback: CallbackQuery) -> None:
+async def handle_scan_all(callback: CallbackQuery, is_admin: bool = False) -> None:
     """Scan all libraries."""
+    if not is_admin:
+        await callback.answer("Недостаточно прав для сканирования библиотек", show_alert=True)
+        return
+
     emby = await get_emby()
     if not emby:
         await callback.answer("Emby не настроен", show_alert=True)
@@ -141,8 +145,12 @@ async def handle_scan_all(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == CallbackData.EMBY_SCAN_MOVIES)
-async def handle_scan_movies(callback: CallbackQuery) -> None:
+async def handle_scan_movies(callback: CallbackQuery, is_admin: bool = False) -> None:
     """Scan movies library."""
+    if not is_admin:
+        await callback.answer("Недостаточно прав для сканирования библиотек", show_alert=True)
+        return
+
     emby = await get_emby()
     if not emby:
         await callback.answer("Emby не настроен", show_alert=True)
@@ -170,8 +178,12 @@ async def handle_scan_movies(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == CallbackData.EMBY_SCAN_SERIES)
-async def handle_scan_series(callback: CallbackQuery) -> None:
+async def handle_scan_series(callback: CallbackQuery, is_admin: bool = False) -> None:
     """Scan series library."""
+    if not is_admin:
+        await callback.answer("Недостаточно прав для сканирования библиотек", show_alert=True)
+        return
+
     emby = await get_emby()
     if not emby:
         await callback.answer("Emby не настроен", show_alert=True)

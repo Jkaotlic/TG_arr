@@ -1,6 +1,7 @@
 """Feature #8: webhook-driven notifications — arr 'on import' payload parsing."""
 
 import pytest
+from unittest.mock import MagicMock
 
 
 def test_parse_arr_event_radarr_download():
@@ -121,6 +122,31 @@ async def test_webhook_with_correct_path_token_accepted():
         )
         assert resp.status == 200
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_webhook_path_token_is_never_logged(monkeypatch):
+    """SEC-01: path authentication must not put its secret into Docker logs."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    import bot.webhook as webhook
+
+    logged = MagicMock()
+    monkeypatch.setattr(webhook, "logger", logged)
+
+    async def notify(_: str) -> None:
+        return None
+
+    secret = "do-not-log-this-secret"
+    app = webhook.build_webhook_app(notify, token=secret)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            f"/webhook/{secret}",
+            json={"eventType": "Download", "movie": {"title": "Dune"}},
+        )
+
+    assert response.status == 200
+    assert secret not in str(logged.mock_calls)
 
 
 @pytest.mark.asyncio

@@ -124,10 +124,17 @@ def build_webhook_app(
     """
 
     async def handle(request: web.Request) -> web.Response:
-        service = request.match_info.get("service")
+        route_segment = request.match_info.get("service")
+        # A configured token may be supplied as the route segment. Never use
+        # that segment as a log field: Docker/Portainer logs are not a secret
+        # store. Service labels remain available only in unauthenticated mode.
+        auth_mode = "none"
+        if token:
+            auth_mode = "query" if request.query.get("token") == token else "path"
+        service = route_segment if token is None else None
 
         if token and not _token_matches(request, token):
-            logger.warning("webhook_rejected_bad_token", remote=request.remote, service=service)
+            logger.warning("webhook_rejected_bad_token", remote=request.remote, auth_mode=auth_mode)
             return web.Response(status=403, text="forbidden")
 
         try:
@@ -142,12 +149,13 @@ def build_webhook_app(
             "webhook_received",
             event_type=event_type,
             service=service,
+            auth_mode=auth_mode,
             matched=message is not None,
         )
         if message:
             try:
                 await notify(message)
-                logger.info("webhook_notified", service=service)
+                logger.info("webhook_notified", service=service, auth_mode=auth_mode)
             except Exception as e:  # never let a notify error 500 the *arr side
                 logger.warning("webhook_notify_failed", error=str(e))
         return web.Response(text="ok")
