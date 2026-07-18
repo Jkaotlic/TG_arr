@@ -13,6 +13,22 @@ from bot.clients.tmdb import TMDbClient
 from bot.models import ContentType
 
 
+@pytest.mark.asyncio
+async def test_emby_retries_transient_timeouts_before_returning_response(monkeypatch):
+    """BUG-03: the retry decorator must see the transient connection error."""
+    from bot.clients.emby import EmbyClient
+
+    client = EmbyClient("http://emby.invalid", "test-key")
+    transport = AsyncMock()
+    transport.request = AsyncMock(
+        side_effect=[httpx.TimeoutException("one"), httpx.TimeoutException("two"), httpx.Response(200, json={})]
+    )
+    monkeypatch.setattr(client, "_get_client", AsyncMock(return_value=transport))
+
+    assert await client._request("GET", "/System/Info") == {}
+    assert transport.request.await_count == 3
+
+
 class TestBaseAPIClient:
     """Test base API client functionality."""
 
