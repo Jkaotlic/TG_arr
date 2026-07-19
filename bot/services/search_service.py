@@ -274,12 +274,34 @@ class SearchService:
             if music_score < 0.92:
                 music_score *= 0.7
 
+        # An exact artist name is a stronger signal than a similarly named
+        # music documentary or TV show.  Without this secondary sort key a
+        # query such as "The Weeknd" ties with Radarr at 1.0, then becomes
+        # UNKNOWN because MOVIE appears first in ``scored``.
+        normalized_query = self._normalize_name(clean_query_no_year)
+        exact_artist_match = any(
+            self._normalize_name(getattr(artist, "name", ""))
+            == normalized_query
+            for artist in artists
+        )
+        # A genuine title collision (for example, the film "Joker" and the
+        # artist "Joker") remains ambiguous.  The music preference is only
+        # for an exact artist versus a merely similar documentary/show title.
+        exact_screen_match = any(
+            self._normalize_name(getattr(item, "title", "")) == normalized_query
+            for item in [*movies, *series]
+        )
+        exact_artist_match = exact_artist_match and not exact_screen_match
+
         scored = [
             (ContentType.MOVIE, movie_score, "movie_match", [getattr(m, "title", "?") for m in movies[:3]]),
             (ContentType.SERIES, series_score, "series_match", [getattr(s, "title", "?") for s in series[:3]]),
             (ContentType.MUSIC, music_score, "music_match", [getattr(a, "name", "?") for a in artists[:3]]),
         ]
-        scored.sort(key=lambda x: x[1], reverse=True)
+        scored.sort(
+            key=lambda x: (x[1], x[0] == ContentType.MUSIC and exact_artist_match),
+            reverse=True,
+        )
         top_type, top_score, reason, _ = scored[0]
         runner_up_score = scored[1][1]
 
@@ -303,6 +325,9 @@ class SearchService:
         # Confidence threshold: below 0.7 → UNKNOWN so user gets the question.
         if top_score < 0.7:
             result = DetectionResult(ContentType.UNKNOWN, top_score, "low_confidence", candidates)
+        # A direct artist match wins over an identically named screen title.
+        elif top_type == ContentType.MUSIC and exact_artist_match:
+            result = DetectionResult(ContentType.MUSIC, top_score, "music_exact_match", candidates)
         # Tie-break: if top and runner-up are within 0.05, ask the user.
         elif top_score - runner_up_score < 0.05 and runner_up_score > 0.6:
             result = DetectionResult(ContentType.UNKNOWN, top_score, "ambiguous", candidates)
@@ -323,6 +348,11 @@ class SearchService:
         if failure_count == 0:
             _cache_put(cache_key, result)
         return result
+
+    @staticmethod
+    def _normalize_name(value: str) -> str:
+        """Normalize an artist/title name for exact-match comparison."""
+        return re.sub(r"[\W_]+", "", value.casefold())
 
     @staticmethod
     def _strip_quality_tokens(query: str) -> str:
