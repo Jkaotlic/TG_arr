@@ -7,7 +7,7 @@ import pytest
 from bot.clients.deezer import DeezerClient
 from bot.clients.lidarr import LidarrClient
 from bot.clients.prowlarr import MUSIC_CATEGORIES, ProwlarrClient
-from bot.models import ArtistInfo, ContentType
+from bot.models import ArtistInfo, ContentType, MovieInfo, SeriesInfo
 
 
 class TestLidarrClient:
@@ -352,6 +352,29 @@ class TestSearchServiceMusicDetection:
         svc = SearchService(prowlarr, radarr, sonarr, ScoringService(), lidarr=lidarr)
         ct = (await svc.detect_with_confidence("Metallica")).content_type
         assert ct == ContentType.MUSIC
+
+    async def test_exact_artist_wins_over_similarly_named_screen_titles(self):
+        """A direct artist match must not be hidden behind a music film/show."""
+        from bot.services.scoring import ScoringService
+        from bot.services.search_service import SearchService
+
+        prowlarr = AsyncMock()
+        radarr = AsyncMock()
+        radarr.lookup_movie = AsyncMock(return_value=[
+            MovieInfo(tmdb_id=1, title="The Weeknd - Double Fantasy", year=2025),
+        ])
+        sonarr = AsyncMock()
+        sonarr.lookup_series = AsyncMock(return_value=[
+            SeriesInfo(tvdb_id=1, title="The Weekend"),
+        ])
+        lidarr = AsyncMock()
+        lidarr.lookup_artist = AsyncMock(return_value=[
+            ArtistInfo(mb_id="mb-1", name="The Weeknd"),
+        ])
+
+        svc = SearchService(prowlarr, radarr, sonarr, ScoringService(), lidarr=lidarr)
+
+        assert (await svc.detect_with_confidence("The Weeknd")).content_type == ContentType.MUSIC
 
     async def test_unknown_when_no_lidarr(self):
         from bot.services.scoring import ScoringService
