@@ -353,8 +353,8 @@ class TestSearchServiceMusicDetection:
         ct = (await svc.detect_with_confidence("Metallica")).content_type
         assert ct == ContentType.MUSIC
 
-    async def test_exact_artist_wins_over_similarly_named_screen_titles(self):
-        """A direct artist match must not be hidden behind a music film/show."""
+    async def test_close_artist_and_screen_match_asks_user_to_choose(self):
+        """A close artist/screen-title match must remain a user choice."""
         from bot.services.scoring import ScoringService
         from bot.services.search_service import SearchService
 
@@ -374,7 +374,28 @@ class TestSearchServiceMusicDetection:
 
         svc = SearchService(prowlarr, radarr, sonarr, ScoringService(), lidarr=lidarr)
 
-        assert (await svc.detect_with_confidence("The Weeknd")).content_type == ContentType.MUSIC
+        assert (await svc.detect_with_confidence("The Weeknd")).content_type == ContentType.UNKNOWN
+
+    async def test_close_cross_type_match_asks_user_to_choose(self):
+        """A narrow lead must remain a user choice, regardless of type."""
+        from bot.services.scoring import ScoringService
+        from bot.services.search_service import SearchService
+
+        prowlarr = AsyncMock()
+        radarr = AsyncMock()
+        radarr.lookup_movie = AsyncMock(return_value=[
+            MovieInfo(tmdb_id=1, title="Metallikaa", year=2025),
+        ])
+        sonarr = AsyncMock()
+        sonarr.lookup_series = AsyncMock(return_value=[])
+        lidarr = AsyncMock()
+        lidarr.lookup_artist = AsyncMock(return_value=[
+            ArtistInfo(mb_id="mb-1", name="Metallicaa"),
+        ])
+
+        svc = SearchService(prowlarr, radarr, sonarr, ScoringService(), lidarr=lidarr)
+
+        assert (await svc.detect_with_confidence("Metallicaa")).content_type == ContentType.UNKNOWN
 
     async def test_unknown_when_no_lidarr(self):
         from bot.services.scoring import ScoringService
