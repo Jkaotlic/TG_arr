@@ -49,6 +49,8 @@ class ScoringWeights:
 
     # Subtitle bonuses
     russian_subtitle_bonus: int = 15
+    english_audio_bonus: int = 35
+    russian_dub_without_english_penalty: int = -50
 
     # DEAD-06: bonus when a release's resolution matches the user's
     # preferred_resolution setting (previously collected but never consumed).
@@ -110,6 +112,22 @@ class ScoringWeights:
                 pat = re.compile(rf"\b{esc}\b", re.IGNORECASE)
             patterns.append((pat, penalty))
         self._bad_keyword_patterns = patterns
+        # Language markers are release-title tokens, not codec information.
+        # Keep ENG strict so normal words and titles do not produce false positives.
+        self._english_audio_pattern = re.compile(
+            r"(?<![A-Za-z0-9])(?:ENG|ENGLISH)(?![A-Za-z0-9])", re.IGNORECASE
+        )
+        self._russian_subtitle_pattern = re.compile(
+            r"(?<![A-Za-z0-9])(?:RUS\.?(?:SUB|SRT|FORCED)|SUBS?\.?RUS|"
+            r"RUSSIAN\.?(?:SUB|SRT|FORCED))(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        )
+        self._russian_dub_pattern = re.compile(
+            r"(?<![A-Za-z0-9])(?:DUB\.?RUS|RUS\.?DUB|DVO|MVO|AVO|LOSTFILM|"
+            r"DUB(?:BED)?\.?(?:RU|RUS|RUSSIAN)|(?:RU|RUS|RUSSIAN)\.?(?:DUB|AUDIO)|"
+            r"SELEZEN|GLADIATOR|RG\.PARAVOZIK|HDREZKA|JASKIER)(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        )
 
 
 class ScoringService:
@@ -227,9 +245,24 @@ class ScoringService:
         if quality.is_proper:
             score += self.weights.proper_bonus
 
-        # Russian subtitle/audio bonus
-        if quality.subtitle:
+        # Prefer the requested language combination. Prowlarr stores Russian
+        # voice-over markers in quality.subtitle, so classify the value instead
+        # of treating every non-empty value as subtitles.
+        title = result.title
+        subtitle_marker = (quality.subtitle or "").lower()
+        has_english_audio = bool(self.weights._english_audio_pattern.search(title))
+        has_russian_subtitles = subtitle_marker == "russub" or bool(
+            self.weights._russian_subtitle_pattern.search(title)
+        )
+        has_russian_dub = subtitle_marker in {"dvo", "mvo", "avo"} or bool(
+            self.weights._russian_dub_pattern.search(title)
+        )
+        if has_english_audio:
+            score += self.weights.english_audio_bonus
+        if has_russian_subtitles:
             score += self.weights.russian_subtitle_bonus
+        if has_russian_dub and not has_english_audio:
+            score += self.weights.russian_dub_without_english_penalty
 
         # Seeder bonus
         if result.seeders is not None and result.seeders > 0:

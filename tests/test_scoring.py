@@ -209,6 +209,50 @@ class TestScoringService:
 
         assert score_remux > score_normal
 
+    def test_english_audio_marker_is_preferred(self, scoring_service, base_result):
+        base_result.title = "Test.Movie.2024.1080p.BluRay.ENG.x264-GROUP"
+        score_english = scoring_service.calculate_score(base_result)
+
+        base_result.title = "Test.Movie.2024.1080p.BluRay.x264-GROUP"
+        score_unmarked = scoring_service.calculate_score(base_result)
+
+        assert score_english > score_unmarked
+
+    def test_russian_subtitles_are_preferred(self, scoring_service, base_result):
+        base_result.title = "Test.Movie.2024.1080p.BluRay.RusSub.x264-GROUP"
+        base_result.quality.subtitle = "RusSub"
+        score_with_subtitles = scoring_service.calculate_score(base_result)
+
+        base_result.title = "Test.Movie.2024.1080p.BluRay.x264-GROUP"
+        base_result.quality.subtitle = None
+        score_without_subtitles = scoring_service.calculate_score(base_result)
+
+        assert score_with_subtitles > score_without_subtitles
+
+    def test_russian_dub_without_english_audio_is_penalized(self, scoring_service, base_result):
+        base_result.title = "Test.Movie.2024.1080p.BluRay.DVO.x264-GROUP"
+        base_result.quality.subtitle = "DVO"
+        score_dub_only = scoring_service.calculate_score(base_result)
+
+        base_result.title = "Test.Movie.2024.1080p.BluRay.ENG.x264-GROUP"
+        base_result.quality.subtitle = None
+        score_english = scoring_service.calculate_score(base_result)
+
+        assert score_dub_only < score_english
+
+    def test_russian_dub_is_not_penalized_when_english_audio_is_present(
+        self, scoring_service, base_result
+    ):
+        base_result.title = "Test.Movie.2024.1080p.BluRay.ENG.DVO.x264-GROUP"
+        base_result.quality.subtitle = "DVO"
+        score_multiaudio = scoring_service.calculate_score(base_result)
+
+        base_result.title = "Test.Movie.2024.1080p.BluRay.ENG.x264-GROUP"
+        base_result.quality.subtitle = None
+        score_english = scoring_service.calculate_score(base_result)
+
+        assert score_multiaudio == score_english
+
     def test_sort_results(self, scoring_service):
         """Test sorting results by score."""
         results = [
