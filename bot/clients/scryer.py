@@ -155,7 +155,7 @@ query SearchMetadata($query: String!, $type: MediaFacetValue!, $limit: Int!, $la
 """
 
 _TITLE_FIELDS = """
-  id name facet year monitored overview posterUrl imdbId runtimeMinutes
+  id name slug facet year monitored overview posterUrl imdbId runtimeMinutes
   qualityTier currentQualityTier qualityProfileId rootFolderId rootFolderPath libraryId
   episodesOwned episodesTotal sizeBytes
   externalIds { source value }
@@ -480,6 +480,7 @@ class ScryerClient(BaseAPIClient):
                 poster_url=item.get("posterUrl"),
                 runtime=runtime,
                 metadata_id=str(item["tvdbId"]) if item.get("tvdbId") else None,
+                slug=item.get("slug"),
             )
         return SeriesInfo(
             title=name,
@@ -489,6 +490,7 @@ class ScryerClient(BaseAPIClient):
             poster_url=item.get("posterUrl"),
             runtime=runtime,
             metadata_id=str(item["tvdbId"]) if item.get("tvdbId") else None,
+            slug=item.get("slug"),
             facet=content_type.scryer_facet or "SERIES",
         )
 
@@ -556,6 +558,7 @@ class ScryerClient(BaseAPIClient):
             "runtime": row.get("runtimeMinutes") or None,
             "scryer_id": row.get("id"),
             "metadata_id": externals.get("tvdb"),
+            "slug": row.get("slug"),
             "library_id": row.get("libraryId"),
             "quality_tier": row.get("qualityTier"),
             "current_quality_tier": row.get("currentQualityTier"),
