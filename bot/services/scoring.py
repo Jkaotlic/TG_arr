@@ -158,7 +158,7 @@ class ScoringService:
         """
         score = 50  # Base score
 
-        # Add Prowlarr score if available (normalized to our scale)
+        # Legacy Prowlarr score, if a pre-migration session still carries one
         if result.prowlarr_score is not None:
             prowlarr_contribution = min(result.prowlarr_score // 100, 20)
             score += prowlarr_contribution
@@ -245,8 +245,8 @@ class ScoringService:
         if quality.is_proper:
             score += self.weights.proper_bonus
 
-        # Prefer the requested language combination. Prowlarr stores Russian
-        # voice-over markers in quality.subtitle, so classify the value instead
+        # Prefer the requested language combination. Russian
+        # voice-over markers land in quality.subtitle, so classify the value instead
         # of treating every non-empty value as subtitles.
         title = result.title
         subtitle_marker = (quality.subtitle or "").lower()

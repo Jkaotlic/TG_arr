@@ -141,7 +141,7 @@ class _SearchKeyboards:
                 InlineKeyboardButton(text="⚡ Принудительно (qBit)", callback_data=CallbackData.FORCE_GRAB),
             ])
 
-        # #2: let the user choose which seasons Sonarr monitors (series only).
+        # #2: let the user choose which seasons are monitored (series only).
         if content_type == ContentType.SERIES:
             keyboard.append([
                 InlineKeyboardButton(text="📺 Мониторинг сезонов", callback_data=CallbackData.SEASON_MENU),
@@ -156,7 +156,7 @@ class _SearchKeyboards:
 
     @staticmethod
     def season_presets() -> InlineKeyboardMarkup:
-        """Feature #2: Sonarr season-monitoring preset picker.
+        """Feature #2: season-monitoring preset picker.
 
         BUG-16: "Назад" uses the dedicated SEASON_BACK callback, not the
         generic BACK — the latter clears the release selection and returns to

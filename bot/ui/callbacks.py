@@ -61,7 +61,7 @@ class ArtistCB(CallbackData, prefix="art"):
 
 
 class AddContentCB(CallbackData, prefix="addc"):
-    """Add a trending movie/series to Radarr/Sonarr (was ``add_movie:ID`` /
+    """Add a trending movie/series to the Scryer catalog (was ``add_movie:ID`` /
     ``add_series:ID``). ``kind`` distinguishes the two so one class replaces
     both string prefixes without risking a movie/series id collision.
     """

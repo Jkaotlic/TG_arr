@@ -326,7 +326,7 @@ class BaseAPIClient:
         return await self._safe_request("POST", endpoint, params=params, json_data=json_data, timeout=timeout)
 
     # DEAD-11: no HTTP DELETE method — removed (zero callers; Radarr/Sonarr/
-    # Lidarr/Prowlarr client methods never delete resources, and qBittorrent
+    # Lidarr/Scryer client methods never delete resources, and qBittorrent
     # has its own dedicated `delete()` on QBittorrentClient, unrelated to
     # this base HTTP client).
 
