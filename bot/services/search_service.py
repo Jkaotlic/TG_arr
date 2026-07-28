@@ -315,6 +315,30 @@ class SearchService:
             return year
         return None
 
+    @staticmethod
+    def _candidate_forms(candidate) -> list[str]:
+        """Every string a candidate can legitimately be matched against.
+
+        Metadata titles carry a subtitle far more often than a user types one
+        ("Frieren: Beyond Journey's End"), and they are localised while the
+        slug stays in latin script ("sousou-no-frieren"). Matching only against
+        the display title made both cases score below the confidence bar and
+        bounced a perfectly clear query back at the user as a question.
+        """
+        forms: list[str] = []
+        title = getattr(candidate, "title", None) or getattr(candidate, "name", None) or ""
+        if title:
+            forms.append(title)
+            # The part before a subtitle separator, e.g. "Frieren" in
+            # "Frieren: Beyond Journey's End".
+            head = re.split(r"\s*[:–—]\s|\s+-\s+", title, maxsplit=1)[0]
+            if head and head != title:
+                forms.append(head)
+        slug = getattr(candidate, "slug", None)
+        if slug:
+            forms.append(slug.replace("-", " "))
+        return [f.lower().strip() for f in forms if f and f.strip()]
+
     def _best_match_score(
         self,
         query: str,
@@ -326,7 +350,8 @@ class SearchService:
         """
         Score 0..1 for the best matching candidate using fuzzy ratio + year bonus.
 
-        - SequenceMatcher.ratio over normalised lower-cased strings.
+        - SequenceMatcher.ratio over normalised lower-cased strings, taken over
+          every form of the candidate (title, title-before-subtitle, slug).
         - +0.15 bonus when years match within ±1 (only if prefer_year).
         - -0.20 penalty if year present in query but candidate.year is far off.
         """
@@ -339,19 +364,19 @@ class SearchService:
 
         best = 0.0
         for cand in candidates[:5]:
-            title = (
-                getattr(cand, "title", None)
-                or getattr(cand, "name", None)
-                or ""
-            )
-            if not title:
+            forms = self._candidate_forms(cand)
+            if not forms:
                 continue
-            cand_lower = title.lower().strip()
-            ratio = SequenceMatcher(None, q, cand_lower).ratio()
 
-            # Substring helper: very-long candidate that fully contains the query.
-            if len(q) >= 3 and q in cand_lower:
-                ratio = max(ratio, min(0.85, len(q) / max(len(cand_lower), len(q))))
+            ratio = 0.0
+            for form in forms:
+                ratio = max(ratio, SequenceMatcher(None, q, form).ratio())
+                # Substring helper for a long candidate containing the query.
+                # Scaled by length, so it only helps when the query is a
+                # meaningful share of the title — never enough on its own to
+                # promote an unrelated long title.
+                if len(q) >= 3 and q in form:
+                    ratio = max(ratio, min(0.85, len(q) / max(len(form), len(q))))
 
             cand_year = getattr(cand, "year", None)
             if prefer_year and query_year is not None and cand_year:

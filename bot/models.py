@@ -183,6 +183,7 @@ class MovieInfo(BaseModel):
     # Scryer-specific
     scryer_id: Optional[str] = Field(default=None, description="Title id in Scryer if already in the catalog")
     metadata_id: Optional[str] = Field(default=None, description="Scryer metadata id (`tvdbId` in searchMetadata)")
+    slug: Optional[str] = Field(default=None, description="Latin-script slug — matched against when the title is localised")
     library_id: Optional[str] = Field(default=None, description="Scryer library id")
     quality_tier: Optional[str] = Field(default=None, description="Quality profile name applied by Scryer")
     current_quality_tier: Optional[str] = Field(default=None, description="Quality actually on disk")
@@ -222,6 +223,7 @@ class SeriesInfo(BaseModel):
     # Scryer-specific
     scryer_id: Optional[str] = Field(default=None, description="Title id in Scryer if already in the catalog")
     metadata_id: Optional[str] = Field(default=None, description="Scryer metadata id (`tvdbId` in searchMetadata)")
+    slug: Optional[str] = Field(default=None, description="Latin-script slug — matched against when the title is localised")
     facet: str = Field(default="SERIES", description="Scryer MediaFacetValue: SERIES or ANIME")
     library_id: Optional[str] = Field(default=None, description="Scryer library id")
     quality_tier: Optional[str] = Field(default=None, description="Quality profile name applied by Scryer")

@@ -321,3 +321,57 @@ def test_arr_clients_are_gone():
     assert not (clients / "radarr.py").exists()
     assert not (clients / "sonarr.py").exists()
     assert not (clients / "prowlarr.py").exists()
+
+
+# ------------------------------------------------------ title-form matching
+@pytest.mark.asyncio
+async def test_query_matching_the_head_of_a_longer_title_still_wins():
+    """Live regression: "Frieren" returned UNKNOWN because the metadata title is
+    "Frieren: Beyond Journey's End" — the substring bonus scaled by length
+    ratio (7/29) scored it *lower* than the plain fuzzy match, so it never
+    cleared the 0.7 confidence bar and the user got a pointless question."""
+    scryer = MagicMock()
+    scryer.search_metadata_multi = AsyncMock(return_value={
+        ContentType.MOVIE: [],
+        ContentType.SERIES: [],
+        ContentType.ANIME: [
+            SeriesInfo(title="Frieren: Beyond Journey's End", year=2023,
+                       facet="ANIME", slug="sousou-no-frieren"),
+        ],
+    })
+    service = _search_service(scryer)
+
+    result = await service.detect_with_confidence("Frieren")
+
+    assert result.content_type == ContentType.ANIME
+    assert result.confidence >= 0.7
+
+
+@pytest.mark.asyncio
+async def test_matching_can_use_the_slug_when_the_title_is_localised():
+    """Metadata titles are localised; the slug stays in latin script."""
+    scryer = MagicMock()
+    scryer.search_metadata_multi = AsyncMock(return_value={
+        ContentType.MOVIE: [],
+        ContentType.SERIES: [],
+        ContentType.ANIME: [
+            SeriesInfo(title="Провожающая в последний путь Фрирен", year=2023,
+                       facet="ANIME", slug="sousou-no-frieren"),
+        ],
+    })
+    service = _search_service(scryer)
+
+    result = await service.detect_with_confidence("Sousou no Frieren")
+
+    assert result.content_type == ContentType.ANIME
+
+
+def test_head_match_does_not_promote_an_unrelated_title():
+    """The head-of-title rule must not turn "Dune" into a match for
+    "Dune Drifter: Something Else"'s unrelated neighbours."""
+    service = _search_service(MagicMock())
+    score = service._best_match_score(
+        "friesenblut", [SeriesInfo(title="Frieren: Beyond Journey's End", slug="sousou-no-frieren")],
+        None, prefer_year=False,
+    )
+    assert score < 0.7
