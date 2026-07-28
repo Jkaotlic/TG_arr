@@ -201,11 +201,11 @@ class TMDbClient(BaseAPIClient):
             except (ValueError, IndexError):
                 pass
 
-        # TMDb uses 'id' for series, but we need TVDB ID for Sonarr
-        # We'll store TMDb ID temporarily and let Sonarr lookup handle TVDB conversion
+        # TMDb uses its own 'id'; Scryer keys on its own metadata id, so the
+        # tvdb_id stays 0 here and the title is resolved by name on add.
         return SeriesInfo(
             title=item.get("name", "Unknown"),
-            tvdb_id=0,  # Will be looked up via Sonarr
+            tvdb_id=0,  # Scryer resolves the title by name/metadata id
             tmdb_id=item["id"],  # Store TMDb ID
             year=year or 0,
             overview=item.get("overview", ""),

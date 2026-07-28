@@ -299,7 +299,7 @@ async def handle_series_from_trending(callback: CallbackQuery, callback_data: Tr
     series = _cache_get(_trending_series_cache, series_id)
 
     if not series:
-        # series_id is a TMDb ID from trending — cannot use as TVDB ID for Sonarr lookup
+        # series_id is a TMDb id from trending — not a Scryer title id
         await callback.message.answer(
             "❌ Сериал не найден в кэше.\n"
             "Попробуйте обновить список или используйте обычный поиск."

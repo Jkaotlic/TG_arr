@@ -188,7 +188,7 @@ async def process_search(
     status_msg: Optional[Message] = None
     # LOGIC-06: only set when content_type was UNKNOWN and detection ran;
     # carries lookup_results forward into the session below so a later grab
-    # doesn't repeat the same Radarr/Sonarr lookup.
+    # doesn't repeat the same metadata lookup.
     detection = None
 
     try:

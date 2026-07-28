@@ -151,7 +151,7 @@ class _EmbyFormatters:
                 overview = overview[:497] + "..."
             lines.append(f"\n{_e(overview)}")
 
-        lines.append("\n💡 Нажмите кнопку ниже для добавления в Radarr")
+        lines.append("\n💡 Нажмите кнопку ниже для добавления в библиотеку")
         return "\n".join(lines)
 
     @staticmethod
@@ -176,5 +176,5 @@ class _EmbyFormatters:
                 overview = overview[:497] + "..."
             lines.append(f"\n{_e(overview)}")
 
-        lines.append("\n💡 Нажмите кнопку ниже для добавления в Sonarr")
+        lines.append("\n💡 Нажмите кнопку ниже для добавления в библиотеку")
         return "\n".join(lines)

@@ -95,11 +95,11 @@ class QualityInfo(BaseModel):
 
 
 class SearchResult(BaseModel):
-    """Normalized search result from Prowlarr."""
+    """Normalized release candidate (from Scryer's indexer search)."""
 
     guid: str = Field(..., description="Unique identifier for the release")
     indexer: str = Field(default="Unknown", description="Indexer name")
-    indexer_id: int = Field(default=0, description="Indexer ID in Prowlarr")
+    indexer_id: int = Field(default=0, description="Indexer id (unused since the Scryer migration)")
     title: str = Field(..., description="Release title")
     size: int = Field(default=0, description="Size in bytes")
     seeders: Optional[int] = Field(default=None, description="Number of seeders")
@@ -116,7 +116,7 @@ class SearchResult(BaseModel):
     quality: QualityInfo = Field(default_factory=QualityInfo)
 
     # Scoring
-    prowlarr_score: Optional[int] = Field(default=None, description="Original Prowlarr score")
+    prowlarr_score: Optional[int] = Field(default=None, description="Legacy Prowlarr score; unset since the Scryer migration")
     calculated_score: int = Field(default=0, description="Our calculated score")
 
     # Scryer release candidate (migration 2026-07-28). Scryer already applies
@@ -615,7 +615,7 @@ class SearchSession(BaseModel):
     # 2 more times per grab. None when detection didn't run or produced no
     # usable lookup (music winner, low-confidence, timeout, etc).
     lookup_candidates: Optional[list[ContentInfo]] = None
-    # Feature #2: user-chosen Sonarr season-monitoring preset (all/future/
+    # Feature #2: user-chosen season-monitoring preset (all/future/
     # latestSeason/firstSeason/none); None → auto-decide from the release.
     monitor_type: Optional[str] = None
     created_at: datetime = Field(default_factory=_utcnow)

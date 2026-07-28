@@ -104,7 +104,7 @@ class _TrendingKeyboards:
             keyboard.append(links)
         keyboard.append([
             InlineKeyboardButton(
-                text="➕ Добавить в Radarr",
+                text="➕ Добавить в библиотеку",
                 callback_data=AddContentCB(kind="movie", tmdb_id=movie.tmdb_id).pack(),
             )
         ])
@@ -120,7 +120,7 @@ class _TrendingKeyboards:
             keyboard.append(links)
         keyboard.append([
             InlineKeyboardButton(
-                text="➕ Добавить в Sonarr",
+                text="➕ Добавить в библиотеку",
                 callback_data=AddContentCB(kind="series", tmdb_id=series.tmdb_id).pack(),
             )
         ])

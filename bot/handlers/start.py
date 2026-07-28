@@ -21,7 +21,7 @@ async def cmd_start(message: Message) -> None:
 
     welcome_text = (
         f"<b>Привет, {safe_name}! 👋</b>\n\n"
-        "Я помогу найти и скачать фильмы, сериалы и музыку через Prowlarr/Radarr/Sonarr/Lidarr.\n\n"
+        "Я помогу найти и скачать фильмы, сериалы, аниме и музыку через Scryer, Lidarr и Soulseek.\n\n"
         "<b>🚀 Быстрый старт:</b>\n"
         "• Просто напишите название — найду фильм или сериал\n"
         "• Или нажмите 🔍 <b>Поиск</b> / 🎵 <b>Музыка</b>\n\n"
