@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from bot.models import ContentType, MovieInfo, QualityInfo, SearchResult, SeriesInfo
+from bot.models import ArtistInfo, ContentType, MovieInfo, QualityInfo, SearchResult, SeriesInfo
 from bot.services.add_service import AddService
 from bot.services.scoring import ScoringService
 from bot.services.search_service import SearchService
@@ -375,3 +375,45 @@ def test_head_match_does_not_promote_an_unrelated_title():
         None, prefer_year=False,
     )
     assert score < 0.7
+
+
+@pytest.mark.asyncio
+async def test_anime_over_series_is_not_re_asked_as_ambiguous():
+    """Live regression: series and anime hold the SAME metadata entry
+    ("Frieren: Beyond Journey's End" is in both facets), so both score 1.0.
+    The anime-over-series rule picked ANIME — and then the generic ambiguity
+    check overrode it back to UNKNOWN and asked the user a question they
+    cannot answer better than we can."""
+    entry = SeriesInfo(title="Frieren: Beyond Journey's End", year=2023, slug="sousou-no-frieren")
+    scryer = MagicMock()
+    scryer.search_metadata_multi = AsyncMock(return_value={
+        ContentType.MOVIE: [],
+        ContentType.SERIES: [entry.model_copy(update={"facet": "SERIES"})],
+        ContentType.ANIME: [entry.model_copy(update={"facet": "ANIME"})],
+    })
+    service = _search_service(scryer)
+
+    result = await service.detect_with_confidence("Frieren")
+
+    assert result.content_type == ContentType.ANIME
+    assert result.lookup_results and result.lookup_results[0].facet == "ANIME"
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_cross_type_tie_still_asks_the_user():
+    """The ambiguity check must still fire when the tie is movie-vs-music —
+    "Metallica" is both a band and a concert film, and only the user knows."""
+    scryer = MagicMock()
+    scryer.search_metadata_multi = AsyncMock(return_value={
+        ContentType.MOVIE: [MovieInfo(title="Metallica", year=2013)],
+        ContentType.SERIES: [],
+        ContentType.ANIME: [],
+    })
+    lidarr = MagicMock()
+    lidarr.lookup_artist = AsyncMock(return_value=[ArtistInfo(mb_id="mb-1", name="Metallica")])
+    service = SearchService(scryer, scoring=ScoringService(), lidarr=lidarr)
+
+    result = await service.detect_with_confidence("Metallica")
+
+    assert result.content_type == ContentType.UNKNOWN
+    assert result.reason == "ambiguous"

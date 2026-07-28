@@ -218,10 +218,12 @@ class SearchService:
         top_type, top_score, reason, winning_items = scored[0]
         runner_up_type, runner_up_score = scored[1][0], scored[1][1]
 
-        # Anime and series share metadata sources, so the two facets routinely
-        # land within noise of each other. Treating that as "ambiguous" would
-        # ask the user a question they can't answer better than we can — prefer
-        # the anime facet, which routes to the anime library and 1080p profile.
+        # Anime and series share metadata sources — frequently the *same*
+        # entry appears in both facets, scoring identically. Treating that as
+        # "ambiguous" would ask the user a question they can't answer better
+        # than we can, so prefer the anime facet (its own library, its own
+        # 1080p profile) and mark the tie as already resolved.
+        anime_resolved = False
         if (
             {top_type, runner_up_type} == {ContentType.SERIES, ContentType.ANIME}
             and abs(top_score - runner_up_score) < _ANIME_OVER_SERIES_MARGIN
@@ -231,6 +233,7 @@ class SearchService:
                 anime_entry[0], max(top_score, anime_entry[1]), "anime_over_series", anime_entry[3]
             )
             runner_up_score = min(runner_up_score, anime_entry[1])
+            anime_resolved = True
 
         candidates = {
             content_type.value: [getattr(i, "title", "?") for i in (video.get(content_type) or [])[:3]]
@@ -258,7 +261,13 @@ class SearchService:
                 if episodic and winning_items
                 else self._episodic_fallback(episodic, "low_confidence", candidates)
             )
-        elif top_score - runner_up_score < _AMBIGUITY_MARGIN and runner_up_score > 0.6:
+        elif (
+            not anime_resolved
+            and top_score - runner_up_score < _AMBIGUITY_MARGIN
+            and runner_up_score > 0.6
+        ):
+            # `anime_resolved` guards the series/anime tie above: it is not a
+            # real ambiguity, it was already decided in favour of anime.
             result = DetectionResult(ContentType.UNKNOWN, top_score, "ambiguous", candidates)
         else:
             result = DetectionResult(top_type, top_score, reason, candidates, list(winning_items))
