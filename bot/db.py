@@ -880,8 +880,15 @@ class Database:
         else:
             # VACUUM INTO requires the target not to exist and works against a
             # live WAL database without blocking writers for long.
+            #
+            # SEC-R6-02: VACUUM INTO does not accept a bound parameter, so the
+            # path must be inlined — but a bare f-string breaks (and would let
+            # the tail of the path be read as SQL) as soon as the resolved
+            # DATABASE_PATH contains a single quote. Escape it the SQL way by
+            # doubling every quote inside the literal.
+            target = backup_path.as_posix().replace("'", "''")
             async with self._write_lock:
-                await self.conn.execute(f"VACUUM INTO '{backup_path.as_posix()}'")
+                await self.conn.execute(f"VACUUM INTO '{target}'")
             created = 1
             logger.info("Database backup created", path=str(backup_path))
 

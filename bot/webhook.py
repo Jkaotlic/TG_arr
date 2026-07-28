@@ -9,6 +9,7 @@ Set up in each *arr: Settings → Connect → Webhook →
     Method: POST, triggers: On Import (On Download).
 """
 
+import hmac
 import html
 from collections.abc import Awaitable, Callable
 from typing import Optional
@@ -104,11 +105,17 @@ def _token_matches(request: web.Request, token: str) -> bool:
     once a token is configured, `/webhook/{service}` no longer authenticates
     unless `{service}` happens to equal the token — operators who want a
     service label AND auth should use `?token=` instead.
+
+    SEC-R6-01: compared with `hmac.compare_digest`, not `==`. A plain equality
+    check on a secret short-circuits at the first differing byte, which leaks
+    the shared secret's prefix (and length) to anyone who can measure response
+    latency across repeated requests.
     """
-    if request.query.get("token") == token:
+    supplied = request.query.get("token")
+    if supplied is not None and hmac.compare_digest(supplied, token):
         return True
     service = request.match_info.get("service")
-    return service is not None and service == token
+    return service is not None and hmac.compare_digest(service, token)
 
 
 def build_webhook_app(
