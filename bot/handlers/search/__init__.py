@@ -52,6 +52,7 @@ from .grab import (  # noqa: E402,F401
     _decide_monitor_type,
     _execute_grab,
     _resolve_folder,
+    _scryer_monitor_type,
     _SEASON_PRESETS,
     grab_release,
     handle_confirm_grab,
@@ -64,8 +65,6 @@ from .grab import (  # noqa: E402,F401
 from .results import (  # noqa: E402,F401
     _emby_library_note,
     _pick_by_year,
-    _resolve_movie,
-    _resolve_series,
     handle_back,
     handle_cancel,
     handle_legacy_page,
@@ -75,6 +74,9 @@ from .results import (  # noqa: E402,F401
     handle_type_selection,
 )
 from .commands import (  # noqa: E402,F401
+    _pick_metadata_candidate,
+    _resolve_title,
+    cmd_anime,
     cmd_movie,
     cmd_search,
     cmd_series,

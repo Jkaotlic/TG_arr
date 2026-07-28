@@ -63,12 +63,8 @@ class _SettingsKeyboards:
         """Create main settings menu keyboard."""
         rows = [
             [
-                InlineKeyboardButton(text="🎬 Профиль Radarr", callback_data="settings:radarr_profile"),
-                InlineKeyboardButton(text="📁 Папка Radarr", callback_data="settings:radarr_folder"),
-            ],
-            [
-                InlineKeyboardButton(text="📺 Профиль Sonarr", callback_data="settings:sonarr_profile"),
-                InlineKeyboardButton(text="📁 Папка Sonarr", callback_data="settings:sonarr_folder"),
+                InlineKeyboardButton(text="🗂 Профиль Scryer", callback_data="settings:scryer_profile"),
+                InlineKeyboardButton(text="📁 Папка Scryer", callback_data="settings:scryer_folder"),
             ],
         ]
         if lidarr_enabled:

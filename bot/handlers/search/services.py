@@ -15,7 +15,7 @@ import structlog
 from aiogram import Router
 from aiogram.types import Message
 
-from bot.clients.registry import get_emby, get_lidarr, get_prowlarr, get_qbittorrent, get_radarr, get_sonarr  # noqa: F401 -- get_emby re-exported for patch.object(bot.handlers.search, "get_emby", ...)
+from bot.clients.registry import get_emby, get_lidarr, get_qbittorrent, get_scryer, get_slskd  # noqa: F401 -- get_emby re-exported for patch.object(bot.handlers.search, "get_emby", ...)
 from bot.handlers.common import safe_edit
 from bot.models import ContentType, User
 from bot.services.add_service import AddService
@@ -61,14 +61,13 @@ async def get_services() -> tuple[SearchService, AddService]:
     caller in this module ever consumed it (music.py imports the module-level
     `_SCORING_SERVICE` singleton directly instead — see below).
     """
-    prowlarr = await get_prowlarr()
-    radarr = await get_radarr()
-    sonarr = await get_sonarr()
+    scryer = await get_scryer()
     qbittorrent = await get_qbittorrent()  # Returns None if not configured
     lidarr = await get_lidarr()  # Returns None if not configured
+    slskd = await get_slskd()  # Returns None if not configured
 
-    search_service = SearchService(prowlarr, radarr, sonarr, _SCORING_SERVICE, lidarr=lidarr)
-    add_service = AddService(prowlarr, radarr, sonarr, qbittorrent=qbittorrent, lidarr=lidarr)
+    search_service = SearchService(scryer, _SCORING_SERVICE, lidarr=lidarr, slskd=slskd)
+    add_service = AddService(scryer, qbittorrent=qbittorrent, lidarr=lidarr, slskd=slskd)
 
     return search_service, add_service
 

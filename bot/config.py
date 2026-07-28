@@ -30,21 +30,40 @@ class Settings(BaseSettings):
         default_factory=list, description="Admin Telegram user IDs"
     )
 
-    # Prowlarr
-    prowlarr_url: str = Field(..., min_length=1, description="Prowlarr base URL")
-    prowlarr_api_key: str = Field(..., min_length=1, description="Prowlarr API key")
-
-    # Radarr
-    radarr_url: str = Field(..., min_length=1, description="Radarr base URL")
-    radarr_api_key: str = Field(..., min_length=1, description="Radarr API key")
-
-    # Sonarr
-    sonarr_url: str = Field(..., min_length=1, description="Sonarr base URL")
-    sonarr_api_key: str = Field(..., min_length=1, description="Sonarr API key")
+    # Scryer — the single source for movies/series/anime since 2026-07-24.
+    # It owns indexers (via Prowlarr), quality profiles, scoring rules and the
+    # download clients; the bot is only a GraphQL client. Radarr/Sonarr and the
+    # bot's direct Prowlarr access were removed in the same migration.
+    scryer_url: str = Field(..., min_length=1, description="Scryer base URL (GraphQL at /graphql)")
+    scryer_username: str = Field(..., min_length=1, description="Scryer username")
+    scryer_password: str = Field(..., min_length=1, description="Scryer password")
+    # Scryer aggregates every routed indexer for a release search, which on
+    # rpie4 Wi-Fi regularly takes longer than a plain HTTP call. Kept separate
+    # from `http_timeout` so metadata/catalog reads stay snappy.
+    scryer_search_timeout: float = Field(
+        default=90.0, ge=10.0, le=300.0, description="Timeout for Scryer release searches (seconds)"
+    )
 
     # Lidarr (optional, music)
     lidarr_url: Optional[str] = Field(default=None, description="Lidarr base URL")
     lidarr_api_key: Optional[str] = Field(default=None, description="Lidarr API key")
+
+    # slskd (optional, Soulseek) — the download client behind Lidarr, also
+    # usable directly from the bot for album/track searches Lidarr can't express.
+    slskd_url: Optional[str] = Field(default=None, description="slskd base URL")
+    slskd_api_key: Optional[str] = Field(default=None, description="slskd API key (X-API-KEY)")
+    slskd_timeout: float = Field(default=30.0, ge=5.0, description="slskd request timeout in seconds")
+    slskd_search_timeout: float = Field(
+        default=25.0, ge=5.0, le=120.0,
+        description="How long to wait for a Soulseek search to gather responses (seconds)",
+    )
+
+    # Navidrome (optional) — read-only "is this already in the library?" probe
+    # so the bot doesn't queue a duplicate album.
+    navidrome_url: Optional[str] = Field(default=None, description="Navidrome base URL")
+    navidrome_username: Optional[str] = Field(default=None, description="Navidrome username")
+    navidrome_password: Optional[str] = Field(default=None, description="Navidrome password")
+    navidrome_timeout: float = Field(default=15.0, ge=5.0, description="Navidrome request timeout in seconds")
 
     # Deezer (optional, public API for music trending/discovery — no key required)
     deezer_enabled: bool = Field(default=True, description="Enable Deezer public API for music trending")
@@ -84,17 +103,6 @@ class Settings(BaseSettings):
 
     # HTTP client settings
     http_timeout: float = Field(default=30.0, description="HTTP request timeout in seconds")
-    # BUG-21 / PERF-02: Prowlarr search aggregates many indexers, slow on rpie4
-    # Wi-Fi → VPS. Default 25s keeps us inside Telegram callback window (~15s
-    # for callbacks; messages have more room) but still tolerant of slow trackers.
-    prowlarr_search_timeout: float = Field(
-        default=25.0, ge=5.0, le=120.0, description="Prowlarr search timeout in seconds"
-    )
-    prowlarr_search_retries: int = Field(
-        default=1, ge=0, le=3,
-        description="Дополнительные попытки при таймауте Prowlarr (0=нет, 1=одна повторная). "
-                    "Отдельный flaky tracker (RuTracker через Cloudflare) часто отрабатывает со 2-й попытки.",
-    )
 
     # Pagination
     results_per_page: int = Field(default=5, ge=1, le=10, description="Search results per page")
@@ -141,13 +149,13 @@ class Settings(BaseSettings):
             return ids
         return []
 
-    @field_validator("prowlarr_url", "radarr_url", "sonarr_url", mode="after")
+    @field_validator("scryer_url", mode="after")
     @classmethod
     def strip_trailing_slash(cls, v: str) -> str:
         """Remove trailing slash from URLs."""
         return v.rstrip("/")
 
-    @field_validator("qbittorrent_url", "emby_url", "lidarr_url", mode="after")
+    @field_validator("qbittorrent_url", "emby_url", "lidarr_url", "slskd_url", "navidrome_url", mode="after")
     @classmethod
     def strip_trailing_slash_optional(cls, v: Optional[str]) -> Optional[str]:
         """Remove trailing slash from optional URLs."""
@@ -174,6 +182,19 @@ class Settings(BaseSettings):
             warnings.warn(
                 "Emby partially configured: both EMBY_URL and EMBY_API_KEY are "
                 "required — Emby integration will stay disabled.",
+                stacklevel=2,
+            )
+        if (self.slskd_url is None) != (self.slskd_api_key is None):
+            warnings.warn(
+                "slskd partially configured: both SLSKD_URL and SLSKD_API_KEY "
+                "are required — Soulseek search will stay disabled.",
+                stacklevel=2,
+            )
+        if self.navidrome_url is not None and not self.navidrome_enabled:
+            warnings.warn(
+                "Navidrome partially configured: NAVIDROME_URL, NAVIDROME_USERNAME "
+                "and NAVIDROME_PASSWORD are all required — the "
+                "'already in library' check will stay disabled.",
                 stacklevel=2,
             )
         if (self.qbittorrent_url is None) != (self.qbittorrent_password is None):
@@ -217,6 +238,25 @@ class Settings(BaseSettings):
     def lidarr_enabled(self) -> bool:
         """Check if Lidarr integration is configured."""
         return self.lidarr_url is not None and self.lidarr_api_key is not None
+
+    @property
+    def slskd_enabled(self) -> bool:
+        """Check if slskd (Soulseek) integration is configured."""
+        return self.slskd_url is not None and self.slskd_api_key is not None
+
+    @property
+    def navidrome_enabled(self) -> bool:
+        """Check if Navidrome integration is configured."""
+        return (
+            self.navidrome_url is not None
+            and self.navidrome_username is not None
+            and self.navidrome_password is not None
+        )
+
+    @property
+    def music_enabled(self) -> bool:
+        """Whether any music backend is usable at all."""
+        return self.lidarr_enabled or self.slskd_enabled
 
     def is_user_allowed(self, user_id: int) -> bool:
         """Check if user is in the allowlist."""

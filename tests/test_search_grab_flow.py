@@ -9,8 +9,12 @@ Covers the previously-untested paths flagged in 08-testing-quality.md:
 - _execute_grab: movie-path (only the series path had coverage before).
 
 Also covers BUG-07 (search.py:handle_release_selection) — callback.answer()
-must fire right after session validation, before the (potentially slow)
-Radarr/Sonarr lookup, not after.
+must fire right after session validation, before any slower work.
+
+Migration 2026-07-28: `_execute_grab` no longer looks the title up, picks a
+quality profile or resolves a root folder — the title was already resolved (and
+created in Scryer) before releases could be listed at all, and Scryer owns the
+profile/folder. Grabbing is redeeming a candidate token.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,11 +25,8 @@ from bot.models import (
     ArtistInfo,
     ContentType,
     MovieInfo,
-    QualityProfile,
-    RootFolder,
     SearchResult,
     SearchSession,
-    SeriesInfo,
     User,
     UserPreferences,
 )
@@ -55,6 +56,17 @@ def _make_db(session=None) -> MagicMock:
     db.delete_session = AsyncMock()
     db.log_action = AsyncMock()
     return db
+
+
+def _null_lock():
+    """A no-op async context manager standing in for db.session_lock(user_id)."""
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def _cm():
+        yield
+
+    return _cm()
 
 
 @pytest.fixture(autouse=True)
@@ -235,325 +247,186 @@ async def test_confirm_grab_no_session_shows_expired():
 
 
 # ---------------------------------------------------------------------------
-# _execute_grab — movie path (only the series path had coverage before)
+# _execute_grab — Scryer edition
 # ---------------------------------------------------------------------------
+def _session_with_title(**overrides) -> SearchSession:
+    release = SearchResult(
+        guid="g1",
+        title="Test.Release.2160p",
+        indexer="RuTracker",
+        candidate_token="cand-1",
+        scryer_title_id="t1",
+        queue_scope={"title": True},
+    )
+    data = dict(
+        user_id=42,
+        query="Interstellar 2014",
+        content_type=ContentType.MOVIE,
+        results=[release],
+        selected_result=release,
+        selected_content=MovieInfo(tmdb_id=157336, title="Interstellar", year=2014, scryer_id="t1"),
+    )
+    data.update(overrides)
+    return SearchSession(**data)
+
+
 @pytest.mark.asyncio
-async def test_execute_grab_movie_path_success():
+async def test_execute_grab_uses_the_session_title_without_a_lookup():
     from bot.handlers import search
 
-    result = SearchResult(guid="g1", title="Test.Movie.Release", calculated_score=80)
-    movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
-    session = SearchSession(
-        user_id=42, query="interstellar", content_type=ContentType.MOVIE, results=[result],
-        selected_result=result,
-    )
-    session.selected_content = movie
-    db = _make_db(session)
+    session = _session_with_title()
     db_user = _make_db_user()
+    db = _make_db(session)
     message = MagicMock()
     message.edit_text = AsyncMock()
 
     search_service = MagicMock()
-    search_service.parse_query = MagicMock(return_value={"title": "interstellar", "year": None})
-
     add_service = MagicMock()
-    add_service.get_radarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="HD")])
-    add_service.get_radarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/movies")])
-    action = MagicMock(success=True, error_message=None)
-    add_service.grab_movie_release = AsyncMock(return_value=(True, action, "Отправлено в Radarr"))
+    add_service.grab_release = AsyncMock(
+        return_value=(True, MagicMock(user_id=0), "Релиз поставлен в очередь на скачивание")
+    )
 
     await search._execute_grab(message, session, db_user, db, search_service, add_service)
 
-    add_service.grab_movie_release.assert_awaited_once()
-    call_kwargs = add_service.grab_movie_release.await_args.kwargs
-    assert call_kwargs["movie"] is movie
-    assert call_kwargs["force_download"] is False
-    sent = message.edit_text.await_args_list[-1].args[0]
-    assert "Interstellar" in sent
-    db.delete_session.assert_awaited_once()
+    add_service.grab_release.assert_awaited_once()
+    args = add_service.grab_release.await_args.args
+    assert args[0].scryer_id == "t1"
+    assert args[1].candidate_token == "cand-1"
+    assert args[2] == ContentType.MOVIE
+    db.log_action.assert_awaited_once()
+    db.delete_session.assert_awaited_once_with(42)
 
 
 @pytest.mark.asyncio
-async def test_execute_grab_movie_path_looks_up_when_no_selected_content():
-    """When selected_content isn't a MovieInfo yet (grab_best path), it must
-    be looked up via search_service.lookup_movie before grabbing."""
+async def test_execute_grab_propagates_force_download():
     from bot.handlers import search
 
-    result = SearchResult(guid="g1", title="Test.Movie.Release", calculated_score=80, detected_year=2014)
-    session = SearchSession(
-        user_id=42, query="interstellar", content_type=ContentType.MOVIE, results=[result],
-        selected_result=result,
-    )
-    # selected_content left unset (None) — forces the lookup branch.
+    session = _session_with_title()
     db = _make_db(session)
-    db_user = _make_db_user()
     message = MagicMock()
     message.edit_text = AsyncMock()
 
-    movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
-    search_service = MagicMock()
-    search_service.parse_query = MagicMock(return_value={"title": "interstellar", "year": None})
-    search_service.lookup_movie = AsyncMock(return_value=[movie])
-
     add_service = MagicMock()
-    add_service.get_radarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="HD")])
-    add_service.get_radarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/movies")])
-    action = MagicMock(success=True, error_message=None)
-    add_service.grab_movie_release = AsyncMock(return_value=(True, action, "OK"))
-
-    await search._execute_grab(message, session, db_user, db, search_service, add_service)
-
-    search_service.lookup_movie.assert_awaited_once()
-    add_service.grab_movie_release.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_execute_grab_movie_path_force_download_propagates():
-    from bot.handlers import search
-
-    result = SearchResult(guid="g1", title="Test.Movie.Release", calculated_score=80)
-    movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
-    session = SearchSession(
-        user_id=42, query="interstellar", content_type=ContentType.MOVIE, results=[result],
-        selected_result=result,
-    )
-    session.selected_content = movie
-    db = _make_db(session)
-    db_user = _make_db_user()
-    message = MagicMock()
-    message.edit_text = AsyncMock()
-
-    search_service = MagicMock()
-    search_service.parse_query = MagicMock(return_value={"title": "interstellar", "year": None})
-
-    add_service = MagicMock()
-    add_service.get_radarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="HD")])
-    add_service.get_radarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/movies")])
-    action = MagicMock(success=True, error_message=None)
-    add_service.grab_movie_release = AsyncMock(return_value=(True, action, "OK"))
+    add_service.grab_release = AsyncMock(return_value=(True, MagicMock(user_id=0), "ok"))
 
     await search._execute_grab(
-        message, session, db_user, db, search_service, add_service, force_download=True
+        message, session, _make_db_user(), db, MagicMock(), add_service, force_download=True
     )
 
-    call_kwargs = add_service.grab_movie_release.await_args.kwargs
-    assert call_kwargs["force_download"] is True
+    assert add_service.grab_release.await_args.kwargs["force_download"] is True
 
 
 @pytest.mark.asyncio
-async def test_execute_grab_movie_path_no_profiles_shows_error():
+async def test_execute_grab_without_a_resolved_title_asks_to_search_again():
+    """A session persisted before the migration has no Scryer title id."""
     from bot.handlers import search
 
-    result = SearchResult(guid="g1", title="Test.Movie.Release", calculated_score=80)
-    movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
-    session = SearchSession(
-        user_id=42, query="interstellar", content_type=ContentType.MOVIE, results=[result],
-        selected_result=result,
-    )
-    session.selected_content = movie
+    session = _session_with_title(selected_content=None)
     db = _make_db(session)
-    db_user = _make_db_user()
     message = MagicMock()
     message.edit_text = AsyncMock()
 
-    search_service = MagicMock()
-    search_service.parse_query = MagicMock(return_value={"title": "interstellar", "year": None})
-
     add_service = MagicMock()
-    add_service.get_radarr_profiles = AsyncMock(return_value=[])
-    add_service.get_radarr_root_folders = AsyncMock(return_value=[])
+    add_service.grab_release = AsyncMock()
 
-    await search._execute_grab(message, session, db_user, db, search_service, add_service)
+    await search._execute_grab(message, session, _make_db_user(), db, MagicMock(), add_service)
 
-    sent = message.edit_text.await_args_list[-1].args[0]
-    assert "профилей" in sent.lower() or "папок" in sent.lower()
-
-
-# ---------------------------------------------------------------------------
-# BUG-07: handle_release_selection must ack right after validation, before
-# the (potentially slow) Radarr/Sonarr lookup.
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_release_selection_acks_before_lookup():
-    """callback.answer() must be called before search_service.lookup_movie —
-    not after. We assert ordering via a shared call-order list."""
-    from bot.handlers import search
-
-    result = SearchResult(guid="g1", title="Test.Release", calculated_score=50)
-    session = SearchSession(
-        user_id=42, query="test movie", content_type=ContentType.MOVIE, results=[result],
-    )
-    db = _make_db(session)
-    db_user = _make_db_user()
-    callback = _make_callback()
-
-    call_order = []
-
-    async def _answer_tracker(*_a, **_k):
-        call_order.append("answer")
-
-    async def _lookup_tracker(*_a, **_k):
-        call_order.append("lookup_movie")
-        return [MovieInfo(title="Test", tmdb_id=1, year=2024)]
-
-    callback.answer = AsyncMock(side_effect=_answer_tracker)
-
-    search_service = MagicMock()
-    search_service.parse_query = MagicMock(return_value={"title": "test movie", "year": None})
-    search_service.lookup_movie = AsyncMock(side_effect=_lookup_tracker)
-
-    add_service = MagicMock()
-    add_service.qbittorrent = None
-    services = (search_service, add_service)
-
-    with patch.object(search, "get_services", AsyncMock(return_value=services)), \
-         patch.object(search, "get_emby", AsyncMock(return_value=None)):
-        await search.handle_release_selection(callback, search.ReleaseCB(idx=0), db_user, db)
-
-    assert call_order == ["answer", "lookup_movie"], call_order
-
-
-# ---------------------------------------------------------------------------
-# LOGIC-06: detection's lookup_results are cached on the session so a grab
-# doesn't repeat the same Radarr/Sonarr lookup 2-3 times.
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_release_selection_reuses_cached_lookup_candidates_no_network_call():
-    """When session.lookup_candidates already has the matching MovieInfo
-    (from detect_with_confidence), handle_release_selection must NOT call
-    search_service.lookup_movie again."""
-    from bot.handlers import search
-
-    result = SearchResult(guid="g1", title="Test.Release", calculated_score=50, detected_year=2014)
-    cached_movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
-    session = SearchSession(
-        user_id=42, query="interstellar", content_type=ContentType.MOVIE, results=[result],
-        lookup_candidates=[cached_movie],
-    )
-    db = _make_db(session)
-    db_user = _make_db_user()
-    callback = _make_callback()
-
-    search_service = MagicMock()
-    search_service.parse_query = MagicMock(return_value={"title": "interstellar", "year": None})
-    search_service.lookup_movie = AsyncMock(side_effect=AssertionError("must not be called"))
-
-    add_service = MagicMock()
-    add_service.qbittorrent = None
-    services = (search_service, add_service)
-
-    with patch.object(search, "get_services", AsyncMock(return_value=services)), \
-         patch.object(search, "get_emby", AsyncMock(return_value=None)):
-        await search.handle_release_selection(callback, search.ReleaseCB(idx=0), db_user, db)
-
-    search_service.lookup_movie.assert_not_awaited()
-    sent = callback.message.edit_text.await_args_list[-1].args[0]
-    assert "Interstellar" in sent
+    add_service.grab_release.assert_not_awaited()
+    text = message.edit_text.await_args.args[0]
+    assert "Scryer" in text
+    db.delete_session.assert_awaited_once_with(42)
 
 
 @pytest.mark.asyncio
-async def test_release_selection_falls_back_to_lookup_when_no_cached_candidates():
-    """No lookup_candidates on the session (e.g. detection never ran, or
-    returned no movie matches) — handle_release_selection must fall back to
-    the network lookup exactly as before."""
+async def test_execute_grab_failure_shows_the_service_message():
     from bot.handlers import search
 
-    result = SearchResult(guid="g1", title="Test.Release", calculated_score=50, detected_year=2014)
-    session = SearchSession(
-        user_id=42, query="interstellar", content_type=ContentType.MOVIE, results=[result],
-        lookup_candidates=None,
-    )
+    session = _session_with_title()
     db = _make_db(session)
-    db_user = _make_db_user()
-    callback = _make_callback()
-
-    fetched_movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
-    search_service = MagicMock()
-    search_service.parse_query = MagicMock(return_value={"title": "interstellar", "year": None})
-    search_service.lookup_movie = AsyncMock(return_value=[fetched_movie])
-
-    add_service = MagicMock()
-    add_service.qbittorrent = None
-    services = (search_service, add_service)
-
-    with patch.object(search, "get_services", AsyncMock(return_value=services)), \
-         patch.object(search, "get_emby", AsyncMock(return_value=None)):
-        await search.handle_release_selection(callback, search.ReleaseCB(idx=0), db_user, db)
-
-    search_service.lookup_movie.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_execute_grab_best_path_reuses_cached_lookup_candidates_no_network_call():
-    """grab_best skips handle_release_selection entirely (selected_content is
-    never set) — _execute_grab must still reuse session.lookup_candidates
-    instead of calling search_service.lookup_movie."""
-    from bot.handlers import search
-
-    result = SearchResult(guid="g1", title="Test.Movie.Release", calculated_score=80, detected_year=2014)
-    cached_movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
-    session = SearchSession(
-        user_id=42, query="interstellar", content_type=ContentType.MOVIE, results=[result],
-        selected_result=result,
-        lookup_candidates=[cached_movie],
-    )
-    db = _make_db(session)
-    db_user = _make_db_user()
     message = MagicMock()
     message.edit_text = AsyncMock()
 
-    search_service = MagicMock()
-    search_service.parse_query = MagicMock(return_value={"title": "interstellar", "year": None})
-    search_service.lookup_movie = AsyncMock(side_effect=AssertionError("must not be called"))
+    add_service = MagicMock()
+    add_service.grab_release = AsyncMock(
+        return_value=(False, MagicMock(user_id=0), "Scryer не принял релиз (CONFLICT)")
+    )
+
+    await search._execute_grab(message, session, _make_db_user(), db, MagicMock(), add_service)
+
+    assert "CONFLICT" in message.edit_text.await_args.args[0]
+
+
+# ---------------------------------------------------------------------------
+# handle_release_selection — BUG-07 (ack first) and the no-second-lookup rule
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_release_selection_acks_before_rendering():
+    """BUG-07: the tap feedback must not wait on anything slow."""
+    from bot.handlers import search
+    from bot.ui.callbacks import ReleaseCB
+
+    call_order: list[str] = []
+    session = _session_with_title(selected_result=None)
+    db = _make_db(session)
+    db.save_session = AsyncMock(side_effect=lambda *a, **kw: call_order.append("save_session"))
+
+    callback = _make_callback()
+    callback.answer = AsyncMock(side_effect=lambda *a, **kw: call_order.append("answer"))
+    db.session_lock = MagicMock(return_value=_null_lock())
 
     add_service = MagicMock()
-    add_service.get_radarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="HD")])
-    add_service.get_radarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/movies")])
-    action = MagicMock(success=True, error_message=None)
-    add_service.grab_movie_release = AsyncMock(return_value=(True, action, "OK"))
+    add_service.qbittorrent = None
 
-    await search._execute_grab(message, session, db_user, db, search_service, add_service)
+    with patch.object(search, "get_services", AsyncMock(return_value=(MagicMock(), add_service))), \
+         patch.object(search, "_emby_library_note", AsyncMock(return_value="")):
+        await search.handle_release_selection(callback, ReleaseCB(idx=0), _make_db_user(), db)
 
-    search_service.lookup_movie.assert_not_awaited()
-    add_service.grab_movie_release.assert_awaited_once()
-    call_kwargs = add_service.grab_movie_release.await_args.kwargs
-    assert call_kwargs["movie"] is cached_movie
+    assert call_order[0] == "answer"
 
 
 @pytest.mark.asyncio
-async def test_execute_grab_best_path_series_reuses_cached_lookup_candidates():
-    """Series counterpart: _execute_grab's series branch reuses
-    session.lookup_candidates instead of calling search_service.lookup_series."""
+async def test_release_selection_does_not_hit_the_network_again():
+    """The title was resolved during the search — selecting a release must be
+    a pure render (plus the optional Emby probe)."""
     from bot.handlers import search
+    from bot.ui.callbacks import ReleaseCB
 
-    result = SearchResult(
-        guid="g1", title="Test.Series.Release", calculated_score=80,
-        detected_year=2016, is_season_pack=True,
-    )
-    cached_series = SeriesInfo(title="Stranger Things", tvdb_id=305288, year=2016)
-    session = SearchSession(
-        user_id=42, query="stranger things", content_type=ContentType.SERIES, results=[result],
-        selected_result=result,
-        lookup_candidates=[cached_series],
-    )
+    session = _session_with_title(selected_result=None)
     db = _make_db(session)
-    db_user = _make_db_user()
-    message = MagicMock()
-    message.edit_text = AsyncMock()
+    db.session_lock = MagicMock(return_value=_null_lock())
 
     search_service = MagicMock()
-    search_service.parse_query = MagicMock(return_value={"title": "stranger things", "year": None})
-    search_service.lookup_series = AsyncMock(side_effect=AssertionError("must not be called"))
+    search_service.search_metadata = AsyncMock()
+    add_service = MagicMock()
+    add_service.qbittorrent = None
+    add_service.ensure_title = AsyncMock()
+
+    callback = _make_callback()
+
+    with patch.object(search, "get_services", AsyncMock(return_value=(search_service, add_service))), \
+         patch.object(search, "_emby_library_note", AsyncMock(return_value="")):
+        await search.handle_release_selection(callback, ReleaseCB(idx=0), _make_db_user(), db)
+
+    search_service.search_metadata.assert_not_awaited()
+    add_service.ensure_title.assert_not_awaited()
+    assert "Interstellar" in callback.message.edit_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_release_selection_without_title_still_offers_the_grab_buttons():
+    from bot.handlers import search
+    from bot.ui.callbacks import ReleaseCB
+
+    session = _session_with_title(selected_result=None, selected_content=None)
+    db = _make_db(session)
+    db.session_lock = MagicMock(return_value=_null_lock())
 
     add_service = MagicMock()
-    add_service.get_sonarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="HD")])
-    add_service.get_sonarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/tv")])
-    action = MagicMock(success=True, error_message=None)
-    add_service.grab_series_release = AsyncMock(return_value=(True, action, "OK"))
+    add_service.qbittorrent = None
+    callback = _make_callback()
 
-    await search._execute_grab(message, session, db_user, db, search_service, add_service)
+    with patch.object(search, "get_services", AsyncMock(return_value=(MagicMock(), add_service))):
+        await search.handle_release_selection(callback, ReleaseCB(idx=0), _make_db_user(), db)
 
-    search_service.lookup_series.assert_not_awaited()
-    add_service.grab_series_release.assert_awaited_once()
-    call_kwargs = add_service.grab_series_release.await_args.kwargs
-    assert call_kwargs["series"] is cached_series
+    kwargs = callback.message.edit_text.await_args.kwargs
+    assert kwargs["reply_markup"] is not None

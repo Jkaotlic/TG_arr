@@ -6,9 +6,8 @@ Covers:
 - DEAD-13: search_releases top_preview drops the dead hasattr(get_size_gb) guard.
 """
 
-import json
 from datetime import datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -30,10 +29,12 @@ _PUBLIC_MAGNET = "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01"
 
 
 def _rejected_release(url: str = _PUBLIC_MAGNET) -> SearchResult:
-    # indexer_id=0 so the direct-grab branch is skipped, magnet URL is "public"
-    # so push_release is reached; with no qBittorrent fallback we land on the
-    # rejected-return branch where details must be populated.
+    # Carries a candidate token so the queue call is actually reached — the
+    # refusal under test comes from Scryer, not from a missing token.
     return SearchResult(
+        candidate_token="cand-1",
+        scryer_title_id="t1",
+        queue_scope={"title": True},
         guid="rej-guid",
         indexer="TestIndexer",
         indexer_id=0,
@@ -163,66 +164,52 @@ async def test_post_no_retry_no_warn_when_fast(monkeypatch):
 # OBS-03: rejection reasons persisted into action.details
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_grab_movie_persists_rejections_into_details():
-    """OBS-03: when Radarr rejects a movie release, action.details must contain
-    the rejection reasons as JSON for forensics."""
-    movie = MovieInfo(tmdb_id=123, imdb_id="tt1", title="Test Movie", year=2024, radarr_id=42)
+async def test_blocked_release_records_the_reason_in_the_action():
+    """OBS-03 (migrated): the *arr "rejections" array is gone; Scryer refuses a
+    candidate with a queue status (or a GraphQL error). Either way the reason
+    must survive into the ActionLog for forensics."""
+    from bot.clients.scryer import ScryerGraphQLError
 
-    rejections = ["Quality not wanted", "Release rejected by profile"]
-    radarr = AsyncMock()
-    radarr.get_movie_by_tmdb = AsyncMock(return_value=movie)
-    radarr.push_release = AsyncMock(return_value={"approved": False, "rejections": rejections})
-    radarr.grab_release = AsyncMock()
-    radarr.search_movie = AsyncMock()
+    scryer = AsyncMock()
+    scryer.queue_existing_title_download = AsyncMock(
+        side_effect=ScryerGraphQLError("Scryer вернул ошибку: release blocked by profile")
+    )
+    svc = _build_add_service(scryer=scryer)
 
-    svc = _build_add_service(radarr=radarr)  # no qBittorrent → rejected-return branch
-    release = _rejected_release()
-
-    success, action, _msg = await svc.grab_movie_release(
-        movie=movie, release=release, quality_profile_id=1, root_folder_path="/movies",
+    success, action, _msg = await svc.grab_release(
+        MovieInfo(tmdb_id=123, title="Test Movie", year=2024, scryer_id="t1"),
+        _rejected_release(),
+        ContentType.MOVIE,
     )
 
     assert success is False
-    assert action.details is not None
-    parsed = json.loads(action.details)
-    assert parsed["rejections"] == rejections
+    assert action.error_message
+    assert "release blocked by profile" in action.error_message
 
 
 @pytest.mark.asyncio
-async def test_grab_series_persists_rejections_into_details():
-    """OBS-03: Sonarr rejection reasons land in action.details."""
-    series = SeriesInfo(tvdb_id=654, imdb_id="tt7", title="Test Series", year=2020, sonarr_id=77)
+async def test_queue_conflict_records_the_status_in_the_action():
+    scryer = AsyncMock()
+    scryer.queue_existing_title_download = AsyncMock(
+        return_value=MagicMock(queued=False, status="CONFLICT", job_id=None)
+    )
+    svc = _build_add_service(scryer=scryer)
 
-    rejections = ["Episode already downloaded"]
-    sonarr = AsyncMock()
-    sonarr.get_series_by_tvdb = AsyncMock(return_value=series)
-    sonarr.push_release = AsyncMock(return_value={"approved": False, "rejections": rejections})
-    sonarr.grab_release = AsyncMock()
-    sonarr.search_series = AsyncMock()
-
-    svc = _build_add_service(sonarr=sonarr)
-    release = _rejected_release()
-
-    success, action, _msg = await svc.grab_series_release(
-        series=series, release=release, quality_profile_id=1, root_folder_path="/tv",
+    success, action, _msg = await svc.grab_release(
+        SeriesInfo(tvdb_id=654, title="Test Series", year=2020, scryer_id="t1"),
+        _rejected_release(),
+        ContentType.SERIES,
     )
 
     assert success is False
-    assert action.details is not None
-    parsed = json.loads(action.details)
-    assert parsed["rejections"] == rejections
+    assert "CONFLICT" in (action.error_message or "")
 
 
-# ---------------------------------------------------------------------------
-# DEAD-13: top_preview size_gb is always computed (no hasattr guard)
-# ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_search_releases_top_preview_includes_size_gb():
     """DEAD-13: size_gb in the search_completed top-preview is computed directly
     from SearchResult.get_size_gb() (no dead hasattr branch)."""
-    prowlarr = AsyncMock()
-    radarr = AsyncMock()
-    sonarr = AsyncMock()
+    scryer = AsyncMock()
 
     result = SearchResult(
         guid="g-1",
@@ -233,7 +220,7 @@ async def test_search_releases_top_preview_includes_size_gb():
         protocol="torrent",
         detected_type=ContentType.MOVIE,
     )
-    prowlarr.search = AsyncMock(return_value=[result])
+    scryer.search_releases = AsyncMock(return_value=[result])
 
     captured: dict = {}
 
@@ -253,8 +240,8 @@ async def test_search_releases_top_preview_includes_size_gb():
     orig_logger = ss.logger
     ss.logger = _Log()
     try:
-        svc = SearchService(prowlarr, radarr, sonarr)
-        results = await svc.search_releases("some movie", ContentType.MOVIE, sort_by_score=False)
+        svc = SearchService(scryer)
+        results = await svc.search_releases("title-id", ContentType.MOVIE)
     finally:
         ss.logger = orig_logger
 

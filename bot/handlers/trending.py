@@ -9,10 +9,10 @@ from aiogram.types import CallbackQuery, Message
 from typing import Any
 
 from bot.config import get_settings
-from bot.clients.registry import get_tmdb, get_radarr, get_sonarr, get_qbittorrent, get_prowlarr
+from bot.clients.registry import get_qbittorrent, get_scryer, get_tmdb
 from bot.db import Database
 from bot.handlers._cache import get_ttl, put_ttl
-from bot.models import User
+from bot.models import ContentType, User
 from bot.services.add_service import AddService
 from bot.ui.callbacks import AddContentCB, TrendingItemCB
 from bot.ui.formatters import Formatters
@@ -242,24 +242,16 @@ async def handle_movie_from_trending(callback: CallbackQuery, callback_data: Tre
         await callback.message.answer("❌ Неверный ID фильма")
         return
 
-    # Try to get movie from cache first
+    # The trending list itself is the source of truth here: the item came from
+    # TMDb, and Scryer's catalog only knows titles that were already added — so
+    # a cache miss means "the list is stale", not "look it up elsewhere".
     movie = _cache_get(_trending_movies_cache, tmdb_id)
 
     if not movie:
-        # If not in cache, fetch from Radarr
-        radarr = await get_radarr()
-        try:
-            movie = await radarr.lookup_movie_by_tmdb(tmdb_id)
-        except Exception as e:
-            logger.error("Failed to lookup movie", tmdb_id=tmdb_id, error=str(e), exc_info=True)
-            await callback.message.answer(
-                Formatters.format_error("Не удалось найти фильм"),
-                parse_mode="HTML",
-            )
-            return
-
-    if not movie:
-        await callback.message.answer("❌ Фильм не найден")
+        await callback.message.answer(
+            "❌ Фильм не найден в кэше.\n"
+            "Попробуйте обновить список или используйте обычный поиск."
+        )
         return
 
     # Send poster with movie details
@@ -342,194 +334,111 @@ async def handle_series_from_trending(callback: CallbackQuery, callback_data: Tr
         )
 
 
-@router.callback_query(AddContentCB.filter(F.kind == "movie"))
-async def handle_add_movie_from_trending(
-    callback: CallbackQuery, callback_data: AddContentCB, db_user: User, db: Database
+async def _add_from_trending(
+    callback: CallbackQuery,
+    content,
+    content_type: ContentType,
+    db_user: User,
+    db: Database,
+    status_text: str,
 ) -> None:
-    """Add movie to Radarr from trending list."""
-    await callback.answer()
-    if not callback.message:
-        return
+    """Shared "add this trending item" path for movies and series.
 
-    tmdb_id = callback_data.tmdb_id
-
-    # Try to get movie from cache first
-    movie = _cache_get(_trending_movies_cache, tmdb_id)
-
-    if not movie:
-        # If not in cache, fetch from Radarr
-        radarr = await get_radarr()
-        try:
-            movie = await radarr.lookup_movie_by_tmdb(tmdb_id)
-        except Exception as e:
-            logger.error("Failed to lookup movie", tmdb_id=tmdb_id, error=str(e), exc_info=True)
-            await callback.message.answer(
-                Formatters.format_error("Не удалось найти фильм"),
-                parse_mode="HTML",
-            )
-            return
-
-    if not movie:
-        await callback.message.answer("❌ Фильм не найден")
-        return
-
-    # Show loading message
-    status_msg = await callback.message.answer("⏳ Добавляю фильм в Radarr...")
+    Migration 2026-07-28: both used to pick a quality profile and a root folder
+    and then call Radarr/Sonarr `add`. Scryer owns both settings, so the bot
+    just adds the title and lets Scryer pick + queue the best release under its
+    own profile and rules.
+    """
+    status_msg = await callback.message.answer(status_text)
 
     try:
-        # Get services
-        prowlarr = await get_prowlarr()
-        radarr = await get_radarr()
-        sonarr = await get_sonarr()
-        qbittorrent = await get_qbittorrent()
-        add_service = AddService(prowlarr, radarr, sonarr, qbittorrent)
-
-        # Get user preferences
-        # PERF-07a: 2 independent RTTs → 1 wall-clock RTT.
-        profiles, folders = await asyncio.gather(
-            add_service.get_radarr_profiles(),
-            add_service.get_radarr_root_folders(),
+        add_service = AddService(
+            await get_scryer(),
+            qbittorrent=await get_qbittorrent(),
         )
         prefs = db_user.preferences
 
-        if not profiles or not folders:
-            await status_msg.edit_text("❌ Нет профилей качества или папок в Radarr")
-            return
-
-        profile_id = AddService.resolve_profile(profiles, prefs.radarr_quality_profile_id).id
-        folder_path = AddService.resolve_root_folder(folders, prefs.radarr_root_folder_id)
-
-        # Add movie to Radarr
-        added_movie, action = await add_service.add_movie(
-            movie=movie,
-            quality_profile_id=profile_id,
-            root_folder_path=folder_path,
-            search_for_movie=True,
+        success, action, message = await add_service.add_and_queue_best(
+            content,
+            content_type,
+            quality_profile_id=prefs.scryer_quality_profile_id,
+            root_folder_path=prefs.scryer_root_folder_id,
         )
 
         action.user_id = db_user.tg_id
         await db.log_action(action)
 
-        if action.success and added_movie:
+        if success:
+            year_str = f" ({content.year})" if getattr(content, "year", None) else ""
             await status_msg.edit_text(
-                f"✅ <b>{html.escape(added_movie.title)}</b> ({added_movie.year})\n\n"
-                f"Фильм добавлен в Radarr. Начат поиск релизов.",
+                f"✅ <b>{html.escape(content.title)}</b>{year_str}\n\n{html.escape(message)}",
                 parse_mode="HTML",
             )
         else:
-            # BUG-12b: action.error_message can contain raw *arr error text
-            # (e.g. an unescaped "<" breaks HTML parsing under default parse_mode).
-            error_msg = html.escape(action.error_message or "Неизвестная ошибка")
-            await status_msg.edit_text(f"❌ Ошибка: {error_msg}")
+            # BUG-12b: error text can contain raw markup from the upstream
+            # service — escape before interpolating into an HTML message.
+            await status_msg.edit_text(f"❌ {html.escape(message)}")
 
     except Exception as e:
-        logger.error("Failed to add movie from trending", tmdb_id=tmdb_id, error=str(e), exc_info=True)
+        logger.error(
+            "trending_add_failed",
+            title=getattr(content, "title", None),
+            content_type=content_type.value,
+            error=str(e),
+            exc_info=True,
+        )
         await status_msg.edit_text(
-            Formatters.format_error("Не удалось добавить фильм"),
+            Formatters.format_error("Не удалось добавить"),
             parse_mode="HTML",
         )
+
+
+@router.callback_query(AddContentCB.filter(F.kind == "movie"))
+async def handle_add_movie_from_trending(
+    callback: CallbackQuery, callback_data: AddContentCB, db_user: User, db: Database
+) -> None:
+    """Add a movie to Scryer from the trending list."""
+    await callback.answer()
+    if not callback.message:
+        return
+
+    tmdb_id = callback_data.tmdb_id
+    movie = _cache_get(_trending_movies_cache, tmdb_id)
+
+    if not movie:
+        await callback.message.answer(
+            "❌ Фильм не найден в кэше.\n"
+            "Попробуйте обновить список или используйте обычный поиск."
+        )
+        return
+
+    await _add_from_trending(
+        callback, movie, ContentType.MOVIE, db_user, db, "⏳ Добавляю фильм в Scryer..."
+    )
 
 
 @router.callback_query(AddContentCB.filter(F.kind == "series"))
 async def handle_add_series_from_trending(
     callback: CallbackQuery, callback_data: AddContentCB, db_user: User, db: Database
 ) -> None:
-    """Add series to Sonarr from trending list."""
+    """Add a series to Scryer from the trending list."""
     await callback.answer()
     if not callback.message:
         return
 
     tmdb_id = callback_data.tmdb_id
-
-    # Try to get series from cache first
     series = _cache_get(_trending_series_cache, tmdb_id)
 
     if not series:
-        if not callback.message:
-            return
         await callback.message.answer(
             "❌ Сериал не найден в кэше.\n"
             "Попробуйте обновить список или используйте обычный поиск."
         )
         return
 
-    if not callback.message:
-        return
-
-    # Show loading message
-    status_msg = await callback.message.answer("⏳ Добавляю сериал в Sonarr...")
-
-    try:
-        # Get services
-        prowlarr = await get_prowlarr()
-        radarr = await get_radarr()
-        sonarr = await get_sonarr()
-        qbittorrent = await get_qbittorrent()
-        add_service = AddService(prowlarr, radarr, sonarr, qbittorrent)
-
-        # Get user preferences
-        # PERF-07a: 2 independent RTTs → 1 wall-clock RTT.
-        profiles, folders = await asyncio.gather(
-            add_service.get_sonarr_profiles(),
-            add_service.get_sonarr_root_folders(),
-        )
-        prefs = db_user.preferences
-
-        if not profiles or not folders:
-            await status_msg.edit_text("❌ Нет профилей качества или папок в Sonarr")
-            return
-
-        profile_id = AddService.resolve_profile(profiles, prefs.sonarr_quality_profile_id).id
-        folder_path = AddService.resolve_root_folder(folders, prefs.sonarr_root_folder_id)
-
-        # Resolve TVDB ID if missing (TMDb trending returns tvdb_id=0)
-        if not series.tvdb_id:
-            # LOGIC-11: shared with grab.py's series-resolution path.
-            resolved = await add_service.resolve_series_tvdb_id(series)
-            if resolved:
-                series = resolved
-                # PERF-07: write the resolved series (now carrying a real
-                # tvdb_id) back into the cache so a subsequent add/detail view
-                # reuses it instead of re-running the Sonarr lookup.
-                async with _cache_lock:
-                    _cache_put(_trending_series_cache, tmdb_id, series)
-            else:
-                await status_msg.edit_text(
-                    "❌ Не удалось определить TVDB ID для сериала.\n"
-                    "Попробуйте добавить через обычный поиск."
-                )
-                return
-
-        # Add series to Sonarr
-        added_series, action = await add_service.add_series(
-            series=series,
-            quality_profile_id=profile_id,
-            root_folder_path=folder_path,
-            monitor_type="all",
-            search_for_missing=True,
-        )
-
-        action.user_id = db_user.tg_id
-        await db.log_action(action)
-
-        if action.success and added_series:
-            year_str = f" ({added_series.year})" if added_series.year else ""
-            await status_msg.edit_text(
-                f"✅ <b>{html.escape(added_series.title)}</b>{year_str}\n\n"
-                f"Сериал добавлен в Sonarr. Начат поиск релизов.",
-                parse_mode="HTML",
-            )
-        else:
-            # BUG-12b: escape *arr error text before interpolating into HTML.
-            error_msg = html.escape(action.error_message or "Неизвестная ошибка")
-            await status_msg.edit_text(f"❌ Ошибка: {error_msg}")
-
-    except Exception as e:
-        logger.error("Failed to add series from trending", tmdb_id=tmdb_id, error=str(e), exc_info=True)
-        await status_msg.edit_text(
-            Formatters.format_error("Не удалось добавить сериал"),
-            parse_mode="HTML",
-        )
+    await _add_from_trending(
+        callback, series, ContentType.SERIES, db_user, db, "⏳ Добавляю сериал в Scryer..."
+    )
 
 
 # ---------------------------------------------------------------------------

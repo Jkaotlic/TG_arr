@@ -9,67 +9,90 @@ if TYPE_CHECKING:
     from bot.clients.deezer import DeezerClient
     from bot.clients.emby import EmbyClient
     from bot.clients.lidarr import LidarrClient
-    from bot.clients.prowlarr import ProwlarrClient
+    from bot.clients.navidrome import NavidromeClient
     from bot.clients.qbittorrent import QBittorrentClient
-    from bot.clients.radarr import RadarrClient
-    from bot.clients.sonarr import SonarrClient
+    from bot.clients.scryer import ScryerClient
+    from bot.clients.slskd import SlskdClient
     from bot.clients.tmdb import TMDbClient
 
 # Per-client locks to prevent race conditions in singleton creation
-_prowlarr_lock = asyncio.Lock()
-_radarr_lock = asyncio.Lock()
-_sonarr_lock = asyncio.Lock()
+_scryer_lock = asyncio.Lock()
 _lidarr_lock = asyncio.Lock()
+_slskd_lock = asyncio.Lock()
+_navidrome_lock = asyncio.Lock()
 _qbittorrent_lock = asyncio.Lock()
 _emby_lock = asyncio.Lock()
 _tmdb_lock = asyncio.Lock()
 _deezer_lock = asyncio.Lock()
 
 # Singleton instances
-_prowlarr: Optional["ProwlarrClient"] = None
-_radarr: Optional["RadarrClient"] = None
-_sonarr: Optional["SonarrClient"] = None
+_scryer: Optional["ScryerClient"] = None
 _lidarr: Optional["LidarrClient"] = None
+_slskd: Optional["SlskdClient"] = None
+_navidrome: Optional["NavidromeClient"] = None
 _qbittorrent: Optional["QBittorrentClient"] = None
 _emby: Optional["EmbyClient"] = None
 _tmdb: Optional["TMDbClient"] = None
 _deezer: Optional["DeezerClient"] = None
 
 
-async def get_prowlarr() -> "ProwlarrClient":
-    """Get or create Prowlarr client singleton."""
-    global _prowlarr
-    async with _prowlarr_lock:
-        if _prowlarr is None:
-            from bot.clients.prowlarr import ProwlarrClient
+async def get_scryer() -> "ScryerClient":
+    """Get or create the Scryer client singleton.
+
+    One instance per process matters more here than for the old *arr clients:
+    the JWT (24h TTL) is cached on the instance, so a second client would mean
+    a second login on every cold start.
+    """
+    global _scryer
+    async with _scryer_lock:
+        if _scryer is None:
+            from bot.clients.scryer import ScryerClient
 
             settings = get_settings()
-            _prowlarr = ProwlarrClient(settings.prowlarr_url, settings.prowlarr_api_key)
-    return _prowlarr
+            _scryer = ScryerClient(
+                settings.scryer_url,
+                settings.scryer_username,
+                settings.scryer_password,
+            )
+    return _scryer
 
 
-async def get_radarr() -> "RadarrClient":
-    """Get or create Radarr client singleton."""
-    global _radarr
-    async with _radarr_lock:
-        if _radarr is None:
-            from bot.clients.radarr import RadarrClient
+async def get_slskd() -> Optional["SlskdClient"]:
+    """Get or create slskd client singleton (if configured)."""
+    global _slskd
+    settings = get_settings()
+    if not settings.slskd_enabled:
+        return None
+    async with _slskd_lock:
+        if _slskd is None:
+            from bot.clients.slskd import SlskdClient
 
-            settings = get_settings()
-            _radarr = RadarrClient(settings.radarr_url, settings.radarr_api_key)
-    return _radarr
+            _slskd = SlskdClient(
+                settings.slskd_url,
+                settings.slskd_api_key,
+                timeout=settings.slskd_timeout,
+                search_timeout=settings.slskd_search_timeout,
+            )
+    return _slskd
 
 
-async def get_sonarr() -> "SonarrClient":
-    """Get or create Sonarr client singleton."""
-    global _sonarr
-    async with _sonarr_lock:
-        if _sonarr is None:
-            from bot.clients.sonarr import SonarrClient
+async def get_navidrome() -> Optional["NavidromeClient"]:
+    """Get or create Navidrome client singleton (if configured)."""
+    global _navidrome
+    settings = get_settings()
+    if not settings.navidrome_enabled:
+        return None
+    async with _navidrome_lock:
+        if _navidrome is None:
+            from bot.clients.navidrome import NavidromeClient
 
-            settings = get_settings()
-            _sonarr = SonarrClient(settings.sonarr_url, settings.sonarr_api_key)
-    return _sonarr
+            _navidrome = NavidromeClient(
+                settings.navidrome_url,
+                settings.navidrome_username,
+                settings.navidrome_password,
+                timeout=settings.navidrome_timeout,
+            )
+    return _navidrome
 
 
 async def get_lidarr() -> Optional["LidarrClient"]:
@@ -157,17 +180,17 @@ async def get_tmdb() -> Optional["TMDbClient"]:
 
 async def close_all() -> None:
     """Close all client connections. Call on shutdown."""
-    global _prowlarr, _radarr, _sonarr, _lidarr, _qbittorrent, _emby, _tmdb, _deezer
+    global _scryer, _lidarr, _slskd, _navidrome, _qbittorrent, _emby, _tmdb, _deezer
 
-    if _prowlarr:
-        await _prowlarr.close()
-        _prowlarr = None
-    if _radarr:
-        await _radarr.close()
-        _radarr = None
-    if _sonarr:
-        await _sonarr.close()
-        _sonarr = None
+    if _scryer:
+        await _scryer.close()
+        _scryer = None
+    if _slskd:
+        await _slskd.close()
+        _slskd = None
+    if _navidrome:
+        await _navidrome.close()
+        _navidrome = None
     if _lidarr:
         await _lidarr.close()
         _lidarr = None

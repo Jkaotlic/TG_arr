@@ -8,7 +8,14 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from bot.clients.registry import get_deezer, get_lidarr, get_prowlarr, get_qbittorrent, get_radarr, get_sonarr
+from bot.clients.registry import (
+    get_deezer,
+    get_lidarr,
+    get_navidrome,
+    get_qbittorrent,
+    get_scryer,
+    get_slskd,
+)
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers._cache import remember_lru
@@ -23,7 +30,7 @@ from bot.models import (
 )
 from bot.services.add_service import AddService
 from bot.services.search_service import SearchService
-from bot.ui.callbacks import ArtistCB, TrendingItemCB
+from bot.ui.callbacks import ArtistCB, SlskdCB, TrendingItemCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.menu import MENU_MUSIC
@@ -91,19 +98,27 @@ async def _render_artist_list(message: Message, artists: list[ArtistInfo], page:
 
 
 async def _get_music_services() -> tuple[SearchService, AddService] | None:
-    """Build SearchService and AddService wired to Lidarr. None if Lidarr is not configured."""
+    """Build SearchService and AddService wired to the music backends.
+
+    Returns None only when *no* music backend is configured. Lidarr is the
+    preferred one (it owns the library layout and hands work to slskd), but
+    slskd alone is enough for search + direct download.
+    """
     lidarr = await get_lidarr()
-    if lidarr is None:
+    slskd = await get_slskd()
+    if lidarr is None and slskd is None:
         return None
 
-    prowlarr = await get_prowlarr()
-    radarr = await get_radarr()
-    sonarr = await get_sonarr()
+    scryer = await get_scryer()
     qbittorrent = await get_qbittorrent()
 
-    search_service = SearchService(prowlarr, radarr, sonarr, _SCORING_SERVICE, lidarr=lidarr)
-    add_service = AddService(prowlarr, radarr, sonarr, qbittorrent=qbittorrent, lidarr=lidarr)
+    search_service = SearchService(scryer, _SCORING_SERVICE, lidarr=lidarr, slskd=slskd)
+    add_service = AddService(scryer, qbittorrent=qbittorrent, lidarr=lidarr, slskd=slskd)
     return search_service, add_service
+
+
+# Per-user Soulseek candidates, same LRU discipline as _artist_candidates.
+_slskd_candidates: dict[int, list] = {}
 
 
 @router.message(Command("music"))
@@ -121,12 +136,186 @@ async def cmd_music(message: Message, db_user: User, db: Database) -> None:
     await process_music_search(message, query, db_user, db)
 
 
+@router.message(Command("album"))
+async def cmd_album(message: Message, db_user: User, db: Database) -> None:
+    """Handle /album <artist - album> — direct Soulseek search.
+
+    Lidarr's model is artist-centric: it can monitor an artist's discography
+    but cannot express "just get me this one album". Soulseek indexes shared
+    *files*, so slskd answers that question directly.
+    """
+    if not message.text:
+        await message.answer("Укажите альбом: <code>/album Metallica Master of Puppets</code>")
+        return
+
+    query = strip_command(message.text, "/album")
+    if not query:
+        await message.answer("Укажите альбом: <code>/album Metallica Master of Puppets</code>")
+        return
+
+    await process_soulseek_search(message, query, db_user, db, kind="album")
+
+
+@router.message(Command("track"))
+async def cmd_track(message: Message, db_user: User, db: Database) -> None:
+    """Handle /track <artist - title> — direct Soulseek search for one track."""
+    if not message.text:
+        await message.answer("Укажите трек: <code>/track Metallica One</code>")
+        return
+
+    query = strip_command(message.text, "/track")
+    if not query:
+        await message.answer("Укажите трек: <code>/track Metallica One</code>")
+        return
+
+    await process_soulseek_search(message, query, db_user, db, kind="track")
+
+
+async def _navidrome_note(artist: str, album: str = "") -> str:
+    """Best-effort "already in the library" hint from Navidrome.
+
+    Never raises and never blocks the flow — on any error/timeout/absence it
+    returns "" and the user simply doesn't see the hint.
+    """
+    try:
+        navidrome = await get_navidrome()
+        if navidrome is None:
+            return ""
+        if album:
+            exists = await asyncio.wait_for(navidrome.has_album(artist, album), timeout=5.0)
+        else:
+            exists = await asyncio.wait_for(navidrome.has_artist(artist), timeout=5.0)
+        return "\n\n✅ <i>Уже есть в библиотеке (Navidrome)</i>" if exists else ""
+    except Exception as e:
+        logger.debug("navidrome_note_skipped", error=str(e))
+        return ""
+
+
+async def process_soulseek_search(
+    message: Message,
+    query: str,
+    db_user: User,
+    db: Database,
+    *,
+    kind: str = "album",
+) -> None:
+    """Search Soulseek via slskd and present the candidates."""
+    MAX_QUERY_LENGTH = 200
+    if len(query) > MAX_QUERY_LENGTH:
+        await message.answer(f"❌ Запрос слишком длинный (макс. {MAX_QUERY_LENGTH} символов)")
+        return
+    if len(query) < 2:
+        await message.answer("❌ Запрос слишком короткий (мин. 2 символа)")
+        return
+
+    slskd = await get_slskd()
+    if slskd is None:
+        await message.answer(
+            "Soulseek не настроен. Добавьте SLSKD_URL и SLSKD_API_KEY в .env"
+        )
+        return
+
+    user_id = db_user.tg_id
+    log = logger.bind(user_id=user_id, query=query, kind=kind)
+    status_msg = await message.answer("🔍 Ищу в Soulseek (это занимает ~25 секунд)...")
+
+    try:
+        results = await slskd.search(query, limit=25)
+    except Exception as e:
+        log.error("slskd_search_failed", error=str(e), exc_info=True)
+        await status_msg.edit_text(Formatters.format_error("Soulseek недоступен"))
+        return
+
+    if not results:
+        await status_msg.edit_text(
+            Formatters.format_warning(f"В Soulseek ничего не найдено: <b>{html.escape(query)}</b>"),
+            parse_mode="HTML",
+        )
+        return
+
+    _remember(_slskd_candidates, user_id, results)
+
+    await db.log_action(
+        ActionLog(
+            user_id=user_id,
+            action_type=ActionType.SEARCH,
+            content_type=ContentType.MUSIC,
+            query=query,
+        )
+    )
+
+    note = await _navidrome_note(results[0].guessed_artist, query if kind == "album" else "")
+    await status_msg.edit_text(
+        Formatters.format_slskd_results(results, query) + note,
+        reply_markup=Keyboards.slskd_results(results),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(SlskdCB.filter())
+async def handle_slskd_selection(
+    callback: CallbackQuery, callback_data: SlskdCB, db_user: User, db: Database
+) -> None:
+    """Queue a Soulseek candidate for download via slskd."""
+    if not callback.message:
+        return
+
+    user_id = callback.from_user.id
+    candidates = _slskd_candidates.get(user_id) or []
+    idx = callback_data.idx
+    if idx < 0 or idx >= len(candidates):
+        await callback.answer("Список истёк. Повторите поиск.", show_alert=True)
+        return
+
+    await callback.answer("Ставлю в очередь...")
+    candidate = candidates[idx]
+
+    slskd = await get_slskd()
+    if slskd is None:
+        await callback.message.edit_text(Formatters.format_error("Soulseek не настроен"))
+        return
+
+    action = ActionLog(
+        user_id=user_id,
+        action_type=ActionType.GRAB,
+        content_type=ContentType.MUSIC,
+        content_title=candidate.display_name,
+        release_title=f"{candidate.username}: {candidate.folder}"[:200],
+    )
+
+    ok = await slskd.enqueue(candidate.username, candidate.files)
+    action.success = ok
+    if not ok:
+        action.error_message = "slskd rejected the transfer"
+    await db.log_action(action)
+
+    if ok:
+        await callback.message.edit_text(
+            Formatters.format_success(
+                f"<b>{html.escape(candidate.display_name)}</b>\n\n"
+                f"Поставлено в очередь Soulseek: {candidate.track_count} файл(ов), "
+                f"{candidate.size_formatted}\n\n"
+                f"Прогресс — в /downloads"
+            ),
+            parse_mode="HTML",
+        )
+    else:
+        await callback.message.edit_text(
+            Formatters.format_error(
+                "Не удалось поставить в очередь — возможно, пользователь ушёл в офлайн"
+            )
+        )
+
+
 @router.message(F.text == MENU_MUSIC)
 async def handle_menu_music(message: Message) -> None:
     """Handle 🎵 Музыка menu button — prompt user for query."""
     settings = get_settings()
-    if not settings.lidarr_enabled:
-        await message.answer("Lidarr не настроен. Добавьте LIDARR_URL и LIDARR_API_KEY в .env")
+    if not settings.music_enabled:
+        await message.answer(
+            "Музыкальный контур не настроен. Добавьте LIDARR_URL/LIDARR_API_KEY "
+            "или SLSKD_URL/SLSKD_API_KEY в .env"
+        )
         return
     await message.answer("🎵 Введите имя артиста (<code>/music &lt;artist&gt;</code> или просто текст):")
 

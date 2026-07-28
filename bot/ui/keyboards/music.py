@@ -74,3 +74,23 @@ class _MusicKeyboards:
             InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def slskd_results(results: list, per_page: int = 5) -> InlineKeyboardMarkup:
+        """Keyboard for picking one Soulseek candidate (see `SlskdCB`)."""
+        from bot.ui.callbacks import SlskdCB
+
+        keyboard = []
+        for idx, result in enumerate(results[:per_page]):
+            fmt = result.dominant_format.upper() or "?"
+            label = f"{idx + 1}. {fmt} · {result.track_count} трек. · {result.size_formatted}"
+            if len(label) > 60:
+                label = label[:57] + "..."
+            keyboard.append([
+                InlineKeyboardButton(text=label, callback_data=SlskdCB(idx=idx).pack())
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)

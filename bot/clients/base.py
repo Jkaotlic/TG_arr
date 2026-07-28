@@ -168,8 +168,14 @@ class BaseAPIClient:
         params: Optional[dict[str, Any]] = None,
         json_data: Optional[dict[str, Any]] = None,
         timeout: Optional[float] = None,
+        headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any] | list[Any]:
-        """Make HTTP request with retry logic."""
+        """Make HTTP request with retry logic.
+
+        ``headers`` are merged on top of the pooled client's defaults for this
+        one call — needed by ScryerClient, whose bearer token is refreshed
+        independently of the (long-lived) httpx client.
+        """
         client = await self._get_client()
         url = endpoint if endpoint.startswith("/") else f"/{endpoint}"
 
@@ -188,6 +194,7 @@ class BaseAPIClient:
                 params=params,
                 json=json_data,
                 timeout=timeout,
+                headers=headers,
             )
             elapsed = (time.monotonic() - start_time) * 1000
             elapsed_rounded = round(elapsed, 2)
@@ -261,10 +268,13 @@ class BaseAPIClient:
         params: Optional[dict[str, Any]] = None,
         json_data: Optional[dict[str, Any]] = None,
         timeout: Optional[float] = None,
+        headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any] | list[Any]:
         """Wrap _request to convert transport errors after retries are exhausted."""
         try:
-            return await self._request(method, endpoint, params=params, json_data=json_data, timeout=timeout)
+            return await self._request(
+                method, endpoint, params=params, json_data=json_data, timeout=timeout, headers=headers,
+            )
         except httpx.TimeoutException as e:
             # OBS-14: tenacity's `before_sleep` already logged each retried
             # attempt — this WARNING marks that all attempts were exhausted

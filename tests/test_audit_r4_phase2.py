@@ -1,8 +1,6 @@
 """Round-4 audit Phase 2 — behavioural bug fixes (BUG-02/04/05, LOGIC-01/03)."""
 
-from unittest.mock import AsyncMock
 
-import pytest
 
 from bot.models import QualityInfo, SearchResult
 
@@ -10,38 +8,27 @@ from bot.models import QualityInfo, SearchResult
 # ---------------------------------------------------------------------------
 # BUG-02: leechers=0 must be preserved (not collapsed to None by truthiness)
 # ---------------------------------------------------------------------------
-def test_prowlarr_normalize_preserves_zero_leechers():
-    from bot.clients.prowlarr import ProwlarrClient
+def test_scryer_release_preserves_zero_leechers():
+    """Migration 2026-07-28: same invariant, new source. `0 leechers` must stay
+    0 and not collapse to None — the release card renders "S/L" from it."""
+    from bot.clients.scryer import ScryerClient
 
-    c = ProwlarrClient("http://x", "k")
-    assert c._normalize_result({"guid": "g", "title": "t", "seeders": 10, "leechers": 0}).leechers == 0
-    assert c._normalize_result({"guid": "g", "title": "t", "peers": 0}).leechers == 0
-    assert c._normalize_result({"guid": "g", "title": "t", "leechers": 5}).leechers == 5
-    assert c._normalize_result({"guid": "g", "title": "t"}).leechers is None
-
-
-# ---------------------------------------------------------------------------
-# BUG-05: add_torrent_url must treat any 2xx without "Fails." as success
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_add_torrent_url_treats_empty_2xx_as_success():
-    from bot.clients.qbittorrent import QBittorrentClient
-
-    c = QBittorrentClient("http://x", "u", "p")
-
-    c._request = AsyncMock(return_value="Ok.")
-    assert await c.add_torrent_url("magnet:?xt=urn:btih:abc") is True
-
-    c._request = AsyncMock(return_value=None)  # qBit >=5.2 empty body on success
-    assert await c.add_torrent_url("magnet:?xt=urn:btih:abc") is True
-
-    c._request = AsyncMock(return_value="Fails.")  # explicit rejection
-    assert await c.add_torrent_url("magnet:?xt=urn:btih:abc") is False
+    client = ScryerClient("http://scryer", "admin", "pw")
+    result = client._release_to_model(
+        {
+            "source": "RuTracker",
+            "title": "Movie.2024.1080p",
+            "seeders": 5,
+            "peers": 0,
+            "sizeBytes": 1024,
+            "sourceKind": "TORRENT_FILE",
+        },
+        "title-1",
+    )
+    assert result.seeders == 5
+    assert result.leechers == 0
 
 
-# ---------------------------------------------------------------------------
-# LOGIC-01: REMUX bonus must apply even when no source token was parsed
-# ---------------------------------------------------------------------------
 def test_remux_bonus_applies_without_source_token():
     from bot.services.scoring import ScoringService
 

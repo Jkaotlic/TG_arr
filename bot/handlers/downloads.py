@@ -10,7 +10,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from bot.clients.qbittorrent import QBittorrentClient, QBittorrentError
-from bot.clients.registry import get_qbittorrent
+from bot.clients.registry import get_qbittorrent, get_slskd
 from bot.handlers.common import safe_edit, strip_command
 from bot.models import TorrentFilter, TorrentInfo, User, format_speed
 from bot.ui.callbacks import TorrentActionCB, TorrentPageCB
@@ -56,6 +56,38 @@ def _parse_filter(value: str) -> TorrentFilter:
 # ============================================================================
 
 
+async def _soulseek_section() -> str:
+    """Render the Soulseek transfers block appended to /downloads.
+
+    Music downloads never appear in qBittorrent — slskd is a separate download
+    client — so without this the user has no way to see whether an album they
+    queued is actually moving. Best-effort: a slskd outage must not break the
+    torrent list, which is the main content of this command.
+    """
+    try:
+        slskd = await get_slskd()
+        if slskd is None:
+            return ""
+        transfers = await slskd.get_active_transfers()
+    except Exception as e:
+        logger.warning("slskd_transfers_failed", error=str(e))
+        return "\n\n🎵 <i>Soulseek недоступен</i>"
+
+    if not transfers:
+        return ""
+
+    lines = ["", "", f"🎵 <b>Soulseek ({len(transfers)})</b>"]
+    for transfer in transfers[:5]:
+        icon = "❌" if transfer.is_errored else "⬇️"
+        name = html.escape(transfer.filename)[:45]
+        lines.append(
+            f"{icon} {name} — {transfer.progress_percent}% · {transfer.speed_formatted}"
+        )
+    if len(transfers) > 5:
+        lines.append(f"<i>…и ещё {len(transfers) - 5}</i>")
+    return "\n".join(lines)
+
+
 @router.message(F.text == MENU_DOWNLOADS)
 @router.message(Command("downloads", "dl"))
 async def cmd_downloads(message: Message, db_user: User) -> None:
@@ -71,8 +103,13 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
         all_torrents = await qbt.get_torrents(filter_type=TorrentFilter.ALL)
         total = len(all_torrents)
 
+        soulseek = await _soulseek_section()
+
         if not all_torrents:
-            await status_msg.edit_text("📭 Торренты не найдены.")
+            await status_msg.edit_text(
+                ("📭 Торренты не найдены." + soulseek) or "📭 Торренты не найдены.",
+                parse_mode="HTML",
+            )
             return
 
         total_pages = max(1, (total + TORRENTS_PER_PAGE - 1) // TORRENTS_PER_PAGE)
@@ -81,7 +118,7 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
         text = Formatters.format_torrent_list(torrents, 0, total_pages, TorrentFilter.ALL, total)
 
         await status_msg.edit_text(
-            text,
+            text + soulseek,
             reply_markup=Keyboards.torrent_list(torrents, 0, total_pages, TorrentFilter.ALL),
             parse_mode="HTML",
         )

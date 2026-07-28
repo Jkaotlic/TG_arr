@@ -2,7 +2,6 @@
 
 import asyncio
 import html
-from typing import Optional
 
 import structlog
 from aiogram import F
@@ -11,8 +10,7 @@ from aiogram.types import CallbackQuery
 
 from bot.config import get_settings
 from bot.db import Database
-from bot.models import ContentType, MovieInfo, SearchSession, SeriesInfo, User
-from bot.services.search_service import SearchService
+from bot.models import ContentType, MovieInfo, SeriesInfo, User
 from bot.ui.callbacks import PageCB, ReleaseCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -26,6 +24,7 @@ logger = structlog.get_logger()
 @router.callback_query(
     F.data.startswith(CallbackData.TYPE_MOVIE)
     | F.data.startswith(CallbackData.TYPE_SERIES)
+    | F.data.startswith(CallbackData.TYPE_ANIME)
     | F.data.startswith(CallbackData.TYPE_MUSIC)
 )
 async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Database) -> None:
@@ -40,7 +39,7 @@ async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Data
         await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
         return
 
-    # Music → hand off to Lidarr artist flow (different UX than torrent search)
+    # Music → hand off to the artist flow (different UX than release search)
     if callback.data == CallbackData.TYPE_MUSIC:
         await callback.answer()
         from bot.handlers.music import process_music_search
@@ -49,7 +48,11 @@ async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Data
         await process_music_search(callback.message, session.query, db_user, db)
         return
 
-    content_type = ContentType.MOVIE if callback.data == CallbackData.TYPE_MOVIE else ContentType.SERIES
+    content_type = {
+        CallbackData.TYPE_MOVIE: ContentType.MOVIE,
+        CallbackData.TYPE_SERIES: ContentType.SERIES,
+        CallbackData.TYPE_ANIME: ContentType.ANIME,
+    }.get(callback.data, ContentType.SERIES)
 
     # Update session and continue search
     session.content_type = content_type
@@ -168,83 +171,49 @@ async def handle_release_selection(
         session.selected_result = result
         await db.save_session(user_id, session)
 
-    # Show release details
+    # Show release details.
+    #
+    # Migration 2026-07-28: the title is already resolved — process_search had
+    # to create/find it in Scryer before releases could be searched at all, and
+    # stored it on the session. So there is no second *arr lookup here (which
+    # used to cost 30-95s when a service was degraded), only the optional Emby
+    # "already in library" probe.
     text = Formatters.format_release_details(result)
-
-    # Now need to look up the actual content in Radarr/Sonarr
-    await callback.message.edit_text(
-        text + "\n\n🔍 Загружаю информацию...",
-        parse_mode="HTML",
-    )
-
-    # Check if force grab is available
     has_qbittorrent = add_service.qbittorrent is not None
+    content = session.selected_content
 
-    # Look up content — match by detected_year when available (BUG-08, LOGIC-07)
-    # so a "Dune" query doesn't pick up the 1984 movie when the chosen release
-    # is the 2021 one (or vice-versa).
-    parsed = search_service.parse_query(session.query)
-    lookup_term = (parsed.get("title") or "").strip() or session.query
     try:
-        if session.content_type == ContentType.MOVIE:
-            movie = await _resolve_movie(
-                session, search_service, lookup_term, result.detected_year, parsed.get("year")
+        if content is None:
+            await callback.message.edit_text(
+                f"{text}\n\n⚠️ Информация о тайтле недоступна. Продолжить?",
+                reply_markup=Keyboards.release_details(
+                    result, session.content_type, show_force_grab=has_qbittorrent
+                ),
+                parse_mode="HTML",
             )
-            if movie:
-                session.selected_content = movie
-                # RACE-04: UPDATE-only — if Cancel/grab deleted the session during
-                # the (slow) lookup, don't resurrect it; abort instead.
-                # DB-02: lock just this mutate+update_session pair.
-                async with db.session_lock(user_id):
-                    if not await db.update_session(user_id, session):
-                        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-                        return
+            return
 
-                movie_text = Formatters.format_movie_info(movie)
-                emby_note = await _emby_library_note(movie)
-                await callback.message.edit_text(
-                    f"{text}\n\n---\n{movie_text}{emby_note}",
-                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent, content=movie),
-                    parse_mode="HTML",
-                )
-            else:
-                await callback.message.edit_text(
-                    f"{text}\n\n⚠️ Не удалось найти информацию о фильме. Продолжить?",
-                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-                    parse_mode="HTML",
-                )
-        else:
-            series = await _resolve_series(
-                session, search_service, lookup_term, result.detected_year, parsed.get("year")
-            )
-            if series:
-                session.selected_content = series
-                # RACE-04: UPDATE-only — don't resurrect a session deleted mid-lookup.
-                # DB-02: lock just this mutate+update_session pair.
-                async with db.session_lock(user_id):
-                    if not await db.update_session(user_id, session):
-                        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-                        return
-
-                series_text = Formatters.format_series_info(series)
-                emby_note = await _emby_library_note(series)
-                await callback.message.edit_text(
-                    f"{text}\n\n---\n{series_text}{emby_note}",
-                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent, content=series),
-                    parse_mode="HTML",
-                )
-            else:
-                await callback.message.edit_text(
-                    f"{text}\n\n⚠️ Не удалось найти информацию о сериале. Продолжить?",
-                    reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
-                    parse_mode="HTML",
-                )
+        info_text = (
+            Formatters.format_movie_info(content)
+            if isinstance(content, MovieInfo)
+            else Formatters.format_series_info(content)
+        )
+        emby_note = await _emby_library_note(content)
+        await callback.message.edit_text(
+            f"{text}\n\n---\n{info_text}{emby_note}",
+            reply_markup=Keyboards.release_details(
+                result, session.content_type, show_force_grab=has_qbittorrent, content=content
+            ),
+            parse_mode="HTML",
+        )
     except Exception as e:
-        logger.warning("Failed to lookup content", error=str(e), exc_info=True)
+        logger.warning("Failed to render release card", error=str(e), exc_info=True)
         # SEC-20: escape exception text — error messages can contain '<' from URLs.
         await callback.message.edit_text(
             f"{text}\n\n⚠️ Ошибка загрузки информации: {html.escape(str(e))[:200]}",
-            reply_markup=Keyboards.release_details(result, session.content_type, show_force_grab=has_qbittorrent),
+            reply_markup=Keyboards.release_details(
+                result, session.content_type, show_force_grab=has_qbittorrent
+            ),
             parse_mode="HTML",
         )
 
@@ -273,11 +242,12 @@ async def _emby_library_note(content) -> str:
 
 def _pick_by_year(items: list, release_year, query_year):
     """Pick the candidate whose `year` matches release.detected_year (preferred)
-    or query year, falling back to the first candidate.
+    or the query year, falling back to the first candidate.
 
-    BUG-08 / LOGIC-07: Radarr/Sonarr `lookup_*` returns candidates ordered by
-    popularity, which is *not* what the user picked. The release the user
-    clicked has its own detected year — prefer the candidate matching that.
+    BUG-08 / LOGIC-07: metadata search returns candidates ordered by
+    popularity, which is *not* necessarily what the user picked. The release
+    the user clicked has its own detected year — prefer the candidate matching
+    that.
     """
     if not items:
         return None
@@ -288,46 +258,6 @@ def _pick_by_year(items: list, release_year, query_year):
             if cand_year and abs(int(cand_year) - int(target_year)) <= 1:
                 return it
     return items[0]
-
-
-async def _resolve_movie(
-    session: SearchSession,
-    search_service: SearchService,
-    lookup_term: str,
-    release_year,
-    query_year,
-) -> Optional[MovieInfo]:
-    """LOGIC-06: pick a MovieInfo from `session.lookup_candidates` (already
-    fetched during content-type detection) when available, instead of
-    repeating the Radarr lookup. Falls back to a fresh lookup on a miss
-    (candidates absent, wrong type, or no year-matching entry among them).
-    """
-    if session.lookup_candidates:
-        cached_movies = [c for c in session.lookup_candidates if isinstance(c, MovieInfo)]
-        if cached_movies:
-            picked = _pick_by_year(cached_movies, release_year, query_year)
-            if picked:
-                return picked
-    movies = await search_service.lookup_movie(lookup_term)
-    return _pick_by_year(movies, release_year, query_year)
-
-
-async def _resolve_series(
-    session: SearchSession,
-    search_service: SearchService,
-    lookup_term: str,
-    release_year,
-    query_year,
-) -> Optional[SeriesInfo]:
-    """LOGIC-06: series counterpart of `_resolve_movie`."""
-    if session.lookup_candidates:
-        cached_series = [c for c in session.lookup_candidates if isinstance(c, SeriesInfo)]
-        if cached_series:
-            picked = _pick_by_year(cached_series, release_year, query_year)
-            if picked:
-                return picked
-    series_list = await search_service.lookup_series(lookup_term)
-    return _pick_by_year(series_list, release_year, query_year)
 
 
 @router.callback_query(F.data == CallbackData.BACK)

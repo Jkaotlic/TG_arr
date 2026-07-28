@@ -379,18 +379,18 @@ async def test_add_movie_from_trending_escapes_error_message():
         action_type=ActionType.ADD,
         content_type=ContentType.MOVIE,
         success=False,
-        error_message="Radarr rejected: <script>bad</script> quality profile missing",
+        error_message="Scryer rejected: <script>bad</script>",
     )
 
     add_service = AsyncMock()
-    add_service.get_radarr_profiles = AsyncMock(return_value=[MagicMock(id=1)])
-    add_service.get_radarr_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="/movies")])
-    add_service.add_movie = AsyncMock(return_value=(None, action))
+    add_service.add_and_queue_best = AsyncMock(
+        return_value=(False, action, "Scryer отклонил запрос: <script>bad</script>")
+    )
 
     db = AsyncMock()
     db_user = MagicMock()
     db_user.tg_id = 1
-    db_user.preferences = MagicMock(radarr_quality_profile_id=None, radarr_root_folder_id=None)
+    db_user.preferences = MagicMock(scryer_quality_profile_id=None, scryer_root_folder_id=None)
 
     cb = _make_callback(None)
     status_msg = MagicMock()
@@ -399,9 +399,7 @@ async def test_add_movie_from_trending_escapes_error_message():
 
     from bot.ui.callbacks import AddContentCB
 
-    with patch.object(trending, "get_prowlarr", AsyncMock()), \
-         patch.object(trending, "get_radarr", AsyncMock()), \
-         patch.object(trending, "get_sonarr", AsyncMock()), \
+    with patch.object(trending, "get_scryer", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
         await trending.handle_add_movie_from_trending(cb, AddContentCB(kind="movie", tmdb_id=99), db_user, db)
@@ -413,41 +411,28 @@ async def test_add_movie_from_trending_escapes_error_message():
 
 
 # ---------------------------------------------------------------------------
-# LOGIC-22 — trending.py: reuse `sonarr` instead of a second get_sonarr()
+# LOGIC-22 (migrated) — trending.py adds through Scryer exactly once
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_add_series_from_trending_does_not_call_get_sonarr_twice():
-    """The TVDB-resolution branch must reuse the `sonarr` client obtained
-    earlier in the handler, not call get_sonarr() again.
-
-    LOGIC-11: TVDB resolution now lives in AddService.resolve_series_tvdb_id
-    (shared with grab.py) rather than an inline `sonarr.lookup_series` call in
-    the handler, so this asserts the delegation instead of the raw client call.
-    """
+async def test_add_series_from_trending_adds_once_through_scryer():
+    """The old handler resolved a TVDB id via Sonarr before adding. Scryer keys
+    on its own metadata id, so the whole resolution step is gone — what must
+    hold now is a single add call with the SERIES facet."""
     from bot.handlers import trending
     from bot.models import ActionLog, ActionType, ContentType
 
     class FakeSeries:
         tmdb_id = 55
-        tvdb_id = 0  # triggers the resolve-TVDB branch
+        tvdb_id = 0
         title = "Some Series"
         year = 2024
         poster_url = None
 
-    class FakeResolved:
-        tmdb_id = 55
-        tvdb_id = 12345
-        title = "Some Series"
-
     series = FakeSeries()
-    resolved = FakeResolved()
     trending._trending_series_cache.clear()
     trending._cache_put(trending._trending_series_cache, series.tmdb_id, series)
-
-    sonarr_client = AsyncMock()
-    get_sonarr_mock = AsyncMock(return_value=sonarr_client)
 
     action = ActionLog(
         user_id=1,
@@ -456,15 +441,12 @@ async def test_add_series_from_trending_does_not_call_get_sonarr_twice():
         success=True,
     )
     add_service = AsyncMock()
-    add_service.get_sonarr_profiles = AsyncMock(return_value=[MagicMock(id=1)])
-    add_service.get_sonarr_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="/tv")])
-    add_service.add_series = AsyncMock(return_value=(MagicMock(title="Some Series", year=2024), action))
-    add_service.resolve_series_tvdb_id = AsyncMock(return_value=resolved)
+    add_service.add_and_queue_best = AsyncMock(return_value=(True, action, "Добавлено"))
 
     db = AsyncMock()
     db_user = MagicMock()
     db_user.tg_id = 1
-    db_user.preferences = MagicMock(sonarr_quality_profile_id=None, sonarr_root_folder_id=None)
+    db_user.preferences = MagicMock(scryer_quality_profile_id=None, scryer_root_folder_id=None)
 
     cb = _make_callback(None)
     status_msg = MagicMock()
@@ -473,18 +455,19 @@ async def test_add_series_from_trending_does_not_call_get_sonarr_twice():
 
     from bot.ui.callbacks import AddContentCB
 
-    with patch.object(trending, "get_prowlarr", AsyncMock()), \
-         patch.object(trending, "get_radarr", AsyncMock()), \
-         patch.object(trending, "get_sonarr", get_sonarr_mock), \
+    with patch.object(trending, "get_scryer", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
-        await trending.handle_add_series_from_trending(cb, AddContentCB(kind="series", tmdb_id=55), db_user, db)
+        await trending.handle_add_series_from_trending(
+            cb, AddContentCB(kind="series", tmdb_id=55), db_user, db
+        )
 
-    # get_sonarr() is called exactly once (to build AddService's sonarr client),
-    # not a second time inside the TVDB-resolution branch (LOGIC-22).
-    assert get_sonarr_mock.await_count == 1, (
-        f"get_sonarr() called {get_sonarr_mock.await_count} times; expected 1 "
-        "(TVDB-resolution branch must reuse the existing `sonarr` variable)"
-    )
-    add_service.resolve_series_tvdb_id.assert_awaited_once()
+    add_service.add_and_queue_best.assert_awaited_once()
+    assert add_service.add_and_queue_best.await_args.args[1] == ContentType.SERIES
+    db.log_action.assert_awaited_once()
     trending._trending_series_cache.clear()
+
+
+# ---------------------------------------------------------------------------
+
+

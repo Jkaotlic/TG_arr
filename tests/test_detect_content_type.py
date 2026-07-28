@@ -5,25 +5,39 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from bot.clients.base import ServiceConnectionError
 from bot.models import ArtistInfo, ContentType, MovieInfo, SeriesInfo
 from bot.services.search_service import SearchService
 
 
-def _svc(*, movies=None, series=None, artists=None, lidarr_enabled=True):
-    """Build a SearchService where Radarr/Sonarr/Lidarr lookups return fixtures."""
-    radarr = AsyncMock()
-    radarr.lookup_movie = AsyncMock(return_value=movies or [])
-    sonarr = AsyncMock()
-    sonarr.lookup_series = AsyncMock(return_value=series or [])
+def _scryer(*, movies=None, series=None, anime=None, fail=None):
+    """A Scryer client whose metadata search returns the given fixtures."""
+    client = AsyncMock()
+    if fail is not None:
+        client.search_metadata_multi = AsyncMock(side_effect=fail)
+    else:
+        client.search_metadata_multi = AsyncMock(return_value={
+            ContentType.MOVIE: movies or [],
+            ContentType.SERIES: series or [],
+            ContentType.ANIME: anime or [],
+        })
+    return client
 
+
+def _svc(*, movies=None, series=None, anime=None, artists=None, lidarr_enabled=True, scryer=None):
+    """Build a SearchService over a mocked Scryer (+ optional Lidarr).
+
+    Migration 2026-07-28: the video side is one `searchMetadataMulti` call
+    rather than parallel Radarr/Sonarr lookups.
+    """
     lidarr = None
     if lidarr_enabled:
         lidarr = AsyncMock()
         lidarr.lookup_artist = AsyncMock(return_value=artists or [])
 
-    prowlarr = AsyncMock()
-    return SearchService(prowlarr, radarr, sonarr, lidarr=lidarr)
+    return SearchService(
+        scryer or _scryer(movies=movies, series=series, anime=anime),
+        lidarr=lidarr,
+    )
 
 
 @pytest.mark.asyncio
@@ -71,10 +85,11 @@ async def test_logic06_definitive_series_winner_carries_lookup_results():
     series = SeriesInfo(title="Stranger Things", tvdb_id=305288, year=2016)
     svc = _svc(series=[series])
     result = await svc.detect_with_confidence("Stranger Things S01")
-    # "S01" is a strong series-pattern short-circuit — has no lookup_results
-    # since no lookup ran at all (this documents that short-circuit path).
+    # Migration 2026-07-28: "S01" no longer short-circuits before the lookup —
+    # it only narrows the candidates to series-vs-anime, so the winner still
+    # carries its metadata (which the caller needs to add the title).
     assert result.content_type == ContentType.SERIES
-    assert result.lookup_results == []
+    assert result.lookup_results == [series]
 
 
 @pytest.mark.asyncio
@@ -89,17 +104,12 @@ async def test_logic06_low_confidence_unknown_has_empty_lookup_results():
 
 @pytest.mark.asyncio
 async def test_bug05_all_lookups_failing_returns_unknown():
-    """BUG-05: when Radarr/Sonarr/Lidarr all raise, return UNKNOWN — don't
-    silently treat empty results as 'music' or 'no match'."""
-    radarr = AsyncMock()
-    radarr.lookup_movie = AsyncMock(side_effect=Exception("Radarr down"))
-    sonarr = AsyncMock()
-    sonarr.lookup_series = AsyncMock(side_effect=Exception("Sonarr down"))
+    """BUG-05: when every backend raises, return UNKNOWN — don't silently
+    treat empty results as 'music' or 'no match'."""
     lidarr = AsyncMock()
     lidarr.lookup_artist = AsyncMock(side_effect=Exception("Lidarr down"))
-    prowlarr = AsyncMock()
 
-    svc = SearchService(prowlarr, radarr, sonarr, lidarr=lidarr)
+    svc = SearchService(_scryer(fail=Exception("Scryer down")), lidarr=lidarr)
     result = await svc.detect_with_confidence("Whatever Movie")
     assert result.content_type == ContentType.UNKNOWN
     assert result.confidence == 0.0
@@ -152,28 +162,30 @@ def test_parse_query_strips_quality_token():
 
 
 @pytest.mark.asyncio
-async def test_search_releases_no_longer_filters_by_detected_type(monkeypatch):
-    """LOGIC-04: results with mismatched detected_type are kept (Russian trackers
-    mis-tag categories). Filtering is removed; scoring orders them."""
+async def test_search_releases_keeps_every_candidate_scryer_returned():
+    """LOGIC-04 (migrated): the bot does not drop releases on its own — Scryer
+    already decided what is allowed, and mis-tagged Russian-tracker releases
+    must stay visible so the user can force one."""
     from bot.models import SearchResult, QualityInfo
 
-    movie_result = SearchResult(
-        guid="g1", indexer="X", indexer_id=1, title="Movie 2024 1080p",
+    allowed = SearchResult(
+        guid="g1", indexer="X", title="Movie 2024 1080p",
         size=10, quality=QualityInfo(resolution="1080p"),
-        detected_type=ContentType.MOVIE,
+        scryer_allowed=True, scryer_score=100, scryer_title_id="t1",
     )
-    misc_result = SearchResult(
-        guid="g2", indexer="X", indexer_id=1, title="Movie 2024 720p",
+    blocked = SearchResult(
+        guid="g2", indexer="X", title="Movie 2024 720p",
         size=10, quality=QualityInfo(resolution="720p"),
-        detected_type=ContentType.SERIES,  # mis-tagged
+        scryer_allowed=False, scryer_score=-1000, scryer_title_id="t1",
     )
 
     svc = _svc()
-    svc.prowlarr.search = AsyncMock(return_value=[movie_result, misc_result])
+    svc.scryer.search_releases = AsyncMock(return_value=[allowed, blocked])
 
-    out = await svc.search_releases("Movie 2024", ContentType.MOVIE)
+    out = await svc.search_releases("t1", ContentType.MOVIE)
     titles = [r.title for r in out]
-    assert "Movie 2024 720p" in titles  # mis-tagged result NOT dropped
+    assert "Movie 2024 720p" in titles  # blocked, but not dropped
+    assert titles[0] == "Movie 2024 1080p"  # allowed ranks first
 
 
 # ---------------------------------------------------------------------------
@@ -181,37 +193,25 @@ async def test_search_releases_no_longer_filters_by_detected_type(monkeypatch):
 # is 503 while the others are alive and should still be able to classify).
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_partial_failure_radarr_down_sonarr_matches_returns_series():
-    """Radarr raises, Sonarr is alive and matches strongly → SERIES, not UNKNOWN."""
-    radarr = AsyncMock()
-    radarr.lookup_movie = AsyncMock(side_effect=Exception("Radarr 503"))
-    sonarr = AsyncMock()
-    sonarr.lookup_series = AsyncMock(
-        return_value=[SeriesInfo(tvdb_id=1, title="Breaking Bad")]
-    )
-    lidarr = AsyncMock()
-    lidarr.lookup_artist = AsyncMock(return_value=[])
-    prowlarr = AsyncMock()
-
-    svc = SearchService(prowlarr, radarr, sonarr, lidarr=lidarr)
+async def test_metadata_failure_returns_unknown_not_a_wrong_guess():
+    """TEST-02 (migrated): when Scryer's metadata search fails there is nothing
+    left to classify with — ask the user instead of guessing."""
+    svc = _svc(scryer=_scryer(fail=Exception("Scryer 503")))
     result = await svc.detect_with_confidence("Breaking Bad")
-    assert result.content_type == ContentType.SERIES
+    assert result.content_type == ContentType.UNKNOWN
+    assert result.confidence == 0.0
 
 
 @pytest.mark.asyncio
-async def test_partial_failure_lidarr_down_movie_matches_returns_movie():
-    """Lidarr raises, Radarr matches strongly → MOVIE, not UNKNOWN."""
-    radarr = AsyncMock()
-    radarr.lookup_movie = AsyncMock(
-        return_value=[MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)]
-    )
-    sonarr = AsyncMock()
-    sonarr.lookup_series = AsyncMock(return_value=[])
+async def test_partial_failure_music_backend_down_movie_still_wins():
+    """Lidarr raises, Scryer matches strongly → MOVIE, not UNKNOWN."""
     lidarr = AsyncMock()
     lidarr.lookup_artist = AsyncMock(side_effect=Exception("Lidarr 503"))
-    prowlarr = AsyncMock()
 
-    svc = SearchService(prowlarr, radarr, sonarr, lidarr=lidarr)
+    svc = SearchService(
+        _scryer(movies=[MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)]),
+        lidarr=lidarr,
+    )
     result = await svc.detect_with_confidence("Interstellar")
     assert result.content_type == ContentType.MOVIE
 
@@ -223,15 +223,11 @@ async def test_detect_timeout_returns_unknown_zero_confidence():
 
     async def _never_returns(*_args, **_kwargs):
         await asyncio.sleep(999)
-        return []
+        return {}
 
-    radarr = AsyncMock()
-    radarr.lookup_movie = AsyncMock(side_effect=_never_returns)
-    sonarr = AsyncMock()
-    sonarr.lookup_series = AsyncMock(side_effect=_never_returns)
-    prowlarr = AsyncMock()
+    svc = _svc(scryer=_scryer(fail=None))
+    svc.scryer.search_metadata_multi = AsyncMock(side_effect=_never_returns)
 
-    svc = SearchService(prowlarr, radarr, sonarr)
     orig_timeout = search_service_mod._DETECT_TIMEOUT_S
     search_service_mod._DETECT_TIMEOUT_S = 0.05
     try:
@@ -244,21 +240,20 @@ async def test_detect_timeout_returns_unknown_zero_confidence():
 
 
 # ---------------------------------------------------------------------------
-# PERF-01: detection-burst guard — module-level semaphore(2), TTL cache (300s)
-# by normalized query, and a 30s circuit-breaker per service after a
-# ServiceConnectionError/503. This is the fix for the prod incident where a
-# single free-text message fires concurrent Radarr+Sonarr+Lidarr lookups.
+# PERF-01: the detection-burst guard. The semaphore and the per-service circuit
+# breaker were removed with the migration — they existed because one free-text
+# message fanned out concurrent Radarr+Sonarr+Lidarr lookups and could take all
+# three down. Scryer answers every video facet in ONE call, so only the TTL
+# cache (which stops a double-tap re-querying) is still needed.
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _reset_detection_module_state():
-    """Each test gets a clean cache/circuit-breaker/semaphore state."""
+    """Each test gets a clean cache."""
     import bot.services.search_service as search_service_mod
 
-    search_service_mod._DETECTION_CACHE.clear()
-    search_service_mod._CIRCUIT_BREAKER.clear()
+    search_service_mod._cache_clear()
     yield
-    search_service_mod._DETECTION_CACHE.clear()
-    search_service_mod._CIRCUIT_BREAKER.clear()
+    search_service_mod._cache_clear()
 
 
 @pytest.mark.asyncio
@@ -269,74 +264,23 @@ async def test_repeated_detect_hits_cache_lookup_called_once():
     await svc.detect_with_confidence("Dune 2021")
     await svc.detect_with_confidence("  dune   2021  ")  # normalizes to same key
 
-    assert svc.radarr.lookup_movie.await_count == 1
+    assert svc.scryer.search_metadata_multi.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_circuit_breaker_skips_service_after_service_connection_error():
-    """After Radarr raises ServiceConnectionError, detection must not call
-    radarr.lookup_movie again for 30s — even for a different query."""
-    radarr = AsyncMock()
-    radarr.lookup_movie = AsyncMock(side_effect=ServiceConnectionError("Radarr down", status_code=503))
-    sonarr = AsyncMock()
-    sonarr.lookup_series = AsyncMock(return_value=[])
-    prowlarr = AsyncMock()
+async def test_detection_is_a_single_upstream_call():
+    """The whole point of the migration: movie/series/anime in one round-trip."""
+    svc = _svc(movies=[MovieInfo(title="Dune", tmdb_id=1, year=2021)])
 
-    svc = SearchService(prowlarr, radarr, sonarr)
+    await svc.detect_with_confidence("Dune 2021")
 
-    await svc.detect_with_confidence("First Query Here")
-    assert radarr.lookup_movie.await_count == 1
-
-    # Different query — cache can't be the reason it's skipped this time.
-    await svc.detect_with_confidence("Second Different Query")
-    assert radarr.lookup_movie.await_count == 1  # breaker open — not called again
+    assert svc.scryer.search_metadata_multi.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_semaphore_caps_concurrent_detection_lookups():
-    """No more than 2 detection-lookup coroutines run concurrently, globally."""
-    active = 0
-    max_active = 0
-    lock = asyncio.Lock()
-    release_event = asyncio.Event()
-
-    async def _tracked_lookup(*_args, **_kwargs):
-        nonlocal active, max_active
-        async with lock:
-            active += 1
-            max_active = max(max_active, active)
-        await release_event.wait()
-        async with lock:
-            active -= 1
-        return []
-
-    services = []
-    for _ in range(3):
-        radarr = AsyncMock()
-        radarr.lookup_movie = AsyncMock(side_effect=_tracked_lookup)
-        sonarr = AsyncMock()
-        sonarr.lookup_series = AsyncMock(side_effect=_tracked_lookup)
-        prowlarr = AsyncMock()
-        services.append(SearchService(prowlarr, radarr, sonarr))
-
-    tasks = [
-        asyncio.create_task(svc.detect_with_confidence(f"Unique Query {i}"))
-        for i, svc in enumerate(services)
-    ]
-    # Give tasks a chance to queue up against the semaphore.
-    await asyncio.sleep(0.05)
-    release_event.set()
-    await asyncio.gather(*tasks)
-
-    assert max_active <= 2
-
-
-# ---------------------------------------------------------------------------
-# TEST-17: empty Prowlarr response must not crash search_releases.
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_search_releases_empty_prowlarr_response_returns_empty_list():
+async def test_search_releases_empty_response_returns_empty_list():
+    """TEST-17: an empty release list must not crash search_releases."""
     svc = _svc()
-    svc.prowlarr.search = AsyncMock(return_value=[])
-    out = await svc.search_releases("nonexistent query xyz", ContentType.MOVIE)
+    svc.scryer.search_releases = AsyncMock(return_value=[])
+    out = await svc.search_releases("title-id", ContentType.MOVIE)
     assert out == []

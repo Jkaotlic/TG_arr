@@ -58,21 +58,19 @@ def callback_with_status():
     return cb, status_msg
 
 
-def build_add_service(radarr=None, sonarr=None, lidarr=None, qbt=None):
-    """Construct an AddService with AsyncMock clients for any arg left as
-    None (except lidarr/qbt, which default to None — not every test wants
-    those wired up).
+def build_add_service(scryer=None, lidarr=None, qbt=None, slskd=None):
+    """Construct an AddService with an AsyncMock Scryer client by default
+    (lidarr/qbt/slskd stay None — not every test wants those wired up).
 
     Shared by test_add_service.py and test_r4_C4-services.py.
     """
     from bot.services.add_service import AddService
 
     return AddService(
-        prowlarr=AsyncMock(),
-        radarr=radarr or AsyncMock(),
-        sonarr=sonarr or AsyncMock(),
+        scryer or AsyncMock(),
         qbittorrent=qbt,
         lidarr=lidarr,
+        slskd=slskd,
     )
 
 
@@ -86,20 +84,29 @@ def _default_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test_token_123:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
     monkeypatch.setenv("ALLOWED_TG_IDS", "123456789,987654321")
     monkeypatch.setenv("ADMIN_TG_IDS", "123456789")
-    monkeypatch.setenv("PROWLARR_URL", "http://localhost:9696")
-    monkeypatch.setenv("PROWLARR_API_KEY", "test_prowlarr_key")
-    monkeypatch.setenv("RADARR_URL", "http://localhost:7878")
-    monkeypatch.setenv("RADARR_API_KEY", "test_radarr_key")
-    monkeypatch.setenv("SONARR_URL", "http://localhost:8989")
-    monkeypatch.setenv("SONARR_API_KEY", "test_sonarr_key")
+    monkeypatch.setenv("SCRYER_URL", "http://localhost:8088")
+    monkeypatch.setenv("SCRYER_USERNAME", "admin")
+    monkeypatch.setenv("SCRYER_PASSWORD", "test_scryer_password")
     monkeypatch.setenv("DATABASE_PATH", ":memory:")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    # Migration 2026-07-28: these are gone from Settings. Clear them so a
+    # developer's exported *arr env can't resurrect stale expectations.
+    for stale in (
+        "PROWLARR_URL", "PROWLARR_API_KEY",
+        "RADARR_URL", "RADARR_API_KEY",
+        "SONARR_URL", "SONARR_API_KEY",
+    ):
+        monkeypatch.delenv(stale, raising=False)
 
     from bot.config import get_settings
+    from bot.services import search_service as _search_service
 
     get_settings.cache_clear()
+    # The detection cache is module-level and shared between tests.
+    _search_service._cache_clear()
     yield
     get_settings.cache_clear()
+    _search_service._cache_clear()
 
 
 @pytest.fixture

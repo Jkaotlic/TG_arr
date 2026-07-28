@@ -12,14 +12,17 @@ from bot.clients.registry import (
     get_deezer,
     get_emby,
     get_lidarr,
-    get_prowlarr,
+    get_navidrome,
     get_qbittorrent,
-    get_radarr,
-    get_sonarr,
+    get_scryer,
+    get_slskd,
 )
 from bot.models import (
+    ContentType,
     QBittorrentStatus,
+    ScryerHealth,
     SystemStatus,
+    VIDEO_CONTENT_TYPES,
     format_bytes,
     format_speed,
 )
@@ -34,6 +37,7 @@ def _format_health(
     statuses: list[SystemStatus],
     disks: list[tuple[str, int | None]],
     qbit: QBittorrentStatus | None,
+    scryer_health: "ScryerHealth | None" = None,
 ) -> str:
     """Feature #7: render the /health dashboard from already-gathered data.
 
@@ -44,6 +48,25 @@ def _format_health(
         icon = "✅" if s.available else "❌"
         ver = f" <code>{html.escape(s.version)}</code>" if s.version else ""
         lines.append(f"{icon} {html.escape(s.service)}{ver}")
+
+    if scryer_health is not None:
+        lines.append("")
+        lines.append("🗂 <b>Каталог Scryer</b>")
+        lines.append(
+            f"  🎬 {scryer_health.titles_movie} · 📺 {scryer_health.titles_series} · "
+            f"🎌 {scryer_health.titles_anime} (следим за {scryer_health.monitored_titles})"
+        )
+        if scryer_health.indexers:
+            lines.append("")
+            lines.append("🔎 <b>Индексеры (24ч)</b>")
+            for stat in scryer_health.indexers:
+                # A tracker that fails most queries is the usual root cause of
+                # "почему ничего не находится" — surface it rather than hide it.
+                icon = "⚠️" if stat.failure_rate > 0.5 else "✅"
+                lines.append(
+                    f"  {icon} {html.escape(stat.name)}: "
+                    f"{stat.successful_24h}/{stat.queries_24h} ок, {stat.failed_24h} ошибок"
+                )
 
     if disks:
         lines.append("")
@@ -70,20 +93,20 @@ async def _collect_statuses(include_deezer: bool) -> list[SystemStatus]:
     deliberately omits Deezer (it doesn't affect grab/download health and
     keeps the dashboard focused on infra the user acts on).
     """
-    prowlarr = await get_prowlarr()
-    radarr = await get_radarr()
-    sonarr = await get_sonarr()
+    scryer = await get_scryer()
     lidarr = await get_lidarr()
+    slskd = await get_slskd()
+    navidrome = await get_navidrome()
     qbittorrent = await get_qbittorrent()
     emby = await get_emby()
 
-    checks = [
-        check_service(prowlarr, "Prowlarr"),
-        check_service(radarr, "Radarr"),
-        check_service(sonarr, "Sonarr"),
-    ]
+    checks = [check_service(scryer, "Scryer")]
     if lidarr:
         checks.append(check_service(lidarr, "Lidarr"))
+    if slskd:
+        checks.append(check_service(slskd, "slskd"))
+    if navidrome:
+        checks.append(check_service(navidrome, "Navidrome"))
     if qbittorrent:
         checks.append(check_service(qbittorrent, "qBittorrent"))
     if emby:
@@ -118,20 +141,36 @@ async def cmd_status(message: Message) -> None:
         await status_msg.edit_text(Formatters.format_error("Проверка статуса не удалась"))
 
 
-async def _gather_disks(*clients) -> list[tuple[str, int | None]]:
-    """Collect (root_folder_path, free_space) across *arr clients, de-duped by path."""
+async def _gather_disks(scryer, lidarr) -> list[tuple[str, int | None]]:
+    """Collect (root_folder_path, free_space), de-duped by path.
+
+    Scryer exposes root folders per facet (movie/series/anime libraries live on
+    different roots), so all three are queried; Lidarr adds the music root.
+    Scryer's `RootFolderPayload` carries no free-space figure, so those entries
+    render as "N/A" — the number is still available from qBittorrent below.
+    """
     seen: dict[str, int | None] = {}
 
-    async def add(client) -> None:
-        if client is None:
-            return
+    async def add_scryer(content_type: ContentType) -> None:
         try:
-            for folder in await client.get_root_folders():
+            for folder in await scryer.get_root_folders(content_type):
                 seen.setdefault(folder.path, folder.free_space)
         except Exception as e:
-            logger.warning("root_folders_fetch_failed", error=str(e))
+            logger.warning("root_folders_fetch_failed", service="scryer", error=str(e))
 
-    await asyncio.gather(*(add(c) for c in clients))
+    async def add_lidarr() -> None:
+        if lidarr is None:
+            return
+        try:
+            for folder in await lidarr.get_root_folders():
+                seen.setdefault(folder.path, folder.free_space)
+        except Exception as e:
+            logger.warning("root_folders_fetch_failed", service="lidarr", error=str(e))
+
+    await asyncio.gather(
+        *(add_scryer(ct) for ct in VIDEO_CONTENT_TYPES),
+        add_lidarr(),
+    )
     return list(seen.items())
 
 
@@ -144,15 +183,20 @@ async def cmd_health(message: Message) -> None:
     """
     status_msg = await message.answer("🩺 Собираю состояние...")
 
-    radarr = await get_radarr()
-    sonarr = await get_sonarr()
+    scryer = await get_scryer()
     lidarr = await get_lidarr()
     qbittorrent = await get_qbittorrent()
 
     try:
         statuses = await _collect_statuses(include_deezer=False)
 
-        disks = await _gather_disks(radarr, sonarr, lidarr)
+        disks = await _gather_disks(scryer, lidarr)
+
+        scryer_health: ScryerHealth | None = None
+        try:
+            scryer_health = await scryer.system_health()
+        except Exception as e:
+            logger.warning("scryer_health_failed", error=str(e))
 
         qbit: QBittorrentStatus | None = None
         if qbittorrent:
@@ -161,7 +205,9 @@ async def cmd_health(message: Message) -> None:
             except Exception as e:
                 logger.warning("qbit_status_failed_for_health", error=str(e))
 
-        await status_msg.edit_text(_format_health(statuses, disks, qbit), parse_mode="HTML")
+        await status_msg.edit_text(
+            _format_health(statuses, disks, qbit, scryer_health), parse_mode="HTML"
+        )
 
     except Exception as e:
         logger.error("Health check failed", error=str(e), exc_info=True)

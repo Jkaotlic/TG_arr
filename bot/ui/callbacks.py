@@ -115,3 +115,14 @@ class CalCB(CallbackData, prefix="cal"):
     """Calendar period switch (was ``cal_7``/``cal_14``/``cal_30``)."""
 
     days: int
+
+
+class SlskdCB(CallbackData, prefix="sk"):
+    """Pick one Soulseek candidate from a `/album` or `/track` result list.
+
+    Only the index is carried: the candidate itself (remote username + the
+    whole file list) is far too large for callback_data's 64-byte budget, so
+    the handler resolves it from the per-user in-memory list.
+    """
+
+    idx: int
