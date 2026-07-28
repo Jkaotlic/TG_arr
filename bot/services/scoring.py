@@ -309,16 +309,26 @@ class ScoringService:
         preferred_resolution: Optional[str] = None,
     ) -> list[SearchResult]:
         """
-        Sort results by calculated score (descending).
+        Sort results best-first, deferring to Scryer's verdict when it exists.
 
-        Args:
-            results: List of SearchResult objects
-            content_type: Type of content for scoring adjustments
-            preferred_resolution: DEAD-06 — user's "Качество" setting, passed
-                through to calculate_score for the resolution-match bonus.
+        Migration 2026-07-28 — how this coexists with Scryer's own policy:
 
-        Returns:
-            Sorted list with calculated_score populated
+        Scryer already evaluates every candidate against the configured quality
+        profile (`4K Remux + 1080P Fallback` for movies/series, `1080p` for
+        anime) AND the `English Audio + Russian Subtitles` Rego rule set. That
+        verdict is authoritative, so the bot ranks by it rather than re-deriving
+        an opinion that could contradict it:
+
+          1. releases Scryer blocked (`scryer_allowed is False`) sink to the
+             bottom — they are shown (the user may still force one) but never
+             offered first;
+          2. among the rest, Scryer's `releaseScore` decides;
+          3. the bot's own heuristic only breaks ties between equal Scryer
+             scores, and is the sole ranking for results with no verdict at all
+             (e.g. a session persisted before the migration).
+
+        `calculated_score` is still computed for every result — the release card
+        and the auto-grab threshold display it.
 
         PERF-08: scores are written in-place (`r.calculated_score = score`)
         instead of `model_copy`-ing every ~25-field result just to attach a
@@ -326,7 +336,15 @@ class ScoringService:
         """
         for r in results:
             r.calculated_score = self.calculate_score(r, content_type, preferred_resolution)
-        results.sort(key=lambda x: x.calculated_score, reverse=True)
+
+        results.sort(
+            key=lambda r: (
+                # False sorts before True, so invert: allowed (or unknown) first.
+                r.scryer_allowed is False,
+                -(r.scryer_score if r.scryer_score is not None else 0),
+                -r.calculated_score,
+            )
+        )
         return results
 
     # DEAD-06: get_best_result / filter_by_quality removed — no production

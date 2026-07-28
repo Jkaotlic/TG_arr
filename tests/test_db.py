@@ -76,15 +76,15 @@ class TestUserOperations:
         await db.create_user(user)
 
         new_prefs = UserPreferences(
-            radarr_quality_profile_id=5,
-            radarr_root_folder_id=1,
+            scryer_quality_profile_id="4k",
+            scryer_root_folder_id="G:\radarr\Films",
             preferred_resolution="1080p",
             auto_grab_enabled=True,
         )
         await db.update_user_preferences(123456789, new_prefs)
 
         retrieved = await db.get_user(123456789)
-        assert retrieved.preferences.radarr_quality_profile_id == 5
+        assert retrieved.preferences.scryer_quality_profile_id == "4k"
         assert retrieved.preferences.preferred_resolution == "1080p"
         assert retrieved.preferences.auto_grab_enabled is True
 
@@ -405,11 +405,11 @@ class TestUpdateUserPreference:
         user = User(tg_id=123456789)
         await db.create_user(user)
 
-        ok = await db.update_user_preference(123456789, "radarr_quality_profile_id", 7)
+        ok = await db.update_user_preference(123456789, "scryer_quality_profile_id", "1080p")
 
         assert ok is True
         retrieved = await db.get_user(123456789)
-        assert retrieved.preferences.radarr_quality_profile_id == 7
+        assert retrieved.preferences.scryer_quality_profile_id == "1080p"
 
     async def test_update_string_preference(self, db):
         user = User(tg_id=123456789)
@@ -447,13 +447,13 @@ class TestUpdateUserPreference:
         await db.create_user(user)
 
         await asyncio.gather(
-            db.update_user_preference(123456789, "radarr_quality_profile_id", 3),
-            db.update_user_preference(123456789, "sonarr_quality_profile_id", 9),
+            db.update_user_preference(123456789, "scryer_quality_profile_id", "4k"),
+            db.update_user_preference(123456789, "lidarr_quality_profile_id", 9),
         )
 
         retrieved = await db.get_user(123456789)
-        assert retrieved.preferences.radarr_quality_profile_id == 3
-        assert retrieved.preferences.sonarr_quality_profile_id == 9
+        assert retrieved.preferences.scryer_quality_profile_id == "4k"
+        assert retrieved.preferences.lidarr_quality_profile_id == 9
 
 
 @pytest.mark.asyncio

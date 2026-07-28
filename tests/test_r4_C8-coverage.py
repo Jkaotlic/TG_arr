@@ -371,93 +371,77 @@ def _build_service(radarr=None, qbt=None) -> AddService:
 
 
 @pytest.mark.asyncio
-async def test_grab_movie_push_approved_success():
-    """push_release approved → success with the 'отправлен' message; no grab."""
-    movie = _movie(radarr_id=42)
-    radarr = AsyncMock()
-    radarr.get_movie_by_tmdb = AsyncMock(return_value=movie)
-    radarr.push_release = AsyncMock(return_value={"approved": True})
-    radarr.grab_release = AsyncMock()
+async def test_grab_queue_success_path():
+    """Migrated from the push-release coverage: the happy path is now
+    "redeem the candidate token, then start monitoring"."""
+    from bot.models import ContentType, MovieInfo
+    from bot.services.add_service import AddService
 
-    svc = _build_service(radarr=radarr)
-    ok, action, msg = await svc.grab_movie_release(
-        movie=movie,
-        release=_public_release(),
-        quality_profile_id=1,
-        root_folder_path="/movies",
+    scryer = AsyncMock()
+    scryer.queue_existing_title_download = AsyncMock(
+        return_value=MagicMock(queued=True, status="QUEUED", job_id="j1")
+    )
+    svc = AddService(scryer)
+
+    success, action, msg = await svc.grab_release(
+        MovieInfo(tmdb_id=1, title="M", year=2024, scryer_id="t1"),
+        _release_with_token(),
+        ContentType.MOVIE,
     )
 
-    assert ok is True
+    assert success is True
     assert action.success is True
-    assert "отправлен" in msg.lower()
-    radarr.push_release.assert_awaited_once()
-    radarr.grab_release.assert_not_called()
+    assert msg
+    scryer.set_title_monitored.assert_awaited_once_with("t1", True)
 
 
 @pytest.mark.asyncio
-async def test_grab_movie_push_fails_then_direct_grab_success():
-    """BUG-05: push_release raises APIError (not a rejection) → there is no
-    direct grab_release fallback anymore (Prowlarr's guid/indexerId are
-    meaningless to Radarr's own /release cache and always 404d). The code
-    falls straight through to the auto-search fallback with an honest
-    message instead."""
-    from bot.clients.base import APIError
+async def test_grab_falls_back_to_qbittorrent_only_when_forced():
+    """The old flow auto-fell-back to qBittorrent whenever *arr rejected a
+    release. Scryer's verdict is authoritative now, so the bypass is explicit:
+    only `force_download=True` reaches qBittorrent."""
+    from bot.models import ContentType, MovieInfo
+    from bot.services.add_service import AddService
 
-    movie = _movie(radarr_id=42)
-    radarr = AsyncMock()
-    radarr.get_movie_by_tmdb = AsyncMock(return_value=movie)
-    # An APIError from push (transient) must NOT mark the release rejected;
-    # the code falls through to the auto-search fallback (indexer_id > 0
-    # no longer matters — the direct-grab branch was removed).
-    radarr.push_release = AsyncMock(side_effect=APIError("boom"))
-    radarr.search_movie = AsyncMock()
-
-    svc = _build_service(radarr=radarr)
-    ok, action, msg = await svc.grab_movie_release(
-        movie=movie,
-        release=_public_release(),
-        quality_profile_id=1,
-        root_folder_path="/movies",
+    scryer = AsyncMock()
+    scryer.queue_existing_title_download = AsyncMock(
+        return_value=MagicMock(queued=False, status="CONFLICT", job_id=None)
     )
-
-    assert ok is True
-    assert action.success is True
-    assert "автопоиск" in msg.lower()
-    radarr.push_release.assert_awaited_once()
-    radarr.search_movie.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_grab_movie_rejected_force_download_qbit_fallback():
-    """Rejected by Radarr + force_download → qBittorrent fallback succeeds."""
-    movie = _movie(radarr_id=42)
-    radarr = AsyncMock()
-    radarr.get_movie_by_tmdb = AsyncMock(return_value=movie)
-    radarr.push_release = AsyncMock(
-        return_value={"approved": False, "rejections": ["quality not allowed"]}
-    )
-    radarr.grab_release = AsyncMock()
-
     qbt = AsyncMock()
     qbt.add_torrent_url = AsyncMock(return_value=True)
+    svc = AddService(scryer, qbittorrent=qbt)
 
-    svc = _build_service(radarr=radarr, qbt=qbt)
-    ok, action, msg = await svc.grab_movie_release(
-        movie=movie,
-        release=_public_release(),
-        quality_profile_id=1,
-        root_folder_path="/movies",
+    success, _action, _msg = await svc.grab_release(
+        MovieInfo(tmdb_id=1, title="M", year=2024, scryer_id="t1"),
+        _release_with_token(),
+        ContentType.MOVIE,
+    )
+    assert success is False
+    qbt.add_torrent_url.assert_not_awaited()
+
+    success, _action, _msg = await svc.grab_release(
+        MovieInfo(tmdb_id=1, title="M", year=2024, scryer_id="t1"),
+        _release_with_token(magnet="magnet:?xt=urn:btih:abcdef0123456789"),
+        ContentType.MOVIE,
         force_download=True,
     )
-
-    assert ok is True
-    assert action.success is True
-    assert "qbittorrent" in msg.lower()
+    assert success is True
     qbt.add_torrent_url.assert_awaited_once()
-    # rejected → the direct-grab branch must be skipped
-    radarr.grab_release.assert_not_called()
-    # qBit was called with the radarr category
-    assert qbt.add_torrent_url.await_args.kwargs.get("category") == "radarr"
+
+
+def _release_with_token(magnet=None):
+    from bot.models import SearchResult
+
+    return SearchResult(
+        guid="g1",
+        title="Movie.2160p",
+        indexer="RuTracker",
+        candidate_token="cand-1",
+        scryer_title_id="t1",
+        queue_scope={"title": True},
+        magnet_url=magnet,
+        download_url=magnet,
+    )
 
 
 # ---------------------------------------------------------------------------

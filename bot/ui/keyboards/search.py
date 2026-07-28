@@ -21,12 +21,14 @@ class _SearchKeyboards:
 
     @staticmethod
     def content_type_selection(show_music: bool = False) -> InlineKeyboardMarkup:
-        """Create keyboard for selecting content type (movie/series/music)."""
+        """Create keyboard for selecting content type (movie/series/anime/music)."""
         first_row = [
             InlineKeyboardButton(text="🎬 Фильм", callback_data=CallbackData.TYPE_MOVIE),
             InlineKeyboardButton(text="📺 Сериал", callback_data=CallbackData.TYPE_SERIES),
         ]
-        rows = [first_row]
+        rows = [first_row, [
+            InlineKeyboardButton(text="🎌 Аниме", callback_data=CallbackData.TYPE_ANIME),
+        ]]
         if show_music:
             rows.append([InlineKeyboardButton(text="🎵 Музыка", callback_data=CallbackData.TYPE_MUSIC)])
         rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)])

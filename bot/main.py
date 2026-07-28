@@ -197,7 +197,7 @@ async def on_startup(
 
 async def _warm_up_clients(logger) -> None:
     """Run health checks in parallel to prime singleton HTTP clients."""
-    from bot.clients.registry import get_lidarr, get_prowlarr, get_radarr, get_sonarr
+    from bot.clients.registry import get_lidarr, get_scryer, get_slskd
 
     structlog.contextvars.bind_contextvars(component="warmup")
     try:
@@ -206,16 +206,17 @@ async def _warm_up_clients(logger) -> None:
                 client = await factory()
                 if client is None:
                     return name, None
-                ok, _ver, ms = await asyncio.wait_for(client.check_connection(), timeout=5.0)
+                # Scryer's probe includes the login round-trip, so give it more
+                # room than a plain health endpoint would need.
+                ok, _ver, ms = await asyncio.wait_for(client.check_connection(), timeout=15.0)
                 return name, (ok, ms)
             except Exception as e:
                 return name, ("error", str(e))
 
         results = await asyncio.gather(
-            _check("prowlarr", get_prowlarr),
-            _check("radarr", get_radarr),
-            _check("sonarr", get_sonarr),
+            _check("scryer", get_scryer),
             _check("lidarr", get_lidarr),
+            _check("slskd", get_slskd),
             return_exceptions=True,
         )
         summary = {name: outcome for r in results if isinstance(r, tuple) for name, outcome in [r]}
@@ -269,6 +270,26 @@ async def _periodic_cleanup(db: Database, logger, notification_service: Optional
                     logger.debug("periodic_cleanup_failed", error=str(e), consecutive_failures=consecutive_failures)
     finally:
         structlog.contextvars.unbind_contextvars("component")
+
+
+async def _cancel_background_tasks(tasks) -> None:
+    """BUG-R6-01: cancel background tasks and WAIT for them to unwind.
+
+    `task.cancel()` only schedules the CancelledError — it returns before the
+    task has run its `finally` blocks. Shutting down right after meant the
+    liveness/cleanup tasks were still pending when the loop closed, producing
+    "Task was destroyed but it is pending!" and skipping their cleanup (e.g.
+    `unbind_contextvars`). Exceptions raised while unwinding are swallowed:
+    shutdown must not fail because a background task misbehaved on the way out.
+    """
+    pending = [t for t in tasks if t is not None]
+    for task in pending:
+        task.cancel()
+    for task in pending:
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: B014 -- explicit: nothing may escape shutdown
+            pass
 
 
 async def on_shutdown(
@@ -450,8 +471,8 @@ async def main() -> None:
         logger.error("Bot crashed", error=str(e), exc_info=True)
         raise
     finally:
-        liveness_task.cancel()
-        cleanup_task.cancel()
+        # BUG-R6-01: await the cancellation instead of firing and forgetting.
+        await _cancel_background_tasks([liveness_task, cleanup_task])
         if webhook_runner is not None:
             await webhook_runner.cleanup()
         await bot.session.close()

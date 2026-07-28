@@ -6,7 +6,6 @@ import pytest
 
 from bot.clients.deezer import DeezerClient
 from bot.clients.lidarr import LidarrClient
-from bot.clients.prowlarr import MUSIC_CATEGORIES, ProwlarrClient
 from bot.models import ArtistInfo, ContentType, MovieInfo, SeriesInfo
 
 
@@ -184,36 +183,9 @@ class TestDeezerClient:
         assert artists == []
 
 
-class TestProwlarrMusicDetection:
-    """Prowlarr must detect music content type from audio categories."""
-
-    def test_music_categories_detected(self):
-        client = ProwlarrClient("http://prowlarr", "key")
-        raw = {
-            "guid": "x",
-            "title": "Artist - Album [2024] [FLAC]",
-            "categories": [{"id": 3040, "name": "Audio/Lossless"}],
-            "downloadUrl": "http://example.com/file",
-        }
-        result = client._normalize_result(raw)
-        assert result is not None
-        assert result.detected_type == ContentType.MUSIC
-
-    def test_audio_root_category(self):
-        client = ProwlarrClient("http://prowlarr", "key")
-        raw = {
-            "guid": "y",
-            "title": "Artist - Single [MP3]",
-            "categories": [{"id": 3000}, {"id": 3010}],
-        }
-        result = client._normalize_result(raw)
-        assert result is not None
-        assert result.detected_type == ContentType.MUSIC
-
-    def test_music_categories_list_exhaustive(self):
-        # Sanity check that our hard-coded list covers the common audio buckets.
-        for cat in (3000, 3010, 3020, 3030, 3040, 3050, 3060):
-            assert cat in MUSIC_CATEGORIES
+# Removed with the Scryer migration (2026-07-28): TestProwlarrMusicDetection
+# checked Prowlarr's audio-category mapping. The bot no longer talks to
+# Prowlarr — Scryer routes indexers and returns typed releases.
 
 
 class TestUrlMasking:
@@ -329,27 +301,32 @@ class TestDownloadUrlValidation:
 
 
 class TestSearchServiceMusicDetection:
-    """SearchService.detect_with_confidence returns MUSIC when Lidarr finds an artist.
+    """SearchService.detect_with_confidence returns MUSIC when the music
+    backend finds an artist and Scryer's metadata search does not win.
 
-    DEAD-07: detect_content_type (a thin content_type-only wrapper) was
-    removed — production only ever calls detect_with_confidence.
+    Migration 2026-07-28: the video side is one `searchMetadataMulti` call
+    instead of parallel Radarr/Sonarr lookups; the music side still comes from
+    Lidarr (falling back to slskd).
     """
+
+    @staticmethod
+    def _scryer(movies=None, series=None, anime=None):
+        client = AsyncMock()
+        client.search_metadata_multi = AsyncMock(return_value={
+            ContentType.MOVIE: movies or [],
+            ContentType.SERIES: series or [],
+            ContentType.ANIME: anime or [],
+        })
+        return client
 
     async def test_music_detected_when_artist_matches(self):
         from bot.services.scoring import ScoringService
         from bot.services.search_service import SearchService
 
-        prowlarr = AsyncMock()
-        radarr = AsyncMock()
-        radarr.lookup_movie = AsyncMock(return_value=[])
-        sonarr = AsyncMock()
-        sonarr.lookup_series = AsyncMock(return_value=[])
         lidarr = AsyncMock()
-        lidarr.lookup_artist = AsyncMock(return_value=[
-            ArtistInfo(mb_id="mb-1", name="Metallica"),
-        ])
+        lidarr.lookup_artist = AsyncMock(return_value=[ArtistInfo(mb_id="mb-1", name="Metallica")])
 
-        svc = SearchService(prowlarr, radarr, sonarr, ScoringService(), lidarr=lidarr)
+        svc = SearchService(self._scryer(), ScoringService(), lidarr=lidarr)
         ct = (await svc.detect_with_confidence("Metallica")).content_type
         assert ct == ContentType.MUSIC
 
@@ -358,21 +335,17 @@ class TestSearchServiceMusicDetection:
         from bot.services.scoring import ScoringService
         from bot.services.search_service import SearchService
 
-        prowlarr = AsyncMock()
-        radarr = AsyncMock()
-        radarr.lookup_movie = AsyncMock(return_value=[
-            MovieInfo(tmdb_id=1, title="The Weeknd - Double Fantasy", year=2025),
-        ])
-        sonarr = AsyncMock()
-        sonarr.lookup_series = AsyncMock(return_value=[
-            SeriesInfo(tvdb_id=1, title="The Weekend"),
-        ])
         lidarr = AsyncMock()
-        lidarr.lookup_artist = AsyncMock(return_value=[
-            ArtistInfo(mb_id="mb-1", name="The Weeknd"),
-        ])
+        lidarr.lookup_artist = AsyncMock(return_value=[ArtistInfo(mb_id="mb-1", name="The Weeknd")])
 
-        svc = SearchService(prowlarr, radarr, sonarr, ScoringService(), lidarr=lidarr)
+        svc = SearchService(
+            self._scryer(
+                movies=[MovieInfo(tmdb_id=1, title="The Weeknd - Double Fantasy", year=2025)],
+                series=[SeriesInfo(tvdb_id=1, title="The Weekend")],
+            ),
+            ScoringService(),
+            lidarr=lidarr,
+        )
 
         assert (await svc.detect_with_confidence("The Weeknd")).content_type == ContentType.UNKNOWN
 
@@ -381,35 +354,50 @@ class TestSearchServiceMusicDetection:
         from bot.services.scoring import ScoringService
         from bot.services.search_service import SearchService
 
-        prowlarr = AsyncMock()
-        radarr = AsyncMock()
-        radarr.lookup_movie = AsyncMock(return_value=[
-            MovieInfo(tmdb_id=1, title="Metallikaa", year=2025),
-        ])
-        sonarr = AsyncMock()
-        sonarr.lookup_series = AsyncMock(return_value=[])
         lidarr = AsyncMock()
-        lidarr.lookup_artist = AsyncMock(return_value=[
-            ArtistInfo(mb_id="mb-1", name="Metallicaa"),
-        ])
+        lidarr.lookup_artist = AsyncMock(return_value=[ArtistInfo(mb_id="mb-1", name="Metallicaa")])
 
-        svc = SearchService(prowlarr, radarr, sonarr, ScoringService(), lidarr=lidarr)
+        svc = SearchService(
+            self._scryer(movies=[MovieInfo(tmdb_id=1, title="Metallikaa", year=2025)]),
+            ScoringService(),
+            lidarr=lidarr,
+        )
 
         assert (await svc.detect_with_confidence("Metallicaa")).content_type == ContentType.UNKNOWN
 
-    async def test_unknown_when_no_lidarr(self):
+    async def test_unknown_when_no_music_backend(self):
         from bot.services.scoring import ScoringService
         from bot.services.search_service import SearchService
 
-        prowlarr = AsyncMock()
-        radarr = AsyncMock()
-        radarr.lookup_movie = AsyncMock(return_value=[])
-        sonarr = AsyncMock()
-        sonarr.lookup_series = AsyncMock(return_value=[])
-
-        svc = SearchService(prowlarr, radarr, sonarr, ScoringService(), lidarr=None)
+        svc = SearchService(self._scryer(), ScoringService(), lidarr=None, slskd=None)
         ct = (await svc.detect_with_confidence("NoSuchArtist")).content_type
         assert ct == ContentType.UNKNOWN
+
+    async def test_slskd_is_used_when_lidarr_is_absent(self):
+        """slskd alone must still classify a query as music."""
+        from bot.services.scoring import ScoringService
+        from bot.services.search_service import SearchService
+
+        slskd = AsyncMock()
+        slskd.lookup_artists = AsyncMock(return_value=[ArtistInfo(mb_id="slskd:Metallica", name="Metallica")])
+
+        svc = SearchService(self._scryer(), ScoringService(), lidarr=None, slskd=slskd)
+        ct = (await svc.detect_with_confidence("Metallica")).content_type
+        assert ct == ContentType.MUSIC
+        slskd.lookup_artists.assert_awaited_once()
+
+    async def test_slskd_is_the_fallback_when_lidarr_fails(self):
+        from bot.services.scoring import ScoringService
+        from bot.services.search_service import SearchService
+
+        lidarr = AsyncMock()
+        lidarr.lookup_artist = AsyncMock(side_effect=RuntimeError("Lidarr stopped"))
+        slskd = AsyncMock()
+        slskd.lookup_artists = AsyncMock(return_value=[ArtistInfo(mb_id="slskd:Metallica", name="Metallica")])
+
+        svc = SearchService(self._scryer(), ScoringService(), lidarr=lidarr, slskd=slskd)
+        ct = (await svc.detect_with_confidence("Metallica")).content_type
+        assert ct == ContentType.MUSIC
 
 
 class TestAddServiceMusic:
@@ -418,7 +406,7 @@ class TestAddServiceMusic:
     async def test_add_artist_no_lidarr_returns_error(self):
         from bot.services.add_service import AddService
 
-        svc = AddService(AsyncMock(), AsyncMock(), AsyncMock(), lidarr=None)
+        svc = AddService(AsyncMock(), lidarr=None)
         artist = ArtistInfo(mb_id="m-1", name="X")
         added, action = await svc.add_artist(
             artist=artist, quality_profile_id=1, metadata_profile_id=1, root_folder_path="/m",
@@ -433,7 +421,7 @@ class TestAddServiceMusic:
         lidarr = AsyncMock()
         existing = ArtistInfo(mb_id="m-1", name="X", lidarr_id=42)
         lidarr.get_artist_by_mbid = AsyncMock(return_value=existing)
-        svc = AddService(AsyncMock(), AsyncMock(), AsyncMock(), lidarr=lidarr)
+        svc = AddService(AsyncMock(), lidarr=lidarr)
         added, action = await svc.add_artist(
             artist=ArtistInfo(mb_id="m-1", name="X"),
             quality_profile_id=1,

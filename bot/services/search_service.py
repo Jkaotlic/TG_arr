@@ -1,4 +1,19 @@
-"""Search service for finding content."""
+"""Search service: content-type detection and release listing via Scryer.
+
+Migration 2026-07-28. What changed and why:
+
+- **Detection** used to fan out parallel `lookup` calls to Radarr, Sonarr and
+  Lidarr, guarded by a global semaphore, a TTL cache and a per-service circuit
+  breaker (all of which existed to survive the lookup burst taking three
+  services down at once). Scryer answers all three video facets in ONE
+  `searchMetadataMulti` query, so the semaphore and circuit breaker are gone.
+  The TTL cache stays — a retried or double-tapped search still shouldn't hit
+  the network twice.
+- **Anime** is now a first-class outcome, not a flavour of SERIES.
+- **Release search** is no longer a free-text Prowlarr query. Scryer searches
+  per *title*, so the caller resolves/creates the title first (AddService.
+  ensure_title) and passes its id here.
+"""
 
 import asyncio
 import re
@@ -8,12 +23,8 @@ from typing import NamedTuple, Optional
 
 import structlog
 
-from bot.clients.base import ServiceConnectionError
-from bot.clients.lidarr import LidarrClient
-from bot.clients.prowlarr import ProwlarrClient
-from bot.clients.radarr import RadarrClient
-from bot.clients.sonarr import SonarrClient
-from bot.models import ArtistInfo, ContentType, MovieInfo, SearchResult, SeriesInfo
+from bot.clients.scryer import ScryerClient
+from bot.models import ArtistInfo, ContentType, SearchResult, VIDEO_CONTENT_TYPES
 from bot.services.scoring import ScoringService
 
 logger = structlog.get_logger()
@@ -34,34 +45,22 @@ _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2}|21\d{2})\b")
 _SE_RE = re.compile(r"s(\d{1,2})(?:e(\d{1,3}))?", re.IGNORECASE)
 _SEASON_WORD_RE = re.compile(r"(?:season|сезон)\s*(\d+)", re.IGNORECASE)
 _QUALITY_TOKENS = ("2160p", "4k", "4к", "uhd", "1080p", "720p", "480p")
-_DETECT_TIMEOUT_S = 8.0  # PERF-01: cap parallel lookups
-_MUSIC_QUERY_HARD_FLOOR = 3   # ignore Lidarr matches when query <3 chars
+_DETECT_TIMEOUT_S = 15.0  # metadata search fans out to TMDb/TVDB behind Scryer
+_MUSIC_QUERY_HARD_FLOOR = 3   # ignore music matches when query <3 chars
 
-# PERF-01: detection-burst guard. A single free-text message previously fired
-# concurrent Radarr+Sonarr+Lidarr `/lookup` calls with no cap, no cache and no
-# cooldown — the exact code-path behind the prod incident where Radarr and
-# Lidarr went 503 at the same time. Three mitigations, all module-level so
-# they're shared across every SearchService instance (there's effectively one
-# per request via get_services(), so per-instance state would be useless):
-#
-#   1. A semaphore capping concurrent *arr lookup coroutines globally at 2 —
-#      even if 3 users search simultaneously, only 2 lookup calls are ever
-#      in flight across the whole process.
-#   2. A TTL cache (300s) keyed by normalized query — a retried/duplicate
-#      search doesn't re-trigger the lookup burst.
-#   3. A per-service circuit breaker — once a service raises
-#      ServiceConnectionError (or any APIError with a 503 status), detection
-#      skips that service for 30s instead of hammering an already-struggling
-#      instance.
-_DETECT_SEMAPHORE = asyncio.Semaphore(2)
+# PERF-01: a retried/duplicate search (double-tap, "повторить") must not
+# re-trigger the metadata lookup. Module-level so it is shared across the
+# per-request SearchService instances created by get_services().
 _DETECTION_CACHE_TTL_S = 300.0
 _DETECTION_CACHE_CAP = 100
 _DETECTION_CACHE: dict[str, tuple[float, "DetectionResult"]] = {}
-_CIRCUIT_BREAKER_COOLDOWN_S = 30.0
-_CIRCUIT_BREAKER: dict[str, float] = {}  # service name -> monotonic retry_after
 # A close runner-up means the query has more than one credible interpretation.
 # Keep the decision with the user rather than auto-selecting a content type.
 _AMBIGUITY_MARGIN = 0.15
+# Anime titles are also indexed as series by the metadata providers, so a
+# near-tie between the two is the normal case rather than a real ambiguity —
+# prefer the anime facet, which has its own library and `1080p` profile.
+_ANIME_OVER_SERIES_MARGIN = 0.1
 
 
 def _normalize_query(query: str) -> str:
@@ -88,51 +87,9 @@ def _cache_put(key: str, result: "DetectionResult") -> None:
     _DETECTION_CACHE[key] = (time.monotonic() + _DETECTION_CACHE_TTL_S, result)
 
 
-def _breaker_is_open(service: str) -> bool:
-    retry_after = _CIRCUIT_BREAKER.get(service)
-    if retry_after is None:
-        return False
-    if time.monotonic() >= retry_after:
-        _CIRCUIT_BREAKER.pop(service, None)
-        return False
-    return True
-
-
-def _breaker_trip(service: str) -> None:
-    _CIRCUIT_BREAKER[service] = time.monotonic() + _CIRCUIT_BREAKER_COOLDOWN_S
-
-
-def _is_service_down_error(exc: BaseException) -> bool:
-    """True for connection failures / 503s that should trip the breaker."""
-    if isinstance(exc, ServiceConnectionError):
-        return True
-    status_code = getattr(exc, "status_code", None)
-    return status_code == 503
-
-
-async def _guarded_lookup(service: str, coro_factory):
-    """Run a detection lookup under the global semaphore + circuit breaker.
-
-    ``coro_factory`` is a zero-arg callable that creates the coroutine lazily
-    — when the breaker is open we must not even instantiate it (an
-    unawaited AsyncMock coroutine still warns/leaks).
-
-    Returns the lookup result, or the underlying exception (never raised —
-    detect_with_confidence already treats exceptions-in-gather as failures
-    via `return_exceptions=True`, this just short-circuits the call entirely
-    when the breaker is open).
-    """
-    if _breaker_is_open(service):
-        return ServiceConnectionError(f"{service} circuit breaker open")
-    async with _DETECT_SEMAPHORE:
-        try:
-            return await coro_factory()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if _is_service_down_error(exc):
-                _breaker_trip(service)
-            return exc
+def _cache_clear() -> None:
+    """Test helper — drop the shared detection cache."""
+    _DETECTION_CACHE.clear()
 
 
 class DetectionResult(NamedTuple):
@@ -140,56 +97,43 @@ class DetectionResult(NamedTuple):
     content_type: ContentType
     confidence: float                       # 0.0..1.0
     reason: str                             # short label for logs
-    candidates: dict[str, list[str]]        # {"movie": [...titles], "series": [...], "music": [...]}
-    # LOGIC-06: the *full* lookup objects behind `candidates["movie"/"series"]`
-    # (titles-only) for the winning content_type — so callers that already ran
-    # detection don't have to re-hit Radarr/Sonarr lookup for the same query.
-    # Empty for MUSIC/UNKNOWN winners or when detection short-circuited before
-    # a lookup ran (e.g. "series_pattern"/"too_short"/"lookup_timeout").
+    candidates: dict[str, list[str]]        # {"movie": [...titles], "series": [...], ...}
+    # The full metadata objects behind `candidates` for the winning type, so
+    # callers that already ran detection don't have to search again before
+    # adding the title. Empty for MUSIC/UNKNOWN winners or when detection
+    # short-circuited before a lookup ran.
     lookup_results: list = []
 
 
 class SearchService:
-    """Service for searching content across Prowlarr, Radarr, Sonarr, Lidarr."""
+    """Content-type detection and release listing, backed by Scryer."""
 
     def __init__(
         self,
-        prowlarr: ProwlarrClient,
-        radarr: RadarrClient,
-        sonarr: SonarrClient,
+        scryer: ScryerClient,
         scoring: Optional[ScoringService] = None,
-        lidarr: Optional[LidarrClient] = None,
+        lidarr=None,
+        slskd=None,
     ):
-        self.prowlarr = prowlarr
-        self.radarr = radarr
-        self.sonarr = sonarr
+        self.scryer = scryer
         self.lidarr = lidarr
+        self.slskd = slskd
         self.scoring = scoring or ScoringService()
 
     async def detect_with_confidence(self, query: str) -> DetectionResult:
         """
-        Detect movie / series / music with confidence score.
+        Detect movie / series / anime / music with a confidence score.
 
-        Year-aware priority (LOGIC-03): if query has a year, music is dropped —
-        artists don't have release-year semantics in user queries.
+        Year-aware priority (LOGIC-03): if the query has a year, music is
+        dropped — artists don't have release-year semantics in user queries.
 
         Fuzzy match (BUG-01, LOGIC-02): SequenceMatcher.ratio() instead of
         substring containment, so "Joker" doesn't match a random "Joker"-named
         artist with 1-letter overlap.
 
-        Bounded latency (PERF-01): parallel lookups capped at 8s; on timeout
-        returns UNKNOWN with confidence 0 so the user gets the button choice.
-
-        Detection-burst guard (PERF-01): lookups are additionally routed
-        through a global semaphore(2) + 300s TTL cache (by normalized query)
-        + a 30s per-service circuit breaker after a connection error/503 —
-        see the module-level `_DETECT_SEMAPHORE`/`_DETECTION_CACHE`/
-        `_CIRCUIT_BREAKER` docstring for the full rationale.
-
-        Failure surfacing (BUG-05): exceptions during lookups don't silently
-        become empty arrays — they downgrade confidence and reason gets
-        "lookup_failures=N" so the user sees the type-question instead of a
-        wrong auto-pick.
+        Failure surfacing (BUG-05): an exception during lookup doesn't silently
+        become an empty result set — it returns UNKNOWN so the user gets the
+        type question instead of a wrong auto-pick.
         """
         log = logger.bind(query=query)
         clean_query = self._strip_quality_tokens(query.strip())
@@ -200,132 +144,155 @@ class SearchService:
         if len(clean_query_no_year) < 2:
             return DetectionResult(ContentType.UNKNOWN, 0.0, "too_short", {})
 
-        # Series indicators in query text — high-confidence shortcut
-        for pattern in _SERIES_PATTERNS:
-            if pattern.search(clean_query):
-                log.info("detect_content_type", winner="series", reason="series_pattern")
-                return DetectionResult(ContentType.SERIES, 0.9, "series_pattern", {})
+        # A season/episode marker settles "not a movie, not music" — but NOT
+        # series-vs-anime, which are separate Scryer libraries with separate
+        # quality profiles. So it narrows the candidate set instead of
+        # short-circuiting the way it used to.
+        episodic = any(pattern.search(clean_query) for pattern in _SERIES_PATTERNS)
 
-        # PERF-01: repeated/duplicate searches (retries, double-taps) must not
-        # re-trigger the *arr lookup burst — serve from the TTL cache.
         cache_key = _normalize_query(query)
         cached = _cache_get(cache_key)
         if cached is not None:
             log.info("content_type_detected", winner=cached.content_type.value, reason="cache_hit")
             return cached
 
-        # Parallel lookups with hard timeout (PERF-01), each routed through the
-        # global semaphore + circuit breaker via _guarded_lookup.
-        # Use clean_query_no_year for Lidarr (LOGIC-01) — MusicBrainz returns garbage on year strings.
-        tasks: list = [
-            asyncio.create_task(
-                _guarded_lookup("radarr", lambda: self.radarr.lookup_movie(clean_query))
-            ),
-            asyncio.create_task(
-                _guarded_lookup("sonarr", lambda: self.sonarr.lookup_series(clean_query))
-            ),
-        ]
-        if self.lidarr is not None and len(clean_query_no_year) >= _MUSIC_QUERY_HARD_FLOOR:
-            tasks.append(
-                asyncio.create_task(
-                    _guarded_lookup("lidarr", lambda: self.lidarr.lookup_artist(clean_query_no_year))
-                )
-            )
+        music_allowed = (
+            (self.lidarr is not None or self.slskd is not None)
+            and len(clean_query_no_year) >= _MUSIC_QUERY_HARD_FLOOR
+            and query_year is None
+            and not episodic
+        )
 
         try:
             gathered = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
+                asyncio.gather(
+                    self.scryer.search_metadata_multi(clean_query),
+                    self._lookup_artists(clean_query_no_year) if music_allowed else _empty_list(),
+                    return_exceptions=True,
+                ),
                 timeout=_DETECT_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
-            for t in tasks:
-                t.cancel()
             log.warning("detect_content_type", winner="unknown", reason="lookup_timeout")
-            return DetectionResult(ContentType.UNKNOWN, 0.0, "lookup_timeout", {})
+            return self._episodic_fallback(episodic, "lookup_timeout")
 
-        movies_result, series_result = gathered[0], gathered[1]
-        artists_result = gathered[2] if len(gathered) > 2 else []
+        video_result, artists_result = gathered
 
-        movies = movies_result if isinstance(movies_result, list) else []
-        series = series_result if isinstance(series_result, list) else []
-        artists = artists_result if isinstance(artists_result, list) else []
+        # BUG-04: `return_exceptions=True` also captures CancelledError, which
+        # would turn a shutdown (or a cancelled callback task) into a normal
+        # "detection failed" answer. Re-raise it instead.
+        for outcome in gathered:
+            if isinstance(outcome, asyncio.CancelledError):
+                raise outcome
 
-        failure_count = sum(
-            1 for r in gathered if isinstance(r, BaseException)
+        if isinstance(video_result, BaseException):
+            log.warning("scryer_metadata_lookup_failed", error=str(video_result))
+            return self._episodic_fallback(episodic, "metadata_lookup_failed")
+        if isinstance(artists_result, BaseException):
+            log.warning("music_lookup_failed", error=str(artists_result))
+            artists_result = []
+
+        video = video_result or {}
+        artists = artists_result or []
+
+        # An episodic query can only be SERIES or ANIME — a movie match there
+        # would be a metadata coincidence, not the user's intent.
+        facets = (
+            (ContentType.SERIES, ContentType.ANIME) if episodic else VIDEO_CONTENT_TYPES
         )
+        scored: list[tuple[ContentType, float, str, list]] = []
+        for content_type in facets:
+            items = video.get(content_type) or []
+            score = self._best_match_score(clean_query_no_year, items, query_year, prefer_year=True)
+            scored.append((content_type, score, f"{content_type.value}_match", items))
 
-        if isinstance(movies_result, BaseException):
-            log.warning("Radarr lookup failed during detection", error=str(movies_result))
-        if isinstance(series_result, BaseException):
-            log.warning("Sonarr lookup failed during detection", error=str(series_result))
-        if len(gathered) > 2 and isinstance(artists_result, BaseException):
-            log.warning("Lidarr lookup failed during detection", error=str(artists_result))
-
-        # If most lookups failed, can't decide → UNKNOWN (BUG-05).
-        if failure_count >= len(tasks):
-            return DetectionResult(ContentType.UNKNOWN, 0.0, "all_lookups_failed", {})
-
-        # Score top candidates from each service.
-        movie_score = self._best_match_score(clean_query_no_year, movies, query_year, prefer_year=True)
-        series_score = self._best_match_score(clean_query_no_year, series, query_year, prefer_year=True)
-        # Music: stricter — require year to be absent in query (artists aren't year-tagged).
-        if query_year is not None:
-            music_score = 0.0
-        else:
+        music_score = 0.0
+        if artists:
             music_score = self._best_match_score(clean_query_no_year, artists, None, prefer_year=False)
-            # Music demotion: only beat movie/series if query is unambiguous (>=0.92).
+            # Music demotion: only beat video if the query is unambiguous.
             if music_score < 0.92:
                 music_score *= 0.7
+        scored.append((ContentType.MUSIC, music_score, "music_match", []))
 
-        scored = [
-            (ContentType.MOVIE, movie_score, "movie_match", [getattr(m, "title", "?") for m in movies[:3]]),
-            (ContentType.SERIES, series_score, "series_match", [getattr(s, "title", "?") for s in series[:3]]),
-            (ContentType.MUSIC, music_score, "music_match", [getattr(a, "name", "?") for a in artists[:3]]),
-        ]
         scored.sort(key=lambda x: x[1], reverse=True)
-        top_type, top_score, reason, _ = scored[0]
-        runner_up_score = scored[1][1]
+        top_type, top_score, reason, winning_items = scored[0]
+        runner_up_type, runner_up_score = scored[1][0], scored[1][1]
+
+        # Anime and series share metadata sources, so the two facets routinely
+        # land within noise of each other. Treating that as "ambiguous" would
+        # ask the user a question they can't answer better than we can — prefer
+        # the anime facet, which routes to the anime library and 1080p profile.
+        if (
+            {top_type, runner_up_type} == {ContentType.SERIES, ContentType.ANIME}
+            and abs(top_score - runner_up_score) < _ANIME_OVER_SERIES_MARGIN
+        ):
+            anime_entry = next(e for e in scored if e[0] == ContentType.ANIME)
+            top_type, top_score, reason, winning_items = (
+                anime_entry[0], max(top_score, anime_entry[1]), "anime_over_series", anime_entry[3]
+            )
+            runner_up_score = min(runner_up_score, anime_entry[1])
 
         candidates = {
-            "movie": [getattr(m, "title", "?") for m in movies[:3]],
-            "series": [getattr(s, "title", "?") for s in series[:3]],
-            "music": [getattr(a, "name", "?") for a in artists[:3]],
+            content_type.value: [getattr(i, "title", "?") for i in (video.get(content_type) or [])[:3]]
+            for content_type in VIDEO_CONTENT_TYPES
         }
+        candidates["music"] = [getattr(a, "name", "?") for a in artists[:3]]
 
-        # OBS-11: log the winner with all candidates
         log.info(
             "content_type_detected",
             winner=top_type.value,
             confidence=round(top_score, 3),
             runner_up=round(runner_up_score, 3),
             reason=reason,
-            failure_count=failure_count,
+            episodic=episodic,
             candidates=candidates,
         )
 
-        # Confidence threshold: below 0.7 → UNKNOWN so user gets the question.
+        # Confidence threshold: below 0.7 → UNKNOWN so the user gets the question.
         if top_score < 0.7:
-            result = DetectionResult(ContentType.UNKNOWN, top_score, "low_confidence", candidates)
-        # Any close cross-type result is ambiguous: let the user choose.
+            # …unless the query is episodic, where "which of series/anime" is a
+            # far better question to answer ourselves than to bounce back at a
+            # user who typed an unambiguous "S01E05".
+            result = (
+                DetectionResult(top_type, top_score, "episodic_low_confidence", candidates, list(winning_items))
+                if episodic and winning_items
+                else self._episodic_fallback(episodic, "low_confidence", candidates)
+            )
         elif top_score - runner_up_score < _AMBIGUITY_MARGIN and runner_up_score > 0.6:
             result = DetectionResult(ContentType.UNKNOWN, top_score, "ambiguous", candidates)
         else:
-            # LOGIC-06: carry the full lookup objects for the winning type so
-            # the caller (process_search -> SearchSession.lookup_candidates)
-            # can skip a second identical Radarr/Sonarr lookup later in the
-            # same flow (release selection / grab_best).
-            winning_lookup = movies if top_type == ContentType.MOVIE else (
-                series if top_type == ContentType.SERIES else []
-            )
-            result = DetectionResult(top_type, top_score, reason, candidates, list(winning_lookup))
+            result = DetectionResult(top_type, top_score, reason, candidates, list(winning_items))
 
-        # PERF-01: cache the classification (even UNKNOWN/low-confidence — a
-        # repeat of the exact same ambiguous query would just burn another
-        # lookup burst for the same answer) unless a service failed, so a
-        # transient 503 doesn't poison the cache for the retry.
-        if failure_count == 0:
-            _cache_put(cache_key, result)
+        _cache_put(cache_key, result)
         return result
+
+    @staticmethod
+    def _episodic_fallback(
+        episodic: bool, reason: str, candidates: Optional[dict] = None
+    ) -> DetectionResult:
+        """Degrade gracefully when the metadata lookup can't decide.
+
+        For an episodic query ("Breaking Bad S01E05") the season marker is
+        itself strong evidence, so fall back to SERIES rather than asking the
+        user a question they already answered. Otherwise return UNKNOWN.
+        """
+        if episodic:
+            return DetectionResult(ContentType.SERIES, 0.9, f"series_pattern:{reason}", candidates or {})
+        return DetectionResult(ContentType.UNKNOWN, 0.0, reason, candidates or {})
+
+    async def _lookup_artists(self, query: str) -> list[ArtistInfo]:
+        """Artist lookup for detection — Lidarr first, slskd as the fallback."""
+        if self.lidarr is not None:
+            try:
+                return await self.lidarr.lookup_artist(query)
+            except Exception as e:
+                logger.warning("lidarr_lookup_failed", error=str(e))
+        if self.slskd is not None:
+            try:
+                return await self.slskd.lookup_artists(query)
+            except Exception as e:
+                logger.warning("slskd_lookup_failed", error=str(e))
+        return []
 
     @staticmethod
     def _strip_quality_tokens(query: str) -> str:
@@ -398,84 +365,73 @@ class SearchService:
 
         return best
 
+    async def search_metadata(self, query: str, content_type: ContentType) -> list:
+        """Metadata candidates for one facet (used when the user picks a type)."""
+        if content_type not in VIDEO_CONTENT_TYPES:
+            return []
+        return await self.scryer.search_metadata(query, content_type)
+
     async def search_releases(
         self,
-        query: str,
+        title_id: str,
         content_type: ContentType = ContentType.UNKNOWN,
-        sort_by_score: bool = True,
+        season: Optional[int] = None,
+        episode: Optional[int] = None,
         preferred_resolution: Optional[str] = None,
+        limit: Optional[int] = None,
+        timeout: Optional[float] = None,
     ) -> list[SearchResult]:
-        """Search for releases using Prowlarr.
+        """List indexer candidates for a title already present in Scryer.
 
-        Important (LOGIC-04): we no longer drop results whose `detected_type`
-        disagrees with the requested type — Russian indexers regularly mis-tag
-        categories, and dropping cuts legitimate releases. Trust Prowlarr's
-        category filter (driven by `content_type`) and let scoring rank.
-
-        DEAD-06: `preferred_resolution` (user's "Качество" setting) is passed
-        through to scoring so a same-quality release at the preferred
-        resolution ranks above others instead of being purely resolution-maxed.
+        Scryer queries Prowlarr itself and applies the quality profile plus the
+        Rego rules, so every result already carries a verdict; the local scoring
+        only orders ties (see `ScoringService.sort_results`).
         """
-        log = logger.bind(query=query, content_type=content_type.value)
-        log.info("Searching for releases")
+        log = logger.bind(title_id=title_id, content_type=content_type.value)
 
         t0 = time.monotonic()
-        results = await self.prowlarr.search(query, content_type)
-        prowlarr_ms = round((time.monotonic() - t0) * 1000, 1)
+        results = await self.scryer.search_releases(
+            title_id, season=season, episode=episode, limit=limit, timeout=timeout
+        )
+        search_ms = round((time.monotonic() - t0) * 1000, 1)
 
         if not results:
-            log.info("No results found", prowlarr_ms=prowlarr_ms)
+            log.info("No results found", search_ms=search_ms)
             return []
 
-        raw_count = len(results)
+        results = self.scoring.sort_results(results, content_type, preferred_resolution)
 
-        if sort_by_score:
-            results = self.scoring.sort_results(results, content_type, preferred_resolution)
-
-        # OBS-13: log top-N for debug
-        top_preview = [
-            {
-                "title": (r.title or "?")[:80],
-                "score": getattr(r, "calculated_score", 0),
-                "indexer": r.indexer,
-                "seeders": r.seeders,
-                "size_gb": r.get_size_gb(),
-                "detected_type": r.detected_type.value if r.detected_type else None,
-                "detected_year": r.detected_year,
-            }
-            for r in results[:5]
-        ]
         log.info(
             "search_completed",
-            raw_count=raw_count,
             result_count=len(results),
-            prowlarr_ms=prowlarr_ms,
-            top=top_preview,
+            allowed_count=sum(1 for r in results if r.scryer_allowed),
+            search_ms=search_ms,
+            top=[
+                {
+                    "title": (r.title or "?")[:80],
+                    "scryer_score": r.scryer_score,
+                    "allowed": r.scryer_allowed,
+                    "score": r.calculated_score,
+                    "indexer": r.indexer,
+                    "seeders": r.seeders,
+                    "size_gb": round(r.get_size_gb(), 2),
+                }
+                for r in results[:5]
+            ],
         )
         return results
 
-    async def lookup_movie(self, query: str) -> list[MovieInfo]:
-        """Look up movies in Radarr."""
-        return await self.radarr.lookup_movie(query)
-
-    async def lookup_series(self, query: str) -> list[SeriesInfo]:
-        """Look up series in Sonarr."""
-        return await self.sonarr.lookup_series(query)
-
     async def lookup_artist(self, query: str) -> list[ArtistInfo]:
-        """Look up artists in Lidarr (returns [] if Lidarr is not configured)."""
-        if self.lidarr is None:
-            return []
-        return await self.lidarr.lookup_artist(query)
+        """Look up artists (Lidarr, falling back to slskd)."""
+        return await self._lookup_artists(query)
 
     def parse_query(self, query: str) -> dict:
         """
-        Parse search query to extract metadata.
+        Parse a search query into title / year / season / episode / quality.
 
-        Note: the `title` field has year/season/quality stripped — that's the
-        clean form for *lookup* APIs (Radarr/Sonarr lookup), not for Prowlarr
-        search. Prowlarr should receive the original query so trackers can
-        match against the year (LOGIC-05).
+        The `title` field has year/season/quality stripped — that's the clean
+        form for the metadata search. Season/episode are used to narrow the
+        release search to one season or episode.
         """
         result = {
             "original": query,
@@ -524,3 +480,8 @@ class SearchService:
         result["title"] = re.sub(r"\s+", " ", result["title"]).strip(" -_:.()[]")
 
         return result
+
+
+async def _empty_list() -> list:
+    """Awaitable placeholder so `gather` keeps a fixed shape when music is off."""
+    return []

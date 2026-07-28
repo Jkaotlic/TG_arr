@@ -176,7 +176,7 @@ async def test_handle_add_movie_from_trending_reads_callback_data():
     db.log_action = AsyncMock()
     db_user = MagicMock()
     db_user.tg_id = 1
-    db_user.preferences = MagicMock(radarr_quality_profile_id=None, radarr_root_folder_id=None)
+    db_user.preferences = MagicMock(scryer_quality_profile_id=None, scryer_root_folder_id=None)
 
     cb = MagicMock()
     cb.data = None
@@ -187,17 +187,14 @@ async def test_handle_add_movie_from_trending_reads_callback_data():
     cb.message.answer = AsyncMock(return_value=status_msg)
 
     add_service = MagicMock()
-    add_service.get_radarr_profiles = AsyncMock(return_value=[MagicMock(id=1)])
-    add_service.get_radarr_root_folders = AsyncMock(return_value=[MagicMock(path="/movies")])
-    added_movie = MagicMock(title="The Matrix", year=1999)
+    add_service.get_quality_profiles = AsyncMock(return_value=[MagicMock(id=1)])
+    add_service.get_root_folders = AsyncMock(return_value=[MagicMock(path="/movies")])
     action = MagicMock(success=True, error_message=None)
-    add_service.add_movie = AsyncMock(return_value=(added_movie, action))
+    add_service.add_and_queue_best = AsyncMock(return_value=(True, action, "Добавлено"))
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(trending, "AddService", MagicMock(return_value=add_service))
-        mp.setattr(trending, "get_prowlarr", AsyncMock(return_value=None))
-        mp.setattr(trending, "get_radarr", AsyncMock(return_value=None))
-        mp.setattr(trending, "get_sonarr", AsyncMock(return_value=None))
+        mp.setattr(trending, "get_scryer", AsyncMock(return_value=None))
         mp.setattr(trending, "get_qbittorrent", AsyncMock(return_value=None))
 
         await trending.handle_add_movie_from_trending(cb, AddContentCB(kind="movie", tmdb_id=603), db_user, db)
@@ -216,9 +213,9 @@ async def test_handle_add_movie_from_trending_reads_callback_data():
 def test_setting_cb_roundtrip():
     from bot.ui.callbacks import SettingCB
 
-    packed = SettingCB(key="radarr_quality_profile_id", value="3").pack()
+    packed = SettingCB(key="scryer_quality_profile_id", value="3").pack()
     got = SettingCB.unpack(packed)
-    assert got.key == "radarr_quality_profile_id"
+    assert got.key == "scryer_quality_profile_id"
     assert got.value == "3"
 
 
@@ -228,12 +225,12 @@ def test_quality_profiles_keyboard_uses_typed_cb():
     from bot.ui.keyboards import Keyboards
 
     profiles = [QualityProfile(id=5, name="HD-1080p")]
-    kb = Keyboards.quality_profiles(profiles, key="radarr_quality_profile_id")
+    kb = Keyboards.quality_profiles(profiles, key="scryer_quality_profile_id")
     cbs = _cbs(kb)
     set_cbs = [c for c in cbs if c.startswith("set:")]
     assert len(set_cbs) == 1
     got = SettingCB.unpack(set_cbs[0])
-    assert got.key == "radarr_quality_profile_id"
+    assert got.key == "scryer_quality_profile_id"
     assert got.value == "5"
 
 
@@ -245,7 +242,7 @@ async def test_handle_settings_set_reads_callback_data():
     db = AsyncMock()
     db.update_user_preference = AsyncMock()
     db_user = MagicMock()
-    db_user.preferences = MagicMock(radarr_quality_profile_id=None)
+    db_user.preferences = MagicMock(scryer_quality_profile_id=None)
 
     cb = MagicMock()
     cb.data = None
@@ -259,11 +256,12 @@ async def test_handle_settings_set_reads_callback_data():
             AsyncMock(return_value=("text", MagicMock())),
         )
         await settings_mod.handle_settings_set(
-            cb, SettingCB(key="radarr_quality_profile_id", value="9"), db_user, db
+            cb, SettingCB(key="scryer_quality_profile_id", value="9"), db_user, db
         )
 
-    db.update_user_preference.assert_awaited_with(db_user.tg_id, "radarr_quality_profile_id", 9)
-    assert db_user.preferences.radarr_quality_profile_id == 9
+    # Scryer profile ids are slugs, so the value stays a string end-to-end.
+    db.update_user_preference.assert_awaited_with(db_user.tg_id, "scryer_quality_profile_id", "9")
+    assert db_user.preferences.scryer_quality_profile_id == "9"
 
 
 def test_resolution_and_auto_grab_keyboards_use_typed_setting_cb():

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
 
 def _utcnow() -> datetime:
@@ -18,12 +18,50 @@ QBIT_INFINITE_ETA = 8640000
 
 
 class ContentType(str, Enum):
-    """Type of content being searched."""
+    """Type of content being searched.
+
+    ANIME is a first-class facet in Scryer (own library, own `1080p` quality
+    profile) rather than a flavour of SERIES, so it gets its own member.
+    """
 
     MOVIE = "movie"
     SERIES = "series"
+    ANIME = "anime"
     MUSIC = "music"
     UNKNOWN = "unknown"
+
+    @property
+    def scryer_facet(self) -> Optional[str]:
+        """The `MediaFacetValue` Scryer expects, or None for non-video types."""
+        return _SCRYER_FACETS.get(self)
+
+    @classmethod
+    def from_scryer_facet(cls, facet: Optional[str]) -> "ContentType":
+        """Map a Scryer `MediaFacetValue` (any case) back to a ContentType."""
+        if not facet:
+            return cls.UNKNOWN
+        return _FACET_TO_CONTENT_TYPE.get(facet.upper(), cls.UNKNOWN)
+
+
+_SCRYER_FACETS: dict["ContentType", str] = {}
+_FACET_TO_CONTENT_TYPE: dict[str, "ContentType"] = {}
+
+
+def _init_facet_maps() -> None:
+    pairs = (
+        (ContentType.MOVIE, "MOVIE"),
+        (ContentType.SERIES, "SERIES"),
+        (ContentType.ANIME, "ANIME"),
+    )
+    for content_type, facet in pairs:
+        _SCRYER_FACETS[content_type] = facet
+        _FACET_TO_CONTENT_TYPE[facet] = content_type
+
+
+_init_facet_maps()
+
+#: Content types Scryer handles (i.e. everything except music/unknown).
+VIDEO_CONTENT_TYPES = (ContentType.MOVIE, ContentType.SERIES, ContentType.ANIME)
 
 
 class ActionType(str, Enum):
@@ -81,6 +119,25 @@ class SearchResult(BaseModel):
     prowlarr_score: Optional[int] = Field(default=None, description="Original Prowlarr score")
     calculated_score: int = Field(default=0, description="Our calculated score")
 
+    # Scryer release candidate (migration 2026-07-28). Scryer already applies
+    # the quality profile and the Rego rules, so its verdict is authoritative
+    # and the bot's own `calculated_score` is only a display/tie-break aid.
+    scryer_title_id: Optional[str] = Field(default=None, description="Scryer title id this release belongs to")
+    candidate_token: Optional[str] = Field(
+        default=None,
+        description="Short-lived Scryer token identifying this candidate. SECRET: embeds the "
+                    "indexer download URL (with the tracker passkey) — never log it.",
+    )
+    queue_scope: Optional[dict[str, Any]] = Field(
+        default=None, description="QueueDownloadScopeInput to reuse when queueing this candidate"
+    )
+    scryer_score: Optional[int] = Field(default=None, description="Scryer releaseScore (profile + rules)")
+    scryer_preference_score: Optional[int] = Field(default=None, description="Scryer preferenceScore")
+    scryer_allowed: Optional[bool] = Field(default=None, description="Whether Scryer's profile allows this release")
+    block_codes: list[str] = Field(default_factory=list, description="Scryer block codes when not allowed")
+    auto_eligible: bool = Field(default=False, description="Scryer would grab this release automatically")
+    auto_decision_summary: Optional[str] = Field(default=None)
+
     # Content detection
     detected_type: ContentType = Field(default=ContentType.UNKNOWN)
     detected_year: Optional[int] = Field(default=None)
@@ -103,14 +160,18 @@ class SearchResult(BaseModel):
 
 
 class MovieInfo(BaseModel):
-    """Movie information from Radarr lookup."""
+    """Movie information from a Scryer metadata search or catalog entry."""
 
     content_model_type: Literal["movie"] = "movie"
-    tmdb_id: int = Field(..., description="TMDB ID")
+    # Migration 2026-07-28: Scryer's metadata search keys on its own id
+    # (`metadata_id`, surfaced as `tvdbId` in the GraphQL payload) and does not
+    # always carry a TMDb id, so `tmdb_id`/`year` are no longer required. They
+    # stay for TMDb-sourced trending items and the external-link keyboards.
+    tmdb_id: int = Field(default=0, description="TMDB ID (0 when unknown)")
     imdb_id: Optional[str] = Field(default=None, description="IMDB ID")
     title: str = Field(..., description="Movie title")
     original_title: Optional[str] = Field(default=None)
-    year: int = Field(..., description="Release year")
+    year: Optional[int] = Field(default=None, description="Release year")
     overview: Optional[str] = Field(default=None, description="Plot summary")
     runtime: Optional[int] = Field(default=None, description="Runtime in minutes")
     studio: Optional[str] = Field(default=None)
@@ -119,19 +180,29 @@ class MovieInfo(BaseModel):
     fanart_url: Optional[str] = Field(default=None)
     ratings: dict[str, Any] = Field(default_factory=dict)
 
-    # Radarr-specific
-    radarr_id: Optional[int] = Field(default=None, description="ID in Radarr if already added")
+    # Scryer-specific
+    scryer_id: Optional[str] = Field(default=None, description="Title id in Scryer if already in the catalog")
+    metadata_id: Optional[str] = Field(default=None, description="Scryer metadata id (`tvdbId` in searchMetadata)")
+    library_id: Optional[str] = Field(default=None, description="Scryer library id")
+    quality_tier: Optional[str] = Field(default=None, description="Quality profile name applied by Scryer")
+    current_quality_tier: Optional[str] = Field(default=None, description="Quality actually on disk")
+    monitored: bool = Field(default=False)
     is_available: bool = Field(default=False, description="Whether movie is available")
     has_file: bool = Field(default=False, description="Whether movie file exists")
-    quality_profile_id: Optional[int] = Field(default=None)
+    quality_profile_id: Optional[str] = Field(default=None)
     root_folder_path: Optional[str] = Field(default=None)
 
 
 class SeriesInfo(BaseModel):
-    """Series information from Sonarr lookup."""
+    """Series (or anime) information from Scryer.
+
+    Anime rides this model too — Scryer models it as a separate *facet*, not a
+    separate entity shape. `facet` carries "SERIES"/"ANIME" so callers can route
+    add/search to the right library without a second lookup.
+    """
 
     content_model_type: Literal["series"] = "series"
-    tvdb_id: int = Field(..., description="TVDB ID")
+    tvdb_id: int = Field(default=0, description="TVDB ID (0 when unknown)")
     tmdb_id: Optional[int] = Field(default=None, description="TMDB ID")
     imdb_id: Optional[str] = Field(default=None, description="IMDB ID")
     title: str = Field(..., description="Series title")
@@ -148,11 +219,25 @@ class SeriesInfo(BaseModel):
     season_count: int = Field(default=0)
     total_episode_count: int = Field(default=0)
 
-    # Sonarr-specific
-    sonarr_id: Optional[int] = Field(default=None, description="ID in Sonarr if already added")
-    quality_profile_id: Optional[int] = Field(default=None)
+    # Scryer-specific
+    scryer_id: Optional[str] = Field(default=None, description="Title id in Scryer if already in the catalog")
+    metadata_id: Optional[str] = Field(default=None, description="Scryer metadata id (`tvdbId` in searchMetadata)")
+    facet: str = Field(default="SERIES", description="Scryer MediaFacetValue: SERIES or ANIME")
+    library_id: Optional[str] = Field(default=None, description="Scryer library id")
+    quality_tier: Optional[str] = Field(default=None, description="Quality profile name applied by Scryer")
+    current_quality_tier: Optional[str] = Field(default=None, description="Quality actually on disk")
+    monitored: bool = Field(default=False)
+    has_file: bool = Field(default=False, description="Whether at least one episode file exists")
+    episodes_owned: int = Field(default=0)
+    episodes_total: int = Field(default=0)
+    quality_profile_id: Optional[str] = Field(default=None)
     root_folder_path: Optional[str] = Field(default=None)
     seasons: list[dict[str, Any]] = Field(default_factory=list)
+
+    @property
+    def content_type(self) -> ContentType:
+        """The ContentType matching this title's Scryer facet."""
+        return ContentType.from_scryer_facet(self.facet)
 
 
 class ArtistInfo(BaseModel):
@@ -189,18 +274,27 @@ class MetadataProfile(BaseModel):
 
 
 class QualityProfile(BaseModel):
-    """Quality profile from Radarr/Sonarr/Lidarr."""
+    """Quality profile from Scryer or Lidarr.
 
-    id: int
+    Scryer profile ids are slugs ("4k", "1080p"); Lidarr's are integers — hence
+    the union type. Compare with `str(...)` when matching a stored preference.
+    """
+
+    id: Union[int, str]
     name: str
 
 
 class RootFolder(BaseModel):
-    """Root folder from Radarr/Sonarr."""
+    """Root folder from Scryer or Lidarr.
 
-    id: int
+    Scryer's `RootFolderPayload` has no id of its own — the path *is* the
+    identity, so the client mirrors the path into `id`.
+    """
+
+    id: Union[int, str]
     path: str
     free_space: Optional[int] = Field(default=None)
+    is_default: bool = Field(default=False)
 
     @property
     def free_space_formatted(self) -> str:
@@ -210,18 +304,272 @@ class RootFolder(BaseModel):
         return format_bytes(self.free_space)
 
 
-class UserPreferences(BaseModel):
-    """User preferences stored in database."""
+# ============================================================================
+# Scryer models (migration 2026-07-28)
+# ============================================================================
 
-    radarr_quality_profile_id: Optional[int] = None
-    radarr_root_folder_id: Optional[int] = None
-    sonarr_quality_profile_id: Optional[int] = None
-    sonarr_root_folder_id: Optional[int] = None
+
+class IndexerStat(BaseModel):
+    """Per-indexer 24h counters from Scryer's `systemHealth.indexerStats`."""
+
+    name: str
+    queries_24h: int = 0
+    successful_24h: int = 0
+    failed_24h: int = 0
+
+    @property
+    def failure_rate(self) -> float:
+        """Share of failed queries in the last 24h (0.0 when idle)."""
+        total = self.successful_24h + self.failed_24h
+        return (self.failed_24h / total) if total else 0.0
+
+
+class ScryerHealth(BaseModel):
+    """Snapshot of Scryer's `systemHealth` query."""
+
+    service_ready: bool = False
+    total_titles: int = 0
+    monitored_titles: int = 0
+    titles_movie: int = 0
+    titles_series: int = 0
+    titles_anime: int = 0
+    version: Optional[str] = None
+    indexers: list[IndexerStat] = Field(default_factory=list)
+
+
+class ScryerQueueItem(BaseModel):
+    """One row of Scryer's `downloadQueue`."""
+
+    id: str
+    title_id: Optional[str] = None
+    episode_id: Optional[str] = None
+    title_name: str = "?"
+    content_type: ContentType = ContentType.UNKNOWN
+    state: str = "UNKNOWN"
+    display_state: str = "UNKNOWN"
+    progress_percent: int = 0
+    size_bytes: Optional[int] = None
+    remaining_seconds: Optional[int] = None
+    queued_at: Optional[datetime] = None
+    client_name: Optional[str] = None
+    attention_required: bool = False
+    attention_reason: Optional[str] = None
+    import_status: Optional[str] = None
+    download_id: Optional[str] = None
+
+    @property
+    def size_formatted(self) -> str:
+        return format_bytes(self.size_bytes) if self.size_bytes else "N/A"
+
+    @property
+    def eta_formatted(self) -> str:
+        """Human-readable ETA; "∞" when Scryer has no estimate."""
+        if self.remaining_seconds is None or self.remaining_seconds < 0:
+            return "∞"
+        hours, remainder = divmod(self.remaining_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours > 24:
+            return f"{hours // 24}d {hours % 24}h"
+        if hours:
+            return f"{hours}h {minutes}m"
+        if minutes:
+            return f"{minutes}m {seconds}s"
+        return f"{seconds}s"
+
+
+class ScryerCalendarItem(BaseModel):
+    """One row of Scryer's `calendarEpisodes`."""
+
+    id: str
+    title_id: str
+    title_name: str
+    content_type: ContentType = ContentType.SERIES
+    season_number: Optional[int] = None
+    episode_number: Optional[int] = None
+    episode_title: Optional[str] = None
+    air_date: Optional[str] = None
+    monitored: bool = True
+
+
+class ScryerWantedItem(BaseModel):
+    """One row of Scryer's `wantedItems`."""
+
+    id: str
+    title_id: str
+    title_name: str = "?"
+    content_type: ContentType = ContentType.UNKNOWN
+    season_number: Optional[int] = None
+    episode_number: Optional[int] = None
+    status: Optional[str] = None
+    media_type: Optional[str] = None
+
+
+class QueueResult(BaseModel):
+    """Outcome of a queue mutation (`QueueDownloadPayload`)."""
+
+    status: str = "QUEUED"
+    job_id: Optional[str] = None
+    title_id: Optional[str] = None
+    title_name: Optional[str] = None
+    conflict: Optional[dict[str, Any]] = None
+
+    @property
+    def queued(self) -> bool:
+        return self.status == "QUEUED"
+
+
+class AddTitleOutcome(BaseModel):
+    """Outcome of `addTitle` / `addTitleAndQueueDownload` (`AddTitleResult`)."""
+
+    title: Union[MovieInfo, SeriesInfo] = Field(..., description="The added or reused title")
+    reused_existing: bool = False
+    download_job_id: Optional[str] = None
+    queued_download: Optional[QueueResult] = None
+
+    @property
+    def queued(self) -> bool:
+        """True when Scryer actually put a download in the queue."""
+        if self.queued_download is not None:
+            return self.queued_download.queued
+        return self.download_job_id is not None
+
+
+# ============================================================================
+# Music models — slskd (Soulseek) and Navidrome
+# ============================================================================
+
+
+class SlskdFile(BaseModel):
+    """One shared file offered by a Soulseek peer."""
+
+    filename: str = Field(..., description="Full remote path (Windows-style separators)")
+    name: str = Field(default="", description="Basename for display")
+    size: int = Field(default=0)
+    extension: str = Field(default="")
+    bitrate: Optional[int] = Field(default=None)
+    bit_depth: Optional[int] = Field(default=None)
+    sample_rate: Optional[int] = Field(default=None)
+    length_seconds: Optional[int] = Field(default=None)
+
+    @property
+    def size_formatted(self) -> str:
+        return format_bytes(self.size)
+
+
+class SlskdSearchResult(BaseModel):
+    """Audio files from one peer, grouped by their shared parent folder.
+
+    Soulseek has no album entity — this grouping is what makes a result
+    downloadable as a unit rather than track by track.
+    """
+
+    username: str
+    folder: str = ""
+    files: list[SlskdFile] = Field(default_factory=list)
+    has_free_slot: bool = False
+    queue_length: int = 0
+    upload_speed: int = 0
+
+    @property
+    def track_count(self) -> int:
+        return len(self.files)
+
+    @property
+    def total_size(self) -> int:
+        return sum(f.size for f in self.files)
+
+    @property
+    def size_formatted(self) -> str:
+        return format_bytes(self.total_size)
+
+    @property
+    def dominant_format(self) -> str:
+        """Most common extension in the group ("flac", "mp3", ...)."""
+        counts: dict[str, int] = {}
+        for f in self.files:
+            if f.extension:
+                counts[f.extension] = counts.get(f.extension, 0) + 1
+        return max(counts, key=lambda k: counts[k]) if counts else ""
+
+    @property
+    def guessed_artist(self) -> str:
+        """Artist guessed from the folder name ("Artist - Album (2024)").
+
+        Deliberately crude: Soulseek folder naming is a free-for-all, and this
+        only feeds the "does this look like music?" heuristic.
+        """
+        folder = self.folder or ""
+        if " - " in folder:
+            return folder.split(" - ", 1)[0].strip()
+        return folder.strip()
+
+    @property
+    def display_name(self) -> str:
+        return self.folder or (self.files[0].name if self.files else self.username)
+
+
+class SlskdTransfer(BaseModel):
+    """One in-flight (or failed) slskd download."""
+
+    username: str
+    filename: str = ""
+    state: str = "Unknown"
+    size: int = 0
+    transferred: int = 0
+    average_speed: float = 0.0
+
+    @property
+    def progress_percent(self) -> int:
+        return int(self.transferred / self.size * 100) if self.size else 0
+
+    @property
+    def is_errored(self) -> bool:
+        return "Errored" in self.state or "Rejected" in self.state or "Cancelled" in self.state
+
+    @property
+    def speed_formatted(self) -> str:
+        return format_speed(self.average_speed)
+
+
+class NavidromeAlbum(BaseModel):
+    """One album known to Navidrome (i.e. already on disk)."""
+
+    id: str
+    name: str
+    artist: str = ""
+    year: Optional[int] = None
+    song_count: int = 0
+
+
+class UserPreferences(BaseModel):
+    """User preferences stored in database.
+
+    Migration 2026-07-28: the per-*arr profile/folder preferences collapsed into
+    one Scryer pair. Scryer ids are slugs/paths, so these are strings now; the
+    Lidarr trio stays integer-keyed. Legacy `radarr_*`/`sonarr_*` keys still
+    present in stored JSON are ignored (extra keys are dropped by pydantic).
+    """
+
+    scryer_quality_profile_id: Optional[str] = None
+    scryer_root_folder_id: Optional[str] = None
     lidarr_quality_profile_id: Optional[int] = None
     lidarr_metadata_profile_id: Optional[int] = None
     lidarr_root_folder_id: Optional[int] = None
     preferred_resolution: Optional[str] = None  # 1080p, 2160p, etc.
     auto_grab_enabled: bool = False
+
+    @field_validator("scryer_quality_profile_id", "scryer_root_folder_id", mode="before")
+    @classmethod
+    def _coerce_scryer_id(cls, v):
+        """Scryer ids are slugs/paths, but a stored preference may still be a
+        number (a value written before the migration, or a numeric-looking
+        profile id). Coerce rather than reject: a ValidationError here makes
+        `_row_to_user` fall back to defaults and silently drop every other
+        preference the user had set.
+        """
+        if v is None or isinstance(v, str):
+            return v
+        return str(v)
 
 
 class User(BaseModel):

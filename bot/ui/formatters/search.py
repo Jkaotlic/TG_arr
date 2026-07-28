@@ -157,10 +157,11 @@ class _SearchFormatters:
     @staticmethod
     def format_movie_info(movie: MovieInfo, compact: bool = False) -> str:
         """Format movie information."""
+        year_str = f" ({movie.year})" if movie.year else ""
         if compact:
-            return f"🎬 <b>{_e(movie.title)}</b> ({movie.year})"
+            return f"🎬 <b>{_e(movie.title)}</b>{year_str}"
 
-        lines = [f"🎬 <b>{_e(movie.title)}</b> ({movie.year})"]
+        lines = [f"🎬 <b>{_e(movie.title)}</b>{year_str}"]
 
         if movie.original_title and movie.original_title != movie.title:
             lines.append(f"<i>Оригинал: {_e(movie.original_title)}</i>")
@@ -180,11 +181,18 @@ class _SearchFormatters:
                 overview += "..."
             lines.append(f"\n📝 {_e(overview)}")
 
-        # Status in Radarr
-        if movie.radarr_id:
-            status = "✅ В библиотеке"
+        # Status in the Scryer catalog. `scryer_id` alone only means "known to
+        # Scryer" — a title is added unmonitored just to list its releases — so
+        # the label distinguishes on-disk / tracked / merely present.
+        if movie.scryer_id:
             if movie.has_file:
-                status += " (скачан)"
+                status = "✅ В библиотеке (скачан)"
+            elif movie.monitored:
+                status = "👀 В библиотеке, отслеживается"
+            else:
+                status = "📇 Есть в каталоге Scryer"
+            if movie.current_quality_tier:
+                status += f" · {_e(movie.current_quality_tier)}"
             lines.append(f"\n{status}")
 
         return "\n".join(lines)
@@ -230,10 +238,42 @@ class _SearchFormatters:
                 overview += "..."
             lines.append(f"\n📝 {_e(overview)}")
 
-        # Status in Sonarr
-        if series.sonarr_id:
-            lines.append("\n✅ В библиотеке")
+        # Status in the Scryer catalog (see format_movie_info for the labels).
+        if series.scryer_id:
+            if series.episodes_total:
+                lines.append(
+                    f"\n📥 Скачано серий: {series.episodes_owned}/{series.episodes_total}"
+                )
+            if series.has_file:
+                status = "✅ В библиотеке"
+            elif series.monitored:
+                status = "👀 В библиотеке, отслеживается"
+            else:
+                status = "📇 Есть в каталоге Scryer"
+            lines.append(f"\n{status}")
 
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_slskd_results(results: list, query: str) -> str:
+        """Render Soulseek candidates.
+
+        Each entry is one peer's folder, not a single file — Soulseek shares
+        directories, so that grouping is what the user actually downloads.
+        `hasFreeUploadSlot` and the queue length matter more than raw speed
+        here: a fast peer with 40 queued transfers is slower in practice.
+        """
+        lines = [f"🎵 <b>Soulseek:</b> <code>{_e(query)}</code>\n"]
+        for idx, result in enumerate(results[:5], start=1):
+            fmt = (result.dominant_format or "?").upper()
+            slot = "🟢 свободен" if result.has_free_slot else f"⏳ очередь {result.queue_length}"
+            lines.append(
+                f"<b>{idx}. {_e(result.display_name)}</b>\n"
+                f"   💿 {fmt} · {result.track_count} трек. · {result.size_formatted}\n"
+                f"   👤 {_e(result.username)} · {slot}"
+            )
+        if len(results) > 5:
+            lines.append(f"\n<i>…и ещё {len(results) - 5} вариант(ов)</i>")
         return "\n".join(lines)
 
     @staticmethod
@@ -308,37 +348,31 @@ class _SearchFormatters:
     @staticmethod
     def format_user_preferences(
         prefs: UserPreferences,
-        radarr_profiles: list[QualityProfile],
-        radarr_folders: list[RootFolder],
-        sonarr_profiles: list[QualityProfile],
-        sonarr_folders: list[RootFolder],
+        profiles: list[QualityProfile],
+        folders: list[RootFolder],
     ) -> str:
-        """Format user preferences for settings display."""
+        """Format user preferences for settings display.
+
+        Migration 2026-07-28: one Scryer profile/folder pair instead of the
+        Radarr+Sonarr quartet. Both are *overrides* — left unset, Scryer applies
+        each library's own profile, which is the recommended setup.
+        """
         lines = ["<b>⚙️ Ваши настройки</b>\n"]
 
-        # Radarr settings
-        lines.append("<b>🎬 Radarr (фильмы):</b>")
-        rp = next(
-            (p for p in radarr_profiles if p.id == prefs.radarr_quality_profile_id),
+        lines.append("<b>🗂 Scryer (кино / сериалы / аниме):</b>")
+        profile = next(
+            (p for p in profiles if str(p.id) == str(prefs.scryer_quality_profile_id)),
             None,
         )
-        lines.append(f"  Профиль: {_e(rp.name) if rp else 'Не выбран'}")
-        rf = next(
-            (f for f in radarr_folders if f.id == prefs.radarr_root_folder_id), None
+        lines.append(
+            f"  Профиль: {_e(profile.name) if profile else 'По умолчанию (профиль библиотеки)'}"
         )
-        lines.append(f"  Папка: {_e(rf.path) if rf else 'Не выбрана'}")
-
-        # Sonarr settings
-        lines.append("\n<b>📺 Sonarr (сериалы):</b>")
-        sp = next(
-            (p for p in sonarr_profiles if p.id == prefs.sonarr_quality_profile_id),
-            None,
+        folder = next(
+            (f for f in folders if str(f.id) == str(prefs.scryer_root_folder_id)), None
         )
-        lines.append(f"  Профиль: {_e(sp.name) if sp else 'Не выбран'}")
-        sf = next(
-            (f for f in sonarr_folders if f.id == prefs.sonarr_root_folder_id), None
+        lines.append(
+            f"  Папка: {_e(folder.path) if folder else 'По умолчанию (папка библиотеки)'}"
         )
-        lines.append(f"  Папка: {_e(sf.path) if sf else 'Не выбрана'}")
 
         # General preferences
         lines.append("\n<b>🎯 Общие:</b>")

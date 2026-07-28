@@ -96,9 +96,9 @@ async def test_collect_statuses_include_deezer_true_adds_deezer():
 
     deezer_client = AsyncMock()
 
-    with patch.object(status_handler, "get_prowlarr", AsyncMock(return_value=AsyncMock())), \
-         patch.object(status_handler, "get_radarr", AsyncMock(return_value=AsyncMock())), \
-         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=AsyncMock())), \
+    with patch.object(status_handler, "get_scryer", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_slskd", AsyncMock(return_value=None)), \
+         patch.object(status_handler, "get_navidrome", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_emby", AsyncMock(return_value=None)), \
@@ -110,16 +110,16 @@ async def test_collect_statuses_include_deezer_true_adds_deezer():
 
     names = {s.service for s in statuses}
     assert "Deezer" in names
-    assert "Prowlarr" in names and "Radarr" in names and "Sonarr" in names
+    assert "Scryer" in names
 
 
 @pytest.mark.asyncio
 async def test_collect_statuses_include_deezer_false_omits_deezer():
     from bot.handlers import status as status_handler
 
-    with patch.object(status_handler, "get_prowlarr", AsyncMock(return_value=AsyncMock())), \
-         patch.object(status_handler, "get_radarr", AsyncMock(return_value=AsyncMock())), \
-         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=AsyncMock())), \
+    with patch.object(status_handler, "get_scryer", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_slskd", AsyncMock(return_value=None)), \
+         patch.object(status_handler, "get_navidrome", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_emby", AsyncMock(return_value=None)), \
@@ -141,13 +141,13 @@ async def test_collect_statuses_exception_becomes_unknown_status():
     from bot.handlers import status as status_handler
 
     async def flaky_check(client, name):
-        if name == "Sonarr":
+        if name == "Scryer":
             raise RuntimeError("boom")
         return SystemStatus(service=name, available=True)
 
-    with patch.object(status_handler, "get_prowlarr", AsyncMock(return_value=AsyncMock())), \
-         patch.object(status_handler, "get_radarr", AsyncMock(return_value=AsyncMock())), \
-         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=AsyncMock())), \
+    with patch.object(status_handler, "get_scryer", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_slskd", AsyncMock(return_value=None)), \
+         patch.object(status_handler, "get_navidrome", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_emby", AsyncMock(return_value=None)), \
@@ -155,7 +155,7 @@ async def test_collect_statuses_exception_becomes_unknown_status():
          patch.object(status_handler, "check_service", AsyncMock(side_effect=flaky_check)):
         statuses = await status_handler._collect_statuses(include_deezer=False)
 
-    assert len(statuses) == 3  # Prowlarr, Radarr, Sonarr all yield a status
+    assert len(statuses) == 1  # Scryer is the only always-checked service now
     unknown = [s for s in statuses if not s.available and s.service == "Unknown"]
     assert len(unknown) == 1
 
@@ -178,8 +178,7 @@ async def test_cmd_status_and_cmd_health_both_use_collect_statuses():
     collect_mock.assert_awaited_once_with(include_deezer=True)
 
     with patch.object(status_handler, "_collect_statuses", AsyncMock(return_value=[])) as collect_mock2, \
-         patch.object(status_handler, "get_radarr", AsyncMock(return_value=None)), \
-         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=None)), \
+         patch.object(status_handler, "get_scryer", AsyncMock(return_value=AsyncMock())), \
          patch.object(status_handler, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=None)):
         await status_handler.cmd_health(message)

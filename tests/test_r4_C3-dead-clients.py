@@ -15,19 +15,11 @@ tests). See analysis/r5/03-dead-code.md DEAD-09.
 
 from bot.clients.deezer import DeezerClient
 from bot.clients.lidarr import LidarrClient
-from bot.clients.prowlarr import ProwlarrClient
-from bot.clients.sonarr import SonarrClient
 from bot.ui.formatters import Formatters
 
 
 class TestDeadSymbolsRemoved:
     """The orphaned methods/helpers must no longer exist anywhere."""
-
-    def test_prowlarr_grab_release_removed(self):
-        assert not hasattr(ProwlarrClient, "grab_release")
-
-    def test_sonarr_lookup_series_by_tvdb_removed(self):
-        assert not hasattr(SonarrClient, "lookup_series_by_tvdb")
 
     def test_deezer_get_trending_albums_removed(self):
         assert not hasattr(DeezerClient, "get_trending_albums")
@@ -48,11 +40,6 @@ class TestDeadSymbolsRemoved:
 
 class TestSurvivingSymbolsIntact:
     """Live siblings of the deleted code must keep working."""
-
-    def test_sonarr_lookup_series_still_present(self):
-        # The remaining title-based lookup is untouched.
-        assert hasattr(SonarrClient, "lookup_series")
-        assert hasattr(SonarrClient, "get_series_by_tvdb")
 
     def test_deezer_get_trending_artists_still_present(self):
         assert hasattr(DeezerClient, "get_trending_artists")

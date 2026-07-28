@@ -14,6 +14,8 @@ class CallbackData:
     # Content type selection
     TYPE_MOVIE = "type:movie"
     TYPE_SERIES = "type:series"
+    # Anime is a separate Scryer facet with its own library and quality profile.
+    TYPE_ANIME = "type:anime"
     TYPE_MUSIC = "type:music"
 
     # Pagination

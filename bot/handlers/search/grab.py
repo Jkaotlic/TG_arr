@@ -1,6 +1,5 @@
 """Grab confirmation, execution and season-monitoring preset handlers."""
 
-import asyncio
 import html
 
 import structlog
@@ -8,7 +7,7 @@ from aiogram import F
 from aiogram.types import CallbackQuery, Message
 
 from bot.db import Database
-from bot.models import ContentType, MovieInfo, SearchSession, SeriesInfo, User
+from bot.models import SearchSession, User
 from bot.services.add_service import AddService
 from bot.services.search_service import SearchService
 from bot.ui.callbacks import SeasonPresetCB
@@ -16,13 +15,22 @@ from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 
 from bot.handlers import search as _search
-from .results import _resolve_movie, _resolve_series
 from .services import router
 
 logger = structlog.get_logger()
 
 # Feature #2: season-monitoring presets exposed on the series release card.
+# These map onto Scryer's `MonitorTypeValue` when a title is added.
 _SEASON_PRESETS = {"all", "future", "latestSeason", "firstSeason", "none"}
+
+#: Bot preset → Scryer `MonitorTypeValue`.
+_SCRYER_MONITOR_TYPES = {
+    "all": "ALL_EPISODES",
+    "future": "FUTURE_EPISODES",
+    "latestSeason": "MONITORED",
+    "firstSeason": "MONITORED",
+    "none": "NONE",
+}
 
 
 @router.callback_query(F.data == CallbackData.GRAB_BEST)
@@ -118,14 +126,13 @@ async def grab_release(
 
 
 def _decide_monitor_type(result, force_download: bool, override: str | None = None) -> str:
-    """Choose the Sonarr monitor scope for a grabbed series release.
+    """Choose the monitor scope for a grabbed series/anime release.
 
     Feature #2: an explicit user preset (``override``) always wins.
 
-    BUG-04: otherwise, a single targeted season (non-pack) must NOT be added with
-    a type that monitors every season — Sonarr's "existing" returns True for all
-    seasons of a brand-new series, so grabbing one season would silently monitor
-    the whole show. Use "none" so only the explicitly grabbed release is pulled.
+    BUG-04: otherwise, a single targeted season (non-pack) must NOT be added
+    with a type that monitors every season — that would silently pull the whole
+    show. Use "none" so only the explicitly grabbed release is fetched.
     """
     if override:
         return override
@@ -138,7 +145,14 @@ def _decide_monitor_type(result, force_download: bool, override: str | None = No
     return "all"
 
 
-def _resolve_folder(folders: list, preferred_id: int | None) -> str:
+def _scryer_monitor_type(preset: str | None) -> str | None:
+    """Translate a bot season preset into Scryer's `MonitorTypeValue`."""
+    if not preset:
+        return None
+    return _SCRYER_MONITOR_TYPES.get(preset)
+
+
+def _resolve_folder(folders: list, preferred_id) -> str:
     """Resolve root folder path from user preference or first available.
 
     LOGIC-11: thin wrapper kept for backward compatibility (tests/callers
@@ -158,108 +172,52 @@ async def _execute_grab(
     *,
     force_download: bool = False,
 ) -> None:
-    """Common grab logic for normal and force grab."""
+    """Common grab logic for normal and force grab.
+
+    Migration 2026-07-28: the title is resolved (and present in Scryer) before
+    releases were ever listed, so this no longer re-looks-up the content, and
+    it no longer picks a quality profile or a root folder — Scryer owns both.
+    Grabbing is just "redeem this candidate token".
+    """
     user_id = session.user_id
     result = session.selected_result
-    prefs = db_user.preferences
 
     if not result:
         await message.edit_text(Formatters.format_error("Релиз не выбран"))
         return
 
+    title = session.selected_content
+    if title is None or not getattr(title, "scryer_id", None):
+        # The session predates the migration, or the title vanished from the
+        # catalog between search and grab.
+        await message.edit_text(
+            Formatters.format_error("Тайтл не найден в Scryer — повторите поиск")
+        )
+        await db.delete_session(user_id)
+        return
+
     try:
-        parsed = search_service.parse_query(session.query)
-        lookup_term = (parsed.get("title") or "").strip() or session.query
-        if session.content_type == ContentType.MOVIE:
-            movie = session.selected_content
-            if not isinstance(movie, MovieInfo):
-                # LOGIC-06: reuse detection's lookup_candidates when possible
-                # (grab_best skips handle_release_selection entirely, so this
-                # is otherwise always a fresh lookup).
-                movie = await _resolve_movie(
-                    session, search_service, lookup_term, result.detected_year, parsed.get("year")
-                )
-                if not movie:
-                    await message.edit_text(Formatters.format_error("Не удалось найти фильм в Radarr"))
-                    return
+        success, action, msg = await add_service.grab_release(
+            title,
+            result,
+            session.content_type,
+            force_download=force_download,
+        )
 
-            # PERF-07b: independent reads — one RTT instead of two sequential ones.
-            profiles, folders = await asyncio.gather(
-                add_service.get_radarr_profiles(), add_service.get_radarr_root_folders()
+        action.user_id = user_id
+        await db.log_action(action)
+
+        if success:
+            year_str = f" ({title.year})" if getattr(title, "year", None) else ""
+            await message.edit_text(
+                Formatters.format_success(
+                    f"<b>{html.escape(title.title)}</b>{year_str}\n\n{msg}\n\n"
+                    f"Релиз: <i>{html.escape(result.title)}</i>"
+                ),
+                parse_mode="HTML",
             )
-
-            if not profiles or not folders:
-                await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Radarr"))
-                return
-
-            profile_id = AddService.resolve_profile(profiles, prefs.radarr_quality_profile_id).id
-            folder_path = AddService.resolve_root_folder(folders, prefs.radarr_root_folder_id)
-
-            success, action, msg = await add_service.grab_movie_release(
-                movie=movie,
-                release=result,
-                quality_profile_id=profile_id,
-                root_folder_path=folder_path,
-                force_download=force_download,
-            )
-
-            action.user_id = user_id
-            await db.log_action(action)
-
-            if success:
-                await message.edit_text(
-                    Formatters.format_success(f"<b>{html.escape(movie.title)}</b> ({movie.year})\n\n{msg}\n\nРелиз: <i>{html.escape(result.title)}</i>"),
-                    parse_mode="HTML",
-                )
-            else:
-                await message.edit_text(Formatters.format_error(msg))
-
         else:
-            series = session.selected_content
-            if not isinstance(series, SeriesInfo):
-                # LOGIC-06: reuse detection's lookup_candidates when possible.
-                series = await _resolve_series(
-                    session, search_service, lookup_term, result.detected_year, parsed.get("year")
-                )
-                if not series:
-                    await message.edit_text(Formatters.format_error("Не удалось найти сериал в Sonarr"))
-                    return
-
-            # PERF-07b: independent reads — one RTT instead of two sequential ones.
-            profiles, folders = await asyncio.gather(
-                add_service.get_sonarr_profiles(), add_service.get_sonarr_root_folders()
-            )
-
-            if not profiles or not folders:
-                await message.edit_text(Formatters.format_error("Нет профилей качества или папок в Sonarr"))
-                return
-
-            profile_id = AddService.resolve_profile(profiles, prefs.sonarr_quality_profile_id).id
-            folder_path = AddService.resolve_root_folder(folders, prefs.sonarr_root_folder_id)
-
-            # Determine monitor type: user preset (#2) wins, else auto (BUG-04/BUG-32)
-            monitor_type = _search._decide_monitor_type(result, force_download, override=session.monitor_type)
-
-            success, action, msg = await add_service.grab_series_release(
-                series=series,
-                release=result,
-                quality_profile_id=profile_id,
-                root_folder_path=folder_path,
-                monitor_type=monitor_type,
-                force_download=force_download,
-            )
-
-            action.user_id = user_id
-            await db.log_action(action)
-
-            if success:
-                year_str = f" ({series.year})" if series.year else ""
-                await message.edit_text(
-                    Formatters.format_success(f"<b>{html.escape(series.title)}</b>{year_str}\n\n{msg}\n\nРелиз: <i>{html.escape(result.title)}</i>"),
-                    parse_mode="HTML",
-                )
-            else:
-                await message.edit_text(Formatters.format_error(msg))
+            await message.edit_text(Formatters.format_error(msg))
 
         await db.delete_session(user_id)
 
