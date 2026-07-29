@@ -3,7 +3,7 @@ progress bars and safe truncation. Used by every domain formatter module.
 """
 
 import html
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -20,16 +20,17 @@ def _e(text) -> str:
 # (calendar headers alone do it once per distinct release date). One process
 # only ever runs under a single configured TIMEZONE, so a tiny cache keyed by
 # tz name is effectively a single cached object in practice.
-_ZONEINFO_CACHE: dict[str, ZoneInfo] = {}
+_ZONEINFO_CACHE: dict[str, tzinfo] = {}
 
 
-def _get_cached_zoneinfo(tz_name: str) -> ZoneInfo:
+def _get_cached_zoneinfo(tz_name: str) -> tzinfo:
     """Return a cached ZoneInfo for `tz_name`, falling back to UTC if the
     IANA database doesn't know it (DEAD-14: single plain except clause).
     """
     cached = _ZONEINFO_CACHE.get(tz_name)
     if cached is not None:
         return cached
+    tz: tzinfo
     try:
         tz = ZoneInfo(tz_name)
     except Exception:

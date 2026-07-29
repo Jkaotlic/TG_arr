@@ -13,7 +13,7 @@ only records what is in flight, so the user is never spammed with history.
 
 import html
 from collections.abc import Awaitable, Callable
-from typing import Optional
+from typing import Any, Optional
 
 import structlog
 
@@ -32,8 +32,8 @@ class LibraryWatcher:
     def __init__(
         self,
         notify: Callable[[str], Awaitable[None]],
-        get_scryer: Optional[Callable[[], Awaitable[object]]] = None,
-        get_slskd: Optional[Callable[[], Awaitable[object]]] = None,
+        get_scryer: Optional[Callable[[], Awaitable[Any]]] = None,
+        get_slskd: Optional[Callable[[], Awaitable[Any]]] = None,
     ):
         self.notify = notify
         self._get_scryer = get_scryer

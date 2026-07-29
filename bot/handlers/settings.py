@@ -22,7 +22,7 @@ from typing import Awaitable, Callable
 import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.clients.registry import (
     get_lidarr,
@@ -32,6 +32,7 @@ from bot.clients.registry import (
 )
 from bot.config import get_settings
 from bot.db import Database
+from bot.handlers.common import accessible_message
 from bot.models import ContentType, User
 from bot.services.add_service import AddService
 from bot.ui.callbacks import SettingCB
@@ -53,7 +54,7 @@ async def _get_add_service() -> AddService:
     )
 
 
-async def _render_settings_menu(db_user: User) -> tuple[str, "Keyboards"]:
+async def _render_settings_menu(db_user: User) -> tuple[str, InlineKeyboardMarkup]:
     """Build the settings-menu text + keyboard.
 
     Migration 2026-07-28: one Scryer profile/folder pair replaces the former
@@ -91,12 +92,13 @@ async def cmd_settings(message: Message, db_user: User) -> None:
 @router.callback_query(F.data == CallbackData.SETTINGS)
 async def handle_settings_back(callback: CallbackQuery, db_user: User) -> None:
     """Return to main settings menu."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     try:
         text, keyboard = await _render_settings_menu(db_user)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer()
     except Exception as e:
         logger.error("Failed to load settings", error=str(e), exc_info=True)
@@ -124,7 +126,7 @@ class _SettingsEntry:
 
     menu_callback: str
     getter: Callable[[AddService], Awaitable[list]]
-    keyboard_builder: Callable[[list, str], object]
+    keyboard_builder: Callable[[list, str], InlineKeyboardMarkup]
     pref_key: str
     not_found_msg: str
     picker_title: str
@@ -195,7 +197,8 @@ _SETTINGS_SET_MAP: dict[str, _SettingsEntry] = {
 @router.callback_query(F.data.in_(_SETTINGS_MAP.keys()))
 async def handle_settings_menu(callback: CallbackQuery) -> None:
     """Generic menu handler: show the picker keyboard for any mapped setting."""
-    if not callback.message or not callback.data:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     entry = _SETTINGS_MAP[callback.data]
@@ -208,7 +211,7 @@ async def handle_settings_menu(callback: CallbackQuery) -> None:
             await callback.answer(entry.not_found_msg, show_alert=True)
             return
 
-        await callback.message.edit_text(
+        await message.edit_text(
             entry.picker_title,
             reply_markup=entry.keyboard_builder(choices, entry.pref_key),
             parse_mode="HTML",
@@ -244,7 +247,8 @@ async def handle_settings_set(
     ``preferences`` blob, so two concurrent settings changes on different
     keys can't clobber each other.
     """
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     entry = _SETTINGS_SET_MAP[callback_data.key]
@@ -267,7 +271,7 @@ async def handle_settings_set(
         setattr(db_user.preferences, entry.pref_key, value)
 
         text, keyboard = await _render_settings_menu(db_user)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     except Exception as e:
         logger.error(
@@ -288,10 +292,11 @@ async def handle_settings_set(
 @router.callback_query(F.data == "settings:resolution")
 async def handle_resolution_menu(callback: CallbackQuery) -> None:
     """Show resolution selection."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
-    await callback.message.edit_text(
+    await message.edit_text(
         "<b>Выберите предпочитаемое разрешение:</b>",
         reply_markup=Keyboards.resolution_selection(),
         parse_mode="HTML",
@@ -304,7 +309,8 @@ async def handle_set_resolution(
     callback: CallbackQuery, callback_data: SettingCB, db_user: User, db: Database
 ) -> None:
     """Set preferred resolution."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     try:
@@ -316,7 +322,7 @@ async def handle_set_resolution(
         db_user.preferences.preferred_resolution = resolution
 
         text, keyboard = await _render_settings_menu(db_user)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     except Exception as e:
         logger.error("Failed to update resolution", error=str(e), exc_info=True)
@@ -329,12 +335,13 @@ async def handle_set_resolution(
 @router.callback_query(F.data == "settings:auto_grab")
 async def handle_auto_grab_menu(callback: CallbackQuery, db_user: User) -> None:
     """Show auto-grab toggle."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     settings = get_settings()
 
-    await callback.message.edit_text(
+    await message.edit_text(
         f"<b>Авто-загрузка</b>\n\n"
         f"При включении релизы с высоким рейтингом (≥ {settings.auto_grab_score_threshold}) "
         f"покажут кнопку «Скачать лучшее» для быстрой загрузки.",
@@ -349,7 +356,8 @@ async def handle_set_auto_grab(
     callback: CallbackQuery, callback_data: SettingCB, db_user: User, db: Database
 ) -> None:
     """Toggle auto-grab setting."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     try:
@@ -359,7 +367,7 @@ async def handle_set_auto_grab(
         db_user.preferences.auto_grab_enabled = enabled
 
         text, keyboard = await _render_settings_menu(db_user)
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
 
     except Exception as e:
         logger.error("Failed to update auto-grab", error=str(e), exc_info=True)

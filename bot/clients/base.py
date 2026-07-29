@@ -15,7 +15,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from bot.config import get_settings
+from bot.config import Settings, get_settings
 from bot.models import QualityProfile, RootFolder
 
 logger = structlog.get_logger()
@@ -89,7 +89,7 @@ class BaseAPIClient:
         self._client_lock = asyncio.Lock()
         # LOGIC-07: lazy settings lookup — don't touch env at import/construction time
         # so tests can instantiate clients without a fully configured environment.
-        self._settings: Optional[object] = None
+        self._settings: Optional["Settings"] = None
         self._ttl_cache: dict[str, tuple[float, Any]] = {}
         self._ttl_cache_lock = asyncio.Lock()
 
@@ -166,7 +166,7 @@ class BaseAPIClient:
         method: str,
         endpoint: str,
         params: Optional[dict[str, Any]] = None,
-        json_data: Optional[dict[str, Any]] = None,
+        json_data: Optional[dict[str, Any] | list[Any]] = None,
         timeout: Optional[float] = None,
         headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any] | list[Any]:
@@ -266,7 +266,7 @@ class BaseAPIClient:
         method: str,
         endpoint: str,
         params: Optional[dict[str, Any]] = None,
-        json_data: Optional[dict[str, Any]] = None,
+        json_data: Optional[dict[str, Any] | list[Any]] = None,
         timeout: Optional[float] = None,
         headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any] | list[Any]:
@@ -318,7 +318,7 @@ class BaseAPIClient:
     async def post(
         self,
         endpoint: str,
-        json_data: Optional[dict[str, Any]] = None,
+        json_data: Optional[dict[str, Any] | list[Any]] = None,
         params: Optional[dict[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> dict[str, Any] | list[Any]:
@@ -333,7 +333,7 @@ class BaseAPIClient:
     async def _post_no_retry(
         self,
         endpoint: str,
-        json_data: dict[str, Any] | None = None,
+        json_data: dict[str, Any] | list[Any] | None = None,
         params: dict[str, Any] | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any] | list[Any]:

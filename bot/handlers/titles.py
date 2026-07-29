@@ -14,7 +14,7 @@ from aiogram.types import CallbackQuery, Message
 
 from bot.clients.registry import get_scryer
 from bot.db import Database
-from bot.handlers.common import strip_command
+from bot.handlers.common import accessible_message, strip_command
 from bot.models import ActionLog, ActionType, ContentType, User
 from bot.ui.callbacks import TitleActionCB
 from bot.ui.formatters import Formatters
@@ -78,7 +78,8 @@ async def handle_title_action(
     callback: CallbackQuery, callback_data: TitleActionCB, db_user: User, db: Database
 ) -> None:
     """Apply a monitoring/removal action to a catalog title."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     action = callback_data.action
@@ -101,13 +102,13 @@ async def handle_title_action(
                 details=f"monitored={monitored}",
             ))
             if title is not None:
-                await callback.message.edit_text(
+                await message.edit_text(
                     _render_title_card(title),
                     reply_markup=Keyboards.title_actions(title),
                     parse_mode="HTML",
                 )
             else:
-                await callback.message.edit_text(
+                await message.edit_text(
                     Formatters.format_success(
                         "Мониторинг включён" if monitored else "Мониторинг снят"
                     )
@@ -125,7 +126,7 @@ async def handle_title_action(
                 if files
                 else "\n\nФайлов на диске нет."
             )
-            await callback.message.edit_text(
+            await message.edit_text(
                 f"🗑 Удалить <b>{label}</b> из каталога Scryer?{warning}",
                 reply_markup=Keyboards.confirm_title_delete(title_id),
                 parse_mode="HTML",
@@ -147,13 +148,13 @@ async def handle_title_action(
                 content_id=title_id,
                 details="deleted",
             ))
-            await callback.message.edit_text(
+            await message.edit_text(
                 Formatters.format_success("Удалено из каталога. Файлы на диске не тронуты.")
             )
             return
 
     except Exception as e:
         logger.error("title_action_failed", action=action, title_id=title_id, error=str(e), exc_info=True)
-        await callback.message.edit_text(
+        await message.edit_text(
             Formatters.format_error(f"Не удалось выполнить действие: {html.escape(str(e))[:150]}")
         )

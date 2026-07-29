@@ -98,7 +98,7 @@ class Formatters(_SearchFormatters, _TorrentFormatters, _EmbyFormatters):
             if episodes:
                 lines.append("")
             lines.append(f"🎬 <b>Фильмы ({len(movies)})</b>")
-            by_date: dict[str, list[dict]] = {}
+            by_date = {}
             for m in movies:
                 date_key = _extract_date_key(m.get("release_date", ""))
                 by_date.setdefault(date_key, []).append(m)
@@ -129,7 +129,7 @@ class Formatters(_SearchFormatters, _TorrentFormatters, _EmbyFormatters):
             if episodes or movies:
                 lines.append("")
             lines.append(f"🎵 <b>Музыка ({len(albums)})</b>")
-            by_date: dict[str, list[dict]] = {}
+            by_date = {}
             for a in albums:
                 date_key = _extract_date_key(a.get("release_date", ""))
                 by_date.setdefault(date_key, []).append(a)

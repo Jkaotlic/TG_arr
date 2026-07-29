@@ -111,7 +111,7 @@ def setup_logging(log_level: str, log_format: str = "json") -> None:
         else structlog.processors.JSONRenderer()
     )
 
-    shared_processors = [
+    shared_processors: list[structlog.typing.Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         _mask_tokens,

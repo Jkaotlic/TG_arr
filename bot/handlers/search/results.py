@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery
 
 from bot.config import get_settings
 from bot.db import Database
+from bot.handlers.common import accessible_message
 from bot.models import ContentType, MovieInfo, SeriesInfo, User
 from bot.ui.callbacks import PageCB, ReleaseCB, SeasonScopeCB, TitleCB
 from bot.ui.formatters import Formatters
@@ -29,7 +30,8 @@ logger = structlog.get_logger()
 )
 async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle content type selection."""
-    if not callback.data or not callback.message:
+    message = accessible_message(callback)
+    if message is None or not callback.data:
         return
 
     user_id = callback.from_user.id
@@ -45,7 +47,7 @@ async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Data
         from bot.handlers.music import process_music_search
 
         await db.delete_session(user_id)  # music flow starts its own session
-        await process_music_search(callback.message, session.query, db_user, db)
+        await process_music_search(message, session.query, db_user, db)
         return
 
     content_type = {
@@ -64,14 +66,14 @@ async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Data
     # otherwise it stays clickable and a repeat tap re-launches a second
     # parallel search while the first one is still in flight.
     try:
-        await callback.message.edit_reply_markup(reply_markup=None)
+        await message.edit_reply_markup(reply_markup=None)
     except TelegramBadRequest as e:
         if "message is not modified" not in str(e):
             raise
 
     # Use message.answer() to send results to same chat
     await _search.process_search(
-        callback.message,
+        message,
         session.query,
         content_type,
         db_user,
@@ -84,7 +86,8 @@ async def handle_pagination(
     callback: CallbackQuery, callback_data: PageCB, db_user: User, db: Database
 ) -> None:
     """Handle pagination buttons (#1: typed PageCB, no string parsing)."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     settings = get_settings()
@@ -117,7 +120,7 @@ async def handle_pagination(
     # LOGIC-04/BUG-03: shared renderer — also swallows "message is not
     # modified" from a fast double-tap on the same page.
     await _search._render_results_page(
-        callback.message,
+        message,
         session.results,
         page,
         total_pages,
@@ -136,7 +139,8 @@ async def handle_release_selection(
     callback: CallbackQuery, callback_data: ReleaseCB, db_user: User, db: Database
 ) -> None:
     """Handle release selection."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     search_service, add_service = await _search.get_services()
@@ -184,7 +188,7 @@ async def handle_release_selection(
 
     try:
         if content is None:
-            await callback.message.edit_text(
+            await message.edit_text(
                 f"{text}\n\n⚠️ Информация о тайтле недоступна. Продолжить?",
                 reply_markup=Keyboards.release_details(
                     result, session.content_type, show_force_grab=has_qbittorrent
@@ -193,13 +197,15 @@ async def handle_release_selection(
             )
             return
 
-        info_text = (
-            Formatters.format_movie_info(content)
-            if isinstance(content, MovieInfo)
-            else Formatters.format_series_info(content)
-        )
+        if isinstance(content, MovieInfo):
+            info_text = Formatters.format_movie_info(content)
+        elif isinstance(content, SeriesInfo):
+            info_text = Formatters.format_series_info(content)
+        else:
+            # ArtistInfo: music has its own card, it never reaches this one.
+            info_text = ""
         emby_note = await _emby_library_note(content)
-        await callback.message.edit_text(
+        await message.edit_text(
             f"{text}\n\n---\n{info_text}{emby_note}",
             reply_markup=Keyboards.release_details(
                 result, session.content_type, show_force_grab=has_qbittorrent, content=content
@@ -209,7 +215,7 @@ async def handle_release_selection(
     except Exception as e:
         logger.warning("Failed to render release card", error=str(e), exc_info=True)
         # SEC-20: escape exception text — error messages can contain '<' from URLs.
-        await callback.message.edit_text(
+        await message.edit_text(
             f"{text}\n\n⚠️ Ошибка загрузки информации: {html.escape(str(e))[:200]}",
             reply_markup=Keyboards.release_details(
                 result, session.content_type, show_force_grab=has_qbittorrent
@@ -263,7 +269,8 @@ def _pick_by_year(items: list, release_year, query_year):
 @router.callback_query(F.data == CallbackData.BACK)
 async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle back button."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     settings = get_settings()
@@ -293,7 +300,7 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
     # LOGIC-04/BUG-03: shared renderer — also swallows "message is not
     # modified" from a repeat Back tap.
     await _search._render_results_page(
-        callback.message,
+        message,
         session.results,
         page,
         total_pages,
@@ -310,13 +317,14 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
 @router.callback_query(F.data == CallbackData.CANCEL)
 async def handle_cancel(callback: CallbackQuery, db: Database) -> None:
     """Handle cancel button."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     user_id = callback.from_user.id
     await db.delete_session(user_id)
 
-    await callback.message.edit_text("Операция отменена. Отправьте новый запрос для поиска.")
+    await message.edit_text("Операция отменена. Отправьте новый запрос для поиска.")
     await callback.answer()
 
 
@@ -355,7 +363,8 @@ async def handle_title_selection(
     ambiguous — see the prod incident where "Холодное сердце" silently resolved
     to an unrelated German film.
     """
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     user_id = callback.from_user.id
@@ -374,13 +383,13 @@ async def handle_title_selection(
 
     # Drop the buttons so a second tap can't start a parallel search (LOGIC-23).
     try:
-        await callback.message.edit_reply_markup(reply_markup=None)
+        await message.edit_reply_markup(reply_markup=None)
     except TelegramBadRequest as e:
         if "message is not modified" not in str(e):
             raise
 
     await _search.process_search(
-        callback.message,
+        message,
         session.query,
         session.content_type,
         db_user,
@@ -394,7 +403,8 @@ async def handle_season_scope(
     callback: CallbackQuery, callback_data: SeasonScopeCB, db_user: User, db: Database
 ) -> None:
     """Continue the search scoped to the chosen season (0 = whole series)."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     user_id = callback.from_user.id
@@ -405,13 +415,13 @@ async def handle_season_scope(
 
     await callback.answer()
     try:
-        await callback.message.edit_reply_markup(reply_markup=None)
+        await message.edit_reply_markup(reply_markup=None)
     except TelegramBadRequest as e:
         if "message is not modified" not in str(e):
             raise
 
     await _search.process_search(
-        callback.message,
+        message,
         session.query,
         session.content_type,
         db_user,

@@ -251,4 +251,6 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Get cached settings instance."""
-    return Settings()
+    # Every field is populated from the environment/.env by pydantic-settings;
+    # mypy only sees the model signature and thinks they are missing.
+    return Settings()  # type: ignore[call-arg]

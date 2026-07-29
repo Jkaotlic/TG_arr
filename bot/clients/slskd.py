@@ -139,7 +139,10 @@ class SlskdClient(BaseAPIClient):
             remaining = deadline - time.monotonic()
             await asyncio.sleep(max(min(_POLL_INTERVAL_S, remaining), 0.05))
             try:
-                payload = await self.get(f"/api/v0/searches/{search_id}", params={"includeResponses": "true"})
+                response = await self.get(
+                    f"/api/v0/searches/{search_id}", params={"includeResponses": "true"}
+                )
+                payload = response if isinstance(response, dict) else {}
             except Exception as e:
                 logger.warning("slskd_search_poll_failed", error=str(e))
                 break

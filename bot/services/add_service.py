@@ -123,7 +123,7 @@ def _log_grab_completed(
     )
 
 
-def _is_internal_ip(addr: ipaddress._BaseAddress) -> bool:
+def _is_internal_ip(addr: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
     """Classify any non-public IP (private/loopback/link-local/reserved/multicast)."""
     return (
         addr.is_private
