@@ -23,7 +23,7 @@ from typing import NamedTuple, Optional
 
 import structlog
 
-from bot.clients.scryer import ScryerClient
+from bot.clients.scryer import ScryerClient, ScryerGraphQLError
 from bot.models import ArtistInfo, ContentType, SearchResult, VIDEO_CONTENT_TYPES
 from bot.services.scoring import ScoringService
 
@@ -61,6 +61,33 @@ _AMBIGUITY_MARGIN = 0.15
 # near-tie between the two is the normal case rather than a real ambiguity —
 # prefer the anime facet, which has its own library and `1080p` profile.
 _ANIME_OVER_SERIES_MARGIN = 0.1
+
+
+#: Scryer masks every repository-level failure as a bare "Internal server
+#: error". In practice the one that reaches users is "all attempted indexer
+#: strategies failed" — i.e. Prowlarr is rate-limiting Scryer because the
+#: indexers' daily query limits are spent (prod incident 2026-07-29).
+_MASKED_INTERNAL_ERROR = "internal server error"
+
+
+def describe_scryer_failure(exc: BaseException) -> str:
+    """Turn a search failure into something the user can act on.
+
+    "Поиск временно недоступен" reads like the bot is broken and hides the only
+    useful fact. When Scryer masks an indexer failure behind a generic internal
+    error, say so — the fix is to wait (the limits are per-24h) or raise the
+    query limits, and neither is discoverable from the generic text.
+    """
+    if isinstance(exc, ScryerGraphQLError):
+        message = str(exc)
+        if _MASKED_INTERNAL_ERROR in message.lower():
+            return (
+                "Индексеры сейчас не отвечают — Scryer не смог опросить ни один "
+                "из них.\n\nОбычно это суточный лимит запросов к трекерам: он "
+                "сбрасывается сам. Текущее состояние — в /health."
+            )
+        return message
+    return "Поиск временно недоступен"
 
 
 def _normalize_query(query: str) -> str:
