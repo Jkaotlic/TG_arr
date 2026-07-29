@@ -56,6 +56,7 @@ services:
       # Notifications
       NOTIFY_DOWNLOAD_COMPLETE: ${NOTIFY_DOWNLOAD_COMPLETE:-true}
       NOTIFY_CHECK_INTERVAL: ${NOTIFY_CHECK_INTERVAL:-60}
+      NOTIFY_ADMINS_ON_START: ${NOTIFY_ADMINS_ON_START:-true}
       # Tuning
       TIMEZONE: ${TIMEZONE:-Europe/Moscow}
       # DEPLOY-03: TZ feeds glibc; tzdata is installed in the image.

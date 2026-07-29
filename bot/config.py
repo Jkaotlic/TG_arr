@@ -86,6 +86,10 @@ class Settings(BaseSettings):
 
     # Notifications
     notify_download_complete: bool = Field(default=True, description="Notify when download completes")
+    notify_admins_on_start: bool = Field(
+        default=True,
+        description="Send admins a 'bot is up' card on startup (matches the other bots' behaviour)",
+    )
     notify_check_interval: int = Field(default=60, ge=10, le=3600, description="Check interval for notifications (seconds)")
 
     # Optional

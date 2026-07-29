@@ -2,6 +2,7 @@
 
 import asyncio
 import faulthandler
+import html
 import logging
 import os
 import re
@@ -182,9 +183,9 @@ async def on_startup(
         # service started" — don't duplicate it here.
         await notification_service.start()
 
-    # PERF-08: warm up *arr clients so the first user search doesn't pay
+    # PERF-08: warm up the clients so the first user search doesn't pay
     # DNS+TCP+TLS handshake (extra 0.5–1.5s on rpie4 over Wi-Fi).
-    await _warm_up_clients(logger)
+    warmup = await _warm_up_clients(logger)
 
     # Get bot info
     bot_info = await bot.get_me()
@@ -194,9 +195,103 @@ async def on_startup(
         id=bot_info.id,
     )
 
+    # Tell the admins the bot is up and which backends answered — the warm-up
+    # already probed them, so this costs nothing extra.
+    settings = get_settings()
+    db_user_ids = await db.list_allowed_users()
+    await notify_admins_on_start(
+        bot,
+        admin_ids=sorted(set(settings.admin_tg_ids)),
+        allowed_ids=sorted(set(settings.allowed_tg_ids) | set(db_user_ids)),
+        warmup=warmup,
+    )
 
-async def _warm_up_clients(logger) -> None:
-    """Run health checks in parallel to prime singleton HTTP clients."""
+
+#: Display names for the warm-up probe keys, in the order they're shown.
+_BACKEND_LABELS = (
+    ("scryer", "🗂 Scryer"),
+    ("lidarr", "🎵 Lidarr"),
+    ("slskd", "🎧 slskd"),
+)
+
+
+def _format_backend_line(label: str, outcome) -> str:
+    """One "service: state" line for the startup card.
+
+    `outcome` mirrors `_warm_up_clients`: None = not configured, ("error", msg)
+    = the probe raised, (ok, elapsed_ms) otherwise. A probe error goes through
+    the same masking as the logs (it can carry a URL with embedded
+    credentials — the TMDb proxy URL does) and is escaped, because the message
+    is sent with parse_mode=HTML.
+    """
+    if outcome is None:
+        return f"{label}: ⚪ не настроен"
+    state, detail, *rest = outcome
+    if state == "error":
+        return f"{label}: ❌ {html.escape(_mask_value(str(detail)))[:80]}"
+    if state:
+        version = rest[0] if rest else None
+        suffix = f" v{html.escape(str(version))}" if version else ""
+        return f"{label}: ✅{suffix} · {detail:.0f} мс"
+    return f"{label}: ❌ не отвечает"
+
+
+def build_startup_message(
+    *, warmup: dict, admin_ids: list, allowed_ids: list, version: Optional[str] = None
+) -> str:
+    """Render the "bot is up" card sent to admins.
+
+    `version` is accepted for callers that know it out-of-band; normally each
+    backend reports its own in the warm-up outcome and is rendered inline.
+    """
+    lines = [
+        "🚀 <b>TG_arr запущен!</b>",
+        "",
+        f"⏰ Время: {time.strftime('%H:%M:%S %d.%m.%Y')}",
+        f"👑 Администраторов: {len(admin_ids)}",
+        f"👥 Разрешённых пользователей: {len(allowed_ids)}",
+    ]
+    backend_lines = [
+        _format_backend_line(label, warmup.get(key))
+        for key, label in _BACKEND_LABELS
+        if key in warmup
+    ]
+    if backend_lines:
+        lines.append("")
+        lines.extend(backend_lines)
+
+    lines.append("")
+    lines.append("✅ Бот готов к работе!")
+    return "\n".join(lines)
+
+
+async def notify_admins_on_start(bot, *, admin_ids: list, allowed_ids: list, warmup: dict) -> None:
+    """Send the startup card to every admin.
+
+    Best-effort per admin: one who blocked the bot must not stop the others
+    from being told, and a delivery failure must never abort startup.
+    """
+    if not get_settings().notify_admins_on_start or not admin_ids:
+        return
+
+    text = build_startup_message(warmup=warmup, admin_ids=admin_ids, allowed_ids=allowed_ids)
+
+    async def _send(admin_id: int) -> None:
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception as e:
+            logger = structlog.get_logger()
+            logger.warning("startup_notify_failed", user_id=admin_id, error=str(e))
+
+    await asyncio.gather(*(_send(admin_id) for admin_id in admin_ids))
+
+
+async def _warm_up_clients(logger) -> dict:
+    """Run health checks in parallel to prime singleton HTTP clients.
+
+    Returns the per-backend outcome map, which the startup notification
+    reuses so the probe isn't repeated.
+    """
     from bot.clients.registry import get_lidarr, get_scryer, get_slskd
 
     structlog.contextvars.bind_contextvars(component="warmup")
@@ -208,8 +303,8 @@ async def _warm_up_clients(logger) -> None:
                     return name, None
                 # Scryer's probe includes the login round-trip, so give it more
                 # room than a plain health endpoint would need.
-                ok, _ver, ms = await asyncio.wait_for(client.check_connection(), timeout=15.0)
-                return name, (ok, ms)
+                ok, version, ms = await asyncio.wait_for(client.check_connection(), timeout=15.0)
+                return name, (ok, ms, version)
             except Exception as e:
                 return name, ("error", str(e))
 
@@ -221,6 +316,7 @@ async def _warm_up_clients(logger) -> None:
         )
         summary = {name: outcome for r in results if isinstance(r, tuple) for name, outcome in [r]}
         logger.info("warmup_completed", summary=summary)
+        return summary
     finally:
         structlog.contextvars.unbind_contextvars("component")
 
