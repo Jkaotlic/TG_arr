@@ -19,7 +19,7 @@ import asyncio
 import re
 import time
 from difflib import SequenceMatcher
-from typing import NamedTuple, Optional
+from typing import Any, NamedTuple, Optional
 
 import structlog
 
@@ -490,7 +490,7 @@ class SearchService:
         """Look up artists (Lidarr, falling back to slskd)."""
         return await self._lookup_artists(query)
 
-    def parse_query(self, query: str) -> dict:
+    def parse_query(self, query: str) -> dict[str, Any]:
         """
         Parse a search query into title / year / season / episode / quality.
 
@@ -498,7 +498,7 @@ class SearchService:
         form for the metadata search. Season/episode are used to narrow the
         release search to one season or episode.
         """
-        result = {
+        result: dict[str, Any] = {
             "original": query,
             "title": query,
             "year": None,

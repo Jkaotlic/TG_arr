@@ -10,7 +10,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
 from bot.clients.registry import get_lidarr, get_scryer
-from bot.handlers.common import swallow_not_modified
+from bot.handlers.common import accessible_message, swallow_not_modified
 from bot.models import ContentType
 from bot.ui.callbacks import CalCB
 from bot.ui.formatters import Formatters
@@ -93,11 +93,11 @@ async def _fetch_and_send_calendar(
 
     payloads: dict[str, list] = {}
     for (source, _), result in zip(fetchers, results, strict=True):
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             logger.error("calendar_fetch_failed", service=source, error=str(result), exc_info=result)
             errors.append(f"{source}: {_html.escape(str(result))[:100]}")
         else:
-            payloads[source] = result
+            payloads[source] = list(result)
 
     episodes, movies = _split_scryer_calendar(payloads.get("Scryer", []))
     albums = payloads.get("Lidarr", [])
@@ -139,7 +139,8 @@ async def handle_calendar_menu(message: Message) -> None:
 async def handle_calendar_period(callback: CallbackQuery, callback_data: CalCB) -> None:
     """Switch calendar to the requested period (was ``cal_7``/``cal_14``/``cal_30``)."""
     await callback.answer()
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
     days = callback_data.days
     user_id = callback.from_user.id
@@ -147,7 +148,7 @@ async def handle_calendar_period(callback: CallbackQuery, callback_data: CalCB) 
         _user_period[user_id] = days
     await _fetch_and_send_calendar(
         days,
-        answer_func=callback.message.edit_text,
+        answer_func=message.edit_text,
     )
 
 
@@ -164,11 +165,12 @@ async def handle_legacy_calendar_period(callback: CallbackQuery) -> None:
 async def handle_calendar_refresh(callback: CallbackQuery) -> None:
     """Refresh calendar without changing period."""
     await callback.answer("🔄 Обновляю...")
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
     user_id = callback.from_user.id
     days = _user_period.get(user_id, 7)
     await _fetch_and_send_calendar(
         days,
-        answer_func=callback.message.edit_text,
+        answer_func=message.edit_text,
     )

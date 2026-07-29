@@ -7,7 +7,8 @@ from aiogram import F
 from aiogram.types import CallbackQuery, Message
 
 from bot.db import Database
-from bot.models import SearchSession, User
+from bot.handlers.common import accessible_message
+from bot.models import MovieInfo, SearchSession, SeriesInfo, User
 from bot.services.add_service import AddService
 from bot.services.search_service import SearchService
 from bot.ui.callbacks import SeasonPresetCB
@@ -36,7 +37,8 @@ _SCRYER_MONITOR_TYPES = {
 @router.callback_query(F.data == CallbackData.GRAB_BEST)
 async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle 'Grab Best' button - grab the highest scored release."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     user_id = callback.from_user.id
@@ -57,10 +59,10 @@ async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database)
         await db.save_session(user_id, session)
 
         await callback.answer("Скачиваю лучший релиз...")
-        await callback.message.edit_text("⏳ Скачиваю лучший релиз...")
+        await message.edit_text("⏳ Скачиваю лучший релиз...")
 
         # Lookup and grab
-        await _search.grab_release(callback.message, session, db_user, db, search_service, add_service)
+        await _search.grab_release(message, session, db_user, db, search_service, add_service)
     finally:
         _search._release_grab(user_id)
 
@@ -75,7 +77,8 @@ async def handle_confirm_grab(callback: CallbackQuery, db_user: User, db: Databa
     the event for movies/series (aiogram does not cascade handlers after a
     routed match). Now we dispatch by session.selected_content type here.
     """
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     user_id = callback.from_user.id
@@ -106,9 +109,9 @@ async def handle_confirm_grab(callback: CallbackQuery, db_user: User, db: Databa
     try:
         search_service, add_service = await _search.get_services()
         await callback.answer("Обработка...")
-        await callback.message.edit_text("⏳ Обрабатываю запрос...")
+        await message.edit_text("⏳ Обрабатываю запрос...")
 
-        await _search.grab_release(callback.message, session, db_user, db, search_service, add_service)
+        await _search.grab_release(message, session, db_user, db, search_service, add_service)
     finally:
         _search._release_grab(user_id)
 
@@ -187,7 +190,9 @@ async def _execute_grab(
         return
 
     title = session.selected_content
-    if title is None or not getattr(title, "scryer_id", None):
+    # Music is dispatched to its own handler well before this point; narrowing
+    # here keeps the movie/series attribute access below honest.
+    if not isinstance(title, (MovieInfo, SeriesInfo)) or not title.scryer_id:
         # The session predates the migration, or the title vanished from the
         # catalog between search and grab.
         await message.edit_text(
@@ -208,7 +213,7 @@ async def _execute_grab(
         await db.log_action(action)
 
         if success:
-            year_str = f" ({title.year})" if getattr(title, "year", None) else ""
+            year_str = f" ({title.year})" if title.year else ""
             await message.edit_text(
                 Formatters.format_success(
                     f"<b>{html.escape(title.title)}</b>{year_str}\n\n{msg}\n\n"
@@ -235,7 +240,8 @@ async def _execute_grab(
 @router.callback_query(F.data == CallbackData.FORCE_GRAB)
 async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Handle force grab button - downloads directly via qBittorrent."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     user_id = db_user.tg_id
@@ -246,7 +252,6 @@ async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database
     try:
         await callback.answer("Загружаю напрямую...")
 
-        message = callback.message
         session = await db.get_session(user_id)
         if not session or not session.selected_result:
             await message.edit_text(Formatters.format_error("Сессия истекла. Повторите поиск."))
@@ -267,7 +272,8 @@ async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database
 @router.callback_query(F.data == CallbackData.SEASON_MENU)
 async def handle_season_menu(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Feature #2: show the season-monitoring preset picker for a series."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
     user_id = callback.from_user.id
     session = await db.get_session(user_id)
@@ -276,7 +282,7 @@ async def handle_season_menu(callback: CallbackQuery, db_user: User, db: Databas
         return
     await callback.answer()
     current = session.monitor_type or "auto"
-    await callback.message.edit_text(
+    await message.edit_text(
         f"📺 <b>Мониторинг сезонов</b>\n\nТекущий: <code>{current}</code>\n\nВыберите, какие сезоны отслеживать:",
         reply_markup=Keyboards.season_presets(),
         parse_mode="HTML",
@@ -288,7 +294,8 @@ async def handle_season_preset(
     callback: CallbackQuery, callback_data: SeasonPresetCB, db_user: User, db: Database
 ) -> None:
     """Feature #2: store the chosen monitoring preset and return to the release card."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
     user_id = callback.from_user.id
 
@@ -314,7 +321,7 @@ async def handle_season_preset(
     has_qbittorrent = add_service.qbittorrent is not None
     result = session.selected_result
     text = Formatters.format_release_details(result)
-    await callback.message.edit_text(
+    await message.edit_text(
         f"{text}\n\n📺 Мониторинг: <b>{preset}</b>",
         reply_markup=Keyboards.release_details(
             result, session.content_type,
@@ -334,7 +341,8 @@ async def handle_season_back(callback: CallbackQuery, db_user: User, db: Databas
     the release the user was configuring. Re-renders the same card
     handle_release_selection/handle_season_preset show, by the same pattern.
     """
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
     user_id = callback.from_user.id
     session = await db.get_session(user_id)
@@ -347,7 +355,7 @@ async def handle_season_back(callback: CallbackQuery, db_user: User, db: Databas
     has_qbittorrent = add_service.qbittorrent is not None
     result = session.selected_result
     text = Formatters.format_release_details(result)
-    await callback.message.edit_text(
+    await message.edit_text(
         text,
         reply_markup=Keyboards.release_details(
             result, session.content_type,

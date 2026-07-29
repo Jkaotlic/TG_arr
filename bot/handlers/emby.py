@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from bot.clients.emby import EmbyError
 from bot.clients.registry import get_emby
-from bot.handlers.common import safe_edit
+from bot.handlers.common import accessible_message, safe_edit
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.menu import MENU_EMBY
@@ -69,10 +69,11 @@ async def _edit_status(callback: CallbackQuery) -> None:
     callback.answer() — callers that already answered (e.g. with a
     "✅ Сканирование запущено" toast) must not answer a second time.
     """
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
     text, keyboard = await _render_status_text()
-    await safe_edit(callback.message, text, reply_markup=keyboard, parse_mode="HTML")
+    await safe_edit(message, text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def show_emby_status(message_or_callback, edit: bool = False) -> None:
@@ -105,16 +106,16 @@ async def cmd_emby(message: Message) -> None:
 async def handle_refresh(callback: CallbackQuery) -> None:
     """Refresh Emby status. BUG-04c: exactly one callback.answer()."""
     text, keyboard = await _render_status_text()
-    if callback.message:
-        await safe_edit(callback.message, text, reply_markup=keyboard, parse_mode="HTML")
+    if (message := accessible_message(callback)) is not None:
+        await safe_edit(message, text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
 
 
 @router.callback_query(F.data == CallbackData.EMBY_CLOSE)
 async def handle_close(callback: CallbackQuery) -> None:
     """Close Emby message."""
-    if callback.message:
-        await callback.message.delete()
+    if (message := accessible_message(callback)) is not None:
+        await message.delete()
     await callback.answer()
 
 
@@ -213,10 +214,11 @@ async def handle_scan_series(callback: CallbackQuery, is_admin: bool = False) ->
 @router.callback_query(F.data == CallbackData.EMBY_RESTART)
 async def handle_restart_prompt(callback: CallbackQuery) -> None:
     """Show restart confirmation."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
-    await callback.message.edit_text(
+    await message.edit_text(
         "⚠️ <b>Перезагрузить Emby сервер?</b>\n\n"
         "Все активные сессии будут прерваны.",
         reply_markup=Keyboards.emby_confirm_restart(),
@@ -240,8 +242,8 @@ async def handle_restart_confirm(callback: CallbackQuery, is_admin: bool = False
     try:
         await emby.restart_server()
 
-        if callback.message:
-            await callback.message.edit_text(
+        if (message := accessible_message(callback)) is not None:
+            await message.edit_text(
                 "🔁 <b>Сервер перезагружается...</b>\n\n"
                 "Подождите 30-60 секунд, затем используйте /emby для проверки.",
                 parse_mode="HTML",
@@ -263,10 +265,11 @@ async def handle_restart_confirm(callback: CallbackQuery, is_admin: bool = False
 @router.callback_query(F.data == CallbackData.EMBY_UPDATE)
 async def handle_update_prompt(callback: CallbackQuery) -> None:
     """Show update confirmation."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
-    await callback.message.edit_text(
+    await message.edit_text(
         "⚠️ <b>Установить обновление Emby?</b>\n\n"
         "Сервер будет перезагружен после установки.",
         reply_markup=Keyboards.emby_confirm_update(),
@@ -290,8 +293,8 @@ async def handle_update_confirm(callback: CallbackQuery, is_admin: bool = False)
     try:
         await emby.install_update()
 
-        if callback.message:
-            await callback.message.edit_text(
+        if (message := accessible_message(callback)) is not None:
+            await message.edit_text(
                 "⬆️ <b>Обновление устанавливается...</b>\n\n"
                 "Сервер перезагрузится автоматически. "
                 "Подождите несколько минут, затем используйте /emby для проверки.",

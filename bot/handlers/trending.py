@@ -11,6 +11,7 @@ from typing import Any
 from bot.config import get_settings
 from bot.clients.registry import get_qbittorrent, get_scryer, get_tmdb
 from bot.db import Database
+from bot.handlers.common import accessible_message
 from bot.handlers._cache import get_ttl, put_ttl
 from bot.models import ContentType, User
 from bot.services.add_service import AddService
@@ -112,7 +113,8 @@ async def handle_trending_back(callback: CallbackQuery) -> None:
     A dedicated callback + handler re-renders the menu instead.
     """
     await callback.answer()
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     settings = get_settings()
@@ -121,7 +123,7 @@ async def handle_trending_back(callback: CallbackQuery) -> None:
         "🔥 <b>Популярное сейчас</b>\n\n"
         "Выберите категорию для просмотра топа:"
     )
-    await callback.message.edit_text(
+    await message.edit_text(
         text,
         parse_mode="HTML",
         reply_markup=Keyboards.trending_menu(show_music=show_music),
@@ -132,25 +134,26 @@ async def handle_trending_back(callback: CallbackQuery) -> None:
 async def handle_trending_movies(callback: CallbackQuery) -> None:
     """Show trending/popular movies."""
     await callback.answer()
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     tmdb = await get_tmdb()
     if not tmdb:
-        await callback.message.edit_text(
+        await message.edit_text(
             "❌ TMDb интеграция не настроена."
         )
         return
 
     # Show loading message
-    await callback.message.edit_text("⏳ Загружаю популярные фильмы...")
+    await message.edit_text("⏳ Загружаю популярные фильмы...")
 
     try:
         # Get trending movies
         movies = await tmdb.get_trending_movies(time_window="week", page=1)
 
         if not movies:
-            await callback.message.edit_text(
+            await message.edit_text(
                 "😕 Не удалось загрузить популярные фильмы.\n"
                 "Попробуйте позже."
             )
@@ -165,7 +168,7 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
 
         # Format and send results
         text = Formatters.format_trending_movies(movies[:10])  # Top 10
-        await callback.message.edit_text(
+        await message.edit_text(
             text,
             parse_mode="HTML",
             reply_markup=Keyboards.trending_movies(movies[:10]),
@@ -173,7 +176,7 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to fetch trending movies", error=str(e), exc_info=True)
-        await callback.message.edit_text(
+        await message.edit_text(
             Formatters.format_error("Не удалось загрузить популярные фильмы"),
             parse_mode="HTML",
         )
@@ -183,25 +186,26 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
 async def handle_trending_series(callback: CallbackQuery) -> None:
     """Show trending/popular TV series."""
     await callback.answer()
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     tmdb = await get_tmdb()
     if not tmdb:
-        await callback.message.edit_text(
+        await message.edit_text(
             "❌ TMDb интеграция не настроена."
         )
         return
 
     # Show loading message
-    await callback.message.edit_text("⏳ Загружаю популярные сериалы...")
+    await message.edit_text("⏳ Загружаю популярные сериалы...")
 
     try:
         # Get trending series
         series_list = await tmdb.get_trending_series(time_window="week", page=1)
 
         if not series_list:
-            await callback.message.edit_text(
+            await message.edit_text(
                 "😕 Не удалось загрузить популярные сериалы.\n"
                 "Попробуйте позже."
             )
@@ -215,7 +219,7 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
 
         # Format and send results
         text = Formatters.format_trending_series(series_list[:10])  # Top 10
-        await callback.message.edit_text(
+        await message.edit_text(
             text,
             parse_mode="HTML",
             reply_markup=Keyboards.trending_series(series_list[:10]),
@@ -223,7 +227,7 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
 
     except Exception as e:
         logger.error("Failed to fetch trending series", error=str(e), exc_info=True)
-        await callback.message.edit_text(
+        await message.edit_text(
             Formatters.format_error("Не удалось загрузить популярные сериалы"),
             parse_mode="HTML",
         )
@@ -233,13 +237,14 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
 async def handle_movie_from_trending(callback: CallbackQuery, callback_data: TrendingItemCB) -> None:
     """Show movie details with poster when clicked from trending list."""
     await callback.answer()
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     try:
         tmdb_id = int(callback_data.item_id)
     except ValueError:
-        await callback.message.answer("❌ Неверный ID фильма")
+        await message.answer("❌ Неверный ID фильма")
         return
 
     # The trending list itself is the source of truth here: the item came from
@@ -248,7 +253,7 @@ async def handle_movie_from_trending(callback: CallbackQuery, callback_data: Tre
     movie = _cache_get(_trending_movies_cache, tmdb_id)
 
     if not movie:
-        await callback.message.answer(
+        await message.answer(
             "❌ Фильм не найден в кэше.\n"
             "Попробуйте обновить список или используйте обычный поиск."
         )
@@ -259,7 +264,7 @@ async def handle_movie_from_trending(callback: CallbackQuery, callback_data: Tre
 
     if movie.poster_url:
         try:
-            await callback.message.answer_photo(
+            await message.answer_photo(
                 photo=movie.poster_url,
                 caption=caption,
                 parse_mode="HTML",
@@ -268,14 +273,14 @@ async def handle_movie_from_trending(callback: CallbackQuery, callback_data: Tre
         except Exception as e:
             logger.error("Failed to send poster", error=str(e), exc_info=True)
             # Fallback to text only
-            await callback.message.answer(
+            await message.answer(
                 caption,
                 parse_mode="HTML",
                 reply_markup=Keyboards.movie_details(movie),
             )
     else:
         # No poster available
-        await callback.message.answer(
+        await message.answer(
             caption,
             parse_mode="HTML",
             reply_markup=Keyboards.movie_details(movie),
@@ -286,13 +291,14 @@ async def handle_movie_from_trending(callback: CallbackQuery, callback_data: Tre
 async def handle_series_from_trending(callback: CallbackQuery, callback_data: TrendingItemCB) -> None:
     """Show series details with poster when clicked from trending list."""
     await callback.answer()
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     try:
         series_id = int(callback_data.item_id)
     except ValueError:
-        await callback.message.answer("❌ Неверный ID сериала")
+        await message.answer("❌ Неверный ID сериала")
         return
 
     # Try to get series from cache first (if from trending)
@@ -300,7 +306,7 @@ async def handle_series_from_trending(callback: CallbackQuery, callback_data: Tr
 
     if not series:
         # series_id is a TMDb id from trending — not a Scryer title id
-        await callback.message.answer(
+        await message.answer(
             "❌ Сериал не найден в кэше.\n"
             "Попробуйте обновить список или используйте обычный поиск."
         )
@@ -311,7 +317,7 @@ async def handle_series_from_trending(callback: CallbackQuery, callback_data: Tr
 
     if series.poster_url:
         try:
-            await callback.message.answer_photo(
+            await message.answer_photo(
                 photo=series.poster_url,
                 caption=caption,
                 parse_mode="HTML",
@@ -320,14 +326,14 @@ async def handle_series_from_trending(callback: CallbackQuery, callback_data: Tr
         except Exception as e:
             logger.error("Failed to send poster", error=str(e), exc_info=True)
             # Fallback to text only
-            await callback.message.answer(
+            await message.answer(
                 caption,
                 parse_mode="HTML",
                 reply_markup=Keyboards.series_details(series),
             )
     else:
         # No poster available
-        await callback.message.answer(
+        await message.answer(
             caption,
             parse_mode="HTML",
             reply_markup=Keyboards.series_details(series),
@@ -349,7 +355,10 @@ async def _add_from_trending(
     just adds the title and lets Scryer pick + queue the best release under its
     own profile and rules.
     """
-    status_msg = await callback.message.answer(status_text)
+    message = accessible_message(callback)
+    if message is None:
+        return
+    status_msg = await message.answer(status_text)
 
     try:
         add_service = AddService(
@@ -358,7 +367,7 @@ async def _add_from_trending(
         )
         prefs = db_user.preferences
 
-        success, action, message = await add_service.add_and_queue_best(
+        success, action, detail = await add_service.add_and_queue_best(
             content,
             content_type,
             quality_profile_id=prefs.scryer_quality_profile_id,
@@ -371,13 +380,13 @@ async def _add_from_trending(
         if success:
             year_str = f" ({content.year})" if getattr(content, "year", None) else ""
             await status_msg.edit_text(
-                f"✅ <b>{html.escape(content.title)}</b>{year_str}\n\n{html.escape(message)}",
+                f"✅ <b>{html.escape(content.title)}</b>{year_str}\n\n{html.escape(detail)}",
                 parse_mode="HTML",
             )
         else:
             # BUG-12b: error text can contain raw markup from the upstream
             # service — escape before interpolating into an HTML message.
-            await status_msg.edit_text(f"❌ {html.escape(message)}")
+            await status_msg.edit_text(f"❌ {html.escape(detail)}")
 
     except Exception as e:
         logger.error(
@@ -399,14 +408,15 @@ async def handle_add_movie_from_trending(
 ) -> None:
     """Add a movie to Scryer from the trending list."""
     await callback.answer()
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     tmdb_id = callback_data.tmdb_id
     movie = _cache_get(_trending_movies_cache, tmdb_id)
 
     if not movie:
-        await callback.message.answer(
+        await message.answer(
             "❌ Фильм не найден в кэше.\n"
             "Попробуйте обновить список или используйте обычный поиск."
         )
@@ -423,14 +433,15 @@ async def handle_add_series_from_trending(
 ) -> None:
     """Add a series to Scryer from the trending list."""
     await callback.answer()
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     tmdb_id = callback_data.tmdb_id
     series = _cache_get(_trending_series_cache, tmdb_id)
 
     if not series:
-        await callback.message.answer(
+        await message.answer(
             "❌ Сериал не найден в кэше.\n"
             "Попробуйте обновить список или используйте обычный поиск."
         )

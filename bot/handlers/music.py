@@ -19,7 +19,7 @@ from bot.clients.registry import (
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers._cache import remember_lru
-from bot.handlers.common import safe_edit, strip_command
+from bot.handlers.common import accessible_message, safe_edit, strip_command
 from bot.models import (
     ActionLog,
     ActionType,
@@ -257,7 +257,8 @@ async def handle_slskd_selection(
     callback: CallbackQuery, callback_data: SlskdCB, db_user: User, db: Database
 ) -> None:
     """Queue a Soulseek candidate for download via slskd."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     user_id = callback.from_user.id
@@ -272,7 +273,7 @@ async def handle_slskd_selection(
 
     slskd = await get_slskd()
     if slskd is None:
-        await callback.message.edit_text(Formatters.format_error("Soulseek не настроен"))
+        await message.edit_text(Formatters.format_error("Soulseek не настроен"))
         return
 
     action = ActionLog(
@@ -290,7 +291,7 @@ async def handle_slskd_selection(
     await db.log_action(action)
 
     if ok:
-        await callback.message.edit_text(
+        await message.edit_text(
             Formatters.format_success(
                 f"<b>{html.escape(candidate.display_name)}</b>\n\n"
                 f"Поставлено в очередь Soulseek: {candidate.track_count} файл(ов), "
@@ -300,7 +301,7 @@ async def handle_slskd_selection(
             parse_mode="HTML",
         )
     else:
-        await callback.message.edit_text(
+        await message.edit_text(
             Formatters.format_error(
                 "Не удалось поставить в очередь — возможно, пользователь ушёл в офлайн"
             )
@@ -389,7 +390,8 @@ async def process_music_search(
 @router.callback_query(F.data.startswith(CallbackData.ARTIST_PAGE))
 async def handle_artist_pagination(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Paginate the artist-list keyboard (LOGIC-14: independent prefix from search)."""
-    if not callback.data or not callback.message:
+    message = accessible_message(callback)
+    if message is None or not callback.data:
         return
     user_id = callback.from_user.id
 
@@ -410,14 +412,15 @@ async def handle_artist_pagination(callback: CallbackQuery, db_user: User, db: D
         await callback.answer("Неверная страница", show_alert=True)
         return
 
-    await _render_artist_list(callback.message, artists, page=page)
+    await _render_artist_list(message, artists, page=page)
     await callback.answer()
 
 
 @router.callback_query(F.data == CallbackData.MUSIC_BACK)
 async def handle_music_back(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """LOGIC-24: back from artist_details → return to artist_list."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
     user_id = callback.from_user.id
     artists = _artist_candidates.get(user_id) or []
@@ -425,7 +428,7 @@ async def handle_music_back(callback: CallbackQuery, db_user: User, db: Database
         await callback.answer("Список истёк. Начните новый поиск.", show_alert=True)
         return
 
-    await _render_artist_list(callback.message, artists, page=0)
+    await _render_artist_list(message, artists, page=0)
     await callback.answer()
 
 
@@ -434,7 +437,8 @@ async def handle_artist_selection(
     callback: CallbackQuery, callback_data: ArtistCB, db_user: User, db: Database
 ) -> None:
     """Handle artist selection from lookup results."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     user_id = callback.from_user.id
@@ -456,7 +460,7 @@ async def handle_artist_selection(
         await db.save_session(user_id, session)
 
     await callback.answer()
-    await callback.message.edit_text(
+    await message.edit_text(
         Formatters.format_artist_info(artist),
         reply_markup=Keyboards.artist_details(artist, already_in_library=bool(artist.lidarr_id)),
         parse_mode="HTML",
@@ -498,8 +502,8 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
         prefs = db_user.preferences
 
         await callback.answer("Добавляю...")
-        if callback.message:
-            await callback.message.edit_text(f"⏳ Добавляю <b>{html.escape(artist.name)}</b> в Lidarr...", parse_mode="HTML")
+        if (message := accessible_message(callback)) is not None:
+            await message.edit_text(f"⏳ Добавляю <b>{html.escape(artist.name)}</b> в Lidarr...", parse_mode="HTML")
 
         try:
             # PERF-07a: 3 independent RTTs → 1 wall-clock RTT.
@@ -510,8 +514,8 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
             )
 
             if not profiles or not folders or not metadata_profiles:
-                if callback.message:
-                    await callback.message.edit_text(
+                if (message := accessible_message(callback)) is not None:
+                    await message.edit_text(
                         Formatters.format_error("Нет профилей качества / папок / metadata-профилей в Lidarr"),
                     )
                 return
@@ -533,9 +537,9 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
             action.user_id = user_id
             await db.log_action(action)
 
-            if callback.message:
+            if (message := accessible_message(callback)) is not None:
                 if added:
-                    await callback.message.edit_text(
+                    await message.edit_text(
                         Formatters.format_success(
                             f"<b>{html.escape(added.name)}</b>\n\n"
                             f"Добавлен в Lidarr. Запущен автопоиск по всем альбомам."
@@ -543,7 +547,7 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
                         parse_mode="HTML",
                     )
                 else:
-                    await callback.message.edit_text(
+                    await message.edit_text(
                         Formatters.format_error(action.error_message or "Не удалось добавить артиста"),
                     )
 
@@ -551,8 +555,8 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
             _artist_candidates.pop(user_id, None)
         except Exception as e:
             logger.error("Add artist failed", error=str(e), exc_info=True)
-            if callback.message:
-                await callback.message.edit_text(Formatters.format_error("Операция временно недоступна"))
+            if (message := accessible_message(callback)) is not None:
+                await message.edit_text(Formatters.format_error("Операция временно недоступна"))
     finally:
         _release_grab(user_id)
 
@@ -570,31 +574,32 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
 @router.callback_query(F.data == CallbackData.TRENDING_MUSIC)
 async def handle_trending_music(callback: CallbackQuery) -> None:
     """Show trending artists from Deezer."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     await callback.answer("🔍 Загружаю...")
 
     deezer = await get_deezer()
     if deezer is None:
-        await callback.message.edit_text(Formatters.format_error("Deezer отключён"))
+        await message.edit_text(Formatters.format_error("Deezer отключён"))
         return
 
     try:
         artists = await deezer.get_trending_artists(limit=10)
     except Exception as e:
         logger.error("Deezer trending failed", error=str(e), exc_info=True)
-        await callback.message.edit_text(Formatters.format_error("Не удалось загрузить трендовых артистов"))
+        await message.edit_text(Formatters.format_error("Не удалось загрузить трендовых артистов"))
         return
 
     if not artists:
-        await callback.message.edit_text(Formatters.format_warning("Нет данных от Deezer"))
+        await message.edit_text(Formatters.format_warning("Нет данных от Deezer"))
         return
 
     user_id = callback.from_user.id
     _remember(_trending_artists_cache, user_id, artists)
 
-    await callback.message.edit_text(
+    await message.edit_text(
         Formatters.format_trending_artists(artists),
         reply_markup=Keyboards.trending_artists(artists),
         parse_mode="HTML",
@@ -606,7 +611,8 @@ async def handle_trending_artist_click(
     callback: CallbackQuery, callback_data: TrendingItemCB, db_user: User, db: Database,
 ) -> None:
     """Click a trending artist → lookup in Lidarr and show details."""
-    if not callback.message:
+    message = accessible_message(callback)
+    if message is None:
         return
 
     try:
@@ -623,9 +629,9 @@ async def handle_trending_artist_click(
 
     name = artists[idx].get("name", "")
     await callback.answer()
-    if callback.message:
-        await callback.message.edit_text(f"🔍 Ищу <b>{html.escape(name)}</b> в Lidarr...", parse_mode="HTML")
-    await process_music_search(callback.message, name, db_user, db)
+    if (message := accessible_message(callback)) is not None:
+        await message.edit_text(f"🔍 Ищу <b>{html.escape(name)}</b> в Lidarr...", parse_mode="HTML")
+    await process_music_search(message, name, db_user, db)
 
 
 @router.callback_query(F.data.startswith(CallbackData.TRENDING_ARTIST))

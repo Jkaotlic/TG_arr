@@ -10,9 +10,11 @@ the "swallow only 'message is not modified'" try/except around
 downloads/emby/music/calendar/search. Both are centralized here.
 """
 
+from typing import Optional, cast
+
 import structlog
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InaccessibleMessage, Message
 
 logger = structlog.get_logger()
 
@@ -64,3 +66,26 @@ async def safe_edit(message: Message, text: str, **kwargs) -> bool:
     Returns True if the edit was applied, False if it was a no-op swallow.
     """
     return await swallow_not_modified(message.edit_text(text, **kwargs))
+
+
+def accessible_message(callback: CallbackQuery) -> Optional[Message]:
+    """The callback's message, if the bot can still act on it.
+
+    aiogram types `CallbackQuery.message` as `Message | InaccessibleMessage |
+    None`: Telegram substitutes an `InaccessibleMessage` (id + chat, nothing
+    else) for messages older than 48 hours. Calling `.edit_text()` on one
+    raises at runtime, and every handler here already guards with `if not
+    callback.message: return` — which catches None but *not* the inaccessible
+    case.
+
+    Returning a narrowed `Message | None` makes the guard cover both, and lets
+    the type checker verify it instead of taking the handler's word for it.
+
+    The test is "is it *inaccessible*", not "is it exactly a Message": the
+    latter would also reject the mocks the handler tests are built on, and the
+    only thing actually unusable here is the inaccessible variant.
+    """
+    message = callback.message
+    if message is None or isinstance(message, InaccessibleMessage):
+        return None
+    return cast(Message, message)
