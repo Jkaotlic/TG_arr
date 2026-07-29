@@ -417,3 +417,38 @@ async def test_a_genuine_cross_type_tie_still_asks_the_user():
 
     assert result.content_type == ContentType.UNKNOWN
     assert result.reason == "ambiguous"
+
+
+# ------------------------------------------------------- error surfacing
+@pytest.mark.asyncio
+async def test_indexer_exhaustion_is_reported_as_such_not_as_a_generic_failure():
+    """Prod incident 2026-07-29: every indexer hit its Prowlarr daily query
+    limit, Scryer masked that as `Internal server error`, and the user saw
+    "Поиск временно недоступен" — which reads like a bot outage and hides the
+    one fact that would let them act (wait / raise the limit)."""
+    from bot.services.search_service import describe_scryer_failure
+    from bot.clients.scryer import ScryerGraphQLError
+
+    message = describe_scryer_failure(
+        ScryerGraphQLError("Scryer вернул ошибку: Internal server error")
+    )
+
+    assert "индексер" in message.lower()
+    assert "недоступен" not in message.lower() or "индексер" in message.lower()
+
+
+def test_other_scryer_errors_keep_their_own_text():
+    from bot.services.search_service import describe_scryer_failure
+    from bot.clients.scryer import ScryerGraphQLError
+
+    message = describe_scryer_failure(
+        ScryerGraphQLError("Scryer вернул ошибку: title not found")
+    )
+    assert "title not found" in message
+
+
+def test_non_scryer_errors_fall_back_to_the_generic_message():
+    from bot.services.search_service import describe_scryer_failure
+
+    message = describe_scryer_failure(RuntimeError("boom"))
+    assert "временно недоступен" in message.lower()

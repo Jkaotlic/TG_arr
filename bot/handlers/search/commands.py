@@ -16,6 +16,7 @@ from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import strip_command
 from bot.models import ActionLog, ActionType, ContentType, SearchSession, User
+from bot.services.search_service import describe_scryer_failure
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import Keyboards
 from bot.ui.menu import MENU_BUTTONS, MENU_SEARCH
@@ -348,7 +349,10 @@ async def process_search(
         log.error("Search failed", error=str(e), exc_info=True)
         # LOGIC-23: edit the in-flight status message ("Ищу релизы...") rather
         # than leaving it hanging forever with a separate error message below it.
-        error_text = Formatters.format_error("Поиск временно недоступен")
+        # 2026-07-29: say *what* failed when we know — a masked Scryer internal
+        # error is almost always "every indexer is rate-limited", and the user
+        # can act on that (wait it out) but not on "временно недоступен".
+        error_text = Formatters.format_error(html.escape(describe_scryer_failure(e)))
         if status_msg is not None:
             try:
                 await status_msg.edit_text(error_text)
