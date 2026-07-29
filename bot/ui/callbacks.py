@@ -126,3 +126,13 @@ class SlskdCB(CallbackData, prefix="sk"):
     """
 
     idx: int
+
+
+class TitleCB(CallbackData, prefix="ti"):
+    """Pick which metadata candidate the user meant (2026-07-29).
+
+    Only the index is carried: the candidates live in the user's session, and
+    the metadata id alone wouldn't tell the handler which facet to add under.
+    """
+
+    idx: int

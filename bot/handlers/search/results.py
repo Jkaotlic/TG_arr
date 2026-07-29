@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery
 from bot.config import get_settings
 from bot.db import Database
 from bot.models import ContentType, MovieInfo, SeriesInfo, User
-from bot.ui.callbacks import PageCB, ReleaseCB
+from bot.ui.callbacks import PageCB, ReleaseCB, TitleCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 
@@ -343,3 +343,47 @@ async def handle_legacy_release(callback: CallbackQuery) -> None:
     through unhandled (see ``handle_legacy_page`` for the same pattern).
     """
     await callback.answer("Кнопка устарела — повторите поиск", show_alert=True)
+
+
+@router.callback_query(TitleCB.filter())
+async def handle_title_selection(
+    callback: CallbackQuery, callback_data: TitleCB, db_user: User, db: Database
+) -> None:
+    """Continue the search with the title the user picked (2026-07-29).
+
+    Reached only when `needs_title_confirmation` decided the metadata list was
+    ambiguous — see the prod incident where "Холодное сердце" silently resolved
+    to an unrelated German film.
+    """
+    if not callback.message:
+        return
+
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    if not session or not session.lookup_candidates:
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+
+    idx = callback_data.idx
+    if idx < 0 or idx >= len(session.lookup_candidates):
+        await callback.answer("Неверный выбор", show_alert=True)
+        return
+
+    chosen = session.lookup_candidates[idx]
+    await callback.answer()
+
+    # Drop the buttons so a second tap can't start a parallel search (LOGIC-23).
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
+
+    await _search.process_search(
+        callback.message,
+        session.query,
+        session.content_type,
+        db_user,
+        db,
+        chosen_title=chosen,
+    )

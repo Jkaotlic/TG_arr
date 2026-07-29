@@ -191,3 +191,23 @@ class _SearchKeyboards:
         if is_series and tvdb_id:
             buttons.append(InlineKeyboardButton(text="📺 TVDB", url=f"https://thetvdb.com/dereferrer/series/{tvdb_id}"))
         return buttons
+
+    @staticmethod
+    def title_candidates(candidates: list) -> InlineKeyboardMarkup:
+        """Ask which title the user meant (see `needs_title_confirmation`)."""
+        from bot.ui.callbacks import TitleCB
+
+        keyboard = []
+        for idx, candidate in enumerate(candidates[:5]):
+            year = f" ({candidate.year})" if getattr(candidate, "year", None) else ""
+            label = f"{idx + 1}. {candidate.title}{year}"
+            if len(label) > 60:
+                label = label[:57] + "..."
+            keyboard.append([
+                InlineKeyboardButton(text=label, callback_data=TitleCB(idx=idx).pack())
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)

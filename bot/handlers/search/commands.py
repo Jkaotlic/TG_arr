@@ -3,6 +3,7 @@ the top-level query-processing pipeline that kicks off content-type detection
 and shows the first results page."""
 
 import html
+import re
 import time
 from typing import Optional
 
@@ -105,6 +106,48 @@ async def handle_text_search(message: Message, db_user: User, db: Database) -> N
     await process_search(message, message.text.strip(), ContentType.UNKNOWN, db_user, db)
 
 
+def _normalize_title(value: str) -> str:
+    """Casefold + collapse punctuation so "Дюна:" == "дюна"."""
+    return re.sub(r"[^\w\s]", "", (value or "").casefold()).strip()
+
+
+def needs_title_confirmation(
+    candidates: list, query: str, query_year: Optional[int]
+) -> bool:
+    """Whether the user must pick which title they meant.
+
+    Prod incident 2026-07-29: "Холодное сердце" returned a German film from
+    2016 first (Disney's Frozen wasn't in the metadata list at all) and the bot
+    silently added it to the catalog, then searched releases for the wrong
+    film. Picking the top hit is only safe when the answer is unambiguous:
+
+    - one candidate, or
+    - the query carried a year and exactly one candidate matches it, or
+    - exactly one candidate's title equals the query.
+
+    Anything else is a guess, and a wrong guess costs a junk catalog entry plus
+    a pointless indexer search — so ask instead.
+    """
+    if len(candidates) <= 1:
+        return False
+
+    wanted = _normalize_title(query)
+    # Strip a trailing year from the query before comparing titles.
+    if query_year:
+        wanted = _normalize_title(re.sub(rf"\b{query_year}\b", "", query))
+
+    if query_year:
+        year_matches = [
+            c for c in candidates if c.year and abs(int(c.year) - int(query_year)) <= 1
+        ]
+        if len(year_matches) == 1:
+            return False
+        # Several candidates in the same year — fall through to the title check.
+
+    exact = [c for c in candidates if _normalize_title(c.title) == wanted]
+    return len(exact) != 1
+
+
 def _pick_metadata_candidate(candidates: list, query_year: Optional[int]):
     """Choose the metadata candidate the user most likely meant.
 
@@ -127,6 +170,8 @@ async def _resolve_title(
     content_type: ContentType,
     lookup_term: str,
     query_year: Optional[int],
+    candidates: Optional[list] = None,
+    chosen=None,
 ):
     """Resolve a query to a Scryer title id, adding the title if it's new.
 
@@ -135,13 +180,19 @@ async def _resolve_title(
     **unmonitored** — browsing releases must not enrol anything into automatic
     acquisition; `AddService.grab_release` turns monitoring on once the user
     actually downloads something.
+
+    `candidates` / `chosen` let the caller pass work it already did: the
+    metadata list it fetched to decide whether to ask, or the entry the user
+    picked from that question.
     """
-    candidates = (
-        detection.lookup_results
-        if detection and detection.content_type == content_type and detection.lookup_results
-        else await search_service.search_metadata(lookup_term, content_type)
-    )
-    chosen = _pick_metadata_candidate(candidates, query_year)
+    if chosen is None:
+        if candidates is None:
+            candidates = (
+                detection.lookup_results
+                if detection and detection.content_type == content_type and detection.lookup_results
+                else await search_service.search_metadata(lookup_term, content_type)
+            )
+        chosen = _pick_metadata_candidate(candidates, query_year)
     if chosen is None:
         return None
 
@@ -165,8 +216,14 @@ async def process_search(
     content_type: ContentType,
     db_user: User,
     db: Database,
+    chosen_title=None,
 ) -> None:
-    """Process a search query."""
+    """Process a search query.
+
+    `chosen_title` is set when the user answered the "which title did you
+    mean?" question — it skips both the metadata search and the ambiguity
+    check, since the answer is now explicit.
+    """
     if len(query) > MAX_QUERY_LENGTH:
         await message.answer(f"❌ Запрос слишком длинный (макс. {MAX_QUERY_LENGTH} символов)")
         return
@@ -268,9 +325,36 @@ async def process_search(
         # Migration 2026-07-28: Scryer searches releases per *title*, not by free
         # text, so resolve the title first. Detection already fetched metadata
         # candidates for the winning facet — reuse them instead of searching again.
+        lookup_term = clean_title or query
+        candidates = (
+            detection.lookup_results
+            if detection and detection.content_type == content_type and detection.lookup_results
+            else await search_service.search_metadata(lookup_term, content_type)
+        )
+
+        # 2026-07-29: don't guess. Adding the wrong title costs a junk catalog
+        # entry AND an indexer search for a film the user never asked for.
+        if chosen_title is None and needs_title_confirmation(
+            candidates, lookup_term, parsed.get("year")
+        ):
+            session = SearchSession(
+                user_id=user_id,
+                query=query,
+                content_type=content_type,
+                lookup_candidates=list(candidates[:5]),
+            )
+            await db.save_session(user_id, session)
+            await status_msg.edit_text(
+                f"🤔 Уточните, что именно нужно — <b>{html.escape(query)}</b>:",
+                reply_markup=Keyboards.title_candidates(candidates),
+                parse_mode="HTML",
+            )
+            log.info("search_branch", branch="ask_title", candidates=len(candidates))
+            return
+
         title = await _resolve_title(
             search_service, add_service, detection, content_type,
-            clean_title or query, parsed.get("year"),
+            lookup_term, parsed.get("year"), candidates=candidates, chosen=chosen_title,
         )
         if title is None:
             await status_msg.edit_text(
