@@ -7,6 +7,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 from bot.db import Database
+from bot.ui.commands import render_help
 from bot.ui.keyboards import Keyboards
 
 router = Router()
@@ -40,26 +41,7 @@ async def cmd_menu(message: Message) -> None:
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     """Handle /help command."""
-    help_text = (
-        "<b>🤖 TG_arr — Справка</b>\n\n"
-        "<b>🔍 Поиск:</b>\n"
-        "<code>/search</code> — фильмы и сериалы\n"
-        "<code>/movie</code> — только фильмы\n"
-        "<code>/series</code> — только сериалы\n"
-        "<code>/music</code> — артисты (Lidarr)\n\n"
-        "<b>📥 Загрузки:</b>\n"
-        "<code>/downloads</code> — список торрентов\n"
-        "<code>/qstatus</code> — статус qBittorrent\n"
-        "<code>/pause</code> — пауза всех\n"
-        "<code>/resume</code> — продолжить все\n\n"
-        "<b>⚙️ Другое:</b>\n"
-        "<code>/settings</code> — настройки\n"
-        "<code>/status</code> — статус сервисов\n"
-        "<code>/history</code> — история\n"
-        "<code>/cancel</code> — отмена\n\n"
-        "💡 Просто напишите название для поиска!"
-    )
-    await message.answer(help_text, parse_mode="HTML", reply_markup=Keyboards.main_menu())
+    await message.answer(render_help(), parse_mode="HTML", reply_markup=Keyboards.main_menu())
 
 
 @router.message(Command("cancel"))
