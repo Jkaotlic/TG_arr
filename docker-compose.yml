@@ -74,19 +74,6 @@ services:
       RESULTS_PER_PAGE: ${RESULTS_PER_PAGE:-5}
       # Database path (relative to /app inside the container)
       DATABASE_PATH: ${DATABASE_PATH:-data/bot.db}
-      # Webhook server (optional, #8) — inbound *arr "on import" notifications.
-      # Off by default; also uncomment the `ports:` block below to expose it
-      # beyond the container when WEBHOOK_BIND is opened past 127.0.0.1.
-      WEBHOOK_ENABLED: ${WEBHOOK_ENABLED:-false}
-      WEBHOOK_PORT: ${WEBHOOK_PORT:-8090}
-      WEBHOOK_BIND: ${WEBHOOK_BIND:-127.0.0.1}
-      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-}
-    # DEPLOY-01: uncomment when WEBHOOK_ENABLED=true and *arr needs to reach
-    # this port from outside the container (e.g. WEBHOOK_BIND=0.0.0.0 because
-    # *arr runs in another container/host). Left commented by default since
-    # webhook is off and nothing should be published.
-    # ports:
-    #   - "${WEBHOOK_PORT:-8090}:${WEBHOOK_PORT:-8090}"
     volumes:
       - bot-data:/app/data
     # DEPLOY-05: the container only ever needs to write to /app/data (the
