@@ -276,14 +276,20 @@ async def notify_admins_on_start(bot, *, admin_ids: list, allowed_ids: list, war
 
     text = build_startup_message(warmup=warmup, admin_ids=admin_ids, allowed_ids=allowed_ids)
 
-    async def _send(admin_id: int) -> None:
+    logger = structlog.get_logger()
+
+    async def _send(admin_id: int) -> bool:
         try:
             await bot.send_message(admin_id, text, parse_mode="HTML")
         except Exception as e:
-            logger = structlog.get_logger()
             logger.warning("startup_notify_failed", user_id=admin_id, error=str(e))
+            return False
+        return True
 
-    await asyncio.gather(*(_send(admin_id) for admin_id in admin_ids))
+    outcomes = await asyncio.gather(*(_send(admin_id) for admin_id in admin_ids))
+    # Log the success too: without it, "card never arrived" and "card was never
+    # attempted" look identical in the logs.
+    logger.info("startup_notify_sent", delivered=sum(outcomes), admins=len(admin_ids))
 
 
 async def _warm_up_clients(logger) -> dict:
