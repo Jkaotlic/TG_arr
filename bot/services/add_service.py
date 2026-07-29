@@ -400,6 +400,36 @@ class AddService:
         )
         return True, action, "Добавлено в библиотеку. Подходящий релиз пока не найден — Scryer продолжит искать"
 
+    async def set_monitored(self, title, *, monitored: bool) -> bool:
+        """Turn monitoring on/off for a title. False when there's nothing to act on."""
+        title_id = getattr(title, "scryer_id", None)
+        if not title_id:
+            return False
+        try:
+            await self.scryer.set_title_monitored(title_id, monitored)
+        except Exception as e:
+            logger.warning("set_monitored_failed", title_id=title_id, error=str(e))
+            return False
+        logger.info("title_monitoring_changed", title_id=title_id, monitored=monitored)
+        return True
+
+    async def preview_delete(self, title_id: str) -> dict:
+        """What a delete would affect — shown before asking to confirm."""
+        return await self.scryer.delete_title_preview(title_id)
+
+    async def delete_title(
+        self, title_id: str, *, fingerprint: Optional[str] = None, delete_files: bool = False
+    ) -> bool:
+        """Remove a title from the catalog, keeping files on disk by default."""
+        try:
+            await self.scryer.delete_title(
+                title_id, fingerprint=fingerprint, delete_files=delete_files
+            )
+        except Exception as e:
+            logger.warning("delete_title_failed", title_id=title_id, error=str(e))
+            return False
+        return True
+
     # ---------------------------------------------------------------- grab
     async def grab_release(
         self,

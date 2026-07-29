@@ -507,3 +507,49 @@ def test_clearly_leading_candidate_needs_no_question():
         _movie_candidate("Interstellar Wars", 2016),
     ]
     assert needs_title_confirmation(candidates, "Interstellar", None) is False
+
+
+# ------------------------------------------------------------ season scoping
+def test_season_scope_keyboard_offers_whole_show_and_seasons():
+    from bot.ui.keyboards import Keyboards
+
+    kb = Keyboards.season_scope(seasons=[1, 2, 3], title_id="t1")
+    labels = [b.text for row in kb.inline_keyboard for b in row]
+    assert any("весь" in label.lower() for label in labels)
+    assert any("1" in label for label in labels)
+
+
+def test_season_scope_keyboard_caps_the_season_list():
+    """A 30-season show must not produce a 30-button wall."""
+    from bot.ui.keyboards import Keyboards
+
+    kb = Keyboards.season_scope(seasons=list(range(1, 31)), title_id="t1")
+    buttons = [b for row in kb.inline_keyboard for b in row]
+    assert len(buttons) <= 14
+
+
+def test_season_scope_is_skipped_for_a_single_season_show():
+    """Nothing to choose between — asking would be noise."""
+    from bot.handlers.search.commands import should_ask_for_season
+
+    assert should_ask_for_season(ContentType.SERIES, seasons=[1], parsed_season=None) is False
+    assert should_ask_for_season(ContentType.SERIES, seasons=[1, 2], parsed_season=None) is True
+
+
+def test_season_scope_is_skipped_when_the_query_named_one():
+    """"Breaking Bad S02" already answered the question."""
+    from bot.handlers.search.commands import should_ask_for_season
+
+    assert should_ask_for_season(ContentType.SERIES, seasons=[1, 2, 3], parsed_season=2) is False
+
+
+def test_season_scope_never_applies_to_movies():
+    from bot.handlers.search.commands import should_ask_for_season
+
+    assert should_ask_for_season(ContentType.MOVIE, seasons=[1, 2], parsed_season=None) is False
+
+
+def test_season_scope_applies_to_anime_too():
+    from bot.handlers.search.commands import should_ask_for_season
+
+    assert should_ask_for_season(ContentType.ANIME, seasons=[1, 2], parsed_season=None) is True

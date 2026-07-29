@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery
 from bot.config import get_settings
 from bot.db import Database
 from bot.models import ContentType, MovieInfo, SeriesInfo, User
-from bot.ui.callbacks import PageCB, ReleaseCB, TitleCB
+from bot.ui.callbacks import PageCB, ReleaseCB, SeasonScopeCB, TitleCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 
@@ -386,4 +386,36 @@ async def handle_title_selection(
         db_user,
         db,
         chosen_title=chosen,
+    )
+
+
+@router.callback_query(SeasonScopeCB.filter())
+async def handle_season_scope(
+    callback: CallbackQuery, callback_data: SeasonScopeCB, db_user: User, db: Database
+) -> None:
+    """Continue the search scoped to the chosen season (0 = whole series)."""
+    if not callback.message:
+        return
+
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    if not session:
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
+
+    await _search.process_search(
+        callback.message,
+        session.query,
+        session.content_type,
+        db_user,
+        db,
+        chosen_title=session.selected_content,
+        season_override=callback_data.season or None,
     )

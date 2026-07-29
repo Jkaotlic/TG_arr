@@ -321,6 +321,46 @@ async def _warm_up_clients(logger) -> dict:
         structlog.contextvars.unbind_contextvars("component")
 
 
+async def _health_watch(bot: Bot, admin_ids: list, logger) -> None:
+    """Poll Scryer's health and alert admins when the stack degrades.
+
+    Added after the 2026-07-29 incident: the indexers had been failing for six
+    hours before anyone noticed, and every signal needed was already sitting in
+    `systemHealth` + `wantedItems`. 15 minutes is frequent enough to catch a
+    real outage and far too slow to add meaningful load.
+    """
+    from bot.clients.registry import get_scryer
+    from bot.services.health_monitor import HealthMonitor
+
+    interval = 15 * 60
+
+    async def _notify(text: str) -> None:
+        for admin_id in admin_ids:
+            try:
+                await bot.send_message(admin_id, text, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logger.warning("health_alert_send_failed", user_id=admin_id, error=str(e))
+
+    monitor = HealthMonitor(_notify)
+    structlog.contextvars.bind_contextvars(component="health_watch")
+    try:
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                scryer = await get_scryer()
+                health = await scryer.system_health()
+                _items, wanted_total, _more = await scryer.get_wanted("MISSING", limit=1)
+                await monitor.evaluate(health, wanted_total)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                # A probe failure is itself worth knowing about, but not worth
+                # a message every 15 minutes — the log carries it.
+                logger.warning("health_watch_failed", error=str(e))
+    finally:
+        structlog.contextvars.unbind_contextvars("component")
+
+
 async def _periodic_cleanup(db: Database, logger, notification_service: Optional[NotificationService] = None) -> None:
     """DB-15: drop stale sessions/searches every 6h instead of only at startup.
 
@@ -517,6 +557,10 @@ async def main() -> None:
     logger.info("background_task_started", task="liveness")
     cleanup_task = asyncio.create_task(_periodic_cleanup(db, logger, notification_service))
     logger.info("background_task_started", task="cleanup")
+    health_task = asyncio.create_task(
+        _health_watch(bot, sorted(set(settings.admin_tg_ids)), logger)
+    )
+    logger.info("background_task_started", task="health_watch")
 
     faulthandler.enable()
     threading.Thread(
@@ -568,7 +612,7 @@ async def main() -> None:
         raise
     finally:
         # BUG-R6-01: await the cancellation instead of firing and forgetting.
-        await _cancel_background_tasks([liveness_task, cleanup_task])
+        await _cancel_background_tasks([liveness_task, cleanup_task, health_task])
         if webhook_runner is not None:
             await webhook_runner.cleanup()
         await bot.session.close()

@@ -233,3 +233,52 @@ async def check_service(client, name: str) -> SystemStatus:
         )
 
 
+
+
+@router.message(Command("wanted"))
+async def cmd_wanted(message: Message) -> None:
+    """Show what Scryer is still hunting for.
+
+    Added after the 2026-07-29 incident: 102 Paw Patrol episodes had been in
+    the wanted queue for months, burning the indexers' whole daily quota every
+    pass, and the only way to see that was raw GraphQL.
+    """
+    status_msg = await message.answer("📋 Собираю очередь поиска...")
+
+    try:
+        scryer = await get_scryer()
+        items, total, _has_more = await scryer.get_wanted("MISSING", limit=200)
+    except Exception as e:
+        logger.error("wanted_fetch_failed", error=str(e), exc_info=True)
+        await status_msg.edit_text(Formatters.format_error("Не удалось получить очередь поиска"))
+        return
+
+    if not items:
+        await status_msg.edit_text("✅ Очередь поиска пуста — всё найдено.")
+        return
+
+    # Group by title: 102 separate Paw Patrol lines would be unreadable, and
+    # the per-title count is exactly the number that matters.
+    grouped: dict[str, list] = {}
+    for item in items:
+        grouped.setdefault(item.title_name, []).append(item)
+
+    lines = [f"📋 <b>Ищется: {total} позиций</b>\n"]
+    for title, entries in sorted(grouped.items(), key=lambda kv: -len(kv[1]))[:15]:
+        seasons = sorted(
+            {str(e.season_number) for e in entries if e.season_number is not None},
+            key=lambda s: int(s) if s.isdigit() else 0,
+        )
+        season_str = f" · сезоны {', '.join(seasons)}" if seasons else ""
+        lines.append(f"• <b>{html.escape(title)}</b> — {len(entries)} эп.{season_str}")
+
+    if len(grouped) > 15:
+        lines.append(f"\n<i>…и ещё {len(grouped) - 15} тайтлов</i>")
+
+    if total > 60:
+        lines.append(
+            "\n⚠️ Очередь большая: Scryer не успеет обойти её за сутки и выжжет "
+            "лимиты трекеров. Стоит снять мониторинг с того, чего всё равно нет."
+        )
+
+    await status_msg.edit_text("\n".join(lines), parse_mode="HTML")

@@ -136,3 +136,20 @@ class TitleCB(CallbackData, prefix="ti"):
     """
 
     idx: int
+
+
+class TitleActionCB(CallbackData, prefix="tm"):
+    """Manage a catalog title: monitoring toggle and removal (2026-07-29).
+
+    `action`: mon | unmon | delete (asks to confirm) | delconf (does it).
+    """
+
+    action: str
+    title_id: str
+
+
+class SeasonScopeCB(CallbackData, prefix="ss"):
+    """Which season to search for (0 = the whole series). 2026-07-29."""
+
+    season: int
+    title_id: str
