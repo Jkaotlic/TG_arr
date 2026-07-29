@@ -7,6 +7,7 @@ from typing import Any
 
 import structlog
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from bot.clients.registry import get_lidarr, get_scryer
@@ -120,8 +121,13 @@ async def _fetch_and_send_calendar(
 
 
 @router.message(F.text == MENU_CALENDAR)
+@router.message(Command("calendar"))
 async def handle_calendar_menu(message: Message) -> None:
-    """Show calendar for the next 7 days (default)."""
+    """Show calendar for the next 7 days (default).
+
+    Reachable both from the reply-keyboard button and as `/calendar`, which is
+    what the published command menu offers.
+    """
     user_id = message.from_user.id if message.from_user else 0
     days = _user_period.get(user_id, 7)
     async with _period_lock:
