@@ -1,6 +1,6 @@
 """LOGIC-09: Settings.model_validator warns (does not raise) on inconsistent
 optional-integration configuration, plus the OBS-13/SEC-02 fields that ride
-along with it (log_format, webhook_token, webhook_bind default)."""
+along with it (log_format, optional-integration consistency)."""
 
 import warnings
 
@@ -50,18 +50,6 @@ def test_notify_enabled_without_qbittorrent_warns():
     assert s.qbittorrent_enabled is False
 
 
-def test_webhook_enabled_without_token_warns():
-    with pytest.warns(UserWarning, match="WEBHOOK_TOKEN"):
-        _settings(webhook_enabled=True)
-
-
-def test_webhook_enabled_with_token_does_not_warn_about_token():
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        _settings(webhook_enabled=True, webhook_token="secret")
-    assert not any("WEBHOOK_TOKEN" in str(w.message) for w in caught)
-
-
 def test_fully_unconfigured_optional_integrations_do_not_warn():
     """The common case (nothing optional configured at all) must be silent —
     warnings are for *inconsistent* half-configuration, not "not configured"."""
@@ -82,12 +70,13 @@ def test_log_format_rejects_invalid_value():
         _settings(log_format="xml")
 
 
-# --- SEC-02: webhook_bind default is loopback, not 0.0.0.0 -----------------
+# --- the *arr webhook is gone (2026-07-29) ---------------------------------
 
 
-def test_webhook_bind_defaults_to_loopback():
-    assert _settings().webhook_bind == "127.0.0.1"
-
-
-def test_webhook_token_defaults_to_none():
-    assert _settings().webhook_token is None
+def test_webhook_settings_are_gone():
+    """The inbound *arr webhook server was removed with its services; library
+    notifications now come from polling (bot/services/library_watcher.py), so
+    the settings — and the network-facing port they configured — went too."""
+    settings = _settings()
+    for field in ("webhook_enabled", "webhook_port", "webhook_bind", "webhook_token"):
+        assert not hasattr(settings, field)

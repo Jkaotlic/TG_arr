@@ -361,6 +361,42 @@ async def _health_watch(bot: Bot, admin_ids: list, logger) -> None:
         structlog.contextvars.unbind_contextvars("component")
 
 
+async def _library_watch(bot: Bot, db: Database, logger) -> None:
+    """Announce library imports and finished music downloads.
+
+    qBittorrent's watcher only knows "the torrent finished"; this covers the
+    part the user actually waits for — Scryer importing the file — and music,
+    which never had completion notices at all (slskd is a separate client).
+    """
+    from bot.clients.registry import get_scryer, get_slskd
+    from bot.services.library_watcher import LibraryWatcher
+
+    settings = get_settings()
+    interval = max(settings.notify_check_interval, 60)
+
+    async def _notify(text: str) -> None:
+        db_user_ids = await db.list_allowed_users()
+        for uid in set(settings.allowed_tg_ids) | set(settings.admin_tg_ids) | set(db_user_ids):
+            try:
+                await bot.send_message(uid, text, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logger.warning("library_notify_send_failed", user_id=uid, error=str(e))
+
+    watcher = LibraryWatcher(_notify, get_scryer=get_scryer, get_slskd=get_slskd)
+    structlog.contextvars.bind_contextvars(component="library_watch")
+    try:
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await watcher.poll()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("library_watch_failed", error=str(e))
+    finally:
+        structlog.contextvars.unbind_contextvars("component")
+
+
 async def _periodic_cleanup(db: Database, logger, notification_service: Optional[NotificationService] = None) -> None:
     """DB-15: drop stale sessions/searches every 6h instead of only at startup.
 
@@ -561,6 +597,8 @@ async def main() -> None:
         _health_watch(bot, sorted(set(settings.admin_tg_ids)), logger)
     )
     logger.info("background_task_started", task="health_watch")
+    library_task = asyncio.create_task(_library_watch(bot, db, logger))
+    logger.info("background_task_started", task="library_watch")
 
     faulthandler.enable()
     threading.Thread(
@@ -569,29 +607,6 @@ async def main() -> None:
         name="liveness-watchdog",
     ).start()
     logger.info("background_task_started", task="watchdog")
-
-    # #8: optional inbound webhook server for *arr on-import notifications.
-    webhook_runner = None
-    if settings.webhook_enabled:
-        from bot.webhook import build_webhook_app, start_webhook_server
-
-        async def _webhook_notify(message: str) -> None:
-            # DB-04/BUG-15/LOGIC-08: notify env allowlist UNION DB runtime allowlist.
-            db_user_ids = await db.list_allowed_users()
-            for uid in set(settings.allowed_tg_ids) | set(settings.admin_tg_ids) | set(db_user_ids):
-                try:
-                    await bot.send_message(uid, message, parse_mode=ParseMode.HTML)
-                except Exception as e:
-                    logger.warning("webhook_notify_failed", user_id=uid, error=str(e))
-
-        webhook_runner = await start_webhook_server(
-            build_webhook_app(_webhook_notify, token=settings.webhook_token),
-            settings.webhook_bind,
-            settings.webhook_port,
-        )
-        logger.info("background_task_started", task="webhook")
-    else:
-        logger.info("Webhook server disabled")
 
     # Start polling
     try:
@@ -612,9 +627,9 @@ async def main() -> None:
         raise
     finally:
         # BUG-R6-01: await the cancellation instead of firing and forgetting.
-        await _cancel_background_tasks([liveness_task, cleanup_task, health_task])
-        if webhook_runner is not None:
-            await webhook_runner.cleanup()
+        await _cancel_background_tasks(
+            [liveness_task, cleanup_task, health_task, library_task]
+        )
         await bot.session.close()
 
 

@@ -111,22 +111,6 @@ class Settings(BaseSettings):
     # Pagination
     results_per_page: int = Field(default=5, ge=1, le=10, description="Search results per page")
 
-    # Webhook server (#8) — inbound Radarr/Sonarr "on import" notifications.
-    # Off by default; when enabled, point *arr Connect→Webhook at http://<host>:<port>/webhook
-    webhook_enabled: bool = Field(default=False, description="Enable inbound *arr webhook notification server")
-    webhook_port: int = Field(default=8090, ge=1, le=65535, description="Webhook server port")
-    # SEC-02: default changed from 0.0.0.0 → loopback. Exposing the webhook to
-    # the whole LAN by default was the actual vulnerability; operators who need
-    # *arr (running elsewhere, e.g. another container) to reach it must opt in
-    # explicitly via WEBHOOK_BIND.
-    webhook_bind: str = Field(default="127.0.0.1", description="Webhook server bind address")
-    # SEC-02/BUG-08: shared secret required to accept webhook POSTs. Checked
-    # against either `?token=` query param or the `/webhook/{token}` path
-    # segment — see bot/webhook.py docstring for the exact matching rule.
-    webhook_token: Optional[str] = Field(
-        default=None, description="Shared secret required to accept inbound webhook requests"
-    )
-
     @field_validator("allowed_tg_ids", "admin_tg_ids", mode="before")
     @classmethod
     def parse_comma_separated_ids(cls, v: str | list[int] | None) -> list[int]:
@@ -212,13 +196,6 @@ class Settings(BaseSettings):
             warnings.warn(
                 "NOTIFY_DOWNLOAD_COMPLETE=true but qBittorrent is not fully "
                 "configured — download-completion notifications will never fire.",
-                stacklevel=2,
-            )
-        if self.webhook_enabled and not self.webhook_token:
-            warnings.warn(
-                "WEBHOOK_ENABLED=true but WEBHOOK_TOKEN is not set — the "
-                "inbound webhook will accept unauthenticated requests from "
-                "anything that can reach WEBHOOK_BIND:WEBHOOK_PORT.",
                 stacklevel=2,
             )
         return self

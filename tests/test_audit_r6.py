@@ -3,9 +3,12 @@
 
 Each test is written to FAIL against the pre-fix code and pass after it:
 
-- SEC-R6-01 — webhook token comparison must be constant-time.
 - SEC-R6-02 — `VACUUM INTO` must not break on a quote in the backup path.
 - BUG-R6-01 — background tasks must be awaited after cancel() on shutdown.
+
+SEC-R6-01 (constant-time webhook token comparison) is gone with the webhook
+itself: the *arr "on import" server it belonged to was removed on 2026-07-29,
+replaced by polling in bot/services/library_watcher.py. Nothing left to test.
 """
 
 import asyncio
@@ -14,38 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from bot import webhook as webhook_mod
 from bot.db import Database
 from bot.main import _cancel_background_tasks
-
-
-class _FakeRequest:
-    """Minimal stand-in for aiohttp's Request (query + match_info only)."""
-
-    def __init__(self, query=None, match_info=None):
-        self.query = query or {}
-        self.match_info = match_info or {}
-
-
-# ---------------------------------------------------------------- SEC-R6-01
-def test_webhook_token_comparison_is_constant_time():
-    """SEC-R6-01: `==` on a secret leaks its length/prefix through timing.
-
-    Asserting on the source is the only honest way to test this — a timing
-    assertion would be flaky. The behavioural half (right/wrong tokens) is
-    covered by tests/test_feat_webhook.py.
-    """
-    source = inspect.getsource(webhook_mod._token_matches)
-    assert "compare_digest" in source, "webhook token must be compared with hmac.compare_digest"
-
-
-def test_webhook_token_still_matches_query_and_path():
-    """SEC-R6-01 must not change the documented matching rule."""
-    assert webhook_mod._token_matches(_FakeRequest(query={"token": "s3cret"}), "s3cret") is True
-    assert webhook_mod._token_matches(_FakeRequest(match_info={"service": "s3cret"}), "s3cret") is True
-    assert webhook_mod._token_matches(_FakeRequest(query={"token": "s3cre"}), "s3cret") is False
-    assert webhook_mod._token_matches(_FakeRequest(match_info={"service": "radarr"}), "s3cret") is False
-    assert webhook_mod._token_matches(_FakeRequest(), "s3cret") is False
 
 
 # ---------------------------------------------------------------- SEC-R6-02
@@ -132,5 +105,5 @@ def test_analysis_report_exists():
     report = Path(__file__).resolve().parents[1] / "analysis" / "audit-2026-07-28.md"
     assert report.is_file(), "analysis/audit-2026-07-28.md must exist"
     text = report.read_text(encoding="utf-8")
-    for finding in ("SEC-R6-01", "SEC-R6-02", "BUG-R6-01"):
+    for finding in ("SEC-R6-02", "BUG-R6-01"):
         assert finding in text
