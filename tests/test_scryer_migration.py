@@ -452,3 +452,58 @@ def test_non_scryer_errors_fall_back_to_the_generic_message():
 
     message = describe_scryer_failure(RuntimeError("boom"))
     assert "временно недоступен" in message.lower()
+
+
+# --------------------------------------------------- title disambiguation
+def _movie_candidate(title, year, slug=None):
+    return MovieInfo(title=title, year=year, slug=slug, metadata_id=f"id-{year}")
+
+
+def test_exact_title_and_year_match_needs_no_question():
+    from bot.handlers.search.commands import needs_title_confirmation
+
+    candidates = [_movie_candidate("Дюна", 2021), _movie_candidate("Дюна", 1984)]
+    assert needs_title_confirmation(candidates, "Дюна 2021", 2021) is False
+
+
+def test_single_candidate_needs_no_question():
+    from bot.handlers.search.commands import needs_title_confirmation
+
+    assert needs_title_confirmation([_movie_candidate("Apex", 2026)], "Apex", None) is False
+
+
+def test_ambiguous_candidates_ask_the_user():
+    """Prod incident 2026-07-29: "Холодное сердце" returned a German film from
+    2016 first (slug heart-of-stone-2016) and Disney's Frozen wasn't in the list
+    at all — the bot silently added the wrong title to the catalog."""
+    from bot.handlers.search.commands import needs_title_confirmation
+
+    candidates = [
+        _movie_candidate("Холодное сердце", 2016, "heart-of-stone-2016"),
+        _movie_candidate("Жил-был Снеговик", 2020, "once-upon-a-snowman"),
+        _movie_candidate("Холодное сердце", 2014, "das-kalte-herz"),
+    ]
+    assert needs_title_confirmation(candidates, "Холодное сердце", None) is True
+
+
+def test_exact_title_match_alone_is_not_enough_when_a_twin_exists():
+    """Two candidates share the exact queried title — the year decides, and
+    without one the user must."""
+    from bot.handlers.search.commands import needs_title_confirmation
+
+    candidates = [
+        _movie_candidate("Холодное сердце", 2016),
+        _movie_candidate("Холодное сердце", 2014),
+    ]
+    assert needs_title_confirmation(candidates, "Холодное сердце", None) is True
+
+
+def test_clearly_leading_candidate_needs_no_question():
+    """A single exact-title hit among unrelated neighbours is not ambiguous."""
+    from bot.handlers.search.commands import needs_title_confirmation
+
+    candidates = [
+        _movie_candidate("Interstellar", 2014),
+        _movie_candidate("Interstellar Wars", 2016),
+    ]
+    assert needs_title_confirmation(candidates, "Interstellar", None) is False
