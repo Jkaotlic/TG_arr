@@ -148,6 +148,22 @@ def needs_title_confirmation(
     return len(exact) != 1
 
 
+def should_ask_for_season(
+    content_type: ContentType, seasons: list, parsed_season: Optional[int]
+) -> bool:
+    """Whether to offer a season picker before searching releases.
+
+    Only worth asking when there is a real choice: an episodic facet, more than
+    one season, and a query that didn't already name one ("Breaking Bad S02"
+    has answered it).
+    """
+    if content_type not in (ContentType.SERIES, ContentType.ANIME):
+        return False
+    if parsed_season is not None:
+        return False
+    return len(seasons) > 1
+
+
 def _pick_metadata_candidate(candidates: list, query_year: Optional[int]):
     """Choose the metadata candidate the user most likely meant.
 
@@ -210,6 +226,21 @@ async def _resolve_title(
     return title
 
 
+async def _known_seasons(search_service, title, content_type: ContentType) -> list:
+    """Seasons Scryer knows about for this title, newest-first-friendly.
+
+    Best-effort: if the catalog can't tell us, return nothing and the caller
+    simply won't offer the picker.
+    """
+    if content_type not in (ContentType.SERIES, ContentType.ANIME):
+        return []
+    try:
+        return await search_service.get_seasons(title.scryer_id)
+    except Exception as e:
+        logger.debug("seasons_lookup_failed", title_id=getattr(title, "scryer_id", None), error=str(e))
+        return []
+
+
 async def process_search(
     message: Message,
     query: str,
@@ -217,12 +248,14 @@ async def process_search(
     db_user: User,
     db: Database,
     chosen_title=None,
+    season_override: Optional[int] = None,
 ) -> None:
     """Process a search query.
 
     `chosen_title` is set when the user answered the "which title did you
     mean?" question — it skips both the metadata search and the ambiguity
-    check, since the answer is now explicit.
+    check, since the answer is now explicit. `season_override` likewise carries
+    the answer to the season picker.
     """
     if len(query) > MAX_QUERY_LENGTH:
         await message.answer(f"❌ Запрос слишком длинный (макс. {MAX_QUERY_LENGTH} символов)")
@@ -364,11 +397,31 @@ async def process_search(
             log.info("search_branch", branch="no_metadata")
             return
 
+        # A multi-season show searched whole returns packs the user may not
+        # want and spends indexer quota on episodes already on disk — offer the
+        # choice while it's still cheap to make.
+        seasons = await _known_seasons(search_service, title, content_type)
+        if should_ask_for_season(content_type, seasons, parsed.get("season")):
+            session = SearchSession(
+                user_id=user_id,
+                query=query,
+                content_type=content_type,
+                selected_content=title,
+            )
+            await db.save_session(user_id, session)
+            await status_msg.edit_text(
+                f"📺 <b>{html.escape(title.title)}</b>\n\nЧто искать?",
+                reply_markup=Keyboards.season_scope(seasons, title.scryer_id),
+                parse_mode="HTML",
+            )
+            log.info("search_branch", branch="ask_season", seasons=len(seasons))
+            return
+
         t_search = time.monotonic()
         results = await search_service.search_releases(
             title.scryer_id,
             content_type,
-            season=parsed.get("season"),
+            season=parsed.get("season") or season_override,
             episode=parsed.get("episode"),
             preferred_resolution=db_user.preferences.preferred_resolution,
             timeout=settings.scryer_search_timeout,

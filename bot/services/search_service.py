@@ -432,6 +432,10 @@ class SearchService:
             return []
         return await self.scryer.search_metadata(query, content_type)
 
+    async def get_seasons(self, title_id: str) -> list:
+        """Seasons available to search for a title (see ScryerClient.get_seasons)."""
+        return await self.scryer.get_seasons(title_id)
+
     async def search_releases(
         self,
         title_id: str,

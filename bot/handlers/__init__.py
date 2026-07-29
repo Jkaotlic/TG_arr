@@ -11,6 +11,7 @@ from bot.handlers.search import router as search_router
 from bot.handlers.settings import router as settings_router
 from bot.handlers.start import router as start_router
 from bot.handlers.status import router as status_router
+from bot.handlers.titles import router as titles_router
 from bot.handlers.trending import router as trending_router
 from bot.handlers.users import router as users_router
 
@@ -33,5 +34,6 @@ def setup_routers() -> Router:
     main_router.include_router(emby_router)
     main_router.include_router(trending_router)
     main_router.include_router(calendar_router)
+    main_router.include_router(titles_router)
 
     return main_router

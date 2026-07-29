@@ -177,6 +177,12 @@ query Title($id: ID!) {{
 }}
 """
 
+_TITLE_SEASONS = """
+query TitleSeasons($id: ID!) {
+  title(id: $id) { wantedItems(limit: 500, offset: 0) { items { seasonNumber } } }
+}
+"""
+
 _SEARCH_RELEASES = """
 query SearchReleases($input: SearchReleasesInput!) {
   searchReleases(input: $input) {
@@ -229,6 +235,21 @@ mutation QueueExisting($input: QueueDownloadInput!) {
 _SET_MONITORED = """
 mutation SetMonitored($input: SetTitleMonitoredInput!) {
   setTitleMonitored(input: $input) { id monitored }
+}
+"""
+
+_DELETE_PREVIEW = """
+query DeletePreview($titleId: ID!) {
+  deleteTitlePreview(titleId: $titleId) {
+    fingerprint totalFileCount mediaCount directoryCount
+    requiresTypedConfirmation typedConfirmationPrompt targetLabel
+  }
+}
+"""
+
+_DELETE_TITLE = """
+mutation DeleteTitle($input: DeleteTitleInput!) {
+  deleteTitle(input: $input) { __typename }
 }
 """
 
@@ -626,6 +647,18 @@ class ScryerClient(BaseAPIClient):
             return None
         return pool[0]
 
+    async def get_seasons(self, title_id: str) -> list[int]:
+        """Season numbers Scryer knows about for a title.
+
+        Derived from the title's wanted items — Scryer has no "list seasons"
+        query, and what the user can usefully search for is exactly what is
+        still missing. Returns [] for a title with nothing outstanding.
+        """
+        data = await self.execute(_TITLE_SEASONS, {"id": title_id}, operation="titleSeasons")
+        node = ((data.get("title") or {}).get("wantedItems") or {}).get("items") or []
+        seasons = {_int_or_none(item.get("seasonNumber")) for item in node}
+        return sorted(s for s in seasons if s is not None)
+
     # ------------------------------------------------------------- releases
     def _release_to_model(self, row: dict[str, Any], title_id: str) -> SearchResult:
         """Map an `IndexerSearchResultPayload` onto the bot's SearchResult."""
@@ -919,6 +952,38 @@ class ScryerClient(BaseAPIClient):
         )
         node = data.get("setTitleMonitored") or {}
         return bool(node.get("monitored", monitored))
+
+    async def delete_title_preview(self, title_id: str) -> dict[str, Any]:
+        """What removing this title would affect — file counts and a fingerprint.
+
+        The fingerprint ties the eventual delete to exactly what was shown, so
+        a title that gained files between the preview and the confirmation
+        can't be removed on stale information.
+        """
+        data = await self.execute(_DELETE_PREVIEW, {"titleId": title_id}, operation="deleteTitlePreview")
+        return data.get("deleteTitlePreview") or {}
+
+    async def delete_title(
+        self,
+        title_id: str,
+        *,
+        fingerprint: Optional[str] = None,
+        delete_files: bool = False,
+        typed_confirmation: Optional[str] = None,
+    ) -> bool:
+        """Remove a title from the catalog.
+
+        `delete_files` defaults to False: dropping a catalog entry must never
+        take the user's media with it unless they explicitly asked.
+        """
+        payload: dict[str, Any] = {"titleId": title_id, "deleteFilesOnDisk": delete_files}
+        if fingerprint:
+            payload["previewFingerprint"] = fingerprint
+        if typed_confirmation:
+            payload["typedConfirmation"] = typed_confirmation
+        await self.execute(_DELETE_TITLE, {"input": payload}, operation="deleteTitle")
+        logger.info("scryer_title_deleted", title_id=title_id, delete_files=delete_files)
+        return True
 
     # ------------------------------------------------------------ downloads
     async def get_download_queue(self, title_id: Optional[str] = None) -> list[ScryerQueueItem]:

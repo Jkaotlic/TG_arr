@@ -211,3 +211,76 @@ class _SearchKeyboards:
             InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def title_actions(title) -> InlineKeyboardMarkup:
+        """Manage a catalog title — monitoring and removal (2026-07-29).
+
+        The monitoring button is a toggle: it shows the action, not the state,
+        so the user never has to work out what pressing it will do.
+        """
+        from bot.ui.callbacks import TitleActionCB
+
+        title_id = getattr(title, "scryer_id", "") or ""
+        monitored = bool(getattr(title, "monitored", False))
+        toggle = (
+            InlineKeyboardButton(
+                text="🔕 Снять мониторинг",
+                callback_data=TitleActionCB(action="unmon", title_id=title_id).pack(),
+            )
+            if monitored
+            else InlineKeyboardButton(
+                text="🔔 Включить мониторинг",
+                callback_data=TitleActionCB(action="mon", title_id=title_id).pack(),
+            )
+        )
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [toggle],
+            [InlineKeyboardButton(
+                text="🗑 Удалить из каталога",
+                callback_data=TitleActionCB(action="delete", title_id=title_id).pack(),
+            )],
+            [InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.CANCEL)],
+        ])
+
+    @staticmethod
+    def confirm_title_delete(title_id: str) -> InlineKeyboardMarkup:
+        """Second step of a destructive action — never one tap away."""
+        from bot.ui.callbacks import TitleActionCB
+
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🗑 Да, удалить",
+                callback_data=TitleActionCB(action="delconf", title_id=title_id).pack(),
+            )],
+            [InlineKeyboardButton(text="◀️ Отмена", callback_data=CallbackData.CANCEL)],
+        ])
+
+    @staticmethod
+    def season_scope(seasons: list, title_id: str, per_row: int = 4) -> InlineKeyboardMarkup:
+        """Pick what to fetch for a series: the whole show or one season.
+
+        Searching a 20-season show as one query returns season packs the user
+        may not want, and burns indexer quota on episodes they already have.
+        The list is capped — a 30-button wall is not a choice, it's a maze.
+        """
+        from bot.ui.callbacks import SeasonScopeCB
+
+        rows = [[InlineKeyboardButton(
+            text="📺 Весь сериал",
+            callback_data=SeasonScopeCB(season=0, title_id=title_id).pack(),
+        )]]
+
+        # Newest seasons first: that's what a user is usually after.
+        shown = sorted(seasons, reverse=True)[:12]
+        for i in range(0, len(shown), per_row):
+            rows.append([
+                InlineKeyboardButton(
+                    text=f"S{season:02d}",
+                    callback_data=SeasonScopeCB(season=season, title_id=title_id).pack(),
+                )
+                for season in shown[i:i + per_row]
+            ])
+
+        rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
