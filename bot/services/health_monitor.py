@@ -109,3 +109,7 @@ class HealthMonitor:
             await self.notify(text)
         except Exception as e:
             logger.warning("health_alert_failed", error=str(e))
+            return
+        # Logged on success too: otherwise "no alert was needed" and "the alert
+        # was sent" are indistinguishable afterwards.
+        logger.info("health_alert_sent", text=" ".join(text.split())[:200])
