@@ -16,6 +16,7 @@ import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand
 
 from bot.clients.registry import close_all as close_all_clients
 from bot.clients.registry import get_qbittorrent
@@ -195,6 +196,8 @@ async def on_startup(
         id=bot_info.id,
     )
 
+    await publish_bot_commands(bot)
+
     # Tell the admins the bot is up and which backends answered — the warm-up
     # already probed them, so this costs nothing extra.
     settings = get_settings()
@@ -205,6 +208,49 @@ async def on_startup(
         allowed_ids=sorted(set(settings.allowed_tg_ids) | set(db_user_ids)),
         warmup=warmup,
     )
+
+
+#: The menu behind Telegram's "/" button.
+#:
+#: Admin-only commands (/users, /adduser, /deluser) are deliberately absent:
+#: advertising them to everyone only produces "недостаточно прав" replies.
+#: Order is the order Telegram displays.
+BOT_COMMANDS = [
+    BotCommand(command="menu", description="Главное меню"),
+    BotCommand(command="search", description="Найти фильм, сериал или аниме"),
+    BotCommand(command="movie", description="Найти фильм"),
+    BotCommand(command="series", description="Найти сериал"),
+    BotCommand(command="anime", description="Найти аниме"),
+    BotCommand(command="music", description="Найти исполнителя"),
+    BotCommand(command="album", description="Найти альбом"),
+    BotCommand(command="track", description="Найти трек"),
+    BotCommand(command="title", description="Тайтл в каталоге: мониторинг, удаление"),
+    BotCommand(command="wanted", description="Что ищется и не находится"),
+    BotCommand(command="downloads", description="Текущие загрузки"),
+    BotCommand(command="calendar", description="Календарь выходов"),
+    BotCommand(command="emby", description="Что нового в библиотеке"),
+    BotCommand(command="history", description="История запросов"),
+    BotCommand(command="status", description="Состояние сервисов"),
+    BotCommand(command="health", description="Диагностика проблем"),
+    BotCommand(command="settings", description="Настройки"),
+    BotCommand(command="help", description="Справка"),
+    BotCommand(command="cancel", description="Отменить текущее действие"),
+]
+
+
+async def publish_bot_commands(bot) -> None:
+    """Publish the command menu to Telegram.
+
+    Best-effort: the menu is cosmetic, and a Telegram hiccup here must not stop
+    the bot from starting.
+    """
+    logger = structlog.get_logger()
+    try:
+        await bot.set_my_commands(BOT_COMMANDS)
+    except Exception as e:
+        logger.warning("bot_commands_publish_failed", error=str(e))
+        return
+    logger.info("bot_commands_published", count=len(BOT_COMMANDS))
 
 
 #: Display names for the warm-up probe keys, in the order they're shown.
