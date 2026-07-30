@@ -276,6 +276,67 @@ async def test_non_json_body_does_not_raise_a_decode_error():
     assert result == {}
 
 
+# ---------------------------------------------------------------- LANG-01
+def _release(**kw):
+    from bot.models import SearchResult
+
+    base = dict(
+        guid="g1",
+        title="Show.S02E07.1080p.WEB-DL.DDP5.1.ENG.Atmos.ITA.H264-GRP",
+        size=3_000_000_000,
+        scryer_score=500,
+        scryer_allowed=True,
+    )
+    base.update(kw)
+    return SearchResult(**base)
+
+
+def test_release_card_warns_when_the_policy_found_no_english_audio():
+    """LANG-01: the language policy only *penalises* a release without English
+    audio — it does not block it — so the release card has to say so. The user
+    asked why Italian audio keeps landing despite the profiles being set.
+    """
+    from bot.ui.formatters import Formatters
+
+    result = _release(policy_codes=["russian_subtitles_bonus"])
+
+    text = Formatters.format_release_details(result)
+
+    assert "англ" in text.lower(), text
+
+
+def test_release_card_confirms_english_audio_when_the_policy_scored_it():
+    from bot.ui.formatters import Formatters
+
+    result = _release(policy_codes=["english_audio_bonus", "russian_subtitles_bonus"])
+
+    text = Formatters.format_release_details(result)
+
+    assert "🔊" in text
+
+
+def test_release_card_stays_quiet_when_the_policy_said_nothing():
+    """No scoring log (e.g. a session from before this change) must not turn
+    into a false "no English audio" warning.
+    """
+    from bot.ui.formatters import Formatters
+
+    text = Formatters.format_release_details(_release())
+
+    assert "англ" not in text.lower()
+
+
+def test_penalties_are_surfaced_with_their_weight():
+    """A -1000 penalty is the difference between "fine" and "last resort"."""
+    from bot.ui.formatters import Formatters
+
+    result = _release(policy_codes=["russian_audio_without_english"])
+
+    text = Formatters.format_release_details(result)
+
+    assert "англ" in text.lower()
+
+
 # ---------------------------------------------------------------- BUG-05
 def _catalog_title(name: str, title_id: str):
     t = MagicMock()

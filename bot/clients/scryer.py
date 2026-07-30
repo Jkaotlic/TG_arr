@@ -211,7 +211,14 @@ query SearchReleases($input: SearchReleasesInput!) {
       isDualAudio isAtmos isDolbyVision detectedHdr
       episode { season episodeNumbers }
     }
-    qualityProfileDecision { allowed blockCodes releaseScore preferenceScore }
+    qualityProfileDecision {
+      allowed blockCodes releaseScore preferenceScore
+      # The per-rule breakdown is the only place the language verdict shows up:
+      # `ParsedReleasePayload` carries no audio-language field, and the language
+      # rule only *penalises* a release rather than blocking it, so without this
+      # the card cannot tell the user why an Italian-only release ranked at all.
+      scoringLog { code delta ruleSetName }
+    }
     queueScope {
       __typename
       ... on TitleScopePayload { wholeTitle }
@@ -792,6 +799,11 @@ class ScryerClient(BaseAPIClient):
             scryer_preference_score=decision.get("preferenceScore"),
             scryer_allowed=decision.get("allowed"),
             block_codes=list(decision.get("blockCodes") or []),
+            policy_codes=[
+                str(entry.get("code"))
+                for entry in (decision.get("scoringLog") or [])
+                if entry.get("code")
+            ],
             auto_eligible=bool(row.get("autoEligible")),
             auto_decision_summary=row.get("autoDecisionSummary"),
         )
