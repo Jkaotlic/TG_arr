@@ -13,8 +13,6 @@ from bot.models import (
     ActionLog,
     ActionType,
     ContentType,
-    QualityInfo,
-    SearchResult,
     SearchSession,
     User,
     UserPreferences,
@@ -93,44 +91,29 @@ class TestUserOperations:
 class TestSearchOperations:
     """Test search and session operations."""
 
-    async def test_save_search(self, db):
-        """Test saving a search with results."""
-        # Create user first
+    async def test_a_search_is_recorded_in_the_action_log(self, db):
+        """Searches are recorded as actions, which is what /history reads.
+
+        2026-07-30: the old test here covered `save_search`/`searches`, a table
+        no production code has written to for a long time (it was empty on the
+        live database). The method is gone; the query/type/user trail lives in
+        `actions`, and that is what this now pins down.
+        """
         user = User(tg_id=123456789)
         await db.create_user(user)
 
-        results = [
-            SearchResult(
-                guid="test-1",
-                title="Test.Movie.1080p",
-                indexer="TestIndexer",
-                size=5000000000,
-                quality=QualityInfo(resolution="1080p"),
-            ),
-            SearchResult(
-                guid="test-2",
-                title="Test.Movie.720p",
-                indexer="TestIndexer",
-                size=2500000000,
-                quality=QualityInfo(resolution="720p"),
-            ),
-        ]
+        await db.log_action(ActionLog(
+            user_id=123456789,
+            action_type=ActionType.SEARCH,
+            content_type=ContentType.MOVIE,
+            query="test movie",
+        ))
 
-        search_id = await db.save_search(123456789, "test movie", ContentType.MOVIE, results)
-
-        assert search_id > 0
-
-        # DB-03: search_results is gone; save_search only persists metadata
-        # (query/content_type/result_count) in the `searches` table.
-        async with db.conn.execute(
-            "SELECT query, content_type, result_count FROM searches WHERE id = ?",
-            (search_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row is not None
-        assert row["query"] == "test movie"
-        assert row["content_type"] == ContentType.MOVIE.value
-        assert row["result_count"] == 2
+        actions = await db.get_user_actions(123456789, limit=10)
+        assert len(actions) == 1
+        assert actions[0].query == "test movie"
+        assert actions[0].action_type == ActionType.SEARCH
+        assert actions[0].content_type == ContentType.MOVIE
 
     async def test_save_and_get_session(self, db):
         """Test saving and retrieving a session."""
@@ -382,12 +365,21 @@ class TestCleanupOperations:
             )
             await db.conn.commit()
 
-        await db.save_search(
-            123456789,
-            "fresh search",
-            ContentType.MOVIE,
-            [SearchResult(guid="test", title="Test", indexer="Test")],
-        )
+        # A fresh row, inserted the same way — nothing writes to this legacy
+        # table any more, so the cleanup path is tested against raw inserts.
+        async with db._write_lock:
+            await db.conn.execute(
+                "INSERT INTO searches (user_id, query, content_type, result_count, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    123456789,
+                    "fresh search",
+                    ContentType.MOVIE.value,
+                    1,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            await db.conn.commit()
 
         deleted = await db.cleanup_old_searches(days=7)
 

@@ -166,30 +166,43 @@ async def test_trending_add_movie_escapes_title():
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_concurrent_writes_do_not_race_transactions():
-    """RACE-02/DB-01: many concurrent save_search + cleanup_old_searches calls
-    on the single shared connection must all complete without
-    'cannot start a transaction within a transaction'."""
+    """RACE-02/DB-01: many concurrent writers + a cleanup pass on the single
+    shared connection must all complete without 'cannot start a transaction
+    within a transaction'.
+
+    2026-07-30: the writer here used to be `save_search`, which no production
+    code called any more — a race test over a dead path proves nothing. It now
+    exercises `log_action`, the writer that actually runs on every search and
+    grab, so a regression in the write lock would fail this test for real.
+    """
     from bot.db import Database
+    from bot.models import ActionLog, ActionType
 
     db = Database(":memory:")
     await db.connect()
     await db.create_user(User(tg_id=1, username="u", first_name="f"))
 
-    results = [SearchResult(guid="g", title="t")]
-
-    async def save():
-        await db.save_search(1, "q", ContentType.MOVIE, results)
+    async def write():
+        await db.log_action(ActionLog(
+            user_id=1,
+            action_type=ActionType.SEARCH,
+            content_type=ContentType.MOVIE,
+            query="q",
+        ))
 
     async def clean():
         await db.cleanup_old_searches(days=7)
 
     tasks = []
     for _ in range(12):
-        tasks.append(asyncio.create_task(save()))
+        tasks.append(asyncio.create_task(write()))
         tasks.append(asyncio.create_task(clean()))
 
     # Must not raise sqlite3.OperationalError (nested transaction) and must not lose data.
     await asyncio.gather(*tasks)
+
+    actions = await db.get_user_actions(1, limit=50)
+    assert len(actions) == 12, "every concurrent write must have landed"
     await db.close()
 
 

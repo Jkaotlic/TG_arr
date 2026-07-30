@@ -16,7 +16,6 @@ from bot.models import (
     ActionLog,
     ActionType,
     ContentType,
-    SearchResult,
     SearchSession,
     User,
     UserPreferences,
@@ -497,34 +496,14 @@ class Database:
         ) as cursor:
             return [row[0] for row in await cursor.fetchall()]
 
-    # Search methods
-    async def save_search(
-        self, user_id: int, query: str, content_type: ContentType, results: list[SearchResult]
-    ) -> int:
-        """Save search metadata (query, content_type, result_count). Returns search ID.
-
-        DB-03: ``results`` is no longer serialized to the write-only
-        ``search_results`` table — the same payload is already persisted in
-        ``sessions`` (search.py) and nothing ever reads ``search_results``
-        back. Only the result *count* is worth keeping for history purposes.
-        The ``results`` parameter is kept (rather than dropped) so existing
-        call sites stay source-compatible; only ``len(results)`` is used.
-        """
-        now = datetime.now(timezone.utc).isoformat()
-
-        async with self._write_lock:
-            cursor = await self.conn.execute(
-                """
-                INSERT INTO searches (user_id, query, content_type, result_count, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (user_id, query, content_type.value, len(results), now),
-            )
-            await self.conn.commit()
-            search_id = cursor.lastrowid
-            if search_id is None:
-                raise RuntimeError("Failed to insert search record")
-            return search_id
+    # DEAD-02 (2026-07-30): `save_search` is gone. No production code had
+    # called it in a long time — only its own tests did, and the `searches`
+    # table was empty on the live database. Every search is already recorded in
+    # `actions` (ActionType.SEARCH, with the query), which is what /history
+    # reads, so the table only ever duplicated that trail. The table and
+    # `cleanup_old_searches` stay: dropping a table needs a migration and buys
+    # nothing, and the cleanup is one DELETE per maintenance pass that keeps any
+    # pre-existing rows from lingering.
 
     # Session methods
     async def save_session(self, user_id: int, session: SearchSession) -> None:
