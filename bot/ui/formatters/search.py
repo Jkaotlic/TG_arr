@@ -17,6 +17,43 @@ from bot.models import (
 )
 from bot.ui.formatters._common import _e, _safe_truncate, _to_local
 
+#: Rule codes from Scryer's `scoringLog` that carry the language verdict.
+#: The language rule set ("English Audio + Russian Subtitles") only *penalises*
+#: a release without English audio — it never blocks one — and it has no clause
+#: at all for, say, Italian-only audio. So a release can rank, be allowed, and
+#: still have no English track. The card has to say that out loud (2026-07-30).
+_ENGLISH_AUDIO_CODE = "english_audio_bonus"
+_RUSSIAN_SUBS_CODE = "russian_subtitles_bonus"
+_NO_ENGLISH_CODES = ("russian_audio_without_english", "verified_file_without_english")
+
+
+def _format_language_verdict(policy_codes: list[str]) -> str:
+    """One line on what the language policy found, or "" when it said nothing.
+
+    An empty scoring log is not evidence of a missing English track — it means
+    the policy never ran (an older session, or a release Scryer didn't score).
+    Staying silent there is the point: a false "no English audio" warning would
+    be worse than none.
+    """
+    if not policy_codes:
+        return ""
+
+    codes = set(policy_codes)
+    has_english = _ENGLISH_AUDIO_CODE in codes
+    penalised = bool(codes & set(_NO_ENGLISH_CODES))
+    subs = " • 💬 RU-субтитры" if _RUSSIAN_SUBS_CODE in codes else ""
+
+    if has_english:
+        return f"🔊 <b>Аудио:</b> есть английское{subs}"
+    if penalised:
+        return (
+            f"⚠️ <b>Аудио:</b> английского нет — политика снизила рейтинг, "
+            f"но не запретила релиз{subs}"
+        )
+    return (
+        f"⚠️ <b>Аудио:</b> английское не найдено в описании релиза{subs}"
+    )
+
 
 class _SearchFormatters:
     """Search / content-info / status / preferences formatting mixin."""
@@ -151,6 +188,10 @@ class _SearchFormatters:
         if result.publish_date:
             date_str = _to_local(result.publish_date).strftime("%d.%m.%Y %H:%M")
             lines.append(f"📆 <b>Опубликовано:</b> {date_str}")
+
+        language_note = _format_language_verdict(result.policy_codes)
+        if language_note:
+            lines.append(f"\n{language_note}")
 
         return "\n".join(lines)
 

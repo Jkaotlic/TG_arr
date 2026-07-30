@@ -139,6 +139,11 @@ class SearchResult(BaseModel):
     scryer_preference_score: Optional[int] = Field(default=None, description="Scryer preferenceScore")
     scryer_allowed: Optional[bool] = Field(default=None, description="Whether Scryer's profile allows this release")
     block_codes: list[str] = Field(default_factory=list, description="Scryer block codes when not allowed")
+    policy_codes: list[str] = Field(
+        default_factory=list,
+        description="Rule codes from Scryer's scoringLog (e.g. english_audio_bonus). Empty means "
+                    "the policy said nothing — which is not the same as 'it said no'.",
+    )
     auto_eligible: bool = Field(default=False, description="Scryer would grab this release automatically")
     auto_decision_summary: Optional[str] = Field(default=None)
 
