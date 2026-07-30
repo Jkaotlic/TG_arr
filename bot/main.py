@@ -498,10 +498,11 @@ async def on_shutdown(
     logger = structlog.get_logger()
     logger.info("Bot shutting down...")
 
-    # Stop notification service
+    # Stop notification service. OBS-07 (2026-07-30): `stop()` already logs
+    # "Notification service stopped" — the same duplicate that was removed from
+    # the startup path was still here, so every shutdown logged it twice.
     if notification_service:
         await notification_service.stop()
-        logger.info("Notification service stopped")
 
     # RACE-05: the qBittorrent client used by the notification service is the
     # registry singleton, so close_all_clients() below closes it exactly once.
