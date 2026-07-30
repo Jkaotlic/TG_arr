@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
@@ -71,6 +71,10 @@ class ActionType(str, Enum):
     ADD = "add"
     GRAB = "grab"
     ERROR = "error"
+    # Added 2026-07-30: monitoring toggles and catalog removals were both being
+    # logged as ADD, so /history showed "добавлено" for a deletion.
+    MONITOR = "monitor"
+    DELETE = "delete"
 
 
 class UserRole(str, Enum):
@@ -404,6 +408,62 @@ class ScryerWantedItem(BaseModel):
     episode_number: Optional[int] = None
     status: Optional[str] = None
     media_type: Optional[str] = None
+
+
+class ScryerImportRecord(BaseModel):
+    """One row of Scryer's `importHistory` — the journal of finished imports.
+
+    This is the authoritative "did the file actually land" signal. The active
+    `downloadQueue` is not: a finished import leaves it, so watching the queue
+    misses the very event the user is waiting for (audit 2026-07-30, BUG-01).
+    """
+
+    id: str
+    source_title: str = "?"
+    title_id: Optional[str] = None
+    content_type: ContentType = ContentType.UNKNOWN
+    #: `ImportStatusValue`: PENDING/RUNNING/PROCESSING/COMPLETED/FAILED/SKIPPED.
+    status: Optional[str] = None
+    #: `ImportDecisionValue`: IMPORTED/REJECTED/SKIPPED/CONFLICT/UNMATCHED/FAILED.
+    decision: Optional[str] = None
+    skip_reason: Optional[str] = None
+    error_message: Optional[str] = None
+    dest_path: Optional[str] = None
+    finished_at: Optional[datetime] = None
+
+    #: Decisions that mean the media is in the library now.
+    IMPORTED_DECISIONS: ClassVar[frozenset[str]] = frozenset({"IMPORTED"})
+    #: …and the ones that mean it isn't, and won't be without help.
+    FAILED_DECISIONS: ClassVar[frozenset[str]] = frozenset(
+        {"REJECTED", "FAILED", "UNMATCHED", "CONFLICT"}
+    )
+    #: Statuses that mean the import is still in flight — say nothing yet.
+    PENDING_STATUSES: ClassVar[frozenset[str]] = frozenset(
+        {"PENDING", "RUNNING", "PROCESSING"}
+    )
+
+    @property
+    def is_finished(self) -> bool:
+        return (self.status or "").upper() not in self.PENDING_STATUSES
+
+    @property
+    def is_imported(self) -> bool:
+        return self.is_finished and (self.decision or "").upper() in self.IMPORTED_DECISIONS
+
+    @property
+    def is_failed(self) -> bool:
+        return self.is_finished and (self.decision or "").upper() in self.FAILED_DECISIONS
+
+    @property
+    def failure_reason(self) -> str:
+        """Shortest honest explanation of a failed import.
+
+        `skipReason` is the machine-readable cause (POLICY_MISMATCH,
+        ALREADY_IMPORTED…); `errorMessage` carries Scryer's own counts and last
+        error, which is what makes the failure actionable.
+        """
+        parts = [p for p in (self.skip_reason, self.error_message) if p]
+        return " — ".join(parts) if parts else (self.decision or "причина неизвестна")
 
 
 class QueueResult(BaseModel):

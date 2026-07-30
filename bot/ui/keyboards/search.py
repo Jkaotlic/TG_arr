@@ -244,6 +244,30 @@ class _SearchKeyboards:
         ])
 
     @staticmethod
+    def title_choices(titles: list, limit: int = 5) -> InlineKeyboardMarkup:
+        """Ask which catalog entry was meant (audit 2026-07-30, BUG-05).
+
+        `/title Frozen` matches Frozen, Frozen Fever and Frozen II. Picking the
+        first silently is how "Холодное сердце" once became "Heart of Stone" —
+        and here the card that follows carries a delete button, so the guess is
+        far more expensive.
+        """
+        from bot.ui.callbacks import TitleActionCB
+
+        rows = []
+        for title in titles[:limit]:
+            year = getattr(title, "year", None)
+            label = f"{getattr(title, 'title', '?')}{f' ({year})' if year else ''}"
+            rows.append([InlineKeyboardButton(
+                text=label[:60],
+                callback_data=TitleActionCB(
+                    action="pick", title_id=getattr(title, "scryer_id", "") or ""
+                ).pack(),
+            )])
+        rows.append([InlineKeyboardButton(text="◀️ Отмена", callback_data=CallbackData.CANCEL)])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @staticmethod
     def confirm_title_delete(title_id: str) -> InlineKeyboardMarkup:
         """Second step of a destructive action — never one tap away."""
         from bot.ui.callbacks import TitleActionCB

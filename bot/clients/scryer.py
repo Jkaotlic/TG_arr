@@ -25,6 +25,7 @@ Scryer's verdict per release (`qualityProfileDecision`), which the bot surfaces
 and sorts by rather than overriding.
 """
 
+import asyncio
 import hashlib
 import time
 import urllib.parse
@@ -47,6 +48,7 @@ from bot.models import (
     RootFolder,
     ScryerCalendarItem,
     ScryerHealth,
+    ScryerImportRecord,
     ScryerQueueItem,
     ScryerWantedItem,
     SearchResult,
@@ -90,6 +92,21 @@ def root_folder_id(path: str) -> str:
     across restarts (unlike a list index) and safe in both respects.
     """
     return hashlib.sha1(path.encode("utf-8")).hexdigest()[:12]  # noqa: S324 -- identity, not security
+
+
+def _is_mutation(query: str) -> bool:
+    """Whether a GraphQL document mutates state.
+
+    Reads are safe to retry (and on rpie4's Wi-Fi that retry earns its keep);
+    mutations are not. GraphQL says an operation is a mutation only if it says so
+    at the top, so the first non-blank line settles it.
+    """
+    for line in query.lstrip().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        return stripped.startswith("mutation")
+    return False
 
 
 def mask_release_secrets(url: Optional[str]) -> str:
@@ -263,6 +280,18 @@ query DownloadQueue($titleId: ID) {
 }
 """
 
+#: The permanent journal of finished imports. Unlike `downloadQueue`, a row here
+#: never disappears, so an import that completed between two polls is still
+#: reportable (audit 2026-07-30, BUG-01).
+_IMPORT_HISTORY = """
+query ImportHistory($limit: Int) {
+  importHistory(limit: $limit) {
+    id sourceTitle titleId facet status decision skipReason errorMessage
+    destPath finishedAt
+  }
+}
+"""
+
 _CALENDAR = """
 query Calendar($startDate: Date!, $endDate: Date!) {
   calendarEpisodes(startDate: $startDate, endDate: $endDate) {
@@ -342,6 +371,11 @@ class ScryerClient(BaseAPIClient):
         self._timeout_override = timeout
         self._token: Optional[str] = None
         self._token_expires_at: Optional[float] = None  # time.monotonic() deadline
+        # Scryer rate-limits `login`. The token expires once a day, and at that
+        # moment several callers (health watch, library watch, a user search) can
+        # each see a stale token and log in at once — enough to get all of them
+        # refused. One login at a time; the rest reuse its result.
+        self._auth_lock = asyncio.Lock()
 
     # ----------------------------------------------------------------- auth
     def _get_headers(self) -> dict[str, str]:
@@ -365,8 +399,25 @@ class ScryerClient(BaseAPIClient):
             return True
         return time.monotonic() < self._token_expires_at
 
-    async def login(self) -> str:
-        """Authenticate and cache the JWT. Raises AuthenticationError on refusal."""
+    async def login(self, *, force: bool = False) -> str:
+        """Authenticate and cache the JWT. Raises AuthenticationError on refusal.
+
+        Serialized: concurrent callers queue on `_auth_lock`, and whoever gets in
+        second finds a fresh token and returns it instead of logging in again.
+        `force=True` is for "the server just rejected this token" — then a token
+        that merely *looks* fresh must not be reused.
+        """
+        stale_token = self._token if force else None
+        async with self._auth_lock:
+            if not force and self._token_is_fresh():
+                return self._token  # type: ignore[return-value]
+            # Someone else already replaced the rejected token while we waited.
+            if force and self._token is not None and self._token != stale_token:
+                return self._token
+            return await self._login_locked()
+
+    async def _login_locked(self) -> str:
+        """The actual login exchange. Call with `_auth_lock` held."""
         payload = await self._post_graphql(
             _LOGIN,
             {"input": {"username": self.username, "password": self.password}},
@@ -435,9 +486,19 @@ class ScryerClient(BaseAPIClient):
         headers = None
         if with_auth and self._token:
             headers = {"Authorization": f"Bearer {self._token}"}
-        result = await self._safe_request(
-            "POST", "/graphql", json_data=body, timeout=timeout, headers=headers
-        )
+
+        if _is_mutation(query):
+            # A mutation must not be replayed. On a timeout the first attempt may
+            # well have succeeded, and the retry then reports CONFLICT — the bot
+            # would tell the user "уже качается" about its own successful grab
+            # (audit 2026-07-30, BUG-04).
+            result = await self._post_no_retry(
+                "/graphql", json_data=body, timeout=timeout, headers=headers
+            )
+        else:
+            result = await self._safe_request(
+                "POST", "/graphql", json_data=body, timeout=timeout, headers=headers
+            )
         return result if isinstance(result, dict) else {"data": None}
 
     async def execute(
@@ -464,7 +525,7 @@ class ScryerClient(BaseAPIClient):
                 if attempt == 2:
                     raise
                 logger.info("scryer_token_rejected", operation=operation, via="http_401")
-                await self.login()
+                await self.login(force=True)
                 continue
 
             errors = payload.get("errors") or []
@@ -474,7 +535,7 @@ class ScryerClient(BaseAPIClient):
                         "Scryer отклонил токен после повторного входа", status_code=401
                     )
                 logger.info("scryer_token_rejected", operation=operation, via="graphql_errors")
-                await self.login()
+                await self.login(force=True)
                 continue
 
             if errors:
@@ -1012,6 +1073,31 @@ class ScryerClient(BaseAPIClient):
                 )
             )
         return items
+
+    async def get_import_history(self, limit: int = 20) -> list[ScryerImportRecord]:
+        """Finished imports, newest first.
+
+        The journal — not the active queue — is what tells you a file landed.
+        `downloadQueue` drops a row once its import completes, so a watcher that
+        diffs the queue only catches an import if it polls inside that window
+        (audit 2026-07-30, BUG-01). Every row here is permanent.
+        """
+        data = await self.execute(_IMPORT_HISTORY, {"limit": limit}, operation="importHistory")
+        return [
+            ScryerImportRecord(
+                id=row.get("id", "?"),
+                source_title=row.get("sourceTitle") or "?",
+                title_id=row.get("titleId"),
+                content_type=ContentType.from_scryer_facet(row.get("facet")),
+                status=row.get("status"),
+                decision=row.get("decision"),
+                skip_reason=row.get("skipReason"),
+                error_message=row.get("errorMessage"),
+                dest_path=row.get("destPath"),
+                finished_at=_parse_dt(row.get("finishedAt")),
+            )
+            for row in data.get("importHistory") or []
+        ]
 
     async def get_calendar(self, start_date: str, end_date: str) -> list[ScryerCalendarItem]:
         """Upcoming episodes between two ISO dates (inclusive)."""

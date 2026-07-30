@@ -141,7 +141,8 @@ class TitleCB(CallbackData, prefix="ti"):
 class TitleActionCB(CallbackData, prefix="tm"):
     """Manage a catalog title: monitoring toggle and removal (2026-07-29).
 
-    `action`: mon | unmon | delete (asks to confirm) | delconf (does it).
+    `action`: pick (chose among several matches) | mon | unmon |
+    delete (asks to confirm) | delconf (does it).
     """
 
     action: str

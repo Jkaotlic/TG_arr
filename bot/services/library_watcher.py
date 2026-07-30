@@ -6,9 +6,19 @@ Music got nothing at all: slskd is a separate download client that qBittorrent
 knows nothing about.
 
 Scryer has no generic webhook (its only notification channel type is
-`mediabrowser`, for Emby), so this polls both backends and reports the
-transitions it sees. State lives in memory: after a restart the first poll
-only records what is in flight, so the user is never spammed with history.
+`mediabrowser`, for Emby — re-verified by introspection on 2026-07-30), so this
+polls. What it polls matters:
+
+- **Imports come from the journal** (`importHistory`), not from the active
+  `downloadQueue`. A finished import leaves the queue, so diffing the queue only
+  catches an import if a poll lands inside that window — on the live instance it
+  never did, and every real import went unannounced (audit 2026-07-30, BUG-01).
+- **Music comes from terminal transfer states**, not from a key disappearing.
+  "It vanished from the active list" also describes a cancelled transfer, and a
+  slskd restart makes *everything* vanish at once (BUG-02).
+
+State lives in memory: the first poll after a restart only records what it sees,
+so history is never replayed at the user.
 """
 
 import html
@@ -19,15 +29,25 @@ import structlog
 
 logger = structlog.get_logger()
 
-#: `importStatus` values that mean the file is in the library.
-_IMPORTED = {"IMPORTED", "COMPLETED", "SUCCESS"}
+#: How many journal rows to ask for per poll. Comfortably more than a single
+#: interval can produce, so nothing is missed between polls; the seen-set keeps
+#: re-reads silent.
+_HISTORY_LIMIT = 25
 
-#: …and the ones that mean it isn't, and won't be without help.
-_IMPORT_FAILED = {"FAILED", "REJECTED", "ERROR"}
+#: Cap on remembered import ids — bounded so a long-running process can't grow
+#: the set without limit. Well above `_HISTORY_LIMIT` so an id is never
+#: forgotten while it is still being returned by the journal.
+_SEEN_IMPORTS_CAP = 500
+
+#: slskd transfer states that mean "this transfer is over". slskd reports e.g.
+#: "Completed, Succeeded" / "Completed, Cancelled" / "Completed, Errored".
+_TRANSFER_SUCCEEDED = "Succeeded"
+_TRANSFER_CANCELLED = "Cancelled"
+_TRANSFER_ERRORED = "Errored"
 
 
 class LibraryWatcher:
-    """Polls Scryer imports and slskd transfers, announcing what completed."""
+    """Polls Scryer's import journal and slskd's transfers, announcing outcomes."""
 
     def __init__(
         self,
@@ -38,12 +58,11 @@ class LibraryWatcher:
         self.notify = notify
         self._get_scryer = get_scryer
         self._get_slskd = get_slskd
-        #: queue item id -> last seen import status ("" while downloading)
-        self._imports: dict[str, str] = {}
+        #: import-record ids already reported (insertion-ordered, bounded)
+        self._seen_imports: dict[str, None] = {}
         #: slskd "user/file" -> last seen state
         self._transfers: dict[str, str] = {}
         self._seeded_imports = False
-        self._seeded_transfers = False
 
     async def poll(self) -> None:
         """One cycle. Never raises: a backend outage must not kill the loop."""
@@ -58,37 +77,43 @@ class LibraryWatcher:
             scryer = await self._get_scryer()
             if scryer is None:
                 return
-            items = await scryer.get_download_queue()
+            records = await scryer.get_import_history(limit=_HISTORY_LIMIT)
         except Exception as e:
             logger.warning("library_watch_imports_failed", error=str(e))
             return
 
-        seen: dict[str, str] = {}
-        for item in items:
-            status = (item.import_status or "").upper()
-            seen[item.id] = status
-            previous = self._imports.get(item.id)
+        # First poll of this process: the journal is history, not news.
+        if not self._seeded_imports:
+            for record in records:
+                self._remember(record.id)
+            self._seeded_imports = True
+            logger.info("library_watch_seeded", imports=len(records))
+            return
 
-            # Unknown item that is *already* finished: this is the first poll
-            # after a restart seeing history, not a fresh event.
-            if previous is None:
+        # Oldest first, so a burst is announced in the order it happened.
+        for record in reversed(records):
+            if record.id in self._seen_imports:
                 continue
-            if previous == status:
+            if not record.is_finished:
+                # Still importing — leave it unrecorded so the next poll, which
+                # will see its final decision, reports it.
                 continue
 
-            if status in _IMPORTED:
+            self._remember(record.id)
+            title = html.escape(record.source_title)
+            if record.is_imported:
+                await self._announce(f"✅ <b>{title}</b> — в библиотеке.")
+            elif record.is_failed:
                 await self._announce(
-                    f"✅ <b>{html.escape(item.title_name)}</b> — в библиотеке."
+                    f"⚠️ <b>{title}</b> — импорт не удался: "
+                    f"{html.escape(record.failure_reason)[:200]}"
                 )
-            elif status in _IMPORT_FAILED:
-                reason = item.attention_reason or item.import_status or "причина неизвестна"
-                await self._announce(
-                    f"⚠️ <b>{html.escape(item.title_name)}</b> — импорт не удался: "
-                    f"{html.escape(str(reason))[:150]}"
-                )
+            # SKIPPED (e.g. ALREADY_IMPORTED) is neither news nor a problem.
 
-        self._imports = seen
-        self._seeded_imports = True
+    def _remember(self, record_id: str) -> None:
+        self._seen_imports[record_id] = None
+        while len(self._seen_imports) > _SEEN_IMPORTS_CAP:
+            self._seen_imports.pop(next(iter(self._seen_imports)))
 
     # -------------------------------------------------------------- slskd
     async def _poll_transfers(self) -> None:
@@ -98,35 +123,37 @@ class LibraryWatcher:
             slskd = await self._get_slskd()
             if slskd is None:
                 return
-            transfers = await slskd.get_active_transfers()
+            transfers = await slskd.get_transfers(include_completed=True)
         except Exception as e:
             logger.warning("library_watch_transfers_failed", error=str(e))
             return
 
-        seen = {f"{t.username}/{t.filename}": t for t in transfers}
-
-        for key, transfer in seen.items():
+        seen: dict[str, str] = {}
+        for transfer in transfers:
+            key = f"{transfer.username}/{transfer.filename}"
+            state = transfer.state or ""
+            seen[key] = state
             previous = self._transfers.get(key)
-            if previous is None or previous == transfer.state:
+
+            # Unknown key, or an unchanged state, is not an event. A key first
+            # seen already finished is history (restart), not news.
+            if previous is None or previous == state:
                 continue
-            if transfer.is_errored:
+
+            name = html.escape(transfer.filename)
+            if _TRANSFER_SUCCEEDED in state:
+                await self._announce(f"🎵 <b>{name}</b> — скачано.")
+            elif _TRANSFER_ERRORED in state:
                 await self._announce(
-                    f"⚠️ 🎵 <b>{html.escape(transfer.filename)}</b> — "
-                    f"не удалось скачать ({html.escape(transfer.state)})"
+                    f"⚠️ 🎵 <b>{name}</b> — не удалось скачать ({html.escape(state)})"
                 )
+            elif _TRANSFER_CANCELLED in state:
+                await self._announce(f"🚫 🎵 <b>{name}</b> — загрузка отменена.")
 
-        # slskd drops finished transfers from the active list, so a key that
-        # disappeared without an error state is a successful download.
-        for key, previous_state in self._transfers.items():
-            if key in seen:
-                continue
-            filename = key.split("/", 1)[-1]
-            if "Errored" in previous_state or "Cancelled" in previous_state:
-                continue
-            await self._announce(f"🎵 <b>{html.escape(filename)}</b> — скачано.")
-
-        self._transfers = {key: t.state for key, t in seen.items()}
-        self._seeded_transfers = True
+        # Keys that vanished are dropped silently: slskd prunes its own history,
+        # and a restart empties the list wholesale — neither is evidence of a
+        # completed download (BUG-02).
+        self._transfers = seen
 
     async def _announce(self, text: str) -> None:
         """Deliver one notification; a failure is logged, never raised.
