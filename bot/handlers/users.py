@@ -12,6 +12,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
+from bot.config import get_settings
 from bot.db import Database
 from bot.services.notification_service import NotificationService
 
@@ -78,6 +79,18 @@ async def cmd_adduser(
     if notification_service is not None:
         notification_service.subscribe_user(uid)
     logger.info("runtime_user_granted", user_id=uid, added_by=added_by)
+
+    if get_settings().is_user_allowed(uid):
+        # Access already came from the env allowlist; the DB row changes nothing
+        # for this user, and saying "получил доступ" would imply it did.
+        await message.answer(
+            f"✅ Пользователь <code>{uid}</code> уже имеет доступ через "
+            f"<code>ALLOWED_TG_IDS</code> — запись в боте добавлена, но она "
+            f"ничего не меняет.",
+            parse_mode="HTML",
+        )
+        return
+
     await message.answer(f"✅ Пользователь <code>{uid}</code> получил доступ.", parse_mode="HTML")
 
 
@@ -99,5 +112,21 @@ async def cmd_deluser(
     await db.remove_allowed_user(uid)
     if notification_service is not None:
         notification_service.unsubscribe_user(uid)
+
+    # SEC-01 (audit 2026-07-30): authorization is `env allowlist OR db
+    # allowlist`, so dropping the DB row does nothing for a user named in
+    # ALLOWED_TG_IDS. Reporting "доступ отозван" there is worse than useless —
+    # the admin stops looking while the user keeps full access.
+    if get_settings().is_user_allowed(uid):
+        logger.warning("runtime_user_revoke_ineffective", user_id=uid, reason="env_allowlist")
+        await message.answer(
+            f"⚠️ Запись в боте удалена, но <code>{uid}</code> остаётся в "
+            f"<code>ALLOWED_TG_IDS</code> и доступ сохраняет.\n\n"
+            f"Чтобы отозвать по-настоящему: убрать id из <code>ALLOWED_TG_IDS</code> "
+            f"в <code>.env</code> и перезапустить бота.",
+            parse_mode="HTML",
+        )
+        return
+
     logger.info("runtime_user_revoked", user_id=uid)
     await message.answer(f"🚫 Доступ пользователя <code>{uid}</code> отозван.", parse_mode="HTML")

@@ -36,7 +36,13 @@ def parse_quality(title: str) -> QualityInfo:
 
     # Source
     source = None
-    if "bluray" in title_lower or "blu-ray" in title_lower or "bdrip" in title_lower:
+    # "BDRemux" / "BD-Remux" is how Russian trackers name a BluRay remux, and
+    # those are a large share of what this stack actually sees — without it the
+    # release card showed "Источник: —" for them (audit 2026-07-30).
+    if any(
+        marker in title_lower
+        for marker in ("bluray", "blu-ray", "bdrip", "bdremux", "bd-remux", "bdmux")
+    ):
         source = "BluRay"
     elif "web-dl" in title_lower or "webdl" in title_lower:
         source = "WEB-DL"
