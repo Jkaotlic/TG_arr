@@ -28,30 +28,40 @@ _NO_ENGLISH_CODES = ("russian_audio_without_english", "verified_file_without_eng
 
 
 def _format_language_verdict(policy_codes: list[str]) -> str:
-    """One line on what the language policy found, or "" when it said nothing.
+    """One line on what the language policy found, or "" when it never ran.
 
-    An empty scoring log is not evidence of a missing English track — it means
-    the policy never ran (an older session, or a release Scryer didn't score).
-    Staying silent there is the point: a false "no English audio" warning would
-    be worse than none.
+    Three outcomes, and the difference between the last two matters a lot:
+
+    - English was found → say so.
+    - Languages were declared and English is not among them → the policy docked
+      the score (−1000) but still allowed the release.
+    - **No language was declared at all** → the policy could not judge. Verified
+      on the live stack: the top candidate for "Michael 2026" was an English
+      BluRay Remux from Knaben that earned *no* language code, while a RuTracker
+      release whose description lists its tracks earned +250 for English and
+      +250 for Russian subs. So a well-described multi-audio release outranks an
+      English one that simply didn't say. Calling that "no English audio" would
+      be wrong; the honest statement is that the languages are unknown.
+
+    An empty scoring log means the policy did not run (older session, unscored
+    release) — stay silent rather than invent a verdict.
     """
     if not policy_codes:
         return ""
 
     codes = set(policy_codes)
-    has_english = _ENGLISH_AUDIO_CODE in codes
-    penalised = bool(codes & set(_NO_ENGLISH_CODES))
     subs = " • 💬 RU-субтитры" if _RUSSIAN_SUBS_CODE in codes else ""
 
-    if has_english:
+    if _ENGLISH_AUDIO_CODE in codes:
         return f"🔊 <b>Аудио:</b> есть английское{subs}"
-    if penalised:
+    if codes & set(_NO_ENGLISH_CODES):
         return (
             f"⚠️ <b>Аудио:</b> английского нет — политика снизила рейтинг, "
-            f"но не запретила релиз{subs}"
+            f"но релиз не запрещён{subs}"
         )
     return (
-        f"⚠️ <b>Аудио:</b> английское не найдено в описании релиза{subs}"
+        f"❔ <b>Аудио:</b> языки не указаны в раздаче — политика не смогла "
+        f"их проверить{subs}"
     )
 
 

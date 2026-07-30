@@ -291,18 +291,21 @@ def _release(**kw):
     return SearchResult(**base)
 
 
-def test_release_card_warns_when_the_policy_found_no_english_audio():
-    """LANG-01: the language policy only *penalises* a release without English
-    audio — it does not block it — so the release card has to say so. The user
-    asked why Italian audio keeps landing despite the profiles being set.
+def test_release_card_says_when_no_language_was_declared():
+    """LANG-01: verified on the live stack — the *top* candidate for "Michael
+    2026" was an English BluRay Remux that earned no language code at all,
+    because the indexer declared no languages, while a RuTracker release that
+    lists its tracks earned +250 for English. Calling the first "no English
+    audio" would be a lie; the truth is that the languages are unknown.
     """
     from bot.ui.formatters import Formatters
 
-    result = _release(policy_codes=["russian_subtitles_bonus"])
+    result = _release(policy_codes=["quality_tier_0", "source_bluray"])
 
     text = Formatters.format_release_details(result)
 
-    assert "англ" in text.lower(), text
+    assert "не указаны" in text, text
+    assert "английского нет" not in text
 
 
 def test_release_card_confirms_english_audio_when_the_policy_scored_it():
