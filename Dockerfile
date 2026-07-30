@@ -31,6 +31,10 @@ ENV PATH=/home/botuser/.local/bin:$PATH \
 # rootfs; combined with `read_only: true` in compose it's defense-in-depth.
 RUN mkdir -p /app/data && chown -R botuser:botuser /app/data
 COPY bot/ ./bot/
+# The rootfs is read-only at runtime and bot/ is root-owned, so CPython can never
+# cache bytecode itself — every start would re-compile all ~65 modules on the Pi.
+# Do it once here instead.
+RUN python -m compileall -q /app/bot
 USER botuser
 
 # SEC-14 / DEPLOY-04: true liveness — checks that /tmp/tgarr-alive has been

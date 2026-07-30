@@ -251,7 +251,20 @@ class BaseAPIClient:
             if response.status_code == 204:
                 return {}
 
-            return response.json()
+            # A 200 with a non-JSON body happens (a proxy's HTML error page, an
+            # empty body). Surfacing a raw JSONDecodeError from here tells the
+            # caller nothing — an empty payload lets the domain layer report
+            # "no data" the same way it would for `{}`. `_post_no_retry` and the
+            # qBittorrent client have always done this; this path had not.
+            try:
+                return response.json()
+            except (json.JSONDecodeError, ValueError):
+                log.warning(
+                    "non_json_response",
+                    status_code=response.status_code,
+                    body_prefix=(response.text or "")[:120],
+                )
+                return {}
 
         except httpx.TimeoutException:
             log.warning("Request timeout, will retry if attempts remain")
@@ -336,8 +349,14 @@ class BaseAPIClient:
         json_data: dict[str, Any] | list[Any] | None = None,
         params: dict[str, Any] | None = None,
         timeout: float | None = None,
+        headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any] | list[Any]:
-        """POST without retry — for non-idempotent operations like grab/push."""
+        """POST without retry — for non-idempotent operations like grab/push.
+
+        ``headers`` are merged over the pooled client's defaults for this one
+        call, same as `_request` — ScryerClient needs it to attach a bearer
+        token that is refreshed independently of the httpx client.
+        """
         client = await self._get_client()
         url = endpoint if endpoint.startswith("/") else f"/{endpoint}"
         log = logger.bind(
@@ -348,7 +367,8 @@ class BaseAPIClient:
         start_time = time.monotonic()
         try:
             response = await client.request(
-                method="POST", url=url, params=params, json=json_data, timeout=timeout,
+                method="POST", url=url, params=params, json=json_data,
+                timeout=timeout, headers=headers,
             )
             # OBS-02: mirror _request — time the call and surface slow ones to
             # WARNING so push/grab latency is reconstructable from prod logs.

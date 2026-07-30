@@ -261,16 +261,31 @@ class SlskdClient(BaseAPIClient):
         return result if isinstance(result, list) else []
 
     async def get_active_transfers(self) -> list[SlskdTransfer]:
-        """Flatten slskd's per-user download tree into a list of transfers."""
+        """Only what is still moving — what the download queue view shows."""
+        return await self.get_transfers(include_completed=False)
+
+    async def get_transfers(self, *, include_completed: bool = False) -> list[SlskdTransfer]:
+        """Flatten slskd's per-user download tree into a list of transfers.
+
+        With ``include_completed`` the finished ones come too, carrying their
+        terminal state ("Completed, Succeeded" / ", Cancelled" / ", Errored").
+        The watcher needs that: inferring success from a transfer *disappearing*
+        also declares cancelled downloads finished, and a slskd restart makes
+        every in-flight transfer disappear at once (audit 2026-07-30, BUG-02).
+        """
         transfers: list[SlskdTransfer] = []
         for user_entry in await self.get_downloads():
             username = user_entry.get("username") or "?"
             for directory in user_entry.get("directories") or []:
                 for file_entry in directory.get("files") or []:
                     state = file_entry.get("state") or "Unknown"
-                    # slskd keeps completed transfers in the list; only report
-                    # what is still in flight or waiting.
-                    if "Completed" in state and "Errored" not in state:
+                    # A completed-and-successful transfer is not "activity";
+                    # the queue view only wants what is still moving.
+                    if (
+                        not include_completed
+                        and "Completed" in state
+                        and "Errored" not in state
+                    ):
                         continue
                     size = file_entry.get("size") or 0
                     transferred = file_entry.get("bytesTransferred") or 0

@@ -53,6 +53,17 @@ async def cmd_title(message: Message, db_user: User, db: Database) -> None:
         )
         return
 
+    if len(items) > 1:
+        # More than one entry matches. Do not guess — the card below this offers
+        # deletion, and acting on the wrong title is not recoverable from the
+        # user's side (audit 2026-07-30, BUG-05).
+        await status_msg.edit_text(
+            f"🗂 Нашёл несколько совпадений на <b>{html.escape(query)}</b> — какой нужен?",
+            reply_markup=Keyboards.title_choices(items),
+            parse_mode="HTML",
+        )
+        return
+
     title = items[0]
     await status_msg.edit_text(
         _render_title_card(title),
@@ -88,13 +99,28 @@ async def handle_title_action(
     await callback.answer()
 
     try:
+        if action == "pick":
+            # The user chose which of several matches they meant; now the card.
+            title = await scryer.get_title(title_id)
+            if title is None:
+                await message.edit_text(
+                    Formatters.format_warning("Тайтл больше не найден в каталоге")
+                )
+                return
+            await message.edit_text(
+                _render_title_card(title),
+                reply_markup=Keyboards.title_actions(title),
+                parse_mode="HTML",
+            )
+            return
+
         if action in ("mon", "unmon"):
             monitored = action == "mon"
             await scryer.set_title_monitored(title_id, monitored)
             title = await scryer.get_title(title_id)
             await db.log_action(ActionLog(
                 user_id=db_user.tg_id,
-                action_type=ActionType.ADD,
+                action_type=ActionType.MONITOR,
                 content_type=getattr(title, "content_type", ContentType.UNKNOWN)
                 if title else ContentType.UNKNOWN,
                 content_title=getattr(title, "title", None),
@@ -142,7 +168,7 @@ async def handle_title_action(
             )
             await db.log_action(ActionLog(
                 user_id=db_user.tg_id,
-                action_type=ActionType.ADD,
+                action_type=ActionType.DELETE,
                 content_type=ContentType.UNKNOWN,
                 content_title=preview.get("targetLabel"),
                 content_id=title_id,
