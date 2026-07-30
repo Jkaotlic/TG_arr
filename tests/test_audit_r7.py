@@ -276,6 +276,101 @@ async def test_non_json_body_does_not_raise_a_decode_error():
     assert result == {}
 
 
+# ---------------------------------------------------------------- SEC-01
+@pytest.mark.asyncio
+async def test_deluser_does_not_claim_success_for_an_env_allowlisted_user():
+    """SEC-01: authorization is env-allowlist OR db-allowlist, so removing the
+    db row does nothing for a user listed in ALLOWED_TG_IDS — yet the bot
+    replied "доступ отозван". An admin would believe access was revoked while
+    the user kept full access until someone edited .env and restarted.
+    """
+    from bot.handlers import users
+
+    message = AsyncMock()
+    message.text = "/deluser 777"
+    message.from_user = MagicMock(id=1)
+    db = AsyncMock()
+
+    settings = MagicMock()
+    settings.is_user_allowed.return_value = True  # 777 is in ALLOWED_TG_IDS
+
+    with patch.object(users, "get_settings", return_value=settings):
+        await users.cmd_deluser(message, db=db, is_admin=True)
+
+    reply = message.answer.await_args.args[0]
+    assert "ALLOWED_TG_IDS" in reply, reply
+    assert "отозван</code>" not in reply
+
+
+@pytest.mark.asyncio
+async def test_deluser_confirms_plainly_for_a_db_granted_user():
+    from bot.handlers import users
+
+    message = AsyncMock()
+    message.text = "/deluser 777"
+    message.from_user = MagicMock(id=1)
+    db = AsyncMock()
+
+    settings = MagicMock()
+    settings.is_user_allowed.return_value = False
+
+    with patch.object(users, "get_settings", return_value=settings):
+        await users.cmd_deluser(message, db=db, is_admin=True)
+
+    db.remove_allowed_user.assert_awaited_once_with(777)
+    reply = message.answer.await_args.args[0]
+    assert "отозв" in reply
+    assert "ALLOWED_TG_IDS" not in reply
+
+
+@pytest.mark.asyncio
+async def test_adduser_notes_a_user_who_already_has_env_access():
+    from bot.handlers import users
+
+    message = AsyncMock()
+    message.text = "/adduser 777"
+    message.from_user = MagicMock(id=1)
+    db = AsyncMock()
+
+    settings = MagicMock()
+    settings.is_user_allowed.return_value = True
+
+    with patch.object(users, "get_settings", return_value=settings):
+        await users.cmd_adduser(message, db=db, is_admin=True)
+
+    reply = message.answer.await_args.args[0]
+    assert "уже" in reply.lower(), reply
+
+
+# ---------------------------------------------------------------- PARSE-01
+@pytest.mark.parametrize(
+    "name",
+    [
+        # Verbatim from the live searchReleases output — Russian trackers name
+        # a BluRay remux "BDRemux", which the parser did not recognise as a
+        # source at all, so the card showed "Источник: —" for exactly the
+        # releases this stack keeps getting.
+        "Майкл / Michael [2026, США, Великобритания, биография, музыка драма UHD BDRemux 2160p]",
+        "Фильм / Movie [2024, BDRip 1080p]",
+        "Series.S01.BD-Remux.2160p",
+    ],
+)
+def test_bluray_remux_is_recognised_as_a_source(name):
+    from bot.services.release_parser import parse_quality
+
+    assert parse_quality(name).source == "BluRay", name
+
+
+def test_a_web_dl_is_still_a_web_dl():
+    """The BDRemux clause must not swallow other sources."""
+    from bot.services.release_parser import parse_quality
+
+    q = parse_quality("Michael.2026.2160p.iT.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-BYNDR")
+
+    assert q.source == "WEB-DL"
+    assert q.is_remux is False
+
+
 # ---------------------------------------------------------------- LANG-01
 def _release(**kw):
     from bot.models import SearchResult
