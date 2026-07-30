@@ -43,10 +43,17 @@ class HealthState(enum.Enum):
 
 @dataclass(frozen=True)
 class Problem:
-    """One detected problem. `key` identifies it across cycles."""
+    """One detected problem. `key` identifies it across cycles.
+
+    `resolved_text` is what to say when it goes away — a recovery notice must
+    not reuse `text`, or it reads as a contradiction. The live alert on
+    2026-07-30 said "✅ Восстановлено 🔎 RuTracker.org: 88 из 88 запросов
+    падают (100%)".
+    """
 
     key: str
     text: str
+    resolved_text: str
 
 
 def diagnose(health: ScryerHealth, wanted_total: int) -> list[Problem]:
@@ -54,7 +61,11 @@ def diagnose(health: ScryerHealth, wanted_total: int) -> list[Problem]:
     problems: list[Problem] = []
 
     if not health.service_ready:
-        problems.append(Problem("service_down", "🗂 Scryer не готов обслуживать запросы"))
+        problems.append(Problem(
+            "service_down",
+            "🗂 Scryer не готов обслуживать запросы",
+            "🗂 Scryer снова обслуживает запросы",
+        ))
 
     for stat in health.indexers:
         total = stat.successful_24h + stat.failed_24h
@@ -65,6 +76,7 @@ def diagnose(health: ScryerHealth, wanted_total: int) -> list[Problem]:
                 f"indexer:{stat.name}",
                 f"🔎 {stat.name}: {stat.failed_24h} из {total} запросов падают "
                 f"({stat.failure_rate:.0%}) — вероятно, исчерпан суточный лимит",
+                f"🔎 {stat.name} снова отвечает",
             ))
 
     if wanted_total > _WANTED_BACKLOG_LIMIT:
@@ -72,9 +84,26 @@ def diagnose(health: ScryerHealth, wanted_total: int) -> list[Problem]:
             "wanted_backlog",
             f"📋 В очереди поиска {wanted_total} позиций — столько Scryer не осилит "
             f"за сутки, лимиты индексеров выгорят. Посмотрите /wanted",
+            f"📋 Очередь поиска сократилась до {wanted_total} позиций",
         ))
 
     return problems
+
+
+def _indexers_without_evidence(health: ScryerHealth) -> set[str]:
+    """Problem keys we currently have too little data to judge.
+
+    Scryer's 24h counters restart when it re-syncs its indexer list. Right after
+    that every tracker sits below `_INDEXER_MIN_QUERIES` and drops out of
+    `diagnose` — which is absence of evidence, not evidence of recovery. On
+    2026-07-30 that produced "восстановлено" for trackers still failing 100% of
+    their requests.
+    """
+    return {
+        f"indexer:{stat.name}"
+        for stat in health.indexers
+        if stat.successful_24h + stat.failed_24h < _INDEXER_MIN_QUERIES
+    }
 
 
 class HealthMonitor:
@@ -91,16 +120,25 @@ class HealthMonitor:
     async def evaluate(self, health: ScryerHealth, wanted_total: int) -> None:
         """Diagnose and announce anything that changed since the last call."""
         current = {p.key: p for p in diagnose(health, wanted_total)}
+        # A tracker that dropped out only because its counters were reset is not
+        # fixed — we simply can't tell yet. Keep it open and stay quiet.
+        undecided = _indexers_without_evidence(health)
 
         for key, problem in current.items():
             if key not in self._open:
                 await self._announce(f"⚠️ <b>Проблема</b>\n\n{problem.text}")
 
+        still_open = dict(current)
         for key, problem in self._open.items():
-            if key not in current:
-                await self._announce(f"✅ <b>Восстановлено</b>\n\n{problem.text}")
+            if key in current:
+                continue
+            if key in undecided:
+                still_open[key] = problem
+                logger.info("health_problem_unverifiable", problem=key)
+                continue
+            await self._announce(f"✅ <b>Восстановлено</b>\n\n{problem.resolved_text}")
 
-        self._open = current
+        self._open = still_open
 
     async def _announce(self, text: str) -> None:
         """Send one alert. A delivery failure must not stop the monitor —

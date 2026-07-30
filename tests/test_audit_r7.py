@@ -371,6 +371,90 @@ def test_a_web_dl_is_still_a_web_dl():
     assert q.is_remux is False
 
 
+# ---------------------------------------------------------------- HEALTH-01
+def _health(**indexers):
+    """A ScryerHealth carrying the given {name: (ok, failed)} indexer stats."""
+    from bot.models import IndexerStat, ScryerHealth
+
+    return ScryerHealth(
+        service_ready=True,
+        indexers=[
+            IndexerStat(name=n, queries_24h=ok + failed, successful_24h=ok, failed_24h=failed)
+            for n, (ok, failed) in indexers.items()
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_message_does_not_quote_the_failure_numbers():
+    """HEALTH-01: the live alert read
+
+        ✅ Восстановлено  🔎 RuTracker.org: 88 из 88 запросов падают (100%)
+
+    — the recovery notice reused the problem's own text, so it contradicted
+    itself. Recovery should say what recovered, not restate the failure.
+    """
+    from bot.services.health_monitor import HealthMonitor
+
+    sent: list[str] = []
+
+    async def notify(text: str) -> None:
+        sent.append(text)
+
+    monitor = HealthMonitor(notify)
+    await monitor.evaluate(_health(**{"RuTracker.org": (10, 90)}), wanted_total=0)
+    assert len(sent) == 1 and "падают" in sent[0]
+
+    await monitor.evaluate(_health(**{"RuTracker.org": (100, 0)}), wanted_total=0)
+
+    assert len(sent) == 2
+    recovery = sent[1]
+    assert "Восстановлено" in recovery
+    assert "падают" not in recovery, recovery
+    assert "RuTracker.org" in recovery
+
+
+@pytest.mark.asyncio
+async def test_a_counter_reset_is_not_a_recovery():
+    """HEALTH-02: after Scryer re-synced its indexers the 24h counters restarted
+    from a handful of queries. That dropped every indexer below the evidence
+    threshold, and the monitor announced "восстановлено" for trackers that were
+    still failing every single request.
+    """
+    from bot.services.health_monitor import HealthMonitor
+
+    sent: list[str] = []
+
+    async def notify(text: str) -> None:
+        sent.append(text)
+
+    monitor = HealthMonitor(notify)
+    await monitor.evaluate(_health(**{"RuTracker.org": (10, 90)}), wanted_total=0)
+    assert len(sent) == 1
+
+    # Counters reset: 3 queries, all still failing — no evidence either way.
+    await monitor.evaluate(_health(**{"RuTracker.org": (0, 3)}), wanted_total=0)
+
+    assert len(sent) == 1, f"claimed recovery on {sent[1:]!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_recovery_is_still_announced():
+    from bot.services.health_monitor import HealthMonitor
+
+    sent: list[str] = []
+
+    async def notify(text: str) -> None:
+        sent.append(text)
+
+    monitor = HealthMonitor(notify)
+    await monitor.evaluate(_health(**{"RuTracker.org": (10, 90)}), wanted_total=0)
+    await monitor.evaluate(_health(**{"RuTracker.org": (95, 5)}), wanted_total=0)
+
+    assert len(sent) == 2
+    assert "Восстановлено" in sent[1]
+
+
 # ---------------------------------------------------------------- LANG-01
 def _release(**kw):
     from bot.models import SearchResult
