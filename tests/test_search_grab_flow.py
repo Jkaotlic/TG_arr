@@ -282,16 +282,18 @@ async def test_execute_grab_uses_the_session_title_without_a_lookup():
 
     search_service = MagicMock()
     add_service = MagicMock()
-    add_service.grab_release = AsyncMock(
+    add_service.grab_with_fallback = AsyncMock(
         return_value=(True, MagicMock(user_id=0), "Релиз поставлен в очередь на скачивание")
     )
 
     await search._execute_grab(message, session, db_user, db, search_service, add_service)
 
-    add_service.grab_release.assert_awaited_once()
-    args = add_service.grab_release.await_args.args
+    add_service.grab_with_fallback.assert_awaited_once()
+    args = add_service.grab_with_fallback.await_args.args
     assert args[0].scryer_id == "t1"
-    assert args[1].candidate_token == "cand-1"
+    # The chosen release leads the list; the rest are fallbacks in case it
+    # turns out to be unfetchable (GRAB-01).
+    assert args[1][0].candidate_token == "cand-1"
     assert args[2] == ContentType.MOVIE
     db.log_action.assert_awaited_once()
     db.delete_session.assert_awaited_once_with(42)
@@ -307,13 +309,13 @@ async def test_execute_grab_propagates_force_download():
     message.edit_text = AsyncMock()
 
     add_service = MagicMock()
-    add_service.grab_release = AsyncMock(return_value=(True, MagicMock(user_id=0), "ok"))
+    add_service.grab_with_fallback = AsyncMock(return_value=(True, MagicMock(user_id=0), "ok"))
 
     await search._execute_grab(
         message, session, _make_db_user(), db, MagicMock(), add_service, force_download=True
     )
 
-    assert add_service.grab_release.await_args.kwargs["force_download"] is True
+    assert add_service.grab_with_fallback.await_args.kwargs["force_download"] is True
 
 
 @pytest.mark.asyncio
@@ -327,11 +329,11 @@ async def test_execute_grab_without_a_resolved_title_asks_to_search_again():
     message.edit_text = AsyncMock()
 
     add_service = MagicMock()
-    add_service.grab_release = AsyncMock()
+    add_service.grab_with_fallback = AsyncMock()
 
     await search._execute_grab(message, session, _make_db_user(), db, MagicMock(), add_service)
 
-    add_service.grab_release.assert_not_awaited()
+    add_service.grab_with_fallback.assert_not_awaited()
     text = message.edit_text.await_args.args[0]
     assert "Scryer" in text
     db.delete_session.assert_awaited_once_with(42)
@@ -347,7 +349,7 @@ async def test_execute_grab_failure_shows_the_service_message():
     message.edit_text = AsyncMock()
 
     add_service = MagicMock()
-    add_service.grab_release = AsyncMock(
+    add_service.grab_with_fallback = AsyncMock(
         return_value=(False, MagicMock(user_id=0), "Scryer не принял релиз (CONFLICT)")
     )
 

@@ -371,6 +371,106 @@ def test_a_web_dl_is_still_a_web_dl():
     assert q.is_remux is False
 
 
+# ---------------------------------------------------------------- GRAB-01
+def test_unresolvable_hash_is_recognised_as_retryable():
+    """GRAB-01: Knaben is a meta-indexer whose download link redirects to the
+    original tracker, and Scryer's plugin cannot work out an info-hash from it:
+
+        plugin scryer_download_add() failed: torrent was added to qBittorrent,
+        but the plugin could not resolve its hash
+
+    Knaben also tends to score highest, so the release the user is offered first
+    is the one that cannot be fetched. The same film from RuTracker queues fine
+    — so this failure means "try the next candidate", not "give up".
+    """
+    from bot.services.add_service import is_retryable_grab_failure
+
+    assert is_retryable_grab_failure(
+        "repository: plugin scryer_download_add() failed: torrent was added to "
+        "qBittorrent, but the plugin could not resolve its hash; provide an "
+        "info-hash hint or magnet URI"
+    )
+
+
+def test_a_rejection_on_the_merits_is_not_retryable():
+    """A release the profile blocks, or a title already downloading, must not
+    send the bot cycling through every remaining candidate.
+    """
+    from bot.services.add_service import is_retryable_grab_failure
+
+    assert not is_retryable_grab_failure("CONFLICT")
+    assert not is_retryable_grab_failure("release blocked by quality profile")
+    assert not is_retryable_grab_failure("")
+
+
+@pytest.mark.asyncio
+async def test_grab_falls_through_to_the_next_candidate():
+    """The user tapped the top release; if that one cannot be fetched, the bot
+    should try the next allowed one rather than hand back an error.
+    """
+    from bot.models import ActionLog, ActionType, ContentType, SearchResult
+    from bot.services.add_service import AddService
+
+    def _release(guid, indexer):
+        return SearchResult(
+            guid=guid, title=f"Film [{indexer}]", size=1, indexer=indexer,
+            scryer_allowed=True, scryer_score=100, candidate_token=f"tok-{guid}",
+            scryer_title_id="t1",
+        )
+
+    knaben, rutracker = _release("a", "Knaben"), _release("b", "RuTracker.org")
+    tried = []
+
+    service = AddService(MagicMock())
+
+    async def fake_grab(title, release, content_type, *, force_download=False):
+        tried.append(release.indexer)
+        action = ActionLog(user_id=0, action_type=ActionType.GRAB, content_type=content_type)
+        if release.indexer == "Knaben":
+            action.success = False
+            return False, action, (
+                "plugin scryer_download_add() failed: torrent was added to "
+                "qBittorrent, but the plugin could not resolve its hash"
+            )
+        action.success = True
+        return True, action, "Релиз поставлен в очередь на скачивание"
+
+    with patch.object(AddService, "grab_release", side_effect=fake_grab):
+        ok, _action, message = await service.grab_with_fallback(
+            MagicMock(), [knaben, rutracker], ContentType.MOVIE
+        )
+
+    assert tried == ["Knaben", "RuTracker.org"]
+    assert ok is True
+    assert "очередь" in message
+
+
+@pytest.mark.asyncio
+async def test_grab_does_not_march_through_candidates_on_a_real_rejection():
+    from bot.models import ActionLog, ActionType, ContentType, SearchResult
+    from bot.services.add_service import AddService
+
+    releases = [
+        SearchResult(guid=str(i), title=f"r{i}", size=1, scryer_allowed=True,
+                     candidate_token=f"t{i}", scryer_title_id="t1")
+        for i in range(3)
+    ]
+    tried = []
+
+    async def fake_grab(title, release, content_type, *, force_download=False):
+        tried.append(release.guid)
+        action = ActionLog(user_id=0, action_type=ActionType.GRAB, content_type=content_type)
+        action.success = False
+        return False, action, "Этот тайтл уже качается"
+
+    service = AddService(MagicMock())
+    with patch.object(AddService, "grab_release", side_effect=fake_grab):
+        ok, _a, _m = await service.grab_with_fallback(MagicMock(), releases, ContentType.MOVIE)
+
+    assert ok is False
+    assert tried == ["0"], f"kept going after a real rejection: {tried}"
+
+
 # ---------------------------------------------------------------- HEALTH-01
 def _health(**indexers):
     """A ScryerHealth carrying the given {name: (ok, failed)} indexer stats."""
