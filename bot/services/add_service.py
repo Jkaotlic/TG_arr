@@ -43,6 +43,29 @@ logger = structlog.get_logger()
 
 _ALLOWED_SCHEMES = {"http", "https", "magnet"}
 
+#: Scryer failures that say "this particular candidate can't be fetched" rather
+#: than "no". Knaben is a meta-indexer whose download link redirects to the
+#: original tracker, so Scryer's plugin cannot derive an info-hash from it and
+#: reports "could not resolve its hash" — while the same film from RuTracker
+#: queues without complaint (verified live 2026-07-31). Knaben also tends to
+#: score highest, so without this the best-looking release is the one that
+#: always fails.
+_RETRYABLE_GRAB_MARKERS = (
+    "could not resolve its hash",
+    "info-hash hint",
+    "scryer_download_add",
+)
+
+
+def is_retryable_grab_failure(message: str) -> bool:
+    """Whether a failed grab is worth retrying with a different candidate.
+
+    Deliberately narrow: a blocked release or a CONFLICT is a decision, and
+    retrying those would march through every remaining candidate for nothing.
+    """
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in _RETRYABLE_GRAB_MARKERS)
+
 # SEC-04/SEC-03: parameters in indexer download URLs commonly contain private
 # trackers' credentials. `link`/`file`/`r`/`rss` are how Prowlarr's own
 # download proxy embeds the ORIGINAL tracker URL (which itself carries a
@@ -529,6 +552,51 @@ class AddService:
             log, success=True, path="queue", force_download=False, content_type=content_type,
         )
         return True, action, "Релиз поставлен в очередь на скачивание"
+
+    async def grab_with_fallback(
+        self,
+        title,
+        releases: list[SearchResult],
+        content_type: ContentType,
+        *,
+        force_download: bool = False,
+        max_attempts: int = 3,
+    ) -> tuple[bool, ActionLog, str]:
+        """Grab the first release that can actually be fetched.
+
+        Some candidates cannot be handed to the download client at all — see
+        `is_retryable_grab_failure`. They tend to rank highest, so the release
+        the user picks is the one most likely to fail, and asking them to search
+        again solves nothing: the same candidate will win again. Only genuine
+        refusals (blocked, already downloading) stop the loop.
+        """
+        attempts = 0
+        result: tuple[bool, ActionLog, str] | None = None
+
+        for release in releases:
+            if attempts >= max_attempts:
+                break
+            attempts += 1
+            success, action, message = await self.grab_release(
+                title, release, content_type, force_download=force_download
+            )
+            result = (success, action, message)
+            if success or not is_retryable_grab_failure(message):
+                return result
+            logger.info(
+                "grab_retry_next_candidate",
+                indexer=release.indexer,
+                release_title=release.title[:80],
+                reason=message[:120],
+            )
+
+        if result is None:
+            action = ActionLog(
+                user_id=0, action_type=ActionType.GRAB, content_type=content_type,
+            )
+            action.success = False
+            return False, action, "Нет релизов для скачивания"
+        return result
 
     async def _force_download(
         self,

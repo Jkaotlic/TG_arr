@@ -202,9 +202,16 @@ async def _execute_grab(
         return
 
     try:
-        success, action, msg = await add_service.grab_release(
+        # Start with what the user chose, then fall back to the other allowed
+        # candidates — some releases (Knaben's, notably) cannot be handed to the
+        # download client at all, and they are usually the top-ranked ones.
+        candidates = [result] + [
+            r for r in (session.results or [])
+            if r.guid != result.guid and r.scryer_allowed
+        ]
+        success, action, msg = await add_service.grab_with_fallback(
             title,
-            result,
+            candidates,
             session.content_type,
             force_download=force_download,
         )
