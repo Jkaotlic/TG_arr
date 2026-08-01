@@ -86,3 +86,10 @@ data/bot.db
 # Claude Code
 .claude/
 analysis_round2/
+
+# Agent instructions - kept out of this public repo on purpose.
+# Canonical copy lives in the private claude-memory repo and is deployed
+# locally by sync-memory.sh. Do not commit these.
+CLAUDE.md
+AGENTS.md
+.agents/
