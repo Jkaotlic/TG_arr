@@ -193,6 +193,54 @@ async def test_unconfigured_backends_are_skipped():
     assert sent == []
 
 
+# ------------------------------------------------------------------ delivery
+@pytest.mark.asyncio
+async def test_delivery_is_logged_with_the_number_of_recipients():
+    """Only failures were logged, so silence meant both "delivered" and
+    "never sent" — the question was unanswerable after the fact (audit
+    2026-07-31)."""
+    import structlog
+    import structlog.testing
+
+    from bot.main import send_library_notification
+
+    bot = AsyncMock()
+
+    with structlog.testing.capture_logs() as logs:
+        await send_library_notification(
+            bot, [111, 222], "✅ <b>Apex</b> — в библиотеке.", structlog.get_logger()
+        )
+
+    sent = [e for e in logs if e.get("event") == "library_notify_sent"]
+    assert len(sent) == 1
+    assert sent[0]["recipients"] == 2
+    assert sent[0]["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_recipient_that_rejects_the_message_is_not_counted_as_delivered():
+    """A user who blocked the bot must not inflate the delivered count —
+    otherwise the log would claim a delivery that never happened."""
+    import structlog
+    import structlog.testing
+
+    from bot.main import send_library_notification
+
+    bot = AsyncMock()
+    bot.send_message = AsyncMock(side_effect=[Exception("bot was blocked"), None])
+
+    with structlog.testing.capture_logs() as logs:
+        await send_library_notification(
+            bot, [111, 222], "✅ <b>Apex</b> — в библиотеке.", structlog.get_logger()
+        )
+
+    sent = [e for e in logs if e.get("event") == "library_notify_sent"]
+    assert len(sent) == 1
+    assert sent[0]["recipients"] == 1
+    assert sent[0]["failed"] == 1
+    assert [e["user_id"] for e in logs if e.get("event") == "library_notify_send_failed"] == [111]
+
+
 @pytest.mark.asyncio
 async def test_a_failing_notify_does_not_lose_later_events():
     """A Telegram blip must not wedge the watcher's state."""

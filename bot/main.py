@@ -9,6 +9,7 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Optional
 
@@ -386,6 +387,37 @@ async def _health_watch(bot: Bot, admin_ids: list, logger) -> None:
         structlog.contextvars.unbind_contextvars("component")
 
 
+async def send_library_notification(
+    bot: Bot, user_ids: Iterable[int], text: str, logger
+) -> int:
+    """Deliver one library notification, returning how many recipients took it.
+
+    The outcome is logged on success too, not just on failure: with only
+    `library_notify_send_failed`, silence in the log described "delivered" and
+    "the watcher never announced anything" equally well, and the question
+    "did the user actually get it?" had no answer after the fact (audit
+    2026-07-31). Counting per recipient matters because a delivery failure is
+    swallowed per user — one blocked chat must not read as a delivery.
+    """
+    delivered = 0
+    failed = 0
+    for uid in user_ids:
+        try:
+            await bot.send_message(uid, text, parse_mode=ParseMode.HTML)
+            delivered += 1
+        except Exception as e:
+            failed += 1
+            logger.warning("library_notify_send_failed", user_id=uid, error=str(e))
+
+    logger.info(
+        "library_notify_sent",
+        recipients=delivered,
+        failed=failed,
+        text=" ".join(text.split())[:200],
+    )
+    return delivered
+
+
 async def _library_watch(bot: Bot, db: Database, logger) -> None:
     """Announce library imports and finished music downloads.
 
@@ -401,11 +433,8 @@ async def _library_watch(bot: Bot, db: Database, logger) -> None:
 
     async def _notify(text: str) -> None:
         db_user_ids = await db.list_allowed_users()
-        for uid in set(settings.allowed_tg_ids) | set(settings.admin_tg_ids) | set(db_user_ids):
-            try:
-                await bot.send_message(uid, text, parse_mode=ParseMode.HTML)
-            except Exception as e:
-                logger.warning("library_notify_send_failed", user_id=uid, error=str(e))
+        recipients = set(settings.allowed_tg_ids) | set(settings.admin_tg_ids) | set(db_user_ids)
+        await send_library_notification(bot, sorted(recipients), text, logger)
 
     watcher = LibraryWatcher(_notify, get_scryer=get_scryer, get_slskd=get_slskd)
     structlog.contextvars.bind_contextvars(component="library_watch")
