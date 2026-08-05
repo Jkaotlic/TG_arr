@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from bot.clients.torrserver import TorrServerError
 from bot.models import SyncHookResult, TorrServerFile, TorrServerTorrent
 from bot.services.torrserver_service import TorrServerService
 
@@ -108,6 +109,22 @@ async def test_missing_hook_is_allowed():
 
     assert result.sync is None
     assert result.metadata_ready is True
+
+
+@pytest.mark.asyncio
+async def test_transient_poll_error_does_not_fail_the_add():
+    """Раздача уже добавлена на сервер — временная ошибка одного опроса
+    (сервер занят подтягиванием метаданных, отдал 500/таймаут) не должна
+    превращать успешное добавление в ошибку. Опрос должен просто продолжиться."""
+    client = _client([TorrServerError("TorrServer недоступен"), READY])
+    hook = _hook()
+    service = TorrServerService(client, hook, metadata_timeout=10.0, poll_interval=0)
+
+    result = await service.add_and_publish("http://link", "Dune 2021")
+
+    assert result.metadata_ready is True
+    assert result.torrent.hash == "abc"
+    hook.trigger_sync.assert_awaited_once()
 
 
 @pytest.mark.asyncio
