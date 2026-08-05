@@ -73,19 +73,27 @@ class _TorrServerFormatters:
                 f"    {format_bytes(torrent.size)} · файлов: {len(torrent.files)} · "
                 f"{html.escape(torrent.stat_string)}"
             )
+        text = "\n".join(lines)
+
         # Delete buttons are capped in the keyboard (Telegram rejects both an
         # oversized message and an oversized keyboard) — an admin scrolling
         # past the cap without a button needs to know why, not just find one
-        # missing.
+        # missing. Built separately from `text` and appended *after*
+        # truncation (with its own length reserved out of the budget first):
+        # a long enough list is exactly the case where both the button cap
+        # and the truncation kick in together, and `_safe_truncate` cuts from
+        # the tail — appending the note before truncating would make it the
+        # first thing thrown away on precisely the lists where it matters.
+        note = ""
         if is_admin and len(torrents) > TS_LIST_BUTTON_CAP:
-            lines.append("")
-            lines.append(
-                f"⚠️ Кнопки удаления показаны только для первых {TS_LIST_BUTTON_CAP} раздач."
+            note = (
+                f"\n\n⚠️ Кнопки удаления показаны только для первых "
+                f"{TS_LIST_BUTTON_CAP} раздач."
             )
-        text = "\n".join(lines)
+
         # BUG-11/TEST-07-style hard safety net: a long enough list otherwise
         # blows past Telegram's 4096-char message limit outright.
-        return _safe_truncate(text, max_len=3800)
+        return _safe_truncate(text, max_len=3800 - len(note)) + note
 
     @staticmethod
     def format_torrserver_added(result) -> str:

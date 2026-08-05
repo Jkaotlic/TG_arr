@@ -105,6 +105,25 @@ def test_torrents_text_notes_the_cut_for_admins():
     assert "первых 30" in text
 
 
+@pytest.mark.parametrize("n", [39, 50, 100])
+def test_torrents_text_note_survives_truncation_for_admins(n):
+    """Regression for a bug in the finding-2 fix itself: the admin note was
+    appended to `lines` *before* `_safe_truncate` ran, and `_safe_truncate`
+    cuts from the tail — so on exactly the lists where the note matters (long
+    enough to need both truncation AND the delete-button cap), it was the
+    first thing thrown away.
+
+    N=35 (the test above) lands at 3440 raw chars — under the 3800 budget,
+    so it never triggers truncation and never exercised this interaction.
+    Verified against the real formatter (not assumed) that this fixture's
+    per-torrent size pushes 39+ torrents past 3800 raw chars, which is where
+    the previous implementation dropped the note; 50 and 100 stay well past
+    it too, confirming the fix isn't a threshold fluke."""
+    text = Formatters.format_torrserver_torrents(_torrents(n), is_admin=True)
+    assert len(text) <= 3800
+    assert "первых 30" in text
+
+
 def test_torrents_text_has_no_admin_cap_note_for_regular_users():
     text = Formatters.format_torrserver_torrents(_torrents(35), is_admin=False)
     assert "удален" not in text.lower()
