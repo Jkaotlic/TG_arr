@@ -28,6 +28,7 @@ COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("wanted", "Что ищется и не находится"),
         ("calendar", "Календарь выходов"),
         ("emby", "Что нового в библиотеке"),
+        ("ts", "TorrServer — смотреть сейчас"),
     ]),
     ("📥 Загрузки", [
         ("downloads", "Текущие загрузки"),
