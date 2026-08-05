@@ -190,3 +190,158 @@ async def test_add_after_cache_expiry_asks_to_search_again():
         await ts_handlers.handle_add(callback, TsAddCB(idx=0))
 
     assert callback.answer.await_args.kwargs.get("show_alert") is True
+
+
+@pytest.mark.asyncio
+async def test_search_reply_reports_a_torrserver_error():
+    client = MagicMock()
+    client.search = AsyncMock(side_effect=ts_handlers.TorrServerError("сервер недоступен"))
+    status = MagicMock()
+    status.edit_text = AsyncMock()
+    message = _message("Dune 2021")
+    message.answer = AsyncMock(return_value=status)
+
+    with patch.object(ts_handlers, "get_torrserver", new_callable=AsyncMock, return_value=client):
+        await ts_handlers.handle_search_reply(message)
+
+    assert "сервер недоступен" in status.edit_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_search_reply_survives_an_unexpected_error():
+    """A non-TorrServerError failure (network blip, bug, whatever) out of
+    client.search() must still degrade to an error message, not an unhandled
+    exception reaching the aiogram dispatcher (mirrors render_panel's own
+    generic-exception coverage)."""
+    client = MagicMock()
+    client.search = AsyncMock(side_effect=RuntimeError("boom"))
+    status = MagicMock()
+    status.edit_text = AsyncMock()
+    message = _message("Dune 2021")
+    message.answer = AsyncMock(return_value=status)
+
+    with patch.object(ts_handlers, "get_torrserver", new_callable=AsyncMock, return_value=client):
+        await ts_handlers.handle_search_reply(message)
+
+    assert "недоступен" in status.edit_text.await_args.args[0].lower()
+
+
+@pytest.mark.asyncio
+async def test_reply_rejects_a_too_long_query():
+    message = _message("a" * (ts_handlers.MAX_QUERY_LENGTH + 1))
+    with patch.object(ts_handlers, "get_torrserver", new_callable=AsyncMock) as client_getter:
+        await ts_handlers.handle_search_reply(message)
+
+    client_getter.assert_not_awaited()
+    assert "длинн" in message.answer.await_args.args[0]
+
+
+def _releases(n):
+    """`n` distinct, orderable hits — titles double as an easy way to tell
+    "which absolute item did we actually open" apart in assertions."""
+    return [
+        TorrServerRelease(title=f"Item {i} 2021", size=1024, seeders=i, link=f"http://p/{i}")
+        for i in range(n)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_page_renders_the_requested_page():
+    """handle_page's own contract: the requested page number is the one that
+    actually gets rendered (results_per_page defaults to 5, so 7 hits split
+    into page 0 = items 0-4, page 1 = items 5-6)."""
+    ts_handlers._results[7] = _releases(7)
+    message = MagicMock()
+    message.edit_text = AsyncMock()
+    callback = MagicMock()
+    callback.answer = AsyncMock()
+    callback.from_user = MagicMock(id=7)
+
+    from bot.ui.callbacks import TsPageCB
+
+    with patch.object(ts_handlers, "accessible_message", return_value=message):
+        await ts_handlers.handle_page(callback, TsPageCB(page=1))
+
+    text = message.edit_text.await_args.args[0]
+    assert "Item 5" in text
+    assert "Item 0" not in text
+    callback.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_page_with_stale_cache_alerts_instead_of_rendering():
+    ts_handlers._results.pop(7, None)
+    message = MagicMock()
+    message.edit_text = AsyncMock()
+    callback = MagicMock()
+    callback.answer = AsyncMock()
+    callback.from_user = MagicMock(id=7)
+
+    from bot.ui.callbacks import TsPageCB
+
+    with patch.object(ts_handlers, "accessible_message", return_value=message):
+        await ts_handlers.handle_page(callback, TsPageCB(page=1))
+
+    message.edit_text.assert_not_awaited()
+    assert callback.answer.await_args.kwargs.get("show_alert") is True
+
+
+@pytest.mark.asyncio
+async def test_page_two_tap_opens_the_release_actually_tapped():
+    """The diff's top risk: a page-relative button index would resolve a tap
+    on page 2 to whatever sits at the *same on-page position* on page 1
+    instead of the item the user actually tapped. This test builds the
+    keyboard for real (via handle_page, which drives the actual
+    Keyboards.torrserver_results(..., offset=...)) and follows its own
+    packed callback_data through handle_release — so a regression in either
+    the keyboard's offset or the handler's index use would be caught here,
+    not just by reading the code."""
+    ts_handlers._results[7] = _releases(7)  # page 0: idx 0-4, page 1: idx 5-6
+
+    page_message = MagicMock()
+    page_message.edit_text = AsyncMock()
+    page_callback = MagicMock()
+    page_callback.answer = AsyncMock()
+    page_callback.from_user = MagicMock(id=7)
+
+    from bot.ui.callbacks import TsPageCB, TsReleaseCB
+
+    with patch.object(ts_handlers, "accessible_message", return_value=page_message):
+        await ts_handlers.handle_page(page_callback, TsPageCB(page=1))
+
+    markup = page_message.edit_text.await_args.kwargs["reply_markup"]
+    first_hit_button = markup.inline_keyboard[0][0]
+    # The first hit button on page two must be the item at absolute index 5.
+    assert "Item 5" in first_hit_button.text
+    tapped = TsReleaseCB.unpack(first_hit_button.callback_data)
+
+    release_message = MagicMock()
+    release_message.edit_text = AsyncMock()
+    release_callback = MagicMock()
+    release_callback.answer = AsyncMock()
+    release_callback.from_user = MagicMock(id=7)
+
+    with patch.object(ts_handlers, "accessible_message", return_value=release_message):
+        await ts_handlers.handle_release(release_callback, tapped)
+
+    opened_text = release_message.edit_text.await_args.args[0]
+    assert "Item 5" in opened_text
+    assert "Item 0" not in opened_text
+
+
+@pytest.mark.asyncio
+async def test_release_after_cache_expiry_asks_to_search_again():
+    ts_handlers._results.pop(7, None)
+    message = MagicMock()
+    message.edit_text = AsyncMock()
+    callback = MagicMock()
+    callback.answer = AsyncMock()
+    callback.from_user = MagicMock(id=7)
+
+    from bot.ui.callbacks import TsReleaseCB
+
+    with patch.object(ts_handlers, "accessible_message", return_value=message):
+        await ts_handlers.handle_release(callback, TsReleaseCB(idx=0))
+
+    message.edit_text.assert_not_awaited()
+    assert callback.answer.await_args.kwargs.get("show_alert") is True
