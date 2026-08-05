@@ -11,6 +11,17 @@ from bot.services.torrserver_service import AddResult
 from bot.ui.menu import TORRSERVER_PROMPT
 
 
+@pytest.fixture(autouse=True)
+def _clear_results_cache():
+    """`_results` is a module-level dict shared by every test in this file.
+    Several tests mutate `_results[7]` with no teardown of their own; without
+    this reset, whether a given test sees an empty or a stale cache depends
+    on file/execution order rather than on what the test itself arranged."""
+    ts_handlers._results.clear()
+    yield
+    ts_handlers._results.clear()
+
+
 @pytest.mark.asyncio
 async def test_panel_says_how_to_configure_when_disabled():
     with patch.object(ts_handlers, "get_torrserver", new_callable=AsyncMock, return_value=None):
@@ -174,6 +185,16 @@ async def test_add_publishes_and_answers_with_the_stream_link():
 
     service.add_and_publish.assert_awaited_once_with(HIT.link, HIT.title, "")
     assert "Emby" in callback.message.edit_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_no_stale_cache_leaks_in_from_a_previous_test():
+    """`_results` is a module-level dict shared by every test in this file.
+    The previous test (test_add_publishes_and_answers_with_the_stream_link)
+    sets `_results[7]` and never tears it down — without the autouse
+    `_clear_results_cache` fixture, this test would inherit that stale entry
+    purely because of file order, not because anything here set it up."""
+    assert ts_handlers._results.get(7) is None
 
 
 @pytest.mark.asyncio
