@@ -18,7 +18,7 @@ from bot.config import get_settings
 from bot.handlers._cache import remember_lru
 from bot.handlers.common import accessible_message, safe_edit
 from bot.models import TorrServerRelease
-from bot.ui.callbacks import TsAddCB, TsPageCB, TsReleaseCB
+from bot.ui.callbacks import TsAddCB, TsPageCB, TsReleaseCB, TsTorrentCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.menu import MENU_TORRSERVER, TORRSERVER_PROMPT
@@ -238,4 +238,91 @@ async def handle_add(callback: CallbackQuery, callback_data: TsAddCB) -> None:
         reply_markup=Keyboards.torrserver_panel(),
         parse_mode="HTML",
         disable_web_page_preview=True,
+    )
+
+
+@router.callback_query(F.data == CallbackData.TS_LIST)
+async def handle_list(callback: CallbackQuery, is_admin: bool = False) -> None:
+    """Show what is currently on the server."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+    client = await get_torrserver()
+    if not client:
+        await callback.answer("TorrServer не настроен", show_alert=True)
+        return
+
+    try:
+        torrents = await client.list_torrents()
+    except TorrServerError as e:
+        await callback.answer(str(e)[:180], show_alert=True)
+        return
+
+    await safe_edit(
+        message,
+        Formatters.format_torrserver_torrents(torrents),
+        reply_markup=Keyboards.torrserver_list(torrents, is_admin),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(TsTorrentCB.filter(F.action == "del"))
+async def handle_delete_prompt(
+    callback: CallbackQuery, callback_data: TsTorrentCB, is_admin: bool = False
+) -> None:
+    """Ask before removing a torrent."""
+    if not is_admin:
+        await callback.answer("Недостаточно прав для удаления", show_alert=True)
+        return
+    message = accessible_message(callback)
+    if message is None:
+        return
+    await safe_edit(
+        message,
+        "⚠️ <b>Удалить раздачу из TorrServer?</b>\n\n"
+        "Поток перестанет открываться. Файлы <code>.strm</code> уберёт "
+        "синхронизация в течение 10 минут.",
+        reply_markup=Keyboards.torrserver_confirm_delete(callback_data.h),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(TsTorrentCB.filter(F.action == "delconf"))
+async def handle_delete_confirm(
+    callback: CallbackQuery, callback_data: TsTorrentCB, is_admin: bool = False
+) -> None:
+    """Remove the torrent."""
+    if not is_admin:
+        await callback.answer("Недостаточно прав для удаления", show_alert=True)
+        return
+    message = accessible_message(callback)
+    if message is None:
+        return
+    client = await get_torrserver()
+    if not client:
+        await callback.answer("TorrServer не настроен", show_alert=True)
+        return
+
+    try:
+        await client.remove_torrent(callback_data.h)
+    except TorrServerError as e:
+        await callback.answer(str(e)[:180], show_alert=True)
+        return
+
+    logger.info("torrserver_remove", torrent_hash=callback_data.h, user_id=callback.from_user.id)
+    await callback.answer("Раздача удалена")
+
+    try:
+        torrents = await client.list_torrents()
+    except TorrServerError:
+        torrents = []
+
+    await safe_edit(
+        message,
+        "🗑 <b>Раздача удалена.</b> Из Emby пропадёт в течение 10 минут.\n\n"
+        + Formatters.format_torrserver_torrents(torrents),
+        reply_markup=Keyboards.torrserver_list(torrents, is_admin),
+        parse_mode="HTML",
     )

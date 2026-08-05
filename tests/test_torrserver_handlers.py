@@ -345,3 +345,74 @@ async def test_release_after_cache_expiry_asks_to_search_again():
 
     message.edit_text.assert_not_awaited()
     assert callback.answer.await_args.kwargs.get("show_alert") is True
+
+
+@pytest.mark.asyncio
+async def test_list_shows_torrents():
+    client = MagicMock()
+    client.list_torrents = AsyncMock(return_value=[TorrServerTorrent(
+        hash="abc", title="Dune 2021", size=1024, stat=5, stat_string="Torrent in db")])
+    callback = MagicMock()
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.edit_text = AsyncMock()
+
+    with patch.object(ts_handlers, "get_torrserver", new_callable=AsyncMock, return_value=client), \
+         patch.object(ts_handlers, "accessible_message", return_value=callback.message):
+        await ts_handlers.handle_list(callback, is_admin=True)
+
+    assert "Dune 2021" in callback.message.edit_text.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_delete_prompt_is_refused_for_non_admins():
+    """The confirmation prompt is itself admin-gated: a crafted callback that
+    skips the panel's delete button and hits `del` directly must not reach
+    the "are you sure" screen either — only `handle_delete_confirm` actually
+    deletes, but showing the prompt to a non-admin is still a reachable path
+    worth refusing explicitly."""
+    callback = MagicMock()
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+
+    from bot.ui.callbacks import TsTorrentCB
+
+    await ts_handlers.handle_delete_prompt(
+        callback, TsTorrentCB(action="del", h="abc"), is_admin=False)
+
+    assert callback.answer.await_args.kwargs.get("show_alert") is True
+
+
+@pytest.mark.asyncio
+async def test_delete_is_refused_for_non_admins():
+    callback = MagicMock()
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+
+    from bot.ui.callbacks import TsTorrentCB
+
+    await ts_handlers.handle_delete_confirm(
+        callback, TsTorrentCB(action="delconf", h="abc"), is_admin=False)
+
+    assert callback.answer.await_args.kwargs.get("show_alert") is True
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_and_warns_about_the_delayed_strm_cleanup():
+    client = MagicMock()
+    client.remove_torrent = AsyncMock()
+    client.list_torrents = AsyncMock(return_value=[])
+    callback = MagicMock()
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.edit_text = AsyncMock()
+
+    from bot.ui.callbacks import TsTorrentCB
+
+    with patch.object(ts_handlers, "get_torrserver", new_callable=AsyncMock, return_value=client), \
+         patch.object(ts_handlers, "accessible_message", return_value=callback.message):
+        await ts_handlers.handle_delete_confirm(
+            callback, TsTorrentCB(action="delconf", h="abc"), is_admin=True)
+
+    client.remove_torrent.assert_awaited_once_with("abc")
+    assert "10 минут" in callback.message.edit_text.await_args.args[0]
