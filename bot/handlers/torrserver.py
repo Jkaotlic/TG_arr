@@ -10,7 +10,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
-from bot.clients.registry import get_torrserver, get_torrserver_service  # noqa: F401 -- get_torrserver_service is wired in by Task 10/11 (search/add, list/delete); unused until then
+from bot.clients.registry import get_torrserver
 from bot.clients.torrserver import TorrServerError
 from bot.handlers.common import accessible_message, safe_edit
 from bot.models import TorrServerRelease

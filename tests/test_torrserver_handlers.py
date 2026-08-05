@@ -42,6 +42,20 @@ async def test_panel_survives_a_dead_server():
     assert keyboard is not None  # кнопка «Обновить» должна остаться
 
 
+@pytest.mark.asyncio
+async def test_panel_survives_an_unexpected_error():
+    """A non-TorrServerError failure (network blip, bug, whatever) out of
+    get_stats() must still degrade to a card with the retry keyboard, not an
+    unhandled exception reaching the aiogram dispatcher."""
+    client = MagicMock()
+    client.get_stats = AsyncMock(side_effect=RuntimeError("boom"))
+    with patch.object(ts_handlers, "get_torrserver", new_callable=AsyncMock, return_value=client):
+        text, keyboard = await ts_handlers.render_panel()
+
+    assert "❌" in text
+    assert keyboard is not None  # кнопка «Обновить» должна остаться
+
+
 def test_router_is_registered_before_search_router():
     """handle_text_search ловит любой текст, а aiogram не каскадирует
     обработчики после совпадения — наш роутер обязан идти раньше.
