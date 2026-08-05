@@ -1,5 +1,8 @@
 """Кнопки и тексты раздела TorrServer."""
 
+import pytest
+from pydantic import ValidationError
+
 from bot.models import (
     SyncHookResult,
     TorrServerFile,
@@ -8,6 +11,7 @@ from bot.models import (
     TorrServerTorrent,
 )
 from bot.services.torrserver_service import AddResult
+from bot.ui.callbacks import TsAddCB, TsReleaseCB, TsTorrentCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.menu import MENU_BUTTONS, MENU_TORRSERVER, TORRSERVER_PROMPT
@@ -145,3 +149,33 @@ def test_added_text_explains_a_metadata_timeout():
     result = AddResult(torrent=TORRENT, metadata_ready=False)
     text = Formatters.format_torrserver_added(result)
     assert "10 минут" in text
+
+
+# --- finding 6: unbounded hash overflows callback_data ---
+
+def test_torrent_callback_does_not_overflow_on_a_v2_infohash():
+    """A BitTorrent v2 (64-hex) infohash must not kill the whole "📋 Раздачи"
+    screen for an admin — confirmed before the fix:
+    TsTorrentCB(action='delconf', h='a'*64).pack() raises
+    'ValueError: Resulted callback data is too long!'."""
+    packed = TsTorrentCB(action="delconf", h="a" * 64).pack()
+    assert len(packed.encode()) <= 64
+
+
+def test_torrent_callback_worst_case_hash_fits_the_budget():
+    """Pins the budget so a regression (e.g. someone bumping the hash cap)
+    fails loudly here instead of silently in production."""
+    packed = TsTorrentCB(action="delconf", h="a" * 40).pack()
+    assert len(packed.encode()) <= 64
+
+
+# --- finding 7: negative index bypasses the stale-cache guard ---
+
+def test_release_callback_rejects_a_negative_index():
+    with pytest.raises(ValidationError):
+        TsReleaseCB(idx=-1)
+
+
+def test_add_callback_rejects_a_negative_index():
+    with pytest.raises(ValidationError):
+        TsAddCB(idx=-1)
