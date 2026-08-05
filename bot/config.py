@@ -79,6 +79,31 @@ class Settings(BaseSettings):
     emby_api_key: Optional[str] = Field(default=None, description="Emby API key")
     emby_timeout: float = Field(default=30.0, ge=5.0, description="Emby request timeout in seconds")
 
+    # TorrServer (optional) — streaming contour: "watch now" instead of
+    # "have it in the library". Separate from Scryer on purpose.
+    torrserver_url: Optional[str] = Field(default=None, description="TorrServer base URL")
+    torrserver_username: Optional[str] = Field(default=None, description="TorrServer basic-auth user")
+    torrserver_password: Optional[str] = Field(default=None, description="TorrServer basic-auth password")
+    torrserver_timeout: float = Field(default=30.0, ge=5.0, description="TorrServer request timeout in seconds")
+    # A torznab search fans out to every configured Prowlarr indexer, so it is
+    # far slower than the plain API calls — same split as scryer_search_timeout.
+    torrserver_search_timeout: float = Field(
+        default=60.0, ge=10.0, le=300.0, description="TorrServer torznab search timeout (seconds)"
+    )
+    # How long to wait for a freshly added torrent to report its files. Without
+    # them the Emby sync would publish an empty release.
+    torrserver_metadata_timeout: float = Field(
+        default=30.0, ge=5.0, le=180.0, description="How long to wait for torrent metadata (seconds)"
+    )
+
+    # Emby sync hook on Homeserver — the bot's container has neither ssh nor
+    # curl, so the forced `.strm` sync is reached over HTTP.
+    emby_sync_hook_url: Optional[str] = Field(default=None, description="Emby sync hook base URL")
+    emby_sync_hook_token: Optional[str] = Field(default=None, description="Emby sync hook token")
+    emby_sync_hook_timeout: float = Field(
+        default=90.0, ge=5.0, le=600.0, description="Emby sync hook timeout (seconds)"
+    )
+
     # TMDb (optional, for trending/popular content)
     tmdb_api_key: Optional[str] = Field(default=None, description="TMDb API key (v3) for trending/popular content")
     tmdb_language: str = Field(default="ru-RU", description="TMDb language for content (ru-RU, en-US, etc.)")
@@ -143,7 +168,10 @@ class Settings(BaseSettings):
         """Remove trailing slash from URLs."""
         return v.rstrip("/")
 
-    @field_validator("qbittorrent_url", "emby_url", "lidarr_url", "slskd_url", "navidrome_url", mode="after")
+    @field_validator(
+        "qbittorrent_url", "emby_url", "lidarr_url", "slskd_url", "navidrome_url",
+        "torrserver_url", "emby_sync_hook_url", mode="after",
+    )
     @classmethod
     def strip_trailing_slash_optional(cls, v: Optional[str]) -> Optional[str]:
         """Remove trailing slash from optional URLs."""
@@ -198,6 +226,27 @@ class Settings(BaseSettings):
                 "configured — download-completion notifications will never fire.",
                 stacklevel=2,
             )
+        ts_parts = (self.torrserver_url, self.torrserver_username, self.torrserver_password)
+        if any(p is not None for p in ts_parts) and not self.torrserver_enabled:
+            warnings.warn(
+                "TorrServer partially configured: TORRSERVER_URL, TORRSERVER_USERNAME "
+                "and TORRSERVER_PASSWORD are all required — the TorrServer section "
+                "will stay disabled.",
+                stacklevel=2,
+            )
+        if (self.emby_sync_hook_url is None) != (self.emby_sync_hook_token is None):
+            warnings.warn(
+                "Emby sync hook partially configured: both EMBY_SYNC_HOOK_URL and "
+                "EMBY_SYNC_HOOK_TOKEN are required.",
+                stacklevel=2,
+            )
+        if self.torrserver_enabled and not self.emby_sync_hook_enabled:
+            warnings.warn(
+                "TorrServer настроен без хука синхронизации: раздачи будут "
+                "добавляться, но в Emby попадут только штатной задачей раз в "
+                "10 минут.",
+                stacklevel=2,
+            )
         return self
 
     @property
@@ -209,6 +258,20 @@ class Settings(BaseSettings):
     def emby_enabled(self) -> bool:
         """Check if Emby integration is configured."""
         return self.emby_url is not None and self.emby_api_key is not None
+
+    @property
+    def torrserver_enabled(self) -> bool:
+        """Check if TorrServer integration is configured."""
+        return (
+            self.torrserver_url is not None
+            and self.torrserver_username is not None
+            and self.torrserver_password is not None
+        )
+
+    @property
+    def emby_sync_hook_enabled(self) -> bool:
+        """Check if the forced Emby sync hook is configured."""
+        return self.emby_sync_hook_url is not None and self.emby_sync_hook_token is not None
 
     @property
     def tmdb_enabled(self) -> bool:
