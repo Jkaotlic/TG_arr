@@ -8,12 +8,15 @@ from bot.config import get_settings
 if TYPE_CHECKING:
     from bot.clients.deezer import DeezerClient
     from bot.clients.emby import EmbyClient
+    from bot.clients.emby_sync_hook import EmbySyncHookClient
     from bot.clients.lidarr import LidarrClient
     from bot.clients.navidrome import NavidromeClient
     from bot.clients.qbittorrent import QBittorrentClient
     from bot.clients.scryer import ScryerClient
     from bot.clients.slskd import SlskdClient
     from bot.clients.tmdb import TMDbClient
+    from bot.clients.torrserver import TorrServerClient
+    from bot.services.torrserver_service import TorrServerService
 
 # Per-client locks to prevent race conditions in singleton creation
 _scryer_lock = asyncio.Lock()
@@ -24,6 +27,8 @@ _qbittorrent_lock = asyncio.Lock()
 _emby_lock = asyncio.Lock()
 _tmdb_lock = asyncio.Lock()
 _deezer_lock = asyncio.Lock()
+_torrserver_lock = asyncio.Lock()
+_emby_sync_hook_lock = asyncio.Lock()
 
 # Singleton instances
 _scryer: Optional["ScryerClient"] = None
@@ -34,6 +39,8 @@ _qbittorrent: Optional["QBittorrentClient"] = None
 _emby: Optional["EmbyClient"] = None
 _tmdb: Optional["TMDbClient"] = None
 _deezer: Optional["DeezerClient"] = None
+_torrserver: Optional["TorrServerClient"] = None
+_emby_sync_hook: Optional["EmbySyncHookClient"] = None
 
 
 async def get_scryer() -> "ScryerClient":
@@ -178,9 +185,67 @@ async def get_tmdb() -> Optional["TMDbClient"]:
     return _tmdb
 
 
+async def get_torrserver() -> Optional["TorrServerClient"]:
+    """Get or create the TorrServer client singleton (if configured)."""
+    global _torrserver
+    settings = get_settings()
+    if not settings.torrserver_enabled:
+        return None
+    async with _torrserver_lock:
+        if _torrserver is None:
+            from bot.clients.torrserver import TorrServerClient
+
+            _torrserver = TorrServerClient(
+                settings.torrserver_url,
+                settings.torrserver_username,
+                settings.torrserver_password,
+                timeout=settings.torrserver_timeout,
+                search_timeout=settings.torrserver_search_timeout,
+            )
+    return _torrserver
+
+
+async def get_emby_sync_hook() -> Optional["EmbySyncHookClient"]:
+    """Get or create the Emby sync hook client singleton (if configured)."""
+    global _emby_sync_hook
+    settings = get_settings()
+    if not settings.emby_sync_hook_enabled:
+        return None
+    async with _emby_sync_hook_lock:
+        if _emby_sync_hook is None:
+            from bot.clients.emby_sync_hook import EmbySyncHookClient
+
+            _emby_sync_hook = EmbySyncHookClient(
+                settings.emby_sync_hook_url,
+                settings.emby_sync_hook_token,
+                timeout=settings.emby_sync_hook_timeout,
+            )
+    return _emby_sync_hook
+
+
+async def get_torrserver_service() -> Optional["TorrServerService"]:
+    """Compose the TorrServer client and (optional) sync hook into the service.
+
+    Cheap to build and stateless, so it is assembled per call rather than kept
+    as another singleton — the expensive parts (the HTTP clients) are cached.
+    """
+    client = await get_torrserver()
+    if client is None:
+        return None
+    from bot.services.torrserver_service import TorrServerService
+
+    settings = get_settings()
+    return TorrServerService(
+        client,
+        await get_emby_sync_hook(),
+        metadata_timeout=settings.torrserver_metadata_timeout,
+    )
+
+
 async def close_all() -> None:
     """Close all client connections. Call on shutdown."""
     global _scryer, _lidarr, _slskd, _navidrome, _qbittorrent, _emby, _tmdb, _deezer
+    global _torrserver, _emby_sync_hook
 
     if _scryer:
         await _scryer.close()
@@ -206,3 +271,9 @@ async def close_all() -> None:
     if _deezer:
         await _deezer.close()
         _deezer = None
+    if _torrserver:
+        await _torrserver.close()
+        _torrserver = None
+    if _emby_sync_hook:
+        await _emby_sync_hook.close()
+        _emby_sync_hook = None
