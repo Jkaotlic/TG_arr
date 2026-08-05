@@ -3074,8 +3074,12 @@ if (-not (Test-Path $tokenFile)) {
     Write-Host "Token already present, kept as is"
 }
 
-$existing = & $Nssm status $ServiceName 2>$null
-if ($LASTEXITCODE -eq 0) {
+# Deliberately NOT `& $Nssm status ... 2>$null`: on PowerShell 5.1, redirecting a
+# native command's stderr wraps each line in an ErrorRecord, which under
+# `$ErrorActionPreference='Stop'` becomes a *terminating* NativeCommandError even
+# when nssm exits 0. Get-Service answers the same question without the footgun,
+# and matches the convention in Install-TorrServer.ps1.
+if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
     Write-Host "Service exists, reinstalling parameters"
     & $Nssm stop $ServiceName | Out-Null
 } else {
@@ -3089,8 +3093,13 @@ if ($LASTEXITCODE -eq 0) {
 & $Nssm set $ServiceName AppRestartDelay 10000 | Out-Null
 & $Nssm start $ServiceName | Out-Null
 
-New-NetFirewallRule -DisplayName 'TorrServer Emby Sync Hook' -Direction Inbound `
-    -Protocol TCP -LocalPort 8099 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+# Windows allows duplicate rules with the same DisplayName, so
+# `-ErrorAction SilentlyContinue` does NOT make this idempotent — every run would
+# add another identical rule. Check first.
+if (-not (Get-NetFirewallRule -DisplayName 'TorrServer Emby Sync Hook' -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -DisplayName 'TorrServer Emby Sync Hook' -Direction Inbound `
+        -Protocol TCP -LocalPort 8099 -Action Allow | Out-Null
+}
 
 Start-Sleep -Seconds 2
 $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8099/health' -TimeoutSec 5
