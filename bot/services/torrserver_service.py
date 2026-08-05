@@ -18,7 +18,7 @@ from typing import Optional
 import structlog
 
 from bot.clients.emby_sync_hook import EmbySyncHookClient
-from bot.clients.torrserver import TorrServerClient
+from bot.clients.torrserver import TorrServerClient, TorrServerError
 from bot.models import SyncHookResult, TorrServerTorrent
 
 logger = structlog.get_logger()
@@ -50,10 +50,21 @@ class TorrServerService:
         self.poll_interval = poll_interval
 
     async def _wait_for_files(self, torrent_hash: str) -> Optional[TorrServerTorrent]:
-        """Poll until the torrent reports its files, or the budget runs out."""
+        """Poll until the torrent reports its files, or the budget runs out.
+
+        The polling window is exactly when TorrServer is busiest fetching
+        metadata, so a slow or 500 answer on any single poll is expected, not
+        exceptional. The torrent is already on the server by this point, so a
+        per-poll failure must not escape and turn a successful add into a
+        reported failure — it just costs one wasted poll.
+        """
         deadline = time.monotonic() + self.metadata_timeout
         while True:
-            torrent = await self.client.get_torrent(torrent_hash)
+            try:
+                torrent = await self.client.get_torrent(torrent_hash)
+            except TorrServerError as e:
+                logger.warning("torrserver_poll_failed", torrent_hash=torrent_hash, error=str(e))
+                torrent = None
             if torrent and torrent.files:
                 return torrent
             if time.monotonic() >= deadline:
