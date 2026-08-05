@@ -292,3 +292,24 @@ async def test_search_survives_missing_source_settings(client):
 
     assert len(releases) == 2
     assert releases[1].tracker == ""
+
+
+@pytest.mark.asyncio
+async def test_search_skips_malformed_torznab_url_entries(client):
+    """Сервер может отдать в TorznabUrls битую запись (не словарь) — она не
+    TorrServerError, поэтому голый except TorrServerError в search() её не
+    ловит. Один плохой элемент не должен ронять весь поиск, а валидный
+    сосед рядом с ним должен по-прежнему резолвиться в имя трекера."""
+    settings_with_junk = {"CacheSize": 1, "UseDisk": False, "TorznabUrls": [
+        "not a dict",
+        None,
+        {"Host": "http://192.168.0.95:9696/2", "Key": "k", "Name": "RuTracker.org"},
+    ]}
+    with patch.object(client, "get", new_callable=AsyncMock, return_value=SEARCH_RESPONSE), \
+         patch.object(client, "get_server_settings", new_callable=AsyncMock,
+                      return_value=settings_with_junk):
+        releases = await client.search("Interstellar")
+
+    by_title = {r.title: r for r in releases}
+    assert len(releases) == 2
+    assert by_title["Interstellar 2014 BDRemux 1080p"].tracker == "RuTracker.org"
