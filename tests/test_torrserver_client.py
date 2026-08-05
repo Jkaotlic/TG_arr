@@ -204,3 +204,91 @@ async def test_get_version_does_not_retry_a_non_retryable_http_error(client, mon
         await client.get_version()
 
     assert transport.get.await_count == 1
+
+
+# --- search() — torznab bridge ---
+
+SEARCH_RESPONSE = [
+    {
+        "Title": "Interstellar 2014 BDRemux 1080p", "Name": "Interstellar 2014 BDRemux 1080p",
+        "Size": "2.5 GCiB", "CreateDate": "2026-07-18T20:49:00+03:00", "Tracker": "",
+        "Link": "http://192.168.0.95:9696/2/download?apikey=k&link=abc&file=x",
+        "Year": 2014, "Peer": 5, "Seed": 5, "Magnet": "", "Hash": "", "IMDBID": "tt0816692",
+    },
+    {
+        "Title": "Interstellar 2014 WEBDL 2160p", "Name": "Interstellar 2014 WEBDL 2160p",
+        "Size": "40 GCiB", "CreateDate": "", "Tracker": "Knaben",
+        "Link": "http://192.168.0.95:9696/13/download?apikey=k&link=def",
+        "Year": 0, "Peer": 90, "Seed": 120, "Magnet": "magnet:?xt=urn:btih:dead", "Hash": "",
+    },
+]
+
+SETTINGS_WITH_SOURCES = {"CacheSize": 1, "UseDisk": False, "TorznabUrls": [
+    {"Host": "http://192.168.0.95:9696/2", "Key": "k", "Name": "RuTracker.org"},
+    {"Host": "http://192.168.0.95:9696/13", "Key": "k", "Name": "Knaben"},
+]}
+
+
+@pytest.mark.asyncio
+async def test_search_sorts_by_seeders_and_parses_sizes(client):
+    with patch.object(client, "get", new_callable=AsyncMock, return_value=SEARCH_RESPONSE), \
+         patch.object(client, "get_server_settings", new_callable=AsyncMock,
+                      return_value=SETTINGS_WITH_SOURCES):
+        releases = await client.search("Interstellar")
+
+    assert [r.seeders for r in releases] == [120, 5]
+    assert releases[1].size == int(2.5 * 1024 ** 3)
+    assert releases[0].link.endswith("link=def")
+
+
+@pytest.mark.asyncio
+async def test_search_fills_tracker_name_from_link_when_empty(client):
+    with patch.object(client, "get", new_callable=AsyncMock, return_value=SEARCH_RESPONSE), \
+         patch.object(client, "get_server_settings", new_callable=AsyncMock,
+                      return_value=SETTINGS_WITH_SOURCES):
+        releases = await client.search("Interstellar")
+
+    by_title = {r.title: r for r in releases}
+    assert by_title["Interstellar 2014 BDRemux 1080p"].tracker == "RuTracker.org"
+    assert by_title["Interstellar 2014 WEBDL 2160p"].tracker == "Knaben"
+
+
+@pytest.mark.asyncio
+async def test_search_passes_query_as_query_string_not_path(client):
+    """Гоча: /torznab/search/<строка> уходит пустым запросом и возвращает
+    ленту последних раздач — «поиск работает, но нерелевантно»."""
+    with patch.object(client, "get", new_callable=AsyncMock, return_value=[]) as mocked, \
+         patch.object(client, "get_server_settings", new_callable=AsyncMock, return_value={}):
+        await client.search("Дюна 2021")
+
+    assert mocked.await_args.args[0] == "/torznab/search/"
+    assert mocked.await_args.kwargs["params"] == {"query": "Дюна 2021"}
+
+
+@pytest.mark.asyncio
+async def test_search_truncates_to_limit(client):
+    many = [dict(SEARCH_RESPONSE[0], Seed=i) for i in range(50)]
+    with patch.object(client, "get", new_callable=AsyncMock, return_value=many), \
+         patch.object(client, "get_server_settings", new_callable=AsyncMock, return_value={}):
+        releases = await client.search("x", limit=30)
+
+    assert len(releases) == 30
+
+
+@pytest.mark.asyncio
+async def test_search_returns_empty_list_on_unexpected_payload(client):
+    with patch.object(client, "get", new_callable=AsyncMock, return_value={"error": "nope"}), \
+         patch.object(client, "get_server_settings", new_callable=AsyncMock, return_value={}):
+        assert await client.search("x") == []
+
+
+@pytest.mark.asyncio
+async def test_search_survives_missing_source_settings(client):
+    """Настройки не прочитались — поиск всё равно работает, просто без имён."""
+    with patch.object(client, "get", new_callable=AsyncMock, return_value=SEARCH_RESPONSE), \
+         patch.object(client, "get_server_settings", new_callable=AsyncMock,
+                      side_effect=TorrServerError("boom")):
+        releases = await client.search("Interstellar")
+
+    assert len(releases) == 2
+    assert releases[1].tracker == ""
