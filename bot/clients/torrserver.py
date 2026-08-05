@@ -19,7 +19,9 @@ import base64
 import json
 import re
 import time
+from pathlib import PurePosixPath
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -32,6 +34,7 @@ from bot.models import (
     TorrServerStats,
     TorrServerTorrent,
     parse_torrserver_size,
+    sanitize_torrent_title,
 )
 
 logger = structlog.get_logger()
@@ -173,6 +176,36 @@ class TorrServerClient(BaseAPIClient):
         if not isinstance(result, dict) or not result.get("hash"):
             return None
         return self._to_torrent(result)
+
+    async def add_torrent(self, link: str, title: str, poster: str = "") -> TorrServerTorrent:
+        """Add a torrent by link (Prowlarr download URL or magnet).
+
+        Answers immediately, before metadata is fetched: `stat` is 1
+        ("Torrent getting info") and `torrent_size` is null — the caller has to
+        poll `get_torrent` if it needs the file list.
+        """
+        payload = {
+            "action": "add",
+            "link": link,
+            "title": sanitize_torrent_title(title),
+            "poster": poster,
+            "save_to_db": True,
+        }
+        result = await self._torrents(payload)
+        if not isinstance(result, dict) or not result.get("hash"):
+            raise TorrServerError("TorrServer не принял раздачу")
+        return self._to_torrent(result)
+
+    async def remove_torrent(self, torrent_hash: str) -> None:
+        """Remove a torrent. The `.strm` files it produced are cleaned up by
+        the sync script on its next pass, not here."""
+        await self._torrents({"action": "rem", "hash": torrent_hash})
+
+    def stream_url(self, torrent_hash: str, file_id: int, file_name: str) -> str:
+        """Direct HTTP stream link for one file — same shape the working
+        Sync-TorrServerToEmby.py writes into every `.strm`."""
+        name = quote(PurePosixPath(file_name).name)
+        return f"{self.base_url}/stream/{name}?link={torrent_hash}&index={file_id}&play"
 
     async def get_server_settings(self) -> dict[str, Any]:
         """Raw settings object (cache size, torznab sources, ...)."""
