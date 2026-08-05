@@ -4,6 +4,7 @@
 отказ хука не превращают операцию в неудачу — меняется только текст ответа.
 """
 
+import asyncio
 import itertools
 from unittest.mock import AsyncMock, MagicMock
 
@@ -60,12 +61,23 @@ async def test_metadata_timeout_still_counts_as_added_and_skips_sync():
     ``itertools.repeat`` keeps every poll answering "still no files" instead
     of pinning the count to a fixed list length that a fast machine can
     outrun.
+
+    That infinite mock only terminates because ``_wait_for_files`` breaks
+    out through its deadline branch. If that branch ever regresses (dropped
+    or inverted), the loop would spin forever on an ever-repeating mock —
+    so the call is wrapped in ``asyncio.wait_for`` (same convention as
+    tests/test_r4_C5-handler-perf.py and tests/test_r4_C2-qbit.py) to turn
+    "hangs forever" into a fast, obvious failure. 5s is two orders of
+    magnitude above this test's own 0.05s budget, so it never adds
+    flakiness on a healthy implementation.
     """
     client = _client(itertools.repeat(ADDED))
     hook = _hook()
     service = TorrServerService(client, hook, metadata_timeout=0.05, poll_interval=0.01)
 
-    result = await service.add_and_publish("http://link", "Dune 2021")
+    result = await asyncio.wait_for(
+        service.add_and_publish("http://link", "Dune 2021"), timeout=5
+    )
 
     assert result.torrent.hash == "abc"
     assert result.metadata_ready is False
