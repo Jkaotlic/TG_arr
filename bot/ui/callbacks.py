@@ -11,6 +11,7 @@ callback families can be migrated the same way incrementally.
 """
 
 from aiogram.filters.callback_data import CallbackData
+from pydantic import Field, field_validator
 
 
 class PageCB(CallbackData, prefix="pg"):
@@ -159,9 +160,14 @@ class SeasonScopeCB(CallbackData, prefix="ss"):
 class TsReleaseCB(CallbackData, prefix="tsr"):
     """Pick one TorrServer search hit. Only the index travels: the release
     itself (title + Prowlarr link) blows past callback_data's 64-byte budget,
-    so the handler resolves it from the per-user result cache."""
+    so the handler resolves it from the per-user result cache.
 
-    idx: int
+    ``ge=0``: a hand-crafted negative index would otherwise bypass the
+    stale-cache guard (``idx >= len(releases)``) and resolve via Python's
+    negative indexing to the wrong cached item.
+    """
+
+    idx: int = Field(ge=0)
 
 
 class TsPageCB(CallbackData, prefix="tsp"):
@@ -172,18 +178,33 @@ class TsPageCB(CallbackData, prefix="tsp"):
 
 class TsTorrentCB(CallbackData, prefix="tst"):
     """Per-torrent action on the server. ``action``: del (asks) | delconf (does it).
-    ``h`` carries the full 40-hex hash — "tst:delconf:<40 hex>" packs to 53
-    bytes, under the 64-byte limit."""
+    ``h`` carries the hash, bounded to 40 hex chars — "tst:delconf:<40 hex>"
+    packs to 53 bytes, under the 64-byte limit."""
 
     action: str
     h: str
+
+    @field_validator("h", mode="after")
+    @classmethod
+    def _bound_hash_length(cls, v: str) -> str:
+        """BitTorrent v2 infohashes are 64 hex chars — long enough to blow
+        past callback_data's 64-byte budget outright (confirmed:
+        ``TsTorrentCB(action='delconf', h='a'*64).pack()`` raises
+        ``ValueError: Resulted callback data is too long!``, which would kill
+        the whole "📋 Раздачи" screen for an admin). 40 hex is the v1
+        infohash length TorrServer returns in practice, so capping here
+        degrades a pathological v2-only hash to a truncated match instead of
+        crashing the screen outright.
+        """
+        return v[:40]
 
 
 class TsAddCB(CallbackData, prefix="tsa"):
     """Add the selected hit to TorrServer and publish it to Emby.
 
     Separate from ``TsReleaseCB`` (which only opens the card) so the two
-    actions can never be confused by a shared prefix.
+    actions can never be confused by a shared prefix. Same ``ge=0`` guard as
+    ``TsReleaseCB.idx``.
     """
 
-    idx: int
+    idx: int = Field(ge=0)
