@@ -98,3 +98,10 @@ class CallbackData:
     # — see bot/handlers/calendar.py::handle_legacy_calendar_period for the
     # legacy-string fallback.
     CALENDAR_REFRESH = "cal_refresh"  # Refresh current view
+
+    # TorrServer section ("watch now")
+    TS_SEARCH = "ts_search"  # Ask for a query
+    TS_LIST = "ts_list"  # Show torrents currently on the server
+    TS_REFRESH = "ts_refresh"  # Re-render the panel
+    TS_CLOSE = "ts_close"  # Close the panel message
+    TS_BACK = "ts_back"  # Back to the panel
