@@ -99,3 +99,19 @@ async def test_non_json_success_body_is_still_ok(hook):
 
     assert result.status == "ok"
     assert result.duration_s is None
+
+
+@pytest.mark.asyncio
+async def test_malformed_base_url_never_raises():
+    """A bad EMBY_SYNC_HOOK_URL (e.g. an operator typo in the port) must not
+    escape trigger_sync as an exception — httpx.InvalidURL is raised by the
+    real httpx.AsyncClient constructor, unmocked, exercising _get_client for
+    real rather than through the patched-out fixture used above."""
+    hook = EmbySyncHookClient("http://hs:notaport", "secret-token")
+    try:
+        result = await hook.trigger_sync()
+    finally:
+        await hook.close()
+
+    assert result.status == "failed"
+    assert result.error

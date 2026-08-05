@@ -42,9 +42,17 @@ class EmbySyncHookClient:
 
     async def trigger_sync(self) -> SyncHookResult:
         """Ask the hook to publish `.strm` files and refresh Emby now."""
-        client = await self._get_client()
         try:
+            client = await self._get_client()
             response = await client.post("/sync", headers={"X-Token": self.token})
+        except httpx.InvalidURL as e:
+            # Raised by the httpx.AsyncClient constructor itself when base_url
+            # is malformed (e.g. a bad port from an operator typo in
+            # EMBY_SYNC_HOOK_URL) — httpx.InvalidURL is a plain Exception, not
+            # an httpx.HTTPError, so it needs its own clause; construction was
+            # therefore folded into this try instead of running unguarded.
+            logger.warning("emby_sync_hook", status="bad_url", error=str(e))
+            return SyncHookResult(status="failed", error="некорректный адрес хука синхронизации")
         except httpx.TimeoutException:
             logger.warning("emby_sync_hook", status="timeout")
             return SyncHookResult(status="failed", error="таймаут хука синхронизации")
