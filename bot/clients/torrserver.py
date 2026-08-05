@@ -51,6 +51,21 @@ _INDEXER_ID_RE = re.compile(r"/(\d+)/download")
 _SOURCE_ID_RE = re.compile(r"/(\d+)/?$")
 
 
+def _as_int(value: Any, default: Optional[int] = 0) -> Optional[int]:
+    """Best-effort int coercion for a single field from the server.
+
+    Same policy as ``parse_torrserver_size`` and ``_files_from_payload``: a
+    malformed value (junk string, dict, whatever) must cost only that one
+    field, never abort the whole item or the whole search.
+    """
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class TorrServerClient(BaseAPIClient):
     """Client for the TorrServer HTTP API."""
 
@@ -129,7 +144,7 @@ class TorrServerClient(BaseAPIClient):
             category=str(item.get("category") or ""),
             poster=str(item.get("poster") or ""),
             size=parse_torrserver_size(item.get("torrent_size")),
-            stat=int(item.get("stat") or 0),
+            stat=_as_int(item.get("stat"), 0),
             stat_string=str(item.get("stat_string") or ""),
             files=cls._files_from_payload(item),
         )
@@ -276,15 +291,14 @@ class TorrServerClient(BaseAPIClient):
             if not tracker:
                 match = _INDEXER_ID_RE.search(link)
                 tracker = source_names.get(match.group(1), "") if match else ""
-            year = item.get("Year") or None
             releases.append(TorrServerRelease(
                 title=str(item.get("Title") or item.get("Name") or "Без названия"),
                 size=parse_torrserver_size(item.get("Size")),
-                seeders=int(item.get("Seed") or 0),
-                peers=int(item.get("Peer") or 0),
+                seeders=_as_int(item.get("Seed"), 0),
+                peers=_as_int(item.get("Peer"), 0),
                 link=link,
                 tracker=tracker,
-                year=int(year) if year else None,
+                year=_as_int(item.get("Year") or None, None),
             ))
 
         releases.sort(key=lambda r: r.seeders, reverse=True)

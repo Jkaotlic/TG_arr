@@ -101,6 +101,20 @@ async def test_get_torrent_returns_none_for_empty_answer(client):
 
 
 @pytest.mark.asyncio
+async def test_to_torrent_survives_a_malformed_stat_field(client):
+    """A junk 'stat' value must not abort parsing the whole torrent —
+    same policy as parse_torrserver_size/_files_from_payload."""
+    payload = {
+        "hash": "abc", "title": "T", "stat": "не число", "stat_string": "?",
+        "torrent_size": 100, "category": "movie", "poster": "", "data": "",
+    }
+    with _patch_post(client, payload):
+        torrent = await client.get_torrent("abc")
+
+    assert torrent.stat == 0
+
+
+@pytest.mark.asyncio
 async def test_auth_error_is_translated_to_credentials_message(client):
     with patch.object(client, "post", new_callable=AsyncMock,
                       side_effect=AuthenticationError("boom", status_code=401)):
@@ -295,6 +309,32 @@ async def test_search_survives_missing_source_settings(client):
 
 
 @pytest.mark.asyncio
+async def test_search_survives_a_malformed_seed_field(client):
+    """A junk 'Seed' value must cost only that one field, never abort the
+    whole search — same defensiveness policy as every other parser in this
+    client (parse_torrserver_size, _files_from_payload, list_torrents)."""
+    broken = dict(SEARCH_RESPONSE[0], Seed="не число", Peer="тоже не число")
+    with patch.object(client, "get", new_callable=AsyncMock, return_value=[broken, SEARCH_RESPONSE[1]]), \
+         patch.object(client, "get_server_settings", new_callable=AsyncMock, return_value={}):
+        releases = await client.search("Interstellar")
+
+    assert len(releases) == 2
+    broken_release = next(r for r in releases if r.title == broken["Title"])
+    assert broken_release.seeders == 0
+    assert broken_release.peers == 0
+
+
+@pytest.mark.asyncio
+async def test_search_survives_a_malformed_year_field(client):
+    broken = dict(SEARCH_RESPONSE[0], Year="unknown")
+    with patch.object(client, "get", new_callable=AsyncMock, return_value=[broken]), \
+         patch.object(client, "get_server_settings", new_callable=AsyncMock, return_value={}):
+        releases = await client.search("Interstellar")
+
+    assert releases[0].year is None
+
+
+@pytest.mark.asyncio
 async def test_search_skips_malformed_torznab_url_entries(client):
     """Сервер может отдать в TorznabUrls битую запись (не словарь) — она не
     TorrServerError, поэтому голый except TorrServerError в search() её не
@@ -355,3 +395,19 @@ async def test_remove_torrent_sends_rem_action(client):
 def test_stream_url_matches_the_working_sync_script(client):
     url = client.stream_url("abc", 2, "Big Buck Bunny/Big Buck Bunny.mp4")
     assert url == "http://ts:8090/stream/Big%20Buck%20Bunny.mp4?link=abc&index=2&play"
+
+
+@pytest.mark.parametrize("file_name,expected_segment", [
+    # Cyrillic filenames are the norm on this stack — the stream link is the
+    # single most user-visible artifact of the feature.
+    ("Фильм 2021/Фильм 2021.mkv", "%D0%A4%D0%B8%D0%BB%D1%8C%D0%BC%202021.mkv"),
+    # `?`/`&` in a filename must not be able to inject extra params into the
+    # URL's own ?link=&index=&play query string.
+    ("Movie?a=1&b=2/Movie?a=1&b=2.mkv", "Movie%3Fa%3D1%26b%3D2.mkv"),
+])
+def test_stream_url_encodes_cyrillic_and_query_characters(client, file_name, expected_segment):
+    url = client.stream_url("abc", 1, file_name)
+    assert url == f"http://ts:8090/stream/{expected_segment}?link=abc&index=1&play"
+    # Exactly one '?' — the one that starts the stream endpoint's own query
+    # string, not one smuggled in from the filename.
+    assert url.count("?") == 1
