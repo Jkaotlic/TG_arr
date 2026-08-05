@@ -4,6 +4,7 @@
 import json
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from bot.clients.base import AuthenticationError
@@ -155,3 +156,51 @@ async def test_check_connection_reports_failure(client):
 
     assert available is False
     assert version is None
+
+
+# --- get_version() retry policy (review finding: /echo must retry on
+# transient network errors like every other call in this client) ---
+
+@pytest.mark.asyncio
+async def test_get_version_retries_transient_connect_error_then_succeeds(client, monkeypatch):
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    transport = AsyncMock()
+    transport.get = AsyncMock(side_effect=[
+        httpx.ConnectError("boom"),
+        httpx.Response(200, text="MatriX.142.2"),
+    ])
+    monkeypatch.setattr(client, "_get_client", AsyncMock(return_value=transport))
+
+    version = await client.get_version()
+
+    assert version == "MatriX.142.2"
+    assert transport.get.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_version_raises_torrserver_error_when_retries_exhausted(client, monkeypatch):
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    transport = AsyncMock()
+    transport.get = AsyncMock(side_effect=httpx.ConnectError("boom"))
+    monkeypatch.setattr(client, "_get_client", AsyncMock(return_value=transport))
+
+    with pytest.raises(TorrServerError):
+        await client.get_version()
+
+    # stop_after_attempt(3): the raw httpx error must not leak past the retry
+    # policy — the caller sees TorrServerError only after all 3 attempts.
+    assert transport.get.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_get_version_does_not_retry_a_non_retryable_http_error(client, monkeypatch):
+    """A 500 is a real answer, not a transient transport failure — it must
+    fail immediately, not burn through the retry budget."""
+    transport = AsyncMock()
+    transport.get = AsyncMock(return_value=httpx.Response(500, text="oops"))
+    monkeypatch.setattr(client, "_get_client", AsyncMock(return_value=transport))
+
+    with pytest.raises(TorrServerError):
+        await client.get_version()
+
+    assert transport.get.await_count == 1
