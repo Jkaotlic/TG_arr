@@ -102,6 +102,7 @@ async def test_collect_statuses_include_deezer_true_adds_deezer():
          patch.object(status_handler, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_emby", AsyncMock(return_value=None)), \
+         patch.object(status_handler, "get_torrserver", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_deezer", AsyncMock(return_value=deezer_client)), \
          patch.object(status_handler, "check_service", AsyncMock(
              side_effect=lambda client, name: SystemStatus(service=name, available=True)
@@ -123,6 +124,7 @@ async def test_collect_statuses_include_deezer_false_omits_deezer():
          patch.object(status_handler, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_emby", AsyncMock(return_value=None)), \
+         patch.object(status_handler, "get_torrserver", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_deezer", AsyncMock()) as get_deezer_mock, \
          patch.object(status_handler, "check_service", AsyncMock(
              side_effect=lambda client, name: SystemStatus(service=name, available=True)
@@ -151,6 +153,7 @@ async def test_collect_statuses_exception_becomes_unknown_status():
          patch.object(status_handler, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_emby", AsyncMock(return_value=None)), \
+         patch.object(status_handler, "get_torrserver", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_deezer", AsyncMock(return_value=None)), \
          patch.object(status_handler, "check_service", AsyncMock(side_effect=flaky_check)):
         statuses = await status_handler._collect_statuses(include_deezer=False)

@@ -16,6 +16,7 @@ from bot.clients.registry import (
     get_qbittorrent,
     get_scryer,
     get_slskd,
+    get_torrserver,
 )
 from bot.models import (
     ContentType,
@@ -111,6 +112,9 @@ async def _collect_statuses(include_deezer: bool) -> list[SystemStatus]:
         checks.append(check_service(qbittorrent, "qBittorrent"))
     if emby:
         checks.append(check_service(emby, "Emby"))
+    torrserver = await get_torrserver()
+    if torrserver:
+        checks.append(check_service(torrserver, "TorrServer"))
     if include_deezer:
         deezer = await get_deezer()
         if deezer:
