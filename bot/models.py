@@ -1,5 +1,6 @@
 """Data models for the application."""
 
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, ClassVar, Literal, Optional, Union
@@ -898,3 +899,101 @@ def format_speed(bytes_per_sec: int | float) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024.0
     return f"{value:.1f} TB/s"
+
+
+# ============================================================================
+# TorrServer Models and Parsers
+# ============================================================================
+
+#: Extensions Emby will actually play from a `.strm`; everything else in a
+#: release (subtitles, posters, BDMV service files) is noise for the user.
+VIDEO_FILE_EXTENSIONS = (".mkv", ".mp4", ".avi", ".ts", ".m2ts", ".mov", ".wmv")
+
+#: TorrServer renders sizes as e.g. "2.5 GCiB" — a number, a binary-prefix
+#: letter, then filler. Only the number and the prefix letter carry meaning.
+_TS_SIZE_RE = re.compile(r"([\d]+(?:[.,][\d]+)?)\s*([KMGTP])?", re.IGNORECASE)
+_TS_SIZE_POWERS = {"k": 1, "m": 2, "g": 3, "t": 4, "p": 5}
+
+
+def parse_torrserver_size(value: "str | int | float | None") -> int:
+    """Bytes from TorrServer's search-result size.
+
+    The torznab search returns the size as a *string* ("2.5 GCiB"), unlike the
+    torrent API which returns plain bytes — so both shapes are accepted.
+    Anything unparseable is 0: a wrong size must never abort a search.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    match = _TS_SIZE_RE.search(str(value))
+    if not match:
+        return 0
+    number = float(match.group(1).replace(",", "."))
+    prefix = (match.group(2) or "").lower()
+    return int(number * (1024 ** _TS_SIZE_POWERS.get(prefix, 0)))
+
+
+def sanitize_torrent_title(title: str, max_length: int = 200) -> str:
+    """Title safe to use as a directory name in TorrServer's virtual FS.
+
+    A slash in a release title (routine on Russian trackers: "Холодное сердце 2 /
+    Frozen II [...]") makes `PROPFIND` on its category return 500 with no
+    entries at all — the folder looks empty in WebDAV and DLNA. TorrServer has a
+    scheduled sanitizer, but it runs every 15 minutes; adding an already-clean
+    title means the release is browsable immediately.
+    """
+    cleaned = re.sub(r"[\\/]+", " - ", title or "")
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:max_length]
+
+
+class TorrServerFile(BaseModel):
+    """One file inside a torrent."""
+
+    id: int
+    path: str
+    length: int = 0
+
+
+class TorrServerRelease(BaseModel):
+    """A search hit from TorrServer's torznab endpoint."""
+
+    title: str
+    size: int = 0
+    seeders: int = 0
+    peers: int = 0
+    link: str = ""
+    tracker: str = ""
+    year: Optional[int] = None
+
+
+class TorrServerTorrent(BaseModel):
+    """A torrent known to TorrServer."""
+
+    hash: str
+    title: str
+    category: str = ""
+    poster: str = ""
+    size: int = 0
+    stat: int = 0
+    stat_string: str = ""
+    files: list[TorrServerFile] = Field(default_factory=list)
+
+    @property
+    def video_files(self) -> list[TorrServerFile]:
+        """Playable files, largest first."""
+        videos = [f for f in self.files if f.path.lower().endswith(VIDEO_FILE_EXTENSIONS)]
+        return sorted(videos, key=lambda f: f.length, reverse=True)
+
+
+class TorrServerStats(BaseModel):
+    """Snapshot for the status card."""
+
+    version: str = "unknown"
+    torrent_count: int = 0
+    total_size: int = 0
+    cache_size: int = 0
+    use_disk: bool = False
+    source_count: int = 0
