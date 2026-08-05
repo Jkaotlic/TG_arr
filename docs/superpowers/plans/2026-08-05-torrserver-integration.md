@@ -1071,7 +1071,7 @@ async def test_add_torrent_sends_sanitized_title(client):
 @pytest.mark.asyncio
 async def test_add_torrent_without_hash_is_an_error(client):
     with _patch_post(client, {"title": "X"}):
-        with pytest.raises(TorrServerError, match="не приняла"):
+        with pytest.raises(TorrServerError, match="не принял"):
             await client.add_torrent("http://link", "X")
 
 
