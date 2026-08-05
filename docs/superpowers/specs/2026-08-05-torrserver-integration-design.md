@@ -242,12 +242,17 @@ Scryer (`candidate_token`, `scryer_*`), переиспользовать его 
 ## Модели данных
 
 ```text
-TorrServerRelease   — результат поиска: title, size, seeders, indexer, link, publish_date
+TorrServerRelease   — результат поиска: title, size, seeders, peers, link, tracker, year
 TorrServerFile      — id, path, length
 TorrServerTorrent   — hash, title, category, poster, size, stat, stat_string, files
-TorrServerStats     — version, torrent_count, total_size, cache_size, use_disk, active_streams
+TorrServerStats     — version, torrent_count, total_size, cache_size, use_disk, source_count
 SyncHookResult      — status (ok / already_running / failed), duration_s, error
 ```
+
+Поля приведены к тому, что реально отдаёт API (см. раздел о живых контрактах):
+у результата поиска это `Seed`/`Peer` и имя трекера, а не «индексер» и дата
+публикации; у статуса — число подключённых источников поиска, потому что
+счётчика активных потоков сервер не отдаёт вовсе.
 
 `TorrServerTorrent.files` заполняется разбором строки `data`; в списке раздач
 используется только их количество и суммарный размер, полные пути — только в
