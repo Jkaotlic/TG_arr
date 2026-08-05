@@ -5,6 +5,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.models import TorrServerRelease, TorrServerTorrent
 from bot.ui.callbacks import TsAddCB, TsPageCB, TsReleaseCB, TsTorrentCB
+from bot.ui.formatters.torrserver import TS_LIST_BUTTON_CAP
 from bot.ui.keyboards._constants import CallbackData
 
 
@@ -76,10 +77,16 @@ class _TorrServerKeyboards:
     def torrserver_list(
         torrents: list[TorrServerTorrent], is_admin: bool
     ) -> InlineKeyboardMarkup:
-        """Torrents on the server; deletion is admin-only."""
+        """Torrents on the server; deletion is admin-only.
+
+        Capped at ``TS_LIST_BUTTON_CAP`` buttons — Telegram rejects an
+        oversized keyboard the same way it rejects an oversized message,
+        which is what ``format_torrserver_torrents`` warns about in the text
+        when the list actually gets cut.
+        """
         builder = InlineKeyboardBuilder()
         if is_admin:
-            for torrent in torrents:
+            for torrent in torrents[:TS_LIST_BUTTON_CAP]:
                 builder.row(InlineKeyboardButton(
                     text=f"🗑 {torrent.title[:35]}",
                     callback_data=TsTorrentCB(action="del", h=torrent.hash).pack(),

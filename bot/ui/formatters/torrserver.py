@@ -8,10 +8,16 @@ from bot.models import (
     TorrServerTorrent,
     format_bytes,
 )
+from bot.ui.formatters._common import _safe_truncate
 
 #: Shown whenever a release will reach Emby by the scheduled pass rather than
 #: by our forced sync — the user should know they are not stuck.
 _SCHEDULED_FALLBACK = "В Emby попадёт штатной задачей в течение 10 минут."
+
+#: Matches Keyboards.torrserver_list's own cap on delete buttons — a torrent
+#: list long enough to need one needs the other, so the two stay in lockstep
+#: via this shared constant rather than two independently-tuned magic numbers.
+TS_LIST_BUTTON_CAP = 30
 
 
 class _TorrServerFormatters:
@@ -55,7 +61,9 @@ class _TorrServerFormatters:
         )
 
     @staticmethod
-    def format_torrserver_torrents(torrents: list[TorrServerTorrent]) -> str:
+    def format_torrserver_torrents(
+        torrents: list[TorrServerTorrent], is_admin: bool = False
+    ) -> str:
         if not torrents:
             return "📋 <b>Раздачи TorrServer</b>\n\nСписок пуст."
         lines = [f"📋 <b>Раздачи TorrServer: {len(torrents)}</b>", ""]
@@ -65,7 +73,19 @@ class _TorrServerFormatters:
                 f"    {format_bytes(torrent.size)} · файлов: {len(torrent.files)} · "
                 f"{html.escape(torrent.stat_string)}"
             )
-        return "\n".join(lines)
+        # Delete buttons are capped in the keyboard (Telegram rejects both an
+        # oversized message and an oversized keyboard) — an admin scrolling
+        # past the cap without a button needs to know why, not just find one
+        # missing.
+        if is_admin and len(torrents) > TS_LIST_BUTTON_CAP:
+            lines.append("")
+            lines.append(
+                f"⚠️ Кнопки удаления показаны только для первых {TS_LIST_BUTTON_CAP} раздач."
+            )
+        text = "\n".join(lines)
+        # BUG-11/TEST-07-style hard safety net: a long enough list otherwise
+        # blows past Telegram's 4096-char message limit outright.
+        return _safe_truncate(text, max_len=3800)
 
     @staticmethod
     def format_torrserver_added(result) -> str:

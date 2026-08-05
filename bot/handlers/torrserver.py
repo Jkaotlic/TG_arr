@@ -254,16 +254,25 @@ async def handle_list(callback: CallbackQuery, is_admin: bool = False) -> None:
 
     try:
         torrents = await client.list_torrents()
+        await safe_edit(
+            message,
+            Formatters.format_torrserver_torrents(torrents, is_admin),
+            reply_markup=Keyboards.torrserver_list(torrents, is_admin),
+            parse_mode="HTML",
+        )
     except TorrServerError as e:
         await callback.answer(str(e)[:180], show_alert=True)
         return
+    except Exception as e:
+        # The keyboard is built as an argument to safe_edit (e.g. a
+        # ValueError from an oversized hash in callback_data, or a
+        # TelegramBadRequest from safe_edit itself) — that throw happens
+        # before callback.answer() below, so without this guard the user
+        # gets a spinning button and no message.
+        logger.error("torrserver_list_failed", error=str(e), exc_info=True)
+        await callback.answer("Не удалось получить список раздач", show_alert=True)
+        return
 
-    await safe_edit(
-        message,
-        Formatters.format_torrserver_torrents(torrents),
-        reply_markup=Keyboards.torrserver_list(torrents, is_admin),
-        parse_mode="HTML",
-    )
     await callback.answer()
 
 
@@ -319,10 +328,19 @@ async def handle_delete_confirm(
     except TorrServerError:
         torrents = []
 
-    await safe_edit(
-        message,
-        "🗑 <b>Раздача удалена.</b> Из Emby пропадёт в течение 10 минут.\n\n"
-        + Formatters.format_torrserver_torrents(torrents),
-        reply_markup=Keyboards.torrserver_list(torrents, is_admin),
-        parse_mode="HTML",
-    )
+    try:
+        await safe_edit(
+            message,
+            "🗑 <b>Раздача удалена.</b> Из Emby пропадёт в течение 10 минут.\n\n"
+            + Formatters.format_torrserver_torrents(torrents, is_admin),
+            reply_markup=Keyboards.torrserver_list(torrents, is_admin),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        # Same failure mode as handle_list (a ValueError from an oversized
+        # hash, or a TelegramBadRequest from safe_edit) — but the deletion
+        # itself already happened and was already acknowledged via
+        # callback.answer() above, so there is nothing left to roll back or
+        # re-answer; just make sure the exception doesn't reach the
+        # dispatcher unhandled.
+        logger.error("torrserver_delete_confirm_render_failed", error=str(e), exc_info=True)
