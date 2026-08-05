@@ -12,6 +12,7 @@ from bot.handlers.settings import router as settings_router
 from bot.handlers.start import router as start_router
 from bot.handlers.status import router as status_router
 from bot.handlers.titles import router as titles_router
+from bot.handlers.torrserver import router as torrserver_router
 from bot.handlers.trending import router as trending_router
 from bot.handlers.users import router as users_router
 
@@ -24,6 +25,9 @@ def setup_routers() -> Router:
     # session.selected_content type (BUG-27). music_router is only for /music,
     # artist selection, and TRENDING_MUSIC callbacks.
     main_router.include_router(start_router)
+    # Before search_router: handle_text_search claims any plain text, and
+    # aiogram does not cascade handlers after a routed match.
+    main_router.include_router(torrserver_router)
     main_router.include_router(search_router)
     main_router.include_router(music_router)
     main_router.include_router(settings_router)
