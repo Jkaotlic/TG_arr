@@ -154,3 +154,36 @@ class SeasonScopeCB(CallbackData, prefix="ss"):
 
     season: int
     title_id: str
+
+
+class TsReleaseCB(CallbackData, prefix="tsr"):
+    """Pick one TorrServer search hit. Only the index travels: the release
+    itself (title + Prowlarr link) blows past callback_data's 64-byte budget,
+    so the handler resolves it from the per-user result cache."""
+
+    idx: int
+
+
+class TsPageCB(CallbackData, prefix="tsp"):
+    """Pagination inside a TorrServer result list."""
+
+    page: int
+
+
+class TsTorrentCB(CallbackData, prefix="tst"):
+    """Per-torrent action on the server. ``action``: del (asks) | delconf (does it).
+    ``h`` carries the full 40-hex hash — "tst:delconf:<40 hex>" packs to 53
+    bytes, under the 64-byte limit."""
+
+    action: str
+    h: str
+
+
+class TsAddCB(CallbackData, prefix="tsa"):
+    """Add the selected hit to TorrServer and publish it to Emby.
+
+    Separate from ``TsReleaseCB`` (which only opens the card) so the two
+    actions can never be confused by a shared prefix.
+    """
+
+    idx: int

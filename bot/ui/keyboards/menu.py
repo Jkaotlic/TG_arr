@@ -12,6 +12,7 @@ from bot.ui.menu import (
     MENU_SEARCH,
     MENU_SETTINGS,
     MENU_STATUS,
+    MENU_TORRSERVER,
     MENU_TRENDING,
 )
 
@@ -27,7 +28,7 @@ class _MenuKeyboards:
                 [KeyboardButton(text=MENU_SEARCH), KeyboardButton(text=MENU_MUSIC), KeyboardButton(text=MENU_TRENDING)],
                 [KeyboardButton(text=MENU_CALENDAR), KeyboardButton(text=MENU_DOWNLOADS), KeyboardButton(text=MENU_QSTATUS)],
                 [KeyboardButton(text=MENU_EMBY), KeyboardButton(text=MENU_STATUS), KeyboardButton(text=MENU_SETTINGS)],
-                [KeyboardButton(text=MENU_HISTORY)],
+                [KeyboardButton(text=MENU_TORRSERVER), KeyboardButton(text=MENU_HISTORY)],
             ],
             resize_keyboard=True,
             input_field_placeholder="Введите название для поиска...",

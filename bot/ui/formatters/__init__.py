@@ -23,16 +23,18 @@ from bot.ui.formatters.calendar import _extract_date_key, _format_date_header
 from bot.ui.formatters.emby import _EmbyFormatters
 from bot.ui.formatters.search import _SearchFormatters
 from bot.ui.formatters.torrent import _TorrentFormatters
+from bot.ui.formatters.torrserver import _TorrServerFormatters
 
 __all__ = ["Formatters"]
 
 
-class Formatters(_SearchFormatters, _TorrentFormatters, _EmbyFormatters):
+class Formatters(_SearchFormatters, _TorrentFormatters, _EmbyFormatters, _TorrServerFormatters):
     """Message formatting utilities — HTML mode.
 
-    Domain-specific formatters live in mixins (see search.py/torrent.py/emby.py);
-    calendar formatting stays here directly (see the module docstring in
-    bot/ui/formatters/calendar.py for why `format_calendar` can't move out).
+    Domain-specific formatters live in mixins (see search.py/torrent.py/emby.py/
+    torrserver.py); calendar formatting stays here directly (see the module
+    docstring in bot/ui/formatters/calendar.py for why `format_calendar` can't
+    move out).
     """
 
     # Re-exposed so every name that used to live directly on the pre-split

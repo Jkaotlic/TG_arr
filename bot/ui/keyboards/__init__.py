@@ -19,6 +19,7 @@ from bot.ui.keyboards.music import _MusicKeyboards
 from bot.ui.keyboards.search import _SearchKeyboards
 from bot.ui.keyboards.settings import _SettingsKeyboards
 from bot.ui.keyboards.torrent import _TorrentKeyboards
+from bot.ui.keyboards.torrserver import _TorrServerKeyboards
 from bot.ui.keyboards.trending import _TrendingKeyboards
 
 __all__ = ["CallbackData", "Keyboards"]
@@ -33,11 +34,12 @@ class Keyboards(
     _EmbyKeyboards,
     _TrendingKeyboards,
     _CalendarKeyboards,
+    _TorrServerKeyboards,
 ):
     """Inline keyboard builders.
 
     Domain-specific keyboards live in mixins (see search.py/torrent.py/
-    settings.py/music.py/emby.py/trending.py/calendar.py/menu.py) — this
-    class only composes them so every ``Keyboards.xxx(...)`` call from before
-    the split keeps working unchanged.
+    settings.py/music.py/emby.py/trending.py/calendar.py/menu.py/torrserver.py)
+    — this class only composes them so every ``Keyboards.xxx(...)`` call from
+    before the split keeps working unchanged.
     """

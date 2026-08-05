@@ -23,6 +23,12 @@ MENU_EMBY = "📺 Emby"
 MENU_STATUS = "🔌 Статус"
 MENU_SETTINGS = "⚙️ Настройки"
 MENU_HISTORY = "📋 История"
+MENU_TORRSERVER = "▶️ Смотреть"
+
+#: Text of the ForceReply prompt that asks for a TorrServer query. The handler
+#: matches replies against this exact string, so it lives here next to the
+#: button labels for the same reason they do: filter and message must not drift.
+TORRSERVER_PROMPT = "▶️ Что найти в TorrServer?"
 
 # All menu button texts — used by handlers/search.py to decide that a plain
 # text message is NOT a search query but a main-menu button press (routed to
@@ -38,4 +44,5 @@ MENU_BUTTONS = frozenset({
     MENU_STATUS,
     MENU_SETTINGS,
     MENU_HISTORY,
+    MENU_TORRSERVER,
 })
