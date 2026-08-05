@@ -179,6 +179,27 @@ class Settings(BaseSettings):
             return v.rstrip("/")
         return v
 
+    @field_validator(
+        "torrserver_url", "torrserver_username", "torrserver_password",
+        "emby_sync_hook_url", "emby_sync_hook_token", mode="before",
+    )
+    @classmethod
+    def _empty_ts_field_is_unset(cls, v: Optional[str]) -> Optional[str]:
+        """Compose passes ``TORRSERVER_URL: ${TORRSERVER_URL:-}`` — with the
+        var unset in the shell/host env, Compose injects an *empty string*,
+        not "absence". Without this, ``env_ignore_empty`` being off (its
+        repo-wide default, left alone here on purpose — flipping it changes
+        behaviour for every other optional integration too) means the field
+        becomes ``""`` rather than ``None``, so ``torrserver_enabled`` /
+        ``emby_sync_hook_enabled`` read True with a blank URL/password.
+        Scoped to only the fields this feature added — the other optional
+        integrations (Emby, qBittorrent, Lidarr, slskd, Navidrome, TMDb) are
+        deliberately left as-is; that's a separate, repo-wide change.
+        """
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     @model_validator(mode="after")
     def _warn_on_inconsistent_integration_config(self) -> "Settings":
         """LOGIC-09: half-configured integrations fail silently (`*_enabled`
