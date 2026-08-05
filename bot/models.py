@@ -997,3 +997,17 @@ class TorrServerStats(BaseModel):
     cache_size: int = 0
     use_disk: bool = False
     source_count: int = 0
+
+
+class SyncHookResult(BaseModel):
+    """Outcome of a forced Emby sync request.
+
+    `status` is one of "ok" (sync ran), "already_running" (a pass was in
+    flight, ours was folded into it) or "failed" (the hook could not be
+    reached or refused) — a failure here never invalidates the torrent that
+    was already added.
+    """
+
+    status: str = "failed"
+    duration_s: Optional[float] = None
+    error: Optional[str] = None
