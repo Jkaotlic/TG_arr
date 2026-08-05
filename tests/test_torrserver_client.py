@@ -313,3 +313,45 @@ async def test_search_skips_malformed_torznab_url_entries(client):
     by_title = {r.title: r for r in releases}
     assert len(releases) == 2
     assert by_title["Interstellar 2014 BDRemux 1080p"].tracker == "RuTracker.org"
+
+
+# --- add_torrent / remove_torrent / stream_url ---
+
+@pytest.mark.asyncio
+async def test_add_torrent_sends_sanitized_title(client):
+    """Слэш в названии ломает листинг WebDAV — чистим до добавления."""
+    added = {"title": "X", "hash": "abc", "stat": 1,
+             "stat_string": "Torrent getting info", "torrent_size": None}
+    with _patch_post(client, added) as mocked:
+        torrent = await client.add_torrent(
+            "http://p:9696/2/download?link=a",
+            "Холодное сердце 2 / Frozen II [2019]",
+        )
+
+    payload = mocked.await_args.kwargs["json_data"]
+    assert payload["action"] == "add"
+    assert payload["title"] == "Холодное сердце 2 - Frozen II [2019]"
+    assert payload["link"] == "http://p:9696/2/download?link=a"
+    assert payload["save_to_db"] is True
+    assert torrent.hash == "abc"
+    assert torrent.size == 0  # torrent_size приходит null сразу после добавления
+
+
+@pytest.mark.asyncio
+async def test_add_torrent_without_hash_is_an_error(client):
+    with _patch_post(client, {"title": "X"}):
+        with pytest.raises(TorrServerError, match="не принял"):
+            await client.add_torrent("http://link", "X")
+
+
+@pytest.mark.asyncio
+async def test_remove_torrent_sends_rem_action(client):
+    with _patch_post(client, "") as mocked:
+        await client.remove_torrent("abc")
+
+    assert mocked.await_args.kwargs["json_data"] == {"action": "rem", "hash": "abc"}
+
+
+def test_stream_url_matches_the_working_sync_script(client):
+    url = client.stream_url("abc", 2, "Big Buck Bunny/Big Buck Bunny.mp4")
+    assert url == "http://ts:8090/stream/Big%20Buck%20Bunny.mp4?link=abc&index=2&play"
