@@ -2,8 +2,13 @@
 
 TorrServer speaks a small POST-with-an-`action`-field API rather than REST, and
 authenticates with Basic auth instead of the `X-Api-Key` every other backend
-here uses. Everything else (retries, pooling, slow-call logging, the TTL cache)
-comes from BaseAPIClient unchanged.
+here uses. Pooling, the TTL cache, and (for calls made through `self.post()`)
+retries and slow-call logging come from BaseAPIClient unchanged. The one
+exception is `get_version()`: `/echo` answers with a plain-text version
+string, and `BaseAPIClient._request` would silently coerce that non-JSON 200
+body into `{}`, so it reads the pooled httpx client directly instead — which
+means it needs, and carries, its own tenacity retry decorator matching
+`_request`'s policy rather than inheriting one.
 
 All contracts below were taken from the live server on 2026-08-05, including a
 probe torrent that was added and removed again — see the spec for the raw
@@ -15,7 +20,9 @@ import json
 import time
 from typing import Any, Optional
 
+import httpx
 import structlog
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from bot.clients.base import APIError, AuthenticationError, BaseAPIClient, ServiceConnectionError
 from bot.models import (
@@ -115,11 +122,29 @@ class TorrServerClient(BaseAPIClient):
             files=cls._files_from_payload(item),
         )
 
+    # Same policy as BaseAPIClient._request: 3 attempts, retry only on
+    # transient network errors (not on an HTTP-level error status — a 500 is
+    # a real answer, not a transport failure, and must fail immediately).
+    @retry(
+        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=4),
+        reraise=True,
+    )
+    async def _fetch_echo(self) -> httpx.Response:
+        """GET /echo. Split out of get_version() purely so the retry
+        decorator only ever sees the raw network call — get_version() is the
+        single place that translates failures (both a raw httpx exception
+        surviving all retries, and a non-retryable HTTP error status) into
+        TorrServerError.
+        """
+        client = await self._get_client()
+        return await client.get("/echo", timeout=self.timeout)
+
     async def get_version(self) -> str:
         """Server version from /echo (the one endpoint open without auth)."""
-        client = await self._get_client()
         try:
-            response = await client.get("/echo", timeout=self.timeout)
+            response = await self._fetch_echo()
         except Exception as e:
             raise TorrServerError("TorrServer недоступен") from e
         if response.status_code >= 400:
