@@ -365,6 +365,59 @@ async def test_list_shows_torrents():
 
 
 @pytest.mark.asyncio
+async def test_list_survives_an_unexpected_error():
+    """A non-TorrServerError failure while rendering the list (a TelegramBadRequest
+    from an oversized message, or — as here — a ValueError from
+    Keyboards.torrserver_list when a hash overflows callback_data) must not
+    reach the dispatcher unhandled. Because the keyboard is built as an
+    argument to safe_edit, the exception happens *before* callback.answer()
+    is reached — without a guard the user gets a spinning button and no
+    message at all."""
+    client = MagicMock()
+    client.list_torrents = AsyncMock(return_value=[TorrServerTorrent(
+        hash="abc", title="Dune 2021", size=1024, stat=5, stat_string="Torrent in db")])
+    callback = MagicMock()
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.edit_text = AsyncMock()
+
+    from bot.ui.keyboards import Keyboards
+
+    with patch.object(ts_handlers, "get_torrserver", new_callable=AsyncMock, return_value=client), \
+         patch.object(ts_handlers, "accessible_message", return_value=callback.message), \
+         patch.object(Keyboards, "torrserver_list", side_effect=ValueError("too long")):
+        await ts_handlers.handle_list(callback, is_admin=True)
+
+    assert callback.answer.await_args.kwargs.get("show_alert") is True
+
+
+@pytest.mark.asyncio
+async def test_delete_confirm_survives_an_unexpected_error_while_rendering():
+    """Same failure mode as handle_list, but after the deletion itself
+    already succeeded — the torrent must stay deleted and the handler must
+    not crash even though re-rendering the list blew up."""
+    client = MagicMock()
+    client.remove_torrent = AsyncMock()
+    client.list_torrents = AsyncMock(return_value=[])
+    callback = MagicMock()
+    callback.answer = AsyncMock()
+    callback.message = MagicMock()
+    callback.message.edit_text = AsyncMock()
+
+    from bot.ui.callbacks import TsTorrentCB
+    from bot.ui.keyboards import Keyboards
+
+    with patch.object(ts_handlers, "get_torrserver", new_callable=AsyncMock, return_value=client), \
+         patch.object(ts_handlers, "accessible_message", return_value=callback.message), \
+         patch.object(Keyboards, "torrserver_list", side_effect=ValueError("too long")):
+        await ts_handlers.handle_delete_confirm(
+            callback, TsTorrentCB(action="delconf", h="abc"), is_admin=True)
+
+    client.remove_torrent.assert_awaited_once_with("abc")
+    assert callback.answer.await_args_list  # answered at least once, no crash
+
+
+@pytest.mark.asyncio
 async def test_delete_prompt_is_refused_for_non_admins():
     """The confirmation prompt is itself admin-gated: a crafted callback that
     skips the panel's delete button and hits `del` directly must not reach

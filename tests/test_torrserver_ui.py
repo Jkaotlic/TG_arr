@@ -62,6 +62,50 @@ def test_list_keyboard_shows_delete_only_for_admins():
     assert not any(d.startswith("tst:del:") for d in user_data)
 
 
+def _torrents(n):
+    """`n` distinct torrents — enough of them to blow past Telegram's message
+    limit and the keyboard's per-message button budget."""
+    return [
+        TorrServerTorrent(
+            hash=f"{i:040d}", title=f"Раздача номер {i} 2021 BDRemux 1080p WEB-DL x264",
+            category="movie", size=2 * 1024 ** 3, stat=5, stat_string="Torrent in db",
+            files=[TorrServerFile(id=1, path=f"Item{i}/movie.mkv", length=2 * 1024 ** 3)],
+        )
+        for i in range(n)
+    ]
+
+
+def test_torrents_text_is_truncated_well_under_the_telegram_limit():
+    """At ~115 chars/torrent, 40 torrents would exceed Telegram's 4096-char
+    message limit outright; the formatter must apply the same safety net
+    every other list formatter in the codebase uses."""
+    text = Formatters.format_torrserver_torrents(_torrents(40))
+    assert len(text) <= 3800
+    assert "truncated" in text
+
+
+def test_list_keyboard_caps_delete_buttons():
+    """35 torrents must not produce 35 delete buttons — Telegram rejects a
+    keyboard that large, and the delete-confirmation callback adds ~70 more
+    chars per button on top."""
+    markup = Keyboards.torrserver_list(_torrents(35), is_admin=True)
+    delete_buttons = [
+        b for row in markup.inline_keyboard for b in row
+        if b.callback_data.startswith("tst:del:")
+    ]
+    assert len(delete_buttons) <= 30
+
+
+def test_torrents_text_notes_the_cut_for_admins():
+    text = Formatters.format_torrserver_torrents(_torrents(35), is_admin=True)
+    assert "первых 30" in text
+
+
+def test_torrents_text_has_no_admin_cap_note_for_regular_users():
+    text = Formatters.format_torrserver_torrents(_torrents(35), is_admin=False)
+    assert "удален" not in text.lower()
+
+
 def test_status_text_mentions_version_and_cache_mode():
     stats = TorrServerStats(version="MatriX.142.2", torrent_count=6,
                             total_size=10 * 1024 ** 3, cache_size=1610612736,
