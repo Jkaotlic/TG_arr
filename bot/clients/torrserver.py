@@ -194,6 +194,8 @@ class TorrServerClient(BaseAPIClient):
             settings = await self.get_server_settings()
             names: dict[str, str] = {}
             for source in settings.get("TorznabUrls") or []:
+                if not isinstance(source, dict):
+                    continue
                 match = _SOURCE_ID_RE.search(str(source.get("Host", "")))
                 if match:
                     names[match.group(1)] = str(source.get("Name") or "")
