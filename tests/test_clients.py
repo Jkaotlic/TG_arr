@@ -180,6 +180,8 @@ async def test_arr_clients_are_singletons_and_scryer_is_gone():
     prowlarr = await registry.get_prowlarr()
     assert prowlarr.service_name == "Prowlarr"
 
-    assert not hasattr(registry, "get_scryer")
+    # get_scryer is a temporary bridge that raises to signal callers to convert
+    with pytest.raises(RuntimeError, match="Scryer was removed"):
+        await registry.get_scryer()
 
     await registry.close_all()

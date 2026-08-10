@@ -85,6 +85,24 @@ async def get_prowlarr() -> "ProwlarrClient":
     return _prowlarr
 
 
+async def get_scryer() -> None:
+    """Temporary bridge — DELETE IN TASK 15.
+
+    Nine modules (handlers/{calendar,music,settings,status,titles,trending},
+    handlers/search/services.py, main.py) still import this name at module level.
+    Removing it outright turned their import errors into pytest collection errors,
+    which aborted the entire suite.
+
+    It deliberately does not return a client: every caller is converted in
+    Tasks 8-14, and this raises so a missed one fails loudly instead of silently
+    talking to a backend that no longer exists.
+    """
+    raise RuntimeError(
+        "Scryer was removed in the 2026-08-10 rollback. This caller still has "
+        "to be converted to the *arr clients — see the rollback plan, Tasks 8-14."
+    )
+
+
 async def get_slskd() -> Optional["SlskdClient"]:
     """Get or create slskd client singleton (if configured)."""
     global _slskd
