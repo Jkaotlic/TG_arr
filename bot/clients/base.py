@@ -598,7 +598,16 @@ class ArrBaseClient(BaseAPIClient):
                 if release:
                     releases.append(release)
             except Exception as e:
-                logger.warning("Skipping malformed release", error=str(e))
+                # Carry guid/title (when the row has them) so "why did release
+                # X vanish" is answerable from prod logs instead of just
+                # knowing *something* in this batch was malformed. `.get()` is
+                # guarded by isinstance since a truly malformed row may not
+                # even be a dict — logging the failure must never itself raise.
+                guid = item.get("guid") if isinstance(item, dict) else None
+                title = item.get("title") if isinstance(item, dict) else None
+                logger.warning(
+                    "Skipping malformed release", error=str(e), guid=guid, title=title,
+                )
         return releases
 
     def _parse_release(self, item: dict[str, Any]) -> Optional["SearchResult"]:

@@ -18,6 +18,20 @@ Read-only, deliberately: no add_movie/add_series/add_artist, no
 push_release/grab, no monitor toggles. This is a production media stack with
 a real library — nothing here may mutate it.
 
+"Read-only" is not the same as "free", though. Most tests here are passive
+reads (`check_connection`, `lookup_movie`, `get_quality_profiles`, a plain
+`get("/api/v3/movie")`) and cost nothing beyond one HTTP round-trip. One test
+— `test_radarr_interactive_search_carries_the_arr_verdict` — is a genuine live
+indexer fan-out (`GET /api/v3/release?movieId=`) that spends real, per-24h
+tracker query quota, same as an actual user search. It is gated behind its
+own `RUN_LIVE_SEARCH_TESTS=1`, on top of `RUN_LIVE_TESTS=1`, precisely so a
+routine "did the credentials still work" run doesn't burn quota by accident.
+Operational history: a previous backend silently exhausted Prowlarr's indexer
+quota, and the only visible symptom was the bot looking broken — searches
+came back empty while Prowlarr itself answered fine. Do not run the
+quota-consuming test in a loop or a schedule; it exists to catch a shape
+regression, not for repeated execution.
+
 All tests share ONE event loop (`loop_scope="module"`). The clients come from
 `bot.clients.registry`'s process-wide singletons, and each wraps a pooled
 httpx.AsyncClient bound to the loop that was running when it was first built;
@@ -189,6 +203,14 @@ async def test_radarr_quality_profiles_and_root_folders_match_measured_state():
     assert folder_paths.get(2, "").startswith("H:"), f"root folder id=2 mismatch: {folder_paths}"
 
 
+@pytest.mark.skipif(
+    os.getenv("RUN_LIVE_SEARCH_TESTS") != "1",
+    reason="performs a real indexer fan-out (GET /api/v3/release) that spends "
+           "per-24h tracker query quota, same as a live user search — needs "
+           "RUN_LIVE_SEARCH_TESTS=1 on top of RUN_LIVE_TESTS=1, and should not "
+           "be run repeatedly (a prior backend silently exhausted this exact "
+           "quota and the only symptom was the bot looking broken)",
+)
 async def test_radarr_interactive_search_carries_the_arr_verdict():
     """Task 9 (2026-08-10): `GET /api/v3/release?movieId=` is the live shape
     the rewritten brief is built on — this pins that the deployed Radarr
@@ -196,9 +218,17 @@ async def test_radarr_interactive_search_carries_the_arr_verdict():
     rejected, rejections, languages, quality.quality.name), not just guid/title/
     size/seeders like a plain indexer search would.
 
-    Read-only: lists releases for a movie already in the catalog (found via
-    lookup_movie, no add/push/grab). If Radarr's real shape disagrees with the
-    brief here, that is exactly the surprise this test exists to catch.
+    Read-only in the sense that it never mutates Radarr's library (no add/push/
+    grab/monitor) — but it is NOT a passive read like its sibling tests in this
+    module. `radarr.get_releases()` triggers a real fan-out to every configured
+    indexer via Prowlarr and spends real, per-24h tracker query quota, exactly
+    like an interactive user search would. Gated behind its own
+    `RUN_LIVE_SEARCH_TESTS=1` (see module docstring) so a routine
+    `RUN_LIVE_TESTS=1` credentials-check run does not fire it. Do not run this
+    test repeatedly/in a loop — trackers enforce per-24h limits, and this
+    project has already had an incident where a backend silently burned
+    through Prowlarr's indexer quota with "the bot looks broken" as the only
+    symptom.
     """
     from bot.clients.registry import get_radarr
 
