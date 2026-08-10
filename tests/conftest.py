@@ -98,14 +98,25 @@ def _default_env(monkeypatch):
         monkeypatch.delenv(stale, raising=False)
 
     from bot.config import get_settings
-    from bot.services import search_service as _search_service
 
     get_settings.cache_clear()
     # The detection cache is module-level and shared between tests.
-    _search_service._cache_clear()
+    # Rollback 2026-08-10: search_service still imports the Scryer client
+    # until Task 8 rewrites it, and bot.clients.scryer imports models that
+    # Task 2 already deleted — so this import can fail mid-rollback. Tolerate
+    # that: in that window there is no detection cache to clear. Remove this
+    # guard once Task 15 lands and the import is unconditionally safe again.
+    try:
+        from bot.services import search_service as _search_service
+    except ImportError:
+        _search_service = None
+
+    if _search_service is not None:
+        _search_service._cache_clear()
     yield
     get_settings.cache_clear()
-    _search_service._cache_clear()
+    if _search_service is not None:
+        _search_service._cache_clear()
 
 
 @pytest.fixture
