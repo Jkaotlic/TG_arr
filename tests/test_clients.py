@@ -160,3 +160,26 @@ class TestTMDbClient:
 
         call_kwargs = safe_request.await_args.kwargs
         assert "api_key" not in (call_kwargs["params"] or {})
+
+
+@pytest.mark.asyncio
+async def test_arr_clients_are_singletons_and_scryer_is_gone():
+    """One instance per process — the connection pool is the point."""
+    import bot.clients.registry as registry
+
+    registry._radarr = registry._sonarr = registry._prowlarr = None
+
+    radarr_a = await registry.get_radarr()
+    radarr_b = await registry.get_radarr()
+    assert radarr_a is radarr_b
+    assert radarr_a.base_url == "http://localhost:7878"
+
+    sonarr = await registry.get_sonarr()
+    assert sonarr.service_name == "Sonarr"
+
+    prowlarr = await registry.get_prowlarr()
+    assert prowlarr.service_name == "Prowlarr"
+
+    assert not hasattr(registry, "get_scryer")
+
+    await registry.close_all()
