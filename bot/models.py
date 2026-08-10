@@ -3,7 +3,7 @@
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, ClassVar, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 
@@ -21,8 +21,11 @@ QBIT_INFINITE_ETA = 8640000
 class ContentType(str, Enum):
     """Type of content being searched.
 
-    ANIME is a first-class facet in Scryer (own library, own `1080p` quality
-    profile) rather than a flavour of SERIES, so it gets its own member.
+    ANIME is not a separate service or library — rollback 2026-08-10 measured
+    the live Sonarr holding 15 `seriesType=standard` series and 1 `anime`, all
+    in the same root folders. It still gets its own member because search/UI
+    routing cares about the distinction, but it maps onto Sonarr's single
+    `seriesType` string rather than a facet of its own.
     """
 
     MOVIE = "movie"
@@ -32,36 +35,33 @@ class ContentType(str, Enum):
     UNKNOWN = "unknown"
 
     @property
-    def scryer_facet(self) -> Optional[str]:
-        """The `MediaFacetValue` Scryer expects, or None for non-video types."""
-        return _SCRYER_FACETS.get(self)
+    def sonarr_series_type(self) -> Optional[str]:
+        """Sonarr's `seriesType`, or None for types Sonarr does not hold.
+
+        Rollback 2026-08-10: anime is not a separate service or library — the
+        live Sonarr keeps 15 standard series and 1 anime in the same root
+        folders, so the facet collapses to this one field.
+        """
+        return _SONARR_SERIES_TYPES.get(self)
 
     @classmethod
-    def from_scryer_facet(cls, facet: Optional[str]) -> "ContentType":
-        """Map a Scryer `MediaFacetValue` (any case) back to a ContentType."""
-        if not facet:
+    def from_sonarr_series_type(cls, value: Optional[str]) -> "ContentType":
+        """Map a Sonarr `seriesType` (any case) back to a ContentType."""
+        if not value:
             return cls.UNKNOWN
-        return _FACET_TO_CONTENT_TYPE.get(facet.upper(), cls.UNKNOWN)
+        return _SERIES_TYPE_TO_CONTENT_TYPE.get(value.lower(), cls.UNKNOWN)
 
 
-_SCRYER_FACETS: dict["ContentType", str] = {}
-_FACET_TO_CONTENT_TYPE: dict[str, "ContentType"] = {}
+_SONARR_SERIES_TYPES: dict["ContentType", str] = {
+    ContentType.SERIES: "standard",
+    ContentType.ANIME: "anime",
+}
+_SERIES_TYPE_TO_CONTENT_TYPE: dict[str, "ContentType"] = {
+    "standard": ContentType.SERIES,
+    "anime": ContentType.ANIME,
+}
 
-
-def _init_facet_maps() -> None:
-    pairs = (
-        (ContentType.MOVIE, "MOVIE"),
-        (ContentType.SERIES, "SERIES"),
-        (ContentType.ANIME, "ANIME"),
-    )
-    for content_type, facet in pairs:
-        _SCRYER_FACETS[content_type] = facet
-        _FACET_TO_CONTENT_TYPE[facet] = content_type
-
-
-_init_facet_maps()
-
-#: Content types Scryer handles (i.e. everything except music/unknown).
+#: Content types the *arr stack handles (i.e. everything except music/unknown).
 VIDEO_CONTENT_TYPES = (ContentType.MOVIE, ContentType.SERIES, ContentType.ANIME)
 
 
@@ -170,18 +170,18 @@ class SearchResult(BaseModel):
 
 
 class MovieInfo(BaseModel):
-    """Movie information from a Scryer metadata search or catalog entry."""
+    """Movie information from a TMDb search or Radarr catalog entry."""
 
     content_model_type: Literal["movie"] = "movie"
-    # Migration 2026-07-28: Scryer's metadata search keys on its own id
-    # (`metadata_id`, surfaced as `tvdbId` in the GraphQL payload) and does not
-    # always carry a TMDb id, so `tmdb_id`/`year` are no longer required. They
-    # stay for TMDb-sourced trending items and the external-link keyboards.
-    tmdb_id: int = Field(default=0, description="TMDB ID (0 when unknown)")
+    # Rollback 2026-08-10: back to Radarr's shape. Radarr always has both a
+    # tmdb_id and a year, and a movie can't be added to Radarr without one, so
+    # these are required again (they were relaxed for Scryer's metadata search,
+    # which keyed on its own id and didn't always carry a TMDb id).
+    tmdb_id: int = Field(..., description="TMDB ID")
     imdb_id: Optional[str] = Field(default=None, description="IMDB ID")
     title: str = Field(..., description="Movie title")
     original_title: Optional[str] = Field(default=None)
-    year: Optional[int] = Field(default=None, description="Release year")
+    year: int = Field(..., description="Release year")
     overview: Optional[str] = Field(default=None, description="Plot summary")
     runtime: Optional[int] = Field(default=None, description="Runtime in minutes")
     studio: Optional[str] = Field(default=None)
@@ -190,26 +190,21 @@ class MovieInfo(BaseModel):
     fanart_url: Optional[str] = Field(default=None)
     ratings: dict[str, Any] = Field(default_factory=dict)
 
-    # Scryer-specific
-    scryer_id: Optional[str] = Field(default=None, description="Title id in Scryer if already in the catalog")
-    metadata_id: Optional[str] = Field(default=None, description="Scryer metadata id (`tvdbId` in searchMetadata)")
-    slug: Optional[str] = Field(default=None, description="Latin-script slug — matched against when the title is localised")
-    library_id: Optional[str] = Field(default=None, description="Scryer library id")
-    quality_tier: Optional[str] = Field(default=None, description="Quality profile name applied by Scryer")
-    current_quality_tier: Optional[str] = Field(default=None, description="Quality actually on disk")
+    radarr_id: Optional[int] = Field(default=None, description="Movie id in Radarr if already added")
     monitored: bool = Field(default=False)
     is_available: bool = Field(default=False, description="Whether movie is available")
     has_file: bool = Field(default=False, description="Whether movie file exists")
-    quality_profile_id: Optional[str] = Field(default=None)
+    quality_profile_id: Optional[int] = Field(default=None)
     root_folder_path: Optional[str] = Field(default=None)
 
 
 class SeriesInfo(BaseModel):
-    """Series (or anime) information from Scryer.
+    """Series (or anime) information from a TVDB search or Sonarr catalog entry.
 
-    Anime rides this model too — Scryer models it as a separate *facet*, not a
-    separate entity shape. `facet` carries "SERIES"/"ANIME" so callers can route
-    add/search to the right library without a second lookup.
+    Anime rides this model too — rollback 2026-08-10 measured the live Sonarr
+    holding both `seriesType=standard` and `seriesType=anime` entries in the
+    same instance and root folders, so `series_type` is Sonarr's own field
+    rather than a separate facet/library concept.
     """
 
     content_model_type: Literal["series"] = "series"
@@ -230,26 +225,20 @@ class SeriesInfo(BaseModel):
     season_count: int = Field(default=0)
     total_episode_count: int = Field(default=0)
 
-    # Scryer-specific
-    scryer_id: Optional[str] = Field(default=None, description="Title id in Scryer if already in the catalog")
-    metadata_id: Optional[str] = Field(default=None, description="Scryer metadata id (`tvdbId` in searchMetadata)")
-    slug: Optional[str] = Field(default=None, description="Latin-script slug — matched against when the title is localised")
-    facet: str = Field(default="SERIES", description="Scryer MediaFacetValue: SERIES or ANIME")
-    library_id: Optional[str] = Field(default=None, description="Scryer library id")
-    quality_tier: Optional[str] = Field(default=None, description="Quality profile name applied by Scryer")
-    current_quality_tier: Optional[str] = Field(default=None, description="Quality actually on disk")
+    sonarr_id: Optional[int] = Field(default=None, description="Series id in Sonarr if already added")
+    series_type: str = Field(default="standard", description="Sonarr seriesType: standard or anime")
     monitored: bool = Field(default=False)
     has_file: bool = Field(default=False, description="Whether at least one episode file exists")
     episodes_owned: int = Field(default=0)
     episodes_total: int = Field(default=0)
-    quality_profile_id: Optional[str] = Field(default=None)
+    quality_profile_id: Optional[int] = Field(default=None)
     root_folder_path: Optional[str] = Field(default=None)
     seasons: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
     def content_type(self) -> ContentType:
-        """The ContentType matching this title's Scryer facet."""
-        return ContentType.from_scryer_facet(self.facet)
+        """The ContentType matching this title's Sonarr seriesType."""
+        return ContentType.from_sonarr_series_type(self.series_type)
 
 
 class ArtistInfo(BaseModel):
@@ -314,192 +303,6 @@ class RootFolder(BaseModel):
         if self.free_space is None:
             return "N/A"
         return format_bytes(self.free_space)
-
-
-# ============================================================================
-# Scryer models (migration 2026-07-28)
-# ============================================================================
-
-
-class IndexerStat(BaseModel):
-    """Per-indexer 24h counters from Scryer's `systemHealth.indexerStats`."""
-
-    name: str
-    queries_24h: int = 0
-    successful_24h: int = 0
-    failed_24h: int = 0
-
-    @property
-    def failure_rate(self) -> float:
-        """Share of failed queries in the last 24h (0.0 when idle)."""
-        total = self.successful_24h + self.failed_24h
-        return (self.failed_24h / total) if total else 0.0
-
-
-class ScryerHealth(BaseModel):
-    """Snapshot of Scryer's `systemHealth` query."""
-
-    service_ready: bool = False
-    total_titles: int = 0
-    monitored_titles: int = 0
-    titles_movie: int = 0
-    titles_series: int = 0
-    titles_anime: int = 0
-    version: Optional[str] = None
-    indexers: list[IndexerStat] = Field(default_factory=list)
-
-
-class ScryerQueueItem(BaseModel):
-    """One row of Scryer's `downloadQueue`."""
-
-    id: str
-    title_id: Optional[str] = None
-    episode_id: Optional[str] = None
-    title_name: str = "?"
-    content_type: ContentType = ContentType.UNKNOWN
-    state: str = "UNKNOWN"
-    display_state: str = "UNKNOWN"
-    progress_percent: int = 0
-    size_bytes: Optional[int] = None
-    remaining_seconds: Optional[int] = None
-    queued_at: Optional[datetime] = None
-    client_name: Optional[str] = None
-    attention_required: bool = False
-    attention_reason: Optional[str] = None
-    import_status: Optional[str] = None
-    download_id: Optional[str] = None
-
-    @property
-    def size_formatted(self) -> str:
-        return format_bytes(self.size_bytes) if self.size_bytes else "N/A"
-
-    @property
-    def eta_formatted(self) -> str:
-        """Human-readable ETA; "∞" when Scryer has no estimate."""
-        if self.remaining_seconds is None or self.remaining_seconds < 0:
-            return "∞"
-        hours, remainder = divmod(self.remaining_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        if hours > 24:
-            return f"{hours // 24}d {hours % 24}h"
-        if hours:
-            return f"{hours}h {minutes}m"
-        if minutes:
-            return f"{minutes}m {seconds}s"
-        return f"{seconds}s"
-
-
-class ScryerCalendarItem(BaseModel):
-    """One row of Scryer's `calendarEpisodes`."""
-
-    id: str
-    title_id: str
-    title_name: str
-    content_type: ContentType = ContentType.SERIES
-    season_number: Optional[int] = None
-    episode_number: Optional[int] = None
-    episode_title: Optional[str] = None
-    air_date: Optional[str] = None
-    monitored: bool = True
-
-
-class ScryerWantedItem(BaseModel):
-    """One row of Scryer's `wantedItems`."""
-
-    id: str
-    title_id: str
-    title_name: str = "?"
-    content_type: ContentType = ContentType.UNKNOWN
-    season_number: Optional[int] = None
-    episode_number: Optional[int] = None
-    status: Optional[str] = None
-    media_type: Optional[str] = None
-
-
-class ScryerImportRecord(BaseModel):
-    """One row of Scryer's `importHistory` — the journal of finished imports.
-
-    This is the authoritative "did the file actually land" signal. The active
-    `downloadQueue` is not: a finished import leaves it, so watching the queue
-    misses the very event the user is waiting for (audit 2026-07-30, BUG-01).
-    """
-
-    id: str
-    source_title: str = "?"
-    title_id: Optional[str] = None
-    content_type: ContentType = ContentType.UNKNOWN
-    #: `ImportStatusValue`: PENDING/RUNNING/PROCESSING/COMPLETED/FAILED/SKIPPED.
-    status: Optional[str] = None
-    #: `ImportDecisionValue`: IMPORTED/REJECTED/SKIPPED/CONFLICT/UNMATCHED/FAILED.
-    decision: Optional[str] = None
-    skip_reason: Optional[str] = None
-    error_message: Optional[str] = None
-    dest_path: Optional[str] = None
-    finished_at: Optional[datetime] = None
-
-    #: Decisions that mean the media is in the library now.
-    IMPORTED_DECISIONS: ClassVar[frozenset[str]] = frozenset({"IMPORTED"})
-    #: …and the ones that mean it isn't, and won't be without help.
-    FAILED_DECISIONS: ClassVar[frozenset[str]] = frozenset(
-        {"REJECTED", "FAILED", "UNMATCHED", "CONFLICT"}
-    )
-    #: Statuses that mean the import is still in flight — say nothing yet.
-    PENDING_STATUSES: ClassVar[frozenset[str]] = frozenset(
-        {"PENDING", "RUNNING", "PROCESSING"}
-    )
-
-    @property
-    def is_finished(self) -> bool:
-        return (self.status or "").upper() not in self.PENDING_STATUSES
-
-    @property
-    def is_imported(self) -> bool:
-        return self.is_finished and (self.decision or "").upper() in self.IMPORTED_DECISIONS
-
-    @property
-    def is_failed(self) -> bool:
-        return self.is_finished and (self.decision or "").upper() in self.FAILED_DECISIONS
-
-    @property
-    def failure_reason(self) -> str:
-        """Shortest honest explanation of a failed import.
-
-        `skipReason` is the machine-readable cause (POLICY_MISMATCH,
-        ALREADY_IMPORTED…); `errorMessage` carries Scryer's own counts and last
-        error, which is what makes the failure actionable.
-        """
-        parts = [p for p in (self.skip_reason, self.error_message) if p]
-        return " — ".join(parts) if parts else (self.decision or "причина неизвестна")
-
-
-class QueueResult(BaseModel):
-    """Outcome of a queue mutation (`QueueDownloadPayload`)."""
-
-    status: str = "QUEUED"
-    job_id: Optional[str] = None
-    title_id: Optional[str] = None
-    title_name: Optional[str] = None
-    conflict: Optional[dict[str, Any]] = None
-
-    @property
-    def queued(self) -> bool:
-        return self.status == "QUEUED"
-
-
-class AddTitleOutcome(BaseModel):
-    """Outcome of `addTitle` / `addTitleAndQueueDownload` (`AddTitleResult`)."""
-
-    title: Union[MovieInfo, SeriesInfo] = Field(..., description="The added or reused title")
-    reused_existing: bool = False
-    download_job_id: Optional[str] = None
-    queued_download: Optional[QueueResult] = None
-
-    @property
-    def queued(self) -> bool:
-        """True when Scryer actually put a download in the queue."""
-        if self.queued_download is not None:
-            return self.queued_download.queued
-        return self.download_job_id is not None
 
 
 # ============================================================================
