@@ -177,6 +177,16 @@ class SonarrClient(ArrBaseClient):
         result = await self.post("/api/v3/command", json_data=payload)
         return result if isinstance(result, dict) else {}
 
+    async def get_wanted_episodes(self, page_size: int = 50) -> list[dict[str, Any]]:
+        """Episodes that are monitored but have no file."""
+        return await self._get_wanted("series", page_size)
+
+    async def set_series_monitored(self, series_id: int, monitored: bool) -> bool:
+        return await self._set_monitored("series", series_id, monitored)
+
+    async def delete_series(self, series_id: int, delete_files: bool = False) -> bool:
+        return await self._delete_resource("series", series_id, delete_files)
+
     async def get_calendar(self, days: int = 7) -> list[dict[str, Any]]:
         """Get upcoming episodes from Sonarr calendar.
 

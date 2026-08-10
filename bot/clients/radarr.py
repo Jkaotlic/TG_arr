@@ -136,6 +136,16 @@ class RadarrClient(ArrBaseClient):
         result = await self.post("/api/v3/command", json_data=payload)
         return result if isinstance(result, dict) else {}
 
+    async def get_wanted_movies(self, page_size: int = 50) -> list[dict[str, Any]]:
+        """Movies that are monitored but have no file."""
+        return await self._get_wanted("movie", page_size)
+
+    async def set_movie_monitored(self, movie_id: int, monitored: bool) -> bool:
+        return await self._set_monitored("movie", movie_id, monitored)
+
+    async def delete_movie(self, movie_id: int, delete_files: bool = False) -> bool:
+        return await self._delete_resource("movie", movie_id, delete_files)
+
     async def get_calendar(self, days: int = 7) -> list[dict[str, Any]]:
         """Get upcoming movie releases from Radarr calendar.
 

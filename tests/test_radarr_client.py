@@ -72,3 +72,48 @@ async def test_search_movie_issues_the_command():
 
     assert post.call_args.args[0] == "/api/v3/command"
     assert post.call_args.kwargs["json_data"] == {"name": "MoviesSearch", "movieIds": [15]}
+
+
+@pytest.mark.asyncio
+async def test_get_wanted_movies_reads_the_missing_endpoint():
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    payload = {"records": [{"id": 1, "title": "Missing One", "year": 2024}]}
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)) as get:
+        wanted = await client.get_wanted_movies()
+
+    assert get.call_args.args[0] == "/api/v3/wanted/missing"
+    assert get.call_args.kwargs["params"]["pageSize"] == 50
+    assert wanted[0]["title"] == "Missing One"
+
+
+@pytest.mark.asyncio
+async def test_set_movie_monitored_patches_the_resource():
+    """Unmonitoring 102 unobtainable episodes must not need a hand-written script."""
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    with patch.object(client, "get", new=AsyncMock(return_value={"id": 15, "monitored": True})), \
+         patch.object(client, "_request", new=AsyncMock(return_value={"id": 15, "monitored": False})) as req:
+        ok = await client.set_movie_monitored(15, False)
+
+    assert ok is True
+    assert req.call_args.args[0] == "PUT"
+    assert req.call_args.args[1] == "/api/v3/movie/15"
+    assert req.call_args.kwargs["json_data"]["monitored"] is False
+
+
+@pytest.mark.asyncio
+async def test_delete_movie_defaults_to_keeping_files():
+    """A catalog removal must never delete media unless explicitly asked."""
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    with patch.object(client, "_request", new=AsyncMock(return_value={})) as req:
+        ok = await client.delete_movie(15)
+
+    assert ok is True
+    assert req.call_args.args[0] == "DELETE"
+    assert req.call_args.args[1] == "/api/v3/movie/15"
+    assert req.call_args.kwargs["params"]["deleteFiles"] is False

@@ -78,3 +78,16 @@ async def test_search_season_targets_one_season():
     assert post.call_args.kwargs["json_data"] == {
         "name": "SeasonSearch", "seriesId": 3, "seasonNumber": 2,
     }
+
+
+@pytest.mark.asyncio
+async def test_delete_series_uses_the_series_resource():
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    with patch.object(client, "_request", new=AsyncMock(return_value={})) as req:
+        ok = await client.delete_series(3, delete_files=True)
+
+    assert ok is True
+    assert req.call_args.args[1] == "/api/v3/series/3"
+    assert req.call_args.kwargs["params"]["deleteFiles"] is True
