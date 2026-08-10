@@ -84,18 +84,17 @@ def _default_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test_token_123:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
     monkeypatch.setenv("ALLOWED_TG_IDS", "123456789,987654321")
     monkeypatch.setenv("ADMIN_TG_IDS", "123456789")
-    monkeypatch.setenv("SCRYER_URL", "http://localhost:8088")
-    monkeypatch.setenv("SCRYER_USERNAME", "admin")
-    monkeypatch.setenv("SCRYER_PASSWORD", "test_scryer_password")
+    monkeypatch.setenv("PROWLARR_URL", "http://localhost:9696")
+    monkeypatch.setenv("PROWLARR_API_KEY", "test_prowlarr_key")
+    monkeypatch.setenv("RADARR_URL", "http://localhost:7878")
+    monkeypatch.setenv("RADARR_API_KEY", "test_radarr_key")
+    monkeypatch.setenv("SONARR_URL", "http://localhost:8989")
+    monkeypatch.setenv("SONARR_API_KEY", "test_sonarr_key")
     monkeypatch.setenv("DATABASE_PATH", ":memory:")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
-    # Migration 2026-07-28: these are gone from Settings. Clear them so a
-    # developer's exported *arr env can't resurrect stale expectations.
-    for stale in (
-        "PROWLARR_URL", "PROWLARR_API_KEY",
-        "RADARR_URL", "RADARR_API_KEY",
-        "SONARR_URL", "SONARR_API_KEY",
-    ):
+    # Rollback 2026-08-10: Scryer is gone from Settings. Clear its vars so a
+    # developer's exported environment can't resurrect stale expectations.
+    for stale in ("SCRYER_URL", "SCRYER_USERNAME", "SCRYER_PASSWORD"):
         monkeypatch.delenv(stale, raising=False)
 
     from bot.config import get_settings

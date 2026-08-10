@@ -80,3 +80,51 @@ def test_webhook_settings_are_gone():
     settings = _settings()
     for field in ("webhook_enabled", "webhook_port", "webhook_bind", "webhook_token"):
         assert not hasattr(settings, field)
+
+
+# --- Rollback 2026-08-10: restore *arr, remove Scryer -----------------------
+
+
+def test_arr_settings_are_required_and_scryer_is_gone(monkeypatch):
+    """*arr credentials are mandatory; the Scryer fields no longer exist."""
+    for name, value in (
+        ("PROWLARR_URL", "http://prowlarr:9696/"),
+        ("PROWLARR_API_KEY", "pk"),
+        ("RADARR_URL", "http://radarr:7878"),
+        ("RADARR_API_KEY", "rk"),
+        ("SONARR_URL", "http://sonarr:8989"),
+        ("SONARR_API_KEY", "sk"),
+    ):
+        monkeypatch.setenv(name, value)
+    for stale in ("SCRYER_URL", "SCRYER_USERNAME", "SCRYER_PASSWORD"):
+        monkeypatch.delenv(stale, raising=False)
+
+    from bot.config import Settings
+
+    settings = Settings()
+
+    # Trailing slash is stripped so endpoint joins never double up.
+    assert settings.prowlarr_url == "http://prowlarr:9696"
+    assert settings.radarr_api_key == "rk"
+    assert settings.sonarr_url == "http://sonarr:8989"
+    # RuTracker behind Cloudflare answers 521/522; 25s was not enough (round 4).
+    assert settings.prowlarr_search_timeout == 45.0
+    assert not hasattr(settings, "scryer_url")
+
+
+def test_missing_radarr_key_is_a_validation_error(monkeypatch):
+    """A half-configured *arr must fail loudly at startup, not at first search."""
+    import pydantic
+
+    for name, value in (
+        ("PROWLARR_URL", "http://p"), ("PROWLARR_API_KEY", "pk"),
+        ("RADARR_URL", "http://r"),
+        ("SONARR_URL", "http://s"), ("SONARR_API_KEY", "sk"),
+    ):
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("RADARR_API_KEY", raising=False)
+
+    from bot.config import Settings
+
+    with pytest.raises(pydantic.ValidationError):
+        Settings()
