@@ -6,7 +6,7 @@ from typing import Any, Optional
 import structlog
 
 from bot.clients.base import APIError, ArrBaseClient
-from bot.models import SeriesInfo
+from bot.models import SearchResult, SeriesInfo
 
 logger = structlog.get_logger()
 
@@ -186,6 +186,15 @@ class SonarrClient(ArrBaseClient):
     async def get_wanted_episodes(self, page_size: int = 50) -> list[dict[str, Any]]:
         """Episodes that are monitored but have no file."""
         return await self._get_wanted(page_size)
+
+    async def get_releases(
+        self, series_id: int, season_number: Optional[int] = None,
+    ) -> list[SearchResult]:
+        """Interactive search for a series, optionally narrowed to one season."""
+        params: dict[str, Any] = {"seriesId": series_id}
+        if season_number is not None:
+            params["seasonNumber"] = season_number
+        return await self._get_releases(params)
 
     async def set_series_monitored(self, series_id: int, monitored: bool) -> bool:
         return await self._set_monitored("series", series_id, monitored)

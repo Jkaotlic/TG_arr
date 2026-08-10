@@ -120,6 +120,15 @@ class SearchResult(BaseModel):
     # Parsed quality info
     quality: QualityInfo = Field(default_factory=QualityInfo)
 
+    # Rollback 2026-08-10: *arr's interactive search returns releases it has
+    # already judged against the user's quality profile and custom formats.
+    # That verdict is authoritative — the local scoring only breaks ties.
+    # Prowlarr's free-text path leaves these at their defaults.
+    custom_format_score: int = Field(default=0, description="*arr customFormatScore")
+    rejected: bool = Field(default=False, description="*arr refuses this release")
+    rejections: list[str] = Field(default_factory=list, description="Why *arr refuses it, verbatim")
+    languages: list[str] = Field(default_factory=list, description="Languages *arr parsed")
+
     # Scoring
     prowlarr_score: Optional[int] = Field(default=None, description="Legacy Prowlarr score; unset since the Scryer migration")
     calculated_score: int = Field(default=0, description="Our calculated score")

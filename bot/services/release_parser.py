@@ -17,6 +17,47 @@ from typing import Optional
 from bot.models import QualityInfo
 
 
+def parse_quality_name(name: str) -> QualityInfo:
+    """Map *arr's own parsed quality name (e.g. "Bluray-2160p") onto QualityInfo.
+
+    Rollback 2026-08-10: Radarr/Sonarr's interactive search (`GET .../release`)
+    already ran its own parser and returns `quality.quality.name` — this is
+    just a thin adapter onto our model, not a second heuristic. `parse_quality`
+    below (title-heuristic parsing) still exists for the Prowlarr free-text
+    path, which gets no such pre-parsed value.
+    """
+    if not name:
+        return QualityInfo()
+
+    name_lower = name.lower()
+
+    resolution = None
+    for token in ("2160p", "1080p", "720p", "480p", "576p"):
+        if token in name_lower:
+            resolution = token
+            break
+
+    source = None
+    if "remux" in name_lower:
+        source = "BluRay"
+    elif "bluray" in name_lower or "bdrip" in name_lower:
+        source = "BluRay"
+    elif "webdl" in name_lower or "web-dl" in name_lower:
+        source = "WEB-DL"
+    elif "webrip" in name_lower:
+        source = "WEBRip"
+    elif "hdtv" in name_lower:
+        source = "HDTV"
+    elif "dvd" in name_lower:
+        source = "DVDRip"
+
+    return QualityInfo(
+        resolution=resolution,
+        source=source,
+        is_remux="remux" in name_lower,
+    )
+
+
 def parse_quality(title: str) -> QualityInfo:
     """Parse quality information from release title."""
     title_lower = title.lower()

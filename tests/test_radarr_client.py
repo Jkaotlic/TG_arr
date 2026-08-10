@@ -282,3 +282,70 @@ async def test_get_calendar_returns_empty_list_for_a_non_list_response():
         entries = await client.get_calendar()
 
     assert entries == []
+
+
+# ============================================================================
+# Task 9: interactive search — releases carry *arr's own verdict
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_releases_carries_the_arr_verdict():
+    """*arr already scored these against the user's profile and custom formats.
+
+    Live shape captured from Radarr 6.3.0 on 2026-08-10.
+    """
+    from bot.clients.radarr import RadarrClient
+
+    payload = [
+        {
+            "guid": "abc-1", "indexerId": 3, "title": "Dune 2021 2160p BluRay",
+            "size": 50_000_000_000, "seeders": 100, "leechers": 2,
+            "protocol": "torrent", "downloadUrl": "http://prowlarr/1/download?apikey=x",
+            "customFormatScore": 500, "rejected": False, "rejections": [],
+            "languages": [{"id": 1, "name": "English"}],
+            "quality": {"quality": {"name": "Bluray-2160p"}},
+        },
+        {
+            "guid": "abc-2", "indexerId": 4, "title": "Дюна 2021 2160p DUB",
+            "size": 40_000_000_000, "seeders": 50, "leechers": 1,
+            "protocol": "torrent", "downloadUrl": "http://prowlarr/2/download?apikey=x",
+            "customFormatScore": -1000, "rejected": True,
+            "rejections": ["English is wanted, but found Russian"],
+            "languages": [{"id": 11, "name": "Russian"}],
+            "quality": {"quality": {"name": "WEBDL-2160p"}},
+        },
+    ]
+
+    client = RadarrClient("http://radarr", "key")
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)) as get:
+        releases = await client.get_releases(15)
+
+    assert get.call_args.args[0] == "/api/v3/release"
+    assert get.call_args.kwargs["params"] == {"movieId": 15}
+
+    good, bad = releases
+    assert good.custom_format_score == 500
+    assert good.rejected is False
+    assert good.languages == ["English"]
+    assert bad.rejected is True
+    assert bad.rejections == ["English is wanted, but found Russian"]
+    assert bad.guid == "abc-2"
+    assert bad.indexer_id == 4
+
+
+@pytest.mark.asyncio
+async def test_get_releases_survives_a_malformed_entry():
+    """One bad row from one indexer must not blank the whole result."""
+    from bot.clients.radarr import RadarrClient
+
+    payload = [
+        {"guid": "ok", "title": "Good", "size": 1, "seeders": 1, "leechers": 0,
+         "protocol": "torrent", "downloadUrl": "http://x", "customFormatScore": 0},
+        {"title": "no guid at all"},
+    ]
+    client = RadarrClient("http://radarr", "key")
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)):
+        releases = await client.get_releases(15)
+
+    assert [r.guid for r in releases] == ["ok"]

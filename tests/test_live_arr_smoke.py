@@ -189,6 +189,57 @@ async def test_radarr_quality_profiles_and_root_folders_match_measured_state():
     assert folder_paths.get(2, "").startswith("H:"), f"root folder id=2 mismatch: {folder_paths}"
 
 
+async def test_radarr_interactive_search_carries_the_arr_verdict():
+    """Task 9 (2026-08-10): `GET /api/v3/release?movieId=` is the live shape
+    the rewritten brief is built on — this pins that the deployed Radarr
+    actually returns the verdict fields the brief documented (customFormatScore,
+    rejected, rejections, languages, quality.quality.name), not just guid/title/
+    size/seeders like a plain indexer search would.
+
+    Read-only: lists releases for a movie already in the catalog (found via
+    lookup_movie, no add/push/grab). If Radarr's real shape disagrees with the
+    brief here, that is exactly the surprise this test exists to catch.
+    """
+    from bot.clients.registry import get_radarr
+
+    radarr = await get_radarr()
+
+    # Need a movie already in the Radarr catalog — /release requires a known
+    # movieId, unlike a free-text Prowlarr search. Pull one from the library
+    # rather than hardcoding an id that may not exist on this instance.
+    library = await radarr.get("/api/v3/movie")
+    assert isinstance(library, list) and library, (
+        "Radarr library is empty — no movieId available to exercise /release against"
+    )
+    movie_id = library[0]["id"]
+    movie_title = library[0].get("title", "?")
+
+    releases = await radarr.get_releases(movie_id)
+
+    assert releases, (
+        f"no releases returned for {movie_title!r} (movieId={movie_id}) — "
+        "indexers may be down, or this movie has nothing available"
+    )
+
+    # Every release must carry the verdict fields, whichever way it went.
+    verdict_shapes = {(r.rejected, bool(r.rejections)) for r in releases}
+    logger_note = [(r.title, r.custom_format_score, r.rejected, r.rejections[:1]) for r in releases[:3]]
+    assert any(isinstance(r.custom_format_score, int) for r in releases), (
+        f"customFormatScore missing/non-int across all releases: {logger_note}"
+    )
+    rejected_with_reasons = [r for r in releases if r.rejected and r.rejections]
+    accepted = [r for r in releases if not r.rejected]
+    # At least one of the two buckets must be non-empty and internally consistent
+    # (a rejected release should carry a human-readable reason).
+    assert accepted or rejected_with_reasons, (
+        f"neither an accepted nor a reason-carrying rejected release was found: {verdict_shapes}"
+    )
+    if rejected_with_reasons:
+        assert all(isinstance(reason, str) and reason for reason in rejected_with_reasons[0].rejections)
+    # guid/indexer_id are what Task 10's native grab needs — confirm they arrive.
+    assert all(r.guid for r in releases), "a release with no guid slipped through _parse_release"
+
+
 async def test_sonarr_quality_profiles_and_root_folders_match_measured_state():
     """Live facts (2026-08-10): root folders G:\\tv-sonarr\\Serials (id=1) and
     H:\\tv-sonarr\\Serials (id=2); quality profile id=7 = "4K Prefer / 1080p

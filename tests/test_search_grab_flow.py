@@ -432,3 +432,36 @@ async def test_release_selection_without_title_still_offers_the_grab_buttons():
 
     kwargs = callback.message.edit_text.await_args.kwargs
     assert kwargs["reply_markup"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 9: SearchService.search_releases_for_title — *arr's verdict wins
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_releases_are_ordered_by_the_arr_verdict_not_local_heuristics():
+    """*arr's score is authoritative; rejected releases sink to the bottom."""
+    from bot.models import ContentType, QualityInfo, SearchResult
+    from bot.services.search_service import SearchService
+
+    rejected_but_big = SearchResult(
+        title="Дюна 2160p DUB", download_url="u1", indexer="i", guid="g1",
+        size=60_000_000_000, seeders=900, leechers=0, quality=QualityInfo(resolution="2160p"),
+        custom_format_score=-1000, rejected=True,
+        rejections=["English is wanted, but found Russian"],
+    )
+    accepted = SearchResult(
+        title="Dune 2160p BluRay", download_url="u2", indexer="i", guid="g2",
+        size=50_000_000_000, seeders=10, leechers=0, quality=QualityInfo(resolution="2160p"),
+        custom_format_score=500, rejected=False,
+    )
+
+    radarr = AsyncMock()
+    radarr.get_releases.return_value = [rejected_but_big, accepted]
+    service = SearchService(radarr, AsyncMock())
+
+    results = await service.search_releases_for_title(
+        ContentType.MOVIE, arr_id=15,
+    )
+
+    # Seeders and size favour the rejected one; the verdict must win anyway.
+    assert [r.guid for r in results] == ["g2", "g1"]

@@ -6,7 +6,7 @@ from typing import Any, Optional
 import structlog
 
 from bot.clients.base import APIError, ArrBaseClient
-from bot.models import MovieInfo
+from bot.models import MovieInfo, SearchResult
 
 logger = structlog.get_logger()
 
@@ -139,6 +139,10 @@ class RadarrClient(ArrBaseClient):
     async def get_wanted_movies(self, page_size: int = 50) -> list[dict[str, Any]]:
         """Movies that are monitored but have no file."""
         return await self._get_wanted(page_size)
+
+    async def get_releases(self, movie_id: int) -> list[SearchResult]:
+        """Interactive search for one movie."""
+        return await self._get_releases({"movieId": movie_id})
 
     async def set_movie_monitored(self, movie_id: int, monitored: bool) -> bool:
         return await self._set_monitored("movie", movie_id, monitored)

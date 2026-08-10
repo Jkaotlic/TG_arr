@@ -305,3 +305,32 @@ async def test_get_calendar_returns_empty_list_for_a_non_list_response():
         entries = await client.get_calendar()
 
     assert entries == []
+
+
+# ============================================================================
+# Task 9: interactive search — releases carry *arr's own verdict
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_get_releases_can_narrow_to_one_season():
+    """A season pick must reach Sonarr, not just filter locally."""
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    with patch.object(client, "get", new=AsyncMock(return_value=[])) as get:
+        await client.get_releases(3, season_number=2)
+
+    assert get.call_args.args[0] == "/api/v3/release"
+    assert get.call_args.kwargs["params"] == {"seriesId": 3, "seasonNumber": 2}
+
+
+@pytest.mark.asyncio
+async def test_get_releases_without_season_asks_for_the_whole_series():
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    with patch.object(client, "get", new=AsyncMock(return_value=[])) as get:
+        await client.get_releases(3)
+
+    assert get.call_args.kwargs["params"] == {"seriesId": 3}

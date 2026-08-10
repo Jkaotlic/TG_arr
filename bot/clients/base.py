@@ -16,7 +16,8 @@ from tenacity import (
 )
 
 from bot.config import Settings, get_settings
-from bot.models import QualityProfile, RootFolder
+from bot.models import QualityProfile, RootFolder, SearchResult
+from bot.services.release_parser import parse_quality_name
 
 logger = structlog.get_logger()
 
@@ -572,3 +573,70 @@ class ArrBaseClient(BaseAPIClient):
             params={"deleteFiles": delete_files, "addImportListExclusion": False},
         )
         return True
+
+    async def _get_releases(self, params: dict[str, Any]) -> list["SearchResult"]:
+        """Interactive search: releases already judged by the user's profile.
+
+        Unlike a raw Prowlarr query this carries *arr's own verdict —
+        `customFormatScore`, `rejected` and the human-readable `rejections` —
+        so the bot can tell the user WHY a release will not be taken.
+        Slow: it fans out to every indexer, hence the search timeout.
+        """
+        settings = get_settings()
+        results = await self.get(
+            f"{self._api_prefix}/release",
+            params=params,
+            timeout=settings.prowlarr_search_timeout,
+        )
+        if not isinstance(results, list):
+            return []
+
+        releases = []
+        for item in results:
+            try:
+                release = self._parse_release(item)
+                if release:
+                    releases.append(release)
+            except Exception as e:
+                logger.warning("Skipping malformed release", error=str(e))
+        return releases
+
+    def _parse_release(self, item: dict[str, Any]) -> Optional["SearchResult"]:
+        """Map one *arr release row onto SearchResult, verdict included."""
+        guid = item.get("guid")
+        title = item.get("title")
+        if not guid or not title:
+            return None
+
+        quality_name = ""
+        quality_block = item.get("quality")
+        if isinstance(quality_block, dict):
+            inner = quality_block.get("quality")
+            if isinstance(inner, dict):
+                quality_name = inner.get("name") or ""
+
+        languages = [
+            lang.get("name")
+            for lang in item.get("languages") or []
+            if isinstance(lang, dict) and lang.get("name")
+        ]
+
+        return SearchResult(
+            guid=guid,
+            indexer_id=item.get("indexerId") or 0,
+            title=title,
+            download_url=item.get("downloadUrl"),
+            magnet_url=item.get("magnetUrl"),
+            info_url=item.get("infoUrl"),
+            indexer=item.get("indexer") or "Unknown",
+            size=item.get("size") or 0,
+            seeders=item.get("seeders") or 0,
+            leechers=item.get("leechers") or 0,
+            protocol=(item.get("protocol") or "torrent").lower(),
+            publish_date=item.get("publishDate"),
+            quality=parse_quality_name(quality_name),
+            custom_format_score=item.get("customFormatScore") or 0,
+            rejected=bool(item.get("rejected")) or bool(item.get("temporarilyRejected")),
+            rejections=[str(r) for r in (item.get("rejections") or [])],
+            languages=languages,
+        )

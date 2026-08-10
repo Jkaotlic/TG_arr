@@ -19,10 +19,17 @@ Rollback 2026-08-10. What changed back and why:
   is always "standard" — so anime-ness is read from the `Animation` genre
   Sonarr/TVDB attaches to the title, splitting the flat list into series and
   anime candidate sets before the existing scoring/tie-break logic runs.
-- **Release search** (`search_releases`/`get_seasons`/`search_metadata`) still
-  calls the removed Scryer client and is intentionally left untouched here —
-  it is Task 9's responsibility (see docs/superpowers/plans/
-  2026-08-10-arr-restore.md) to repoint it at Prowlarr/Radarr/Sonarr.
+- **Release search** is `search_releases_for_title` (Task 9): Radarr/Sonarr's
+  interactive search (`GET .../release?movieId=`/`?seriesId=`) already judges
+  every candidate against the user's quality profile and custom formats —
+  `customFormatScore`, `rejected`, human-readable `rejections`. That verdict
+  is authoritative; the local `ScoringService` only breaks ties (see
+  docs/superpowers/sdd/2026-08-10-arr-restore/task-9-brief.md for the
+  live-measurement rationale). `search_metadata`/`get_seasons` still call the
+  removed Scryer client — Task 9's own brief neither tests nor specifies them,
+  and Task 12 (search handlers) removes the "resolve a catalog title first"
+  step they served, so they are left as NotImplementedError rather than
+  guessed at without a driving test.
 """
 
 import asyncio
@@ -543,46 +550,60 @@ class SearchService:
 
         return best
 
-    # NOTE (rollback 2026-08-10, Task 8): the three methods below used to call
-    # `self.scryer`, which this class no longer constructs — they are out of
-    # scope for Task 8 (content-type detection only; see the module
-    # docstring) and are left as a clear TODO for Task 9, which repoints
-    # release search at Prowlarr/Radarr/Sonarr. Each raises NotImplementedError
-    # naming Task 9 rather than falling through to an AttributeError on the
+    # NOTE (rollback 2026-08-10, Task 8): search_metadata/get_seasons used to
+    # call `self.scryer`, which this class no longer constructs. Task 9's own
+    # brief (docs/superpowers/sdd/2026-08-10-arr-restore/task-9-brief.md)
+    # tests and specifies only the release-listing path — `search_releases`
+    # below is replaced by `search_releases_for_title`. It does not test or
+    # specify these two: Task 12 ("Хендлеры поиска") removes the "resolve a
+    # catalog title, then list its releases" flow they served — the new
+    # interactive search lists releases straight from a Radarr/Sonarr id — so
+    # implementing a signature nobody has specified yet, with no driving test,
+    # would be guessing rather than repointing. Left as a clear TODO naming
+    # Task 12 rather than falling through to an AttributeError on the
     # nonexistent `self.scryer` — same scoping, a more legible failure.
-    _RELEASE_SEARCH_NOT_CONVERTED = (
-        "still depends on the removed Scryer client — Task 9 repoints release "
-        "search at Prowlarr/Radarr/Sonarr (see "
-        "docs/superpowers/plans/2026-08-10-arr-restore.md)"
+    _METADATA_SEARCH_NOT_CONVERTED = (
+        "still depends on the removed Scryer client — Task 12 (search handlers) "
+        "removes the catalog-title-resolution step this served, rather than "
+        "repointing it (see docs/superpowers/plans/2026-08-10-arr-restore.md)"
     )
 
     async def search_metadata(self, query: str, content_type: ContentType) -> list:
         """Metadata candidates for one facet (used when the user picks a type)."""
         if content_type not in VIDEO_CONTENT_TYPES:
             return []
-        raise NotImplementedError(f"search_metadata {self._RELEASE_SEARCH_NOT_CONVERTED}")
+        raise NotImplementedError(f"search_metadata {self._METADATA_SEARCH_NOT_CONVERTED}")
 
     async def get_seasons(self, title_id: str) -> list:
         """Seasons available to search for a title (see ScryerClient.get_seasons)."""
-        raise NotImplementedError(f"get_seasons {self._RELEASE_SEARCH_NOT_CONVERTED}")
+        raise NotImplementedError(f"get_seasons {self._METADATA_SEARCH_NOT_CONVERTED}")
 
-    async def search_releases(
+    async def search_releases_for_title(
         self,
-        title_id: str,
-        content_type: ContentType = ContentType.UNKNOWN,
+        content_type: ContentType,
+        arr_id: int,
         season: Optional[int] = None,
-        episode: Optional[int] = None,
-        preferred_resolution: Optional[str] = None,
-        limit: Optional[int] = None,
-        timeout: Optional[float] = None,
     ) -> list[SearchResult]:
-        """List indexer candidates for a title already present in Scryer.
+        """Releases for a title already in the catalog, ordered by *arr's verdict.
 
-        Scryer queries Prowlarr itself and applies the quality profile plus the
-        Rego rules, so every result already carries a verdict; the local scoring
-        only orders ties (see `ScoringService.sort_results`).
+        Order: accepted before rejected, then by customFormatScore, then by the
+        local ScoringService as a tie-break only. Rejected releases are kept
+        rather than hidden — the user may still want one, and `rejections`
+        explains the cost.
         """
-        raise NotImplementedError(f"search_releases {self._RELEASE_SEARCH_NOT_CONVERTED}")
+        if content_type is ContentType.MOVIE:
+            releases = await self.radarr.get_releases(arr_id)
+        else:
+            releases = await self.sonarr.get_releases(arr_id, season_number=season)
+
+        return sorted(
+            releases,
+            key=lambda r: (
+                r.rejected,
+                -r.custom_format_score,
+                -self.scoring.calculate_score(r, content_type),
+            ),
+        )
 
     async def lookup_artist(self, query: str) -> list[ArtistInfo]:
         """Look up artists (Lidarr, falling back to slskd)."""
