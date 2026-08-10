@@ -138,7 +138,7 @@ class RadarrClient(ArrBaseClient):
 
     async def get_wanted_movies(self, page_size: int = 50) -> list[dict[str, Any]]:
         """Movies that are monitored but have no file."""
-        return await self._get_wanted("movie", page_size)
+        return await self._get_wanted(page_size)
 
     async def set_movie_monitored(self, movie_id: int, monitored: bool) -> bool:
         return await self._set_monitored("movie", movie_id, monitored)

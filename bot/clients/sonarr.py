@@ -114,6 +114,12 @@ class SonarrClient(ArrBaseClient):
             "seriesType": series_type,
             "addOptions": {
                 "searchForMissingEpisodes": search_for_missing,
+                # Fix round 1 (2026-08-10 review): the pre-migration client
+                # exposed this as a caller-facing search_for_cutoff_unmet
+                # parameter. Dropped in this rollback because no current or
+                # planned caller needs it — hardcoded False (its old default)
+                # rather than left unset. If a caller ever needs it, re-widen
+                # add_series's signature; do not just flip this literal.
                 "searchForCutoffUnmetEpisodes": False,
                 "monitor": monitor,
             },
@@ -179,7 +185,7 @@ class SonarrClient(ArrBaseClient):
 
     async def get_wanted_episodes(self, page_size: int = 50) -> list[dict[str, Any]]:
         """Episodes that are monitored but have no file."""
-        return await self._get_wanted("series", page_size)
+        return await self._get_wanted(page_size)
 
     async def set_series_monitored(self, series_id: int, monitored: bool) -> bool:
         return await self._set_monitored("series", series_id, monitored)

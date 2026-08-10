@@ -517,9 +517,15 @@ class ArrBaseClient(BaseAPIClient):
                     logger.warning("Skipping malformed root folder", error=str(e))
         return folders
 
-    async def _get_wanted(self, resource: str, page_size: int = 50) -> list[dict[str, Any]]:
+    async def _get_wanted(self, page_size: int = 50) -> list[dict[str, Any]]:
         """Read the "missing" list. Rollback 2026-08-10: /wanted lived on
         Scryer's catalog query before; *arr paginates it instead.
+
+        No `resource` parameter: Radarr and Sonarr hit the identical
+        `{prefix}/wanted/missing` endpoint — only the record shape in the
+        response differs, which callers parse themselves. (Fix round 1,
+        2026-08-10 review: the plan's own brief was self-contradictory here —
+        prose said no resource parameter, its code sample had an unused one.)
         """
         result = await self.get(
             f"{self._api_prefix}/wanted/missing",
@@ -540,7 +546,12 @@ class ArrBaseClient(BaseAPIClient):
         if not isinstance(current, dict):
             return False
         current["monitored"] = monitored
-        await self._request(
+        # Fix round 1 (2026-08-10 review): go through _safe_request, not
+        # _request directly — _safe_request is what converts a timeout/connect
+        # error surviving tenacity's retries into the domain
+        # ServiceConnectionError every other public method raises. Calling
+        # _request bare here leaked a raw httpx exception instead.
+        await self._safe_request(
             "PUT", f"{self._api_prefix}/{resource}/{resource_id}", json_data=current,
         )
         return True
@@ -551,7 +562,11 @@ class ArrBaseClient(BaseAPIClient):
         """Remove a catalog entry. `delete_files` defaults to False so a
         catalog cleanup can never take the media with it.
         """
-        await self._request(
+        # Fix round 1 (2026-08-10 review): same _safe_request fix as
+        # _set_monitored above. Retrying a DELETE is still safe (it's
+        # idempotent — a repeat DELETE 404s rather than double-deleting); the
+        # bug was the missing error translation, not the retry.
+        await self._safe_request(
             "DELETE",
             f"{self._api_prefix}/{resource}/{resource_id}",
             params={"deleteFiles": delete_files, "addImportListExclusion": False},

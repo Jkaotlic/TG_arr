@@ -119,6 +119,39 @@ async def test_delete_movie_defaults_to_keeping_files():
     assert req.call_args.kwargs["params"]["deleteFiles"] is False
 
 
+@pytest.mark.asyncio
+async def test_set_movie_monitored_surfaces_service_connection_error_on_persistent_failure():
+    """Fix round 1 (2026-08-10 review): _set_monitored must go through
+    _safe_request, not call _request directly — otherwise a connection
+    failure that survives tenacity's retries leaks a raw httpx exception
+    instead of the domain ServiceConnectionError every other public method
+    raises."""
+    import httpx
+
+    from bot.clients.base import ServiceConnectionError
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    with patch.object(client, "get", new=AsyncMock(return_value={"id": 15, "monitored": True})), \
+         patch.object(client, "_request", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
+        with pytest.raises(ServiceConnectionError):
+            await client.set_movie_monitored(15, False)
+
+
+@pytest.mark.asyncio
+async def test_delete_movie_surfaces_service_connection_error_on_persistent_failure():
+    """Same fix as above, DELETE path."""
+    import httpx
+
+    from bot.clients.base import ServiceConnectionError
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    with patch.object(client, "_request", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
+        with pytest.raises(ServiceConnectionError):
+            await client.delete_movie(15)
+
+
 # ============================================================================
 # Characterization tests — mandated by Task 3's review: restoring a large file
 # against a handful of contract tests leaves _parse_movie and get_calendar's

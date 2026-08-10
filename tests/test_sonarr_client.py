@@ -93,6 +93,67 @@ async def test_delete_series_uses_the_series_resource():
     assert req.call_args.kwargs["params"]["deleteFiles"] is True
 
 
+@pytest.mark.asyncio
+async def test_get_wanted_episodes_reads_the_missing_endpoint():
+    """Fix round 1 (2026-08-10 review): Sonarr's wanted/monitor wrappers had
+    no direct coverage while Radarr's did — evened up here."""
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    payload = {"records": [{"id": 1, "title": "Missing Episode Series", "seasonNumber": 2}]}
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)) as get:
+        wanted = await client.get_wanted_episodes()
+
+    assert get.call_args.args[0] == "/api/v3/wanted/missing"
+    assert get.call_args.kwargs["params"]["pageSize"] == 50
+    assert wanted[0]["title"] == "Missing Episode Series"
+
+
+@pytest.mark.asyncio
+async def test_set_series_monitored_patches_the_resource():
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    with patch.object(client, "get", new=AsyncMock(return_value={"id": 3, "monitored": True})), \
+         patch.object(client, "_request", new=AsyncMock(return_value={"id": 3, "monitored": False})) as req:
+        ok = await client.set_series_monitored(3, False)
+
+    assert ok is True
+    assert req.call_args.args[0] == "PUT"
+    assert req.call_args.args[1] == "/api/v3/series/3"
+    assert req.call_args.kwargs["json_data"]["monitored"] is False
+
+
+@pytest.mark.asyncio
+async def test_set_series_monitored_surfaces_service_connection_error_on_persistent_failure():
+    """Same _safe_request fix as the Radarr equivalent — a persistent
+    connection failure must surface as ServiceConnectionError, not a raw
+    httpx exception."""
+    import httpx
+
+    from bot.clients.base import ServiceConnectionError
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    with patch.object(client, "get", new=AsyncMock(return_value={"id": 3, "monitored": True})), \
+         patch.object(client, "_request", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
+        with pytest.raises(ServiceConnectionError):
+            await client.set_series_monitored(3, False)
+
+
+@pytest.mark.asyncio
+async def test_delete_series_surfaces_service_connection_error_on_persistent_failure():
+    import httpx
+
+    from bot.clients.base import ServiceConnectionError
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    with patch.object(client, "_request", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
+        with pytest.raises(ServiceConnectionError):
+            await client.delete_series(3)
+
+
 # ============================================================================
 # Characterization tests — mandated by Task 3's review: restoring a large file
 # against a handful of contract tests leaves _parse_series, get_calendar and
