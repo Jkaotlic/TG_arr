@@ -117,3 +117,135 @@ async def test_delete_movie_defaults_to_keeping_files():
     assert req.call_args.args[0] == "DELETE"
     assert req.call_args.args[1] == "/api/v3/movie/15"
     assert req.call_args.kwargs["params"]["deleteFiles"] is False
+
+
+# ============================================================================
+# Characterization tests — mandated by Task 3's review: restoring a large file
+# against a handful of contract tests leaves _parse_movie and get_calendar's
+# response handling untested (every contract test above either patches
+# lookup_movie's whole response or never touches these code paths at all).
+# These pin down what the RESTORED code actually does today, not what it
+# should do — no production code is changed to make them pass.
+# ============================================================================
+
+
+def test_parse_movie_falls_back_to_original_title_when_title_missing():
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    movie = client._parse_movie({"tmdbId": 1, "originalTitle": "Original Only"})
+
+    assert movie is not None
+    assert movie.title == "Original Only"
+
+
+def test_parse_movie_returns_none_without_a_tmdb_id():
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+
+    assert client._parse_movie({"title": "No id"}) is None
+
+
+def test_parse_movie_returns_none_without_any_title():
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+
+    assert client._parse_movie({"tmdbId": 5}) is None
+
+
+def test_parse_movie_defaults_year_to_zero_when_missing():
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    movie = client._parse_movie({"tmdbId": 5, "title": "No Year"})
+
+    assert movie.year == 0
+
+
+def test_parse_movie_root_folder_path_falls_back_to_path_field():
+    """Some Radarr responses (library reads) use `path` instead of
+    `rootFolderPath`."""
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    movie = client._parse_movie({"tmdbId": 5, "title": "X", "path": "G:\\radarr\\Films\\X"})
+
+    assert movie.root_folder_path == "G:\\radarr\\Films\\X"
+
+
+def test_parse_movie_ratings_skip_entries_without_a_value_key():
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    movie = client._parse_movie({
+        "tmdbId": 5,
+        "title": "X",
+        "ratings": {"imdb": {"value": 8.1}, "rottenTomatoes": {"votes": 100}},
+    })
+
+    assert movie.ratings == {"imdb": 8.1}
+
+
+def test_parse_movie_raises_when_ratings_is_present_but_not_a_dict():
+    """Discrepancy flag (see fix report): unlike _parse_series's
+    `isinstance(rating_data, dict)` guard, _parse_movie calls
+    `item["ratings"].items()` unconditionally once the key is present — a
+    non-dict value (None, a list) raises AttributeError instead of being
+    skipped. Real Radarr always sends a dict here, so this has not been
+    observed live, but add_movie's own `_parse_movie(result)` call has no
+    try/except around it (only lookup_movie does), so a malformed response
+    would surface as an unhandled AttributeError rather than the intended
+    APIError. Production code is NOT changed by this test."""
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+
+    with pytest.raises(AttributeError):
+        client._parse_movie({"tmdbId": 5, "title": "X", "ratings": None})
+
+
+@pytest.mark.asyncio
+async def test_get_calendar_prefers_digital_release_over_physical_and_cinema():
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    item = {
+        "title": "Dune",
+        "year": 2021,
+        "digitalRelease": "2021-10-22",
+        "physicalRelease": "2021-11-01",
+        "inCinemas": "2021-10-01",
+        "hasFile": True,
+    }
+    with patch.object(client, "get", new=AsyncMock(return_value=[item])):
+        entries = await client.get_calendar()
+
+    assert entries[0]["release_date"] == "2021-10-22"
+    assert entries[0]["has_file"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_calendar_falls_back_to_cinema_release_when_others_absent():
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    item = {"title": "Dune", "inCinemas": "2021-10-01"}
+    with patch.object(client, "get", new=AsyncMock(return_value=[item])):
+        entries = await client.get_calendar()
+
+    assert entries[0]["release_date"] == "2021-10-01"
+    assert entries[0]["has_file"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_calendar_returns_empty_list_for_a_non_list_response():
+    """A dict error body (or any non-list JSON) must not raise."""
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    with patch.object(client, "get", new=AsyncMock(return_value={"error": "nope"})):
+        entries = await client.get_calendar()
+
+    assert entries == []

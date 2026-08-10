@@ -91,3 +91,156 @@ async def test_delete_series_uses_the_series_resource():
     assert ok is True
     assert req.call_args.args[1] == "/api/v3/series/3"
     assert req.call_args.kwargs["params"]["deleteFiles"] is True
+
+
+# ============================================================================
+# Characterization tests — mandated by Task 3's review: restoring a large file
+# against a handful of contract tests leaves _parse_series, get_calendar and
+# _should_monitor_season's response handling untested (every contract test
+# above either patches lookup_series's whole response or never touches these
+# code paths at all). These pin down what the RESTORED code actually does
+# today, not what it should do — no production code is changed to make them
+# pass.
+# ============================================================================
+
+
+def test_parse_series_falls_back_to_sort_title_when_title_missing():
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    series = client._parse_series({"tvdbId": 1, "sortTitle": "sort only"})
+
+    assert series is not None
+    assert series.title == "sort only"
+
+
+def test_parse_series_returns_none_without_a_tvdb_id():
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+
+    assert client._parse_series({"title": "No id"}) is None
+
+
+def test_parse_series_returns_none_without_any_title():
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+
+    assert client._parse_series({"tvdbId": 5}) is None
+
+
+def test_parse_series_season_count_excludes_season_zero(sample_sonarr_series):
+    """Season 0 is Sonarr's "Specials" bucket — not a real season."""
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    series = client._parse_series(sample_sonarr_series)
+
+    assert series.season_count == 3
+    assert series.total_episode_count == 28
+
+
+def test_parse_series_ratings_use_default_key_for_a_flat_value():
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    series = client._parse_series({"tvdbId": 1, "title": "X", "ratings": {"value": 8.4}})
+
+    assert series.ratings == {"default": 8.4}
+
+
+def test_parse_series_ratings_use_per_source_keys_when_nested():
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    series = client._parse_series({
+        "tvdbId": 1,
+        "title": "X",
+        "ratings": {"imdb": {"value": 8.4}, "tvdb": {"value": 9.0}},
+    })
+
+    assert series.ratings == {"imdb": 8.4, "tvdb": 9.0}
+
+
+def test_parse_series_series_type_defaults_to_standard_when_key_absent():
+    from bot.clients.sonarr import SonarrClient
+    from bot.models import ContentType
+
+    client = SonarrClient("http://sonarr", "key")
+    series = client._parse_series({"tvdbId": 1, "title": "X"})
+
+    assert series.series_type == "standard"
+    assert series.content_type is ContentType.SERIES
+
+
+@pytest.mark.parametrize(
+    "monitor_type,season_num,total_seasons,expected",
+    [
+        ("all", 2, 3, True),
+        ("none", 2, 3, False),
+        ("future", 2, 3, False),
+        ("missing", 2, 3, True),
+        ("existing", 2, 3, True),
+        ("pilot", 1, 3, True),
+        ("pilot", 2, 3, False),
+        ("firstSeason", 1, 3, True),
+        ("firstSeason", 2, 3, False),
+        ("latestSeason", 3, 3, True),
+        ("latestSeason", 2, 3, False),
+        ("some-unrecognized-value", 2, 3, True),
+    ],
+)
+def test_should_monitor_season_by_monitor_type(monitor_type, season_num, total_seasons, expected):
+    """Direct characterization of every branch, including the unconditional
+    True fallback for a monitor_type this helper doesn't recognize."""
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+
+    assert client._should_monitor_season(season_num, monitor_type, total_seasons) is expected
+
+
+@pytest.mark.asyncio
+async def test_get_calendar_reads_the_nested_series_title():
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    ep = {
+        "series": {"title": "Test Series"},
+        "seasonNumber": 2,
+        "episodeNumber": 5,
+        "title": "The Episode",
+        "airDateUtc": "2026-08-15T00:00:00Z",
+        "hasFile": False,
+    }
+    with patch.object(client, "get", new=AsyncMock(return_value=[ep])):
+        entries = await client.get_calendar()
+
+    assert entries[0]["series_title"] == "Test Series"
+    assert entries[0]["season"] == 2
+    assert entries[0]["episode"] == 5
+    assert entries[0]["has_file"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_calendar_defaults_series_title_to_unknown_when_series_key_absent():
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    ep = {"seasonNumber": 1, "episodeNumber": 1}
+    with patch.object(client, "get", new=AsyncMock(return_value=[ep])):
+        entries = await client.get_calendar()
+
+    assert entries[0]["series_title"] == "Unknown"
+
+
+@pytest.mark.asyncio
+async def test_get_calendar_returns_empty_list_for_a_non_list_response():
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    with patch.object(client, "get", new=AsyncMock(return_value={"error": "nope"})):
+        entries = await client.get_calendar()
+
+    assert entries == []
