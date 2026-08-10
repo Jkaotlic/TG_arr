@@ -25,15 +25,16 @@ def _reset_detection_module_state():
 
     Both are module-level (shared across every SearchService instance), so
     without this a failure recorded by one test could trip the breaker for
-    the next one.
+    the next one. tests/conftest.py's process-wide autouse fixture calls the
+    same `_reset_module_state()` helper — this local one is redundant with it
+    but kept so this file's tests are self-contained if ever run in
+    isolation with a different conftest.
     """
     import bot.services.search_service as search_service_mod
 
-    search_service_mod._cache_clear()
-    search_service_mod._CIRCUIT_BREAKER.reset()
+    search_service_mod._reset_module_state()
     yield
-    search_service_mod._cache_clear()
-    search_service_mod._CIRCUIT_BREAKER.reset()
+    search_service_mod._reset_module_state()
 
 
 def _radarr(*, movies=None, fail=None):
@@ -90,6 +91,52 @@ def _svc(
 
 
 # ---------------------------------------------------------------------------
+# Fix round 1 (code review), finding 1: the too_short guard (len < 2) must
+# stay a real guard, not be weakened to fit a test's input. A 1-char query is
+# a cheap way to trigger three external TMDb/TVDB/MusicBrainz lookups, and
+# detect_content_type is a public method — it must not rely on the sole live
+# caller (bot/handlers/search/commands.py) validating length first.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_too_short_query_does_not_touch_the_network():
+    """A 1-char query must return UNKNOWN without calling any *arr lookup."""
+    radarr = AsyncMock()
+    sonarr = AsyncMock()
+    svc = SearchService(radarr, sonarr)
+
+    result = await svc.detect_content_type("X")
+
+    assert result.content_type == ContentType.UNKNOWN
+    radarr.lookup_movie.assert_not_awaited()
+    sonarr.lookup_series.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (code review), finding 2: `_CIRCUIT_BREAKER` is module-level,
+# process-wide state. pytest runs the whole suite in one process, so a test
+# in one file that trips the breaker for a service must not leave it open
+# for an unrelated, later test in a *different* file — tests/conftest.py's
+# autouse fixture now resets it via `_reset_module_state()` (same helper this
+# file's own local fixture uses above).
+# ---------------------------------------------------------------------------
+def test_reset_module_state_clears_cache_and_breaker():
+    """The one function conftest.py calls between every test must actually
+    reset both pieces of shared state, not just the cache."""
+    import bot.services.search_service as search_service_mod
+
+    search_service_mod._cache_put("some-cache-key", "placeholder-result")
+    for _ in range(3):
+        search_service_mod._CIRCUIT_BREAKER.record_failure("radarr")
+    assert search_service_mod._cache_get("some-cache-key") is not None
+    assert search_service_mod._CIRCUIT_BREAKER.is_open("radarr")
+
+    search_service_mod._reset_module_state()
+
+    assert search_service_mod._cache_get("some-cache-key") is None
+    assert not search_service_mod._CIRCUIT_BREAKER.is_open("radarr")
+
+
+# ---------------------------------------------------------------------------
 # Task 8 brief — mandatory TDD tests (verbatim scenarios).
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
@@ -108,13 +155,19 @@ async def test_detection_survives_one_dead_service():
 
 @pytest.mark.asyncio
 async def test_detection_runs_the_three_lookups_concurrently():
-    """Three sequential lookups would triple the user's wait."""
+    """Three sequential lookups would triple the user's wait.
+
+    Uses a 2-char query ("XX") rather than a 1-char one: the too_short guard
+    (len < 2) is production-critical — a 1-char query is a cheap way to
+    trigger three external metadata lookups, and the guard must not be
+    weakened just to make a single-character query exercise concurrency.
+    """
     started = []
 
     async def slow_movie(query):
         started.append("movie")
         await asyncio.sleep(0.05)
-        return [MovieInfo(tmdb_id=1, title="X", year=2020)]
+        return [MovieInfo(tmdb_id=1, title="XX", year=2020)]
 
     async def slow_series(query):
         started.append("series")
@@ -127,7 +180,7 @@ async def test_detection_runs_the_three_lookups_concurrently():
 
     service = SearchService(radarr, sonarr)
     start = asyncio.get_event_loop().time()
-    await service.detect_content_type("X")
+    await service.detect_content_type("XX")
     elapsed = asyncio.get_event_loop().time() - start
 
     assert set(started) == {"movie", "series"}

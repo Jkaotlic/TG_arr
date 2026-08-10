@@ -172,6 +172,20 @@ def _cache_clear() -> None:
     _DETECTION_CACHE.clear()
 
 
+def _reset_module_state() -> None:
+    """Test helper — reset every module-level piece of shared state.
+
+    `_DETECTION_CACHE` and `_CIRCUIT_BREAKER` are both process-wide globals
+    (shared across every SearchService instance, not per-request), so pytest
+    running the whole suite in one process means a test that trips the
+    breaker for a service can leave it open for an unrelated, later test in
+    a different file. tests/conftest.py's autouse fixture calls this (instead
+    of `_cache_clear()` alone) so both reset between every test.
+    """
+    _cache_clear()
+    _CIRCUIT_BREAKER.reset()
+
+
 class DetectionResult(NamedTuple):
     """Result of content type detection (LOGIC-28: confidence-based UX)."""
     content_type: ContentType
@@ -260,8 +274,14 @@ class SearchService:
         clean_query_no_year = _YEAR_RE.sub("", clean_query).strip()
         query_year = self._extract_query_year(query)
 
-        # Pre-filter (PERF-06): nothing left to meaningfully classify.
-        if not clean_query_no_year:
+        # Pre-filter (PERF-06): too short to meaningfully classify. A 1-char
+        # query is a cheap way to trigger three external TMDb/TVDB/MusicBrainz
+        # lookups; this guard exists to make that not free. The bot's own
+        # caller (bot/handlers/search/commands.py) already rejects len<2
+        # before calling here, but detect_content_type is a public method and
+        # must not rely on that — a future caller that skips it must not get
+        # three lookups for a single keystroke.
+        if len(clean_query_no_year) < 2:
             return DetectionResult(ContentType.UNKNOWN, 0.0, "too_short", {})
 
         # A season/episode marker settles "not a movie, not music" — but NOT
@@ -523,22 +543,28 @@ class SearchService:
 
         return best
 
-    # NOTE (rollback 2026-08-10, Task 8): the three methods below still call
+    # NOTE (rollback 2026-08-10, Task 8): the three methods below used to call
     # `self.scryer`, which this class no longer constructs — they are out of
     # scope for Task 8 (content-type detection only; see the module
     # docstring) and are left as a clear TODO for Task 9, which repoints
-    # release search at Prowlarr/Radarr/Sonarr. Calling any of them today
-    # raises AttributeError rather than silently doing the wrong thing.
+    # release search at Prowlarr/Radarr/Sonarr. Each raises NotImplementedError
+    # naming Task 9 rather than falling through to an AttributeError on the
+    # nonexistent `self.scryer` — same scoping, a more legible failure.
+    _RELEASE_SEARCH_NOT_CONVERTED = (
+        "still depends on the removed Scryer client — Task 9 repoints release "
+        "search at Prowlarr/Radarr/Sonarr (see "
+        "docs/superpowers/plans/2026-08-10-arr-restore.md)"
+    )
 
     async def search_metadata(self, query: str, content_type: ContentType) -> list:
         """Metadata candidates for one facet (used when the user picks a type)."""
         if content_type not in VIDEO_CONTENT_TYPES:
             return []
-        return await self.scryer.search_metadata(query, content_type)
+        raise NotImplementedError(f"search_metadata {self._RELEASE_SEARCH_NOT_CONVERTED}")
 
     async def get_seasons(self, title_id: str) -> list:
         """Seasons available to search for a title (see ScryerClient.get_seasons)."""
-        return await self.scryer.get_seasons(title_id)
+        raise NotImplementedError(f"get_seasons {self._RELEASE_SEARCH_NOT_CONVERTED}")
 
     async def search_releases(
         self,
@@ -556,39 +582,7 @@ class SearchService:
         Rego rules, so every result already carries a verdict; the local scoring
         only orders ties (see `ScoringService.sort_results`).
         """
-        log = logger.bind(title_id=title_id, content_type=content_type.value)
-
-        t0 = time.monotonic()
-        results = await self.scryer.search_releases(
-            title_id, season=season, episode=episode, limit=limit, timeout=timeout
-        )
-        search_ms = round((time.monotonic() - t0) * 1000, 1)
-
-        if not results:
-            log.info("No results found", search_ms=search_ms)
-            return []
-
-        results = self.scoring.sort_results(results, content_type, preferred_resolution)
-
-        log.info(
-            "search_completed",
-            result_count=len(results),
-            allowed_count=sum(1 for r in results if r.scryer_allowed),
-            search_ms=search_ms,
-            top=[
-                {
-                    "title": (r.title or "?")[:80],
-                    "scryer_score": r.scryer_score,
-                    "allowed": r.scryer_allowed,
-                    "score": r.calculated_score,
-                    "indexer": r.indexer,
-                    "seeders": r.seeders,
-                    "size_gb": round(r.get_size_gb(), 2),
-                }
-                for r in results[:5]
-            ],
-        )
-        return results
+        raise NotImplementedError(f"search_releases {self._RELEASE_SEARCH_NOT_CONVERTED}")
 
     async def lookup_artist(self, query: str) -> list[ArtistInfo]:
         """Look up artists (Lidarr, falling back to slskd)."""
