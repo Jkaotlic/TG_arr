@@ -1,18 +1,28 @@
-"""Search service: content-type detection and release listing via Scryer.
+"""Search service: content-type detection and release listing via *arr.
 
-Migration 2026-07-28. What changed and why:
+Rollback 2026-08-10. What changed back and why:
 
-- **Detection** used to fan out parallel `lookup` calls to Radarr, Sonarr and
-  Lidarr, guarded by a global semaphore, a TTL cache and a per-service circuit
-  breaker (all of which existed to survive the lookup burst taking three
-  services down at once). Scryer answers all three video facets in ONE
-  `searchMetadataMulti` query, so the semaphore and circuit breaker are gone.
-  The TTL cache stays — a retried or double-tapped search still shouldn't hit
-  the network twice.
-- **Anime** is now a first-class outcome, not a flavour of SERIES.
-- **Release search** is no longer a free-text Prowlarr query. Scryer searches
-  per *title*, so the caller resolves/creates the title first (AddService.
-  ensure_title) and passes its id here.
+- **Detection** fans out parallel `lookup` calls to Radarr, Sonarr and Lidarr
+  again, guarded by a global semaphore and a per-service circuit breaker.
+  The Scryer migration removed both because Scryer answered all three video
+  facets in ONE `searchMetadataMulti` query — a concurrency limiter guarding
+  three parallel calls had nothing to guard. Now there ARE three parallel
+  calls again, and *arr's `lookup` proxies out to TMDb/TVDB/MusicBrainz (slow,
+  externally rate-limited), so without a ceiling a burst of searches takes
+  all three services down at once — the incident these existed to prevent
+  before the migration. The TTL cache survived the migration unchanged and
+  stays: a retried or double-tapped search still shouldn't hit the network
+  twice.
+- **Anime** is still a first-class outcome, not a flavour of SERIES, but it no
+  longer comes from a dedicated Scryer facet. Sonarr's `/series/lookup`
+  returns one flat list, and `series_type` on a result not yet in the catalog
+  is always "standard" — so anime-ness is read from the `Animation` genre
+  Sonarr/TVDB attaches to the title, splitting the flat list into series and
+  anime candidate sets before the existing scoring/tie-break logic runs.
+- **Release search** (`search_releases`/`get_seasons`/`search_metadata`) still
+  calls the removed Scryer client and is intentionally left untouched here —
+  it is Task 9's responsibility (see docs/superpowers/plans/
+  2026-08-10-arr-restore.md) to repoint it at Prowlarr/Radarr/Sonarr.
 """
 
 import asyncio
@@ -23,7 +33,11 @@ from typing import Any, NamedTuple, Optional
 
 import structlog
 
-from bot.clients.scryer import ScryerClient, ScryerGraphQLError
+from bot.clients.base import AuthenticationError, ServiceConnectionError
+from bot.clients.lidarr import LidarrClient
+from bot.clients.prowlarr import ProwlarrClient
+from bot.clients.radarr import RadarrClient
+from bot.clients.sonarr import SonarrClient
 from bot.models import ArtistInfo, ContentType, SearchResult, VIDEO_CONTENT_TYPES
 from bot.services.scoring import ScoringService
 
@@ -45,7 +59,11 @@ _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2}|21\d{2})\b")
 _SE_RE = re.compile(r"s(\d{1,2})(?:e(\d{1,3}))?", re.IGNORECASE)
 _SEASON_WORD_RE = re.compile(r"(?:season|сезон)\s*(\d+)", re.IGNORECASE)
 _QUALITY_TOKENS = ("2160p", "4k", "4к", "uhd", "1080p", "720p", "480p")
-_DETECT_TIMEOUT_S = 15.0  # metadata search fans out to TMDb/TVDB behind Scryer
+# Each lookup fans out to TMDb/TVDB/MusicBrainz directly now (no more single
+# Scryer round-trip). Live measurement 2026-08-10: Radarr lookup ~3.4s,
+# Sonarr ~34.4s — 15s (the Scryer-era value) would spuriously time out most
+# real Sonarr detections, so this needs real headroom above that.
+_DETECT_TIMEOUT_S = 40.0
 _MUSIC_QUERY_HARD_FLOOR = 3   # ignore music matches when query <3 chars
 
 # PERF-01: a retried/duplicate search (double-tap, "повторить") must not
@@ -62,31 +80,66 @@ _AMBIGUITY_MARGIN = 0.15
 # prefer the anime facet, which has its own library and `1080p` profile.
 _ANIME_OVER_SERIES_MARGIN = 0.1
 
+# One user search = three parallel metadata lookups, and *arr's `lookup`
+# proxies to TMDb/TVDB/MusicBrainz, so it is slow. Without a ceiling a burst
+# of searches takes all three services down at once — which is why these
+# existed before the Scryer migration removed them (Scryer answered in one
+# query, so they were genuinely dead weight then).
+_DETECTION_SEMAPHORE = asyncio.Semaphore(6)
 
-#: Scryer masks every repository-level failure as a bare "Internal server
-#: error". In practice the one that reaches users is "all attempted indexer
-#: strategies failed" — i.e. Prowlarr is rate-limiting Scryer because the
-#: indexers' daily query limits are spent (prod incident 2026-07-29).
-_MASKED_INTERNAL_ERROR = "internal server error"
 
+class _CircuitBreaker:
+    """Stop calling a service that keeps failing.
 
-def describe_scryer_failure(exc: BaseException) -> str:
-    """Turn a search failure into something the user can act on.
-
-    "Поиск временно недоступен" reads like the bot is broken and hides the only
-    useful fact. When Scryer masks an indexer failure behind a generic internal
-    error, say so — the fix is to wait (the limits are per-24h) or raise the
-    query limits, and neither is discoverable from the generic text.
+    Opens after `threshold` consecutive failures and stays open for
+    `cooldown_s`; a single success closes it again.
     """
-    if isinstance(exc, ScryerGraphQLError):
-        message = str(exc)
-        if _MASKED_INTERNAL_ERROR in message.lower():
-            return (
-                "Индексеры сейчас не отвечают — Scryer не смог опросить ни один "
-                "из них.\n\nОбычно это суточный лимит запросов к трекерам: он "
-                "сбрасывается сам. Текущее состояние — в /health."
-            )
-        return message
+
+    def __init__(self, threshold: int = 3, cooldown_s: float = 60.0):
+        self._threshold = threshold
+        self._cooldown_s = cooldown_s
+        self._failures: dict[str, int] = {}
+        self._opened_at: dict[str, float] = {}
+
+    def is_open(self, service: str) -> bool:
+        opened = self._opened_at.get(service)
+        if opened is None:
+            return False
+        if time.monotonic() - opened >= self._cooldown_s:
+            # Cooldown elapsed — let exactly one probe through.
+            self._opened_at.pop(service, None)
+            self._failures[service] = 0
+            return False
+        return True
+
+    def record_success(self, service: str) -> None:
+        self._failures[service] = 0
+        self._opened_at.pop(service, None)
+
+    def record_failure(self, service: str) -> None:
+        count = self._failures.get(service, 0) + 1
+        self._failures[service] = count
+        if count >= self._threshold:
+            self._opened_at[service] = time.monotonic()
+
+    def reset(self) -> None:
+        """Test helper — forget every recorded failure."""
+        self._failures.clear()
+        self._opened_at.clear()
+
+
+_CIRCUIT_BREAKER = _CircuitBreaker()
+
+
+def describe_search_failure(exc: BaseException) -> str:
+    """Turn a search failure into something the user can act on."""
+    if isinstance(exc, ServiceConnectionError):
+        return (
+            "Индексеры не ответили вовремя. Обычно это залипший трекер — "
+            "попробуйте повторить запрос. Состояние сервисов — в /health."
+        )
+    if isinstance(exc, AuthenticationError):
+        return "Ошибка авторизации в медиасервисе — проверьте API-ключи."
     return "Поиск временно недоступен"
 
 
@@ -133,21 +186,59 @@ class DetectionResult(NamedTuple):
 
 
 class SearchService:
-    """Content-type detection and release listing, backed by Scryer."""
+    """Content-type detection and release listing, backed by the *arr stack."""
 
     def __init__(
         self,
-        scryer: ScryerClient,
+        radarr: RadarrClient,
+        sonarr: SonarrClient,
+        lidarr: Optional[LidarrClient] = None,
+        prowlarr: Optional[ProwlarrClient] = None,
         scoring: Optional[ScoringService] = None,
-        lidarr=None,
         slskd=None,
     ):
-        self.scryer = scryer
+        self.radarr = radarr
+        self.sonarr = sonarr
         self.lidarr = lidarr
+        self.prowlarr = prowlarr
         self.slskd = slskd
         self.scoring = scoring or ScoringService()
 
-    async def detect_with_confidence(self, query: str) -> DetectionResult:
+    async def _lookup_branch(self, service: str, coro_factory) -> list[Any]:
+        """Run one lookup under the semaphore, respecting the breaker."""
+        if _CIRCUIT_BREAKER.is_open(service):
+            logger.warning("lookup_skipped_breaker_open", service=service)
+            return []
+        try:
+            async with _DETECTION_SEMAPHORE:
+                result = await coro_factory()
+            _CIRCUIT_BREAKER.record_success(service)
+            return result
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            _CIRCUIT_BREAKER.record_failure(service)
+            logger.warning("lookup_failed", service=service, error=str(e))
+            return []
+
+    @staticmethod
+    def _split_series_candidates(series_list: list) -> tuple[list, list]:
+        """Partition Sonarr's lookup_series results into (series, anime).
+
+        *arr has no separate anime facet: Sonarr's `/series/lookup` returns
+        one flat list, and `series_type` on a result not yet in the catalog
+        is always "standard" (rollback 2026-08-10 live measurement). Genre is
+        the only signal *arr offers before a title is added, so an
+        "Animation" genre marks a result as an anime candidate instead of a
+        plain series one.
+        """
+        series, anime = [], []
+        for item in series_list:
+            genres = {g.lower() for g in (getattr(item, "genres", None) or [])}
+            (anime if "animation" in genres else series).append(item)
+        return series, anime
+
+    async def detect_content_type(self, query: str) -> DetectionResult:
         """
         Detect movie / series / anime / music with a confidence score.
 
@@ -158,23 +249,24 @@ class SearchService:
         substring containment, so "Joker" doesn't match a random "Joker"-named
         artist with 1-letter overlap.
 
-        Failure surfacing (BUG-05): an exception during lookup doesn't silently
-        become an empty result set — it returns UNKNOWN so the user gets the
-        type question instead of a wrong auto-pick.
+        Failure surfacing (BUG-05): a lookup failing doesn't silently become
+        an empty result set — each branch is guarded by `_lookup_branch`
+        (semaphore + circuit breaker), and if every branch comes back empty
+        the confidence score is 0 so the user gets the type question instead
+        of a wrong auto-pick.
         """
         log = logger.bind(query=query)
         clean_query = self._strip_quality_tokens(query.strip())
         clean_query_no_year = _YEAR_RE.sub("", clean_query).strip()
         query_year = self._extract_query_year(query)
 
-        # Pre-filter (PERF-06): too short to meaningfully classify
-        if len(clean_query_no_year) < 2:
+        # Pre-filter (PERF-06): nothing left to meaningfully classify.
+        if not clean_query_no_year:
             return DetectionResult(ContentType.UNKNOWN, 0.0, "too_short", {})
 
         # A season/episode marker settles "not a movie, not music" — but NOT
-        # series-vs-anime, which are separate Scryer libraries with separate
-        # quality profiles. So it narrows the candidate set instead of
-        # short-circuiting the way it used to.
+        # series-vs-anime, which score separately. So it narrows the
+        # candidate set instead of short-circuiting before the lookup runs.
         episodic = any(pattern.search(clean_query) for pattern in _SERIES_PATTERNS)
 
         cache_key = _normalize_query(query)
@@ -193,8 +285,11 @@ class SearchService:
         try:
             gathered = await asyncio.wait_for(
                 asyncio.gather(
-                    self.scryer.search_metadata_multi(clean_query),
-                    self._lookup_artists(clean_query_no_year) if music_allowed else _empty_list(),
+                    self._lookup_branch("radarr", lambda: self.radarr.lookup_movie(clean_query)),
+                    self._lookup_branch("sonarr", lambda: self.sonarr.lookup_series(clean_query)),
+                    self._lookup_branch("lidarr", lambda: self._lookup_artists(clean_query_no_year))
+                    if music_allowed
+                    else _empty_list(),
                     return_exceptions=True,
                 ),
                 timeout=_DETECT_TIMEOUT_S,
@@ -203,24 +298,26 @@ class SearchService:
             log.warning("detect_content_type", winner="unknown", reason="lookup_timeout")
             return self._episodic_fallback(episodic, "lookup_timeout")
 
-        video_result, artists_result = gathered
-
         # BUG-04: `return_exceptions=True` also captures CancelledError, which
         # would turn a shutdown (or a cancelled callback task) into a normal
-        # "detection failed" answer. Re-raise it instead.
+        # "detection failed" answer. Re-raise it instead. (_lookup_branch
+        # already swallows every other exception into `[]`, so this is the
+        # only kind of BaseException that can still show up here.)
         for outcome in gathered:
             if isinstance(outcome, asyncio.CancelledError):
                 raise outcome
 
-        if isinstance(video_result, BaseException):
-            log.warning("scryer_metadata_lookup_failed", error=str(video_result))
-            return self._episodic_fallback(episodic, "metadata_lookup_failed")
-        if isinstance(artists_result, BaseException):
-            log.warning("music_lookup_failed", error=str(artists_result))
-            artists_result = []
+        movies_result, series_result, artists_result = gathered
+        movies = movies_result if isinstance(movies_result, list) else []
+        all_series = series_result if isinstance(series_result, list) else []
+        artists = artists_result if isinstance(artists_result, list) else []
 
-        video = video_result or {}
-        artists = artists_result or []
+        series_candidates, anime_candidates = self._split_series_candidates(all_series)
+        facet_candidates = {
+            ContentType.MOVIE: movies,
+            ContentType.SERIES: series_candidates,
+            ContentType.ANIME: anime_candidates,
+        }
 
         # An episodic query can only be SERIES or ANIME — a movie match there
         # would be a metadata coincidence, not the user's intent.
@@ -229,7 +326,7 @@ class SearchService:
         )
         scored: list[tuple[ContentType, float, str, list]] = []
         for content_type in facets:
-            items = video.get(content_type) or []
+            items = facet_candidates[content_type]
             score = self._best_match_score(clean_query_no_year, items, query_year, prefer_year=True)
             scored.append((content_type, score, f"{content_type.value}_match", items))
 
@@ -263,7 +360,7 @@ class SearchService:
             anime_resolved = True
 
         candidates = {
-            content_type.value: [getattr(i, "title", "?") for i in (video.get(content_type) or [])[:3]]
+            content_type.value: [getattr(i, "title", "?") for i in (facet_candidates.get(content_type) or [])[:3]]
             for content_type in VIDEO_CONTENT_TYPES
         }
         candidates["music"] = [getattr(a, "name", "?") for a in artists[:3]]
@@ -425,6 +522,13 @@ class SearchService:
                 best = ratio
 
         return best
+
+    # NOTE (rollback 2026-08-10, Task 8): the three methods below still call
+    # `self.scryer`, which this class no longer constructs — they are out of
+    # scope for Task 8 (content-type detection only; see the module
+    # docstring) and are left as a clear TODO for Task 9, which repoints
+    # release search at Prowlarr/Radarr/Sonarr. Calling any of them today
+    # raises AttributeError rather than silently doing the wrong thing.
 
     async def search_metadata(self, query: str, content_type: ContentType) -> list:
         """Metadata candidates for one facet (used when the user picks a type)."""

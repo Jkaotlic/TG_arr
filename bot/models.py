@@ -479,7 +479,7 @@ class SearchSession(BaseModel):
     selected_result: Optional[SearchResult] = None
     selected_content: Optional[ContentInfo] = None
     # LOGIC-06: full Radarr/Sonarr lookup candidates captured during content-type
-    # detection (search_service.detect_with_confidence), so handle_release_selection/
+    # detection (search_service.detect_content_type), so handle_release_selection/
     # _execute_grab can reuse them instead of repeating the same lookup up to
     # 2 more times per grab. None when detection didn't run or produced no
     # usable lookup (music winner, low-confidence, timeout, etc).
