@@ -1,4 +1,4 @@
-"""Service for grabbing releases through Radarr/Sonarr.
+"""Service for adding titles to and grabbing releases through Radarr/Sonarr.
 
 Rollback 2026-08-10, Task 10. This is the last module in the package that
 imported the Scryer client at module level — that single import (of models
@@ -6,8 +6,9 @@ Task 2 deleted) was the root cause of most of the suite's collection errors
 mid-rollback. Replaced with the two *arr grab paths:
 
     grab_release(release, content_type, arr_id=...)
-        native  — release.indexer_id is set (it came from *arr's own
-                   interactive search, Task 9's `get_releases`): grab it with
+        native  — release.indexer_id is set AND release.source == "arr" (it
+                   came from *arr's own interactive search, Task 9's
+                   `get_releases`): grab it with
                    `ArrBaseClient.grab_release(guid, indexer_id)`. *arr
                    resolves Prowlarr's `301 -> magnet` redirect itself, hands
                    the torrent to its own download client and imports the
@@ -15,25 +16,38 @@ mid-rollback. Replaced with the two *arr grab paths:
                    killed the previous (Scryer) backend — it could not
                    expand that redirect, so every download failed with a
                    bare "Internal server error".
-        push chain — release.indexer_id is unset (a Prowlarr free-text hit;
-                   Prowlarr numbers indexers differently from *arr, so its id
-                   is meaningless to the native endpoint): the restored
-                   pre-migration three-step chain — release/push ->
+
+                   Fix round 1 (2026-08-10 review): `indexer_id` truthiness
+                   ALONE is not a safe signal — ProwlarrClient's free-text
+                   parser also fills `indexer_id`, with PROWLARR's own
+                   numbering, which is meaningless (or actively wrong) to
+                   *arr's native endpoint. `source` records which parser
+                   actually built the SearchResult and is what really gates
+                   this path; see SearchResult's docstring in bot/models.py.
+        push chain — release.source != "arr" (today: a Prowlarr free-text
+                   hit — Prowlarr numbers indexers differently from *arr, so
+                   its id is meaningless to the native endpoint): the
+                   restored pre-migration three-step chain — release/push
+                   (SEC-16-gated, see `_validate_download_url`) ->
                    qBittorrent by downloadUrl -> *arr auto-search command.
 
-`arr_id` is the movie/series id already in Radarr/Sonarr. The caller is
-expected to have ensured the title exists in the library before calling this
-(the same precondition `SearchService.search_releases_for_title` has, since
-listing releases needs that id too) — this service does not add the title.
+`arr_id` is the movie/series id already in Radarr/Sonarr. `grab_release`'s
+caller is expected to have ensured the title exists in the library before
+calling this (the same precondition `SearchService.search_releases_for_title`
+has, since listing releases needs that id too) — `grab_release` itself does
+not add the title. `add_movie`/`add_series` below are what add it, restored
+from `f30545d~1` and adapted to the current `RadarrClient`/`SonarrClient`
+signatures (fix round 1 — the first version of this file dropped them,
+which was too aggressive: real callers already exist in
+bot/handlers/{trending.py,search/commands.py,search/grab.py}, even though
+fixing those call sites is Task 12's job, not this one's).
 
-add_movie/add_series ("adding content", the other half of this class's
-pre-migration charter) are deliberately NOT restored here: no task brief or
-test in this rollback drives their shape yet, and Task 12 explicitly removes
-the "resolve/ensure a catalog title first" step the old search flow used
-without yet specifying what (if anything) replaces it for the *arr add flow.
-Guessing that shape would be repeating the same mistake search_service.py's
-own NOTE warns against for search_metadata/get_seasons. Restore them with
-their own driving test when a task actually needs them.
+Scryer-specific composite flows with no *arr equivalent specified by any task
+yet (`ensure_title`, `add_and_queue_best`, `grab_with_fallback`) are kept as
+`NotImplementedError` stubs naming Task 12/13, matching the precedent
+`search_service.py` set for `search_metadata`/`get_seasons` — a stub that
+fails loudly beats both silently guessing a shape and a bare
+`AttributeError` on a name nobody bothered to keep.
 """
 
 import asyncio
@@ -58,9 +72,11 @@ from bot.models import (
     ArtistInfo,
     ContentType,
     MetadataProfile,
+    MovieInfo,
     QualityProfile,
     RootFolder,
     SearchResult,
+    SeriesInfo,
 )
 
 logger = structlog.get_logger()
@@ -214,11 +230,19 @@ def _trusted_service_hosts() -> set[tuple[str, int]]:
 
 async def _validate_download_url(url: str) -> bool:
     """
-    Validate URL is safe for download (not SSRF). Only gates a URL the BOT'S
-    OWN process hands to qBittorrent directly (the force-download escape
-    hatch and the push chain's own qBittorrent fallback step) — the native
-    grab and `release/push` paths hand a guid/URL to *arr itself, which does
-    its own fetching inside its own trusted network context.
+    Validate URL is safe for download (not SSRF).
+
+    SEC-16 (fix round 1, restored — this docstring previously argued the
+    opposite of the recovered pre-migration rationale, which re-justified a
+    real regression): gates every URL the bot hands to a downstream fetcher
+    that will act on it — *arr's `release/push` call AND the bot's own direct
+    qBittorrent handoff (the force-download escape hatch and the push
+    chain's own qBittorrent fallback step). *arr fetches whatever URL it is
+    given, from inside the LAN — handing it a private/loopback URL would
+    turn *arr itself into an SSRF proxy, exactly like handing that URL to
+    qBittorrent directly would. Only the **native** grab path is exempt: it
+    hands *arr a guid it already resolved itself via its own interactive
+    search, never a URL this process constructed.
 
     Async to avoid blocking the event loop on DNS (SEC-11) and to inspect every
     A/AAAA record returned by getaddrinfo so a hostname with both public and
@@ -337,6 +361,146 @@ class AddService:
         default = next((f for f in folders if f.is_default), None)
         return (default or folders[0]).path
 
+    # ----------------------------------------------------------------- add
+    async def add_movie(
+        self,
+        movie: MovieInfo,
+        quality_profile_id: int,
+        root_folder_path: str,
+        search_for_movie: bool = True,
+        tags: Optional[list[int]] = None,
+    ) -> tuple[Optional[MovieInfo], ActionLog]:
+        """Add a movie to Radarr (restored from `f30545d~1`, unchanged shape —
+        `RadarrClient.add_movie`'s signature didn't move under the rollback)."""
+        log = logger.bind(title=movie.title, tmdb_id=movie.tmdb_id)
+        log.info("Adding movie to Radarr")
+
+        action = ActionLog(
+            user_id=0,  # set by the caller before logging
+            action_type=ActionType.ADD,
+            content_type=ContentType.MOVIE,
+            content_title=movie.title,
+            content_id=str(movie.tmdb_id),
+        )
+
+        try:
+            existing = await self.radarr.get_movie_by_tmdb(movie.tmdb_id)
+            if existing and existing.radarr_id:
+                log.info("Movie already exists", radarr_id=existing.radarr_id)
+                action.success = True
+                return existing, action
+
+            added = await self.radarr.add_movie(
+                movie=movie,
+                quality_profile_id=quality_profile_id,
+                root_folder_path=root_folder_path,
+                search_for_movie=search_for_movie,
+                tags=tags,
+            )
+
+            action.success = True
+            log.info("Movie added successfully", radarr_id=added.radarr_id)
+            return added, action
+
+        except Exception as e:
+            log.error("Failed to add movie", error=str(e), exc_info=True)
+            action.success = False
+            action.error_message = str(e)
+            return None, action
+
+    async def add_series(
+        self,
+        series: SeriesInfo,
+        quality_profile_id: int,
+        root_folder_path: str,
+        content_type: ContentType = ContentType.SERIES,
+        monitor: str = "all",
+        search_for_missing: bool = True,
+        tags: Optional[list[int]] = None,
+    ) -> tuple[Optional[SeriesInfo], ActionLog]:
+        """Add a series (or anime) to Sonarr — restored from `f30545d~1`,
+        adapted to the current `SonarrClient.add_series` signature.
+
+        Rollback 2026-08-10: anime is not a separate service/library, just
+        Sonarr's own `seriesType` field (`ContentType.sonarr_series_type`) —
+        `content_type=ContentType.ANIME` is the one thing that changes
+        `series_type` from the pre-migration call. The old caller-facing
+        `monitor_type` kwarg is `monitor` here, matching the current client.
+        """
+        log = logger.bind(title=series.title, tvdb_id=series.tvdb_id)
+        log.info("Adding series to Sonarr")
+
+        action = ActionLog(
+            user_id=0,  # set by the caller before logging
+            action_type=ActionType.ADD,
+            content_type=content_type,
+            content_title=series.title,
+            content_id=str(series.tvdb_id),
+        )
+
+        try:
+            existing = await self.sonarr.get_series_by_tvdb(series.tvdb_id)
+            if existing and existing.sonarr_id:
+                log.info("Series already exists", sonarr_id=existing.sonarr_id)
+                action.success = True
+                return existing, action
+
+            added = await self.sonarr.add_series(
+                series=series,
+                quality_profile_id=quality_profile_id,
+                root_folder_path=root_folder_path,
+                monitor=monitor,
+                search_for_missing=search_for_missing,
+                series_type=content_type.sonarr_series_type or "standard",
+                tags=tags,
+            )
+
+            action.success = True
+            log.info("Series added successfully", sonarr_id=added.sonarr_id)
+            return added, action
+
+        except Exception as e:
+            log.error("Failed to add series", error=str(e), exc_info=True)
+            action.success = False
+            action.error_message = str(e)
+            return None, action
+
+    # Fix round 1 (2026-08-10 review): a service whose own docstring promises
+    # "adding content and grabbing releases" must be able to add — bare
+    # AttributeErrors on these three names is a worse failure mode than a
+    # named NotImplementedError, and real callers already exist
+    # (bot/handlers/{trending.py,search/commands.py,search/grab.py}) even
+    # though repointing them is Task 12's job. Matches the precedent
+    # search_service.py set for search_metadata/get_seasons: fail loudly with
+    # a message naming the task that owns the replacement, rather than
+    # guessing a shape with no driving test.
+    _COMPOSITE_FLOW_NOT_CONVERTED = (
+        "was Scryer-specific (its composite add+queue/redeem-candidate-token "
+        "flow has no *arr equivalent specified by any task yet) and was not "
+        "carried into the *arr rollback — see Task 12/13, "
+        "docs/superpowers/plans/2026-08-10-arr-restore.md"
+    )
+
+    async def ensure_title(self, *args, **kwargs):
+        """Scryer's "find or add unmonitored" step. Task 12 explicitly
+        removes this step from the search flow rather than repointing it."""
+        raise NotImplementedError(f"ensure_title {self._COMPOSITE_FLOW_NOT_CONVERTED}")
+
+    async def add_and_queue_best(self, *args, **kwargs):
+        """Scryer's "add + let the profile pick + queue automatically"
+        one-shot. The nearest *arr equivalent is `add_movie`/`add_series`
+        with `search_for_movie`/`search_for_missing=True`, but no task has
+        specified the caller-facing shape ("Скачать лучшее") yet."""
+        raise NotImplementedError(f"add_and_queue_best {self._COMPOSITE_FLOW_NOT_CONVERTED}")
+
+    async def grab_with_fallback(self, *args, **kwargs):
+        """Scryer's multi-candidate retry loop (some indexers' download
+        links Scryer couldn't resolve to an info-hash). `grab_release`'s
+        native/push split already handles the one release *arr's own verdict
+        picked; no task has specified multi-candidate retry for the *arr
+        rollback."""
+        raise NotImplementedError(f"grab_with_fallback {self._COMPOSITE_FLOW_NOT_CONVERTED}")
+
     # ---------------------------------------------------------------- grab
     async def grab_release(
         self,
@@ -370,7 +534,12 @@ class AddService:
         if force_download:
             return await self._force_download(log, action, release, content_type)
 
-        if release.indexer_id:
+        # Fix round 1 (2026-08-10 review): `indexer_id` alone is not a safe
+        # signal — ProwlarrClient's free-text parser also fills it, with
+        # PROWLARR's own (incompatible) indexer numbering. `source == "arr"`
+        # is what actually guarantees this release came from *arr's own
+        # interactive search, where the id is *arr's own.
+        if release.indexer_id and release.source == "arr":
             return await self._grab_native(log, action, arr_client, release, content_type)
 
         return await self._grab_via_push_chain(
@@ -427,27 +596,40 @@ class AddService:
             rejections: list[str] = []
 
             if release.download_url:
-                try:
-                    result = await arr_client.push_release(
-                        title=release.title,
-                        download_url=release.download_url,
-                        protocol=release.protocol,
-                        publish_date=release.publish_date.isoformat() if release.publish_date else None,
+                # SEC-16 (fix round 1, restored): validate the URL BEFORE
+                # handing it to Radarr/Sonarr. *arr fetches whatever URL it
+                # is given, from inside the LAN — handing it a private/
+                # loopback URL would turn *arr itself into an SSRF proxy.
+                # An unsafe URL is treated the same as a transport failure
+                # below: no verdict was rendered, so this falls through to
+                # auto-search rather than being reported as a rejection.
+                if not await _validate_download_url(release.download_url):
+                    log.warning(
+                        "push_skipped_unsafe_url",
+                        download_url=_mask_url(release.download_url),
                     )
-                    log.info("push_release_result", result=_safe_push_result(result))
-                    if result and result.get("approved") is True:
-                        action.success = True
-                        _log_grab_completed(
-                            log, success=True, path="push", force_download=False, content_type=content_type,
+                else:
+                    try:
+                        result = await arr_client.push_release(
+                            title=release.title,
+                            download_url=release.download_url,
+                            protocol=release.protocol,
+                            publish_date=release.publish_date.isoformat() if release.publish_date else None,
                         )
-                        return True, action
-                    rejections = result.get("rejections", []) if result else []
-                    release_rejected = True
-                except APIError as e:
-                    # Falls through to auto-search below, same as pre-migration:
-                    # a transport failure is not a verdict, so it isn't treated
-                    # as one.
-                    log.warning("push_release_failed", error=str(e))
+                        log.info("push_release_result", result=_safe_push_result(result))
+                        if result and result.get("approved") is True:
+                            action.success = True
+                            _log_grab_completed(
+                                log, success=True, path="push", force_download=False, content_type=content_type,
+                            )
+                            return True, action
+                        rejections = result.get("rejections", []) if result else []
+                        release_rejected = True
+                    except APIError as e:
+                        # Falls through to auto-search below, same as pre-migration:
+                        # a transport failure is not a verdict, so it isn't treated
+                        # as one.
+                        log.warning("push_release_failed", error=str(e))
 
             if release_rejected and self.qbittorrent is not None:
                 download_url = release.download_url or release.magnet_url

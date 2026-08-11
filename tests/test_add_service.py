@@ -2,18 +2,26 @@
 
 Replaces the Scryer-edition file. The single-candidate-token queue flow this
 file used to cover no longer exists — `AddService` no longer talks to Scryer
-at all. Two grab paths replace it, chosen by whether the release carries
-*arr's own `indexer_id`:
+at all. Two grab paths replace it, chosen by the release's `source` (which
+parser built it) AND `indexer_id`:
 
-- native: the release came from *arr's interactive search — grab it with
-  `ArrBaseClient.grab_release(guid, indexer_id)`.
-- push chain: the release came from Prowlarr's free-text search (no *arr
-  indexer id) — the restored pre-migration release/push -> qBittorrent ->
+- native: `source == "arr"` and `indexer_id` is set (it came from *arr's
+  interactive search) — grab it with `ArrBaseClient.grab_release(guid,
+  indexer_id)`.
+- push chain: anything else (today: `source == "prowlarr"`, a Prowlarr
+  free-text hit) — the restored pre-migration release/push -> qBittorrent ->
   auto-search fallback.
 
-Invariants carried over unchanged: the SSRF guard still gates every URL
-handed directly to qBittorrent, download URLs are still masked before they
-reach the logs, the push-release response is never logged raw (it echoes
+Fix round 1 (2026-08-10 review): `indexer_id` truthiness ALONE used to be the
+signal, which was wrong — `ProwlarrClient._normalize_result` also fills
+`indexer_id`, with PROWLARR's own (incompatible) numbering. `source` is the
+field that actually distinguishes the two producers safely; see
+`test_prowlarr_sourced_release_never_takes_the_native_path` below.
+
+Invariants carried over unchanged: the SSRF guard (SEC-16) gates every URL
+handed to a downstream fetcher — *arr's `release/push` call AND every direct
+qBittorrent handoff — download URLs are still masked before they reach the
+logs, the push-release response is never logged raw (it echoes
 `downloadUrl`, which can carry a passkey), and every grab still emits exactly
 one terminal `grab_completed` event. Lidarr artist-add is unchanged.
 """
@@ -22,7 +30,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from bot.models import ArtistInfo, ContentType, QualityInfo, SearchResult
+from bot.models import ArtistInfo, ContentType, MovieInfo, QualityInfo, SearchResult, SeriesInfo
 from bot.services.add_service import (
     AddService,
     _mask_url,
@@ -32,12 +40,17 @@ from bot.services.add_service import (
 
 
 def _release(**overrides) -> SearchResult:
+    # download_url points at conftest's configured PROWLARR_URL (a trusted
+    # service host per _trusted_service_hosts()) rather than an arbitrary
+    # hostname — SEC-16's `_validate_download_url` now genuinely gates the
+    # push_release call (fix round 1), and this default must pass that gate
+    # deterministically without depending on this machine's DNS.
     data = dict(
         guid="g1",
         title="Movie.2024.2160p.WEB-DL",
         indexer="RuTracker",
         indexer_id=3,
-        download_url="http://prowlarr/1/download?apikey=SECRET",
+        download_url="http://localhost:9696/1/download?apikey=SECRET",
         size=8 * 1024**3,
         seeders=42,
         quality=QualityInfo(resolution="2160p", source="WEB-DL"),
@@ -111,10 +124,83 @@ async def test_native_grab_logged_with_the_native_path():
     assert log_mock.call_args.kwargs["path"] == "native"
 
 
+@pytest.mark.asyncio
+async def test_prowlarr_sourced_release_never_takes_the_native_path():
+    """Fix round 1 (2026-08-10 review): `indexer_id` truthiness alone is NOT
+    a safe signal for the native path — `ProwlarrClient._normalize_result`
+    also fills `indexer_id`, with PROWLARR's own indexer numbering, which is
+    meaningless (or actively wrong) to *arr's native `/release` endpoint
+    (pre-migration BUG-05). A release with `source="prowlarr"` must be routed
+    to the push chain even though it carries a truthy `indexer_id` — exactly
+    the shape `ProwlarrClient._normalize_result` produces today.
+    """
+    radarr = AsyncMock()
+    radarr.push_release.return_value = {"approved": True}
+    service = _service(radarr=radarr)
+
+    release = _release(source="prowlarr", indexer_id=7)  # Prowlarr's OWN numbering
+    assert release.indexer_id  # sanity: the truthy signal alone WOULD say "native"
+
+    ok, _ = await service.grab_release(release, ContentType.MOVIE, arr_id=15)
+
+    assert ok is True
+    radarr.grab_release.assert_not_awaited()  # never routed to the native path
+    radarr.push_release.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------- sec-16
+@pytest.mark.asyncio
+async def test_push_release_rejects_a_private_url():
+    """SEC-16 (fix round 1, restored): push_release must never be called with
+    a private URL — *arr would fetch it itself, from inside the LAN, turning
+    *arr into an SSRF proxy. Restored from `f30545d~1`
+    (`test_push_release_rejects_private_url_movie`), adapted to the current
+    `grab_release(release, content_type, arr_id)` shape: no verdict was
+    rendered (the push never even ran), so — same as pre-migration — this
+    falls through to *arr's own auto-search rather than being reported as a
+    rejection.
+    """
+    radarr = AsyncMock()
+    service = _service(radarr=radarr)
+
+    release = _release(indexer_id=None, download_url="http://192.168.1.1/x")
+    ok, action = await service.grab_release(release, ContentType.MOVIE, arr_id=15)
+
+    radarr.push_release.assert_not_awaited()
+    assert ok is True
+    assert action.success is True
+    radarr.search_movie.assert_awaited_once_with(15)
+
+
+@pytest.mark.asyncio
+async def test_push_release_rejects_a_loopback_url():
+    """SEC-16 (fix round 1, restored): same guard, loopback host. Restored
+    from `f30545d~1` (`test_push_release_rejects_loopback_url_series`)."""
+    sonarr = AsyncMock()
+    service = _service(sonarr=sonarr)
+
+    release = _release(indexer_id=None, download_url="http://127.0.0.1:8080/file.torrent")
+    ok, action = await service.grab_release(release, ContentType.SERIES, arr_id=77)
+
+    sonarr.push_release.assert_not_awaited()
+    assert ok is True
+    assert action.success is True
+    sonarr.search_series.assert_awaited_once_with(77)
+
+
 # ------------------------------------------------------------------ fallback
 @pytest.mark.asyncio
 async def test_release_without_indexer_id_falls_back_to_push():
-    """A Prowlarr free-text hit has no *arr indexer id — push it instead."""
+    """A Prowlarr free-text hit has no *arr indexer id — push it instead.
+
+    The brief's literal `download_url` ("http://prowlarr/1/download?apikey=x")
+    does not resolve on a dev machine, which is irrelevant to what this test
+    is actually about (path selection, not SEC-16) — SEC-16 (fix round 1,
+    restored) would otherwise correctly block the push and fail this test for
+    the wrong reason. Patch `_validate_download_url` rather than weaken the
+    guard or use an unsafe URL to make it pass: never make a test pass by
+    opening a security control (see Task 8's `too_short` precedent).
+    """
     radarr = AsyncMock()
     radarr.push_release.return_value = {"approved": True}
     service = _service(radarr=radarr)
@@ -125,7 +211,11 @@ async def test_release_without_indexer_id_falls_back_to_push():
         guid="abc-1", indexer_id=None,
     )
 
-    ok, _ = await service.grab_release(release, ContentType.MOVIE, arr_id=15)
+    with patch(
+        "bot.services.add_service._validate_download_url",
+        new=AsyncMock(return_value=True),
+    ):
+        ok, _ = await service.grab_release(release, ContentType.MOVIE, arr_id=15)
 
     assert ok is True
     radarr.grab_release.assert_not_awaited()
@@ -418,6 +508,143 @@ async def test_validate_download_url_trusts_a_configured_service_host(monkeypatc
         assert await _validate_download_url("http://192.168.0.95:22/") is False
     finally:
         get_settings.cache_clear()
+
+
+# ------------------------------------------------------------------------ add
+@pytest.mark.asyncio
+async def test_add_movie_reuses_an_existing_radarr_entry():
+    radarr = AsyncMock()
+    radarr.get_movie_by_tmdb.return_value = MovieInfo(tmdb_id=42, title="Dune", year=2021, radarr_id=15)
+    service = _service(radarr=radarr)
+
+    added, action = await service.add_movie(
+        MovieInfo(tmdb_id=42, title="Dune", year=2021), quality_profile_id=7, root_folder_path="G:\\radarr",
+    )
+
+    assert added.radarr_id == 15
+    assert action.success is True
+    radarr.add_movie.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_add_movie_adds_when_not_already_in_the_library():
+    radarr = AsyncMock()
+    radarr.get_movie_by_tmdb.return_value = None
+    radarr.add_movie.return_value = MovieInfo(tmdb_id=42, title="Dune", year=2021, radarr_id=15)
+    service = _service(radarr=radarr)
+
+    added, action = await service.add_movie(
+        MovieInfo(tmdb_id=42, title="Dune", year=2021), quality_profile_id=7, root_folder_path="G:\\radarr",
+    )
+
+    assert added.radarr_id == 15
+    assert action.success is True
+    radarr.add_movie.assert_awaited_once()
+    assert radarr.add_movie.await_args.kwargs["quality_profile_id"] == 7
+    assert radarr.add_movie.await_args.kwargs["root_folder_path"] == "G:\\radarr"
+
+
+@pytest.mark.asyncio
+async def test_add_movie_failure_is_reported_without_raising():
+    radarr = AsyncMock()
+    radarr.get_movie_by_tmdb.return_value = None
+    radarr.add_movie.side_effect = RuntimeError("Radarr временно недоступен")
+    service = _service(radarr=radarr)
+
+    added, action = await service.add_movie(
+        MovieInfo(tmdb_id=42, title="Dune", year=2021), quality_profile_id=7, root_folder_path="G:\\radarr",
+    )
+
+    assert added is None
+    assert action.success is False
+
+
+@pytest.mark.asyncio
+async def test_add_series_reuses_an_existing_sonarr_entry():
+    sonarr = AsyncMock()
+    sonarr.get_series_by_tvdb.return_value = SeriesInfo(tvdb_id=654, title="Fargo", sonarr_id=7)
+    service = _service(sonarr=sonarr)
+
+    added, action = await service.add_series(
+        SeriesInfo(tvdb_id=654, title="Fargo"), quality_profile_id=7, root_folder_path="G:\\tv-sonarr",
+    )
+
+    assert added.sonarr_id == 7
+    assert action.success is True
+    sonarr.add_series.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_add_series_defaults_to_the_standard_series_type():
+    sonarr = AsyncMock()
+    sonarr.get_series_by_tvdb.return_value = None
+    sonarr.add_series.return_value = SeriesInfo(tvdb_id=654, title="Fargo", sonarr_id=7)
+    service = _service(sonarr=sonarr)
+
+    await service.add_series(
+        SeriesInfo(tvdb_id=654, title="Fargo"), quality_profile_id=7, root_folder_path="G:\\tv-sonarr",
+    )
+
+    assert sonarr.add_series.await_args.kwargs["series_type"] == "standard"
+
+
+@pytest.mark.asyncio
+async def test_add_series_uses_the_anime_series_type_for_anime():
+    """Rollback 2026-08-10: anime is not a separate library, just Sonarr's
+    own seriesType — content_type=ANIME is what flips it."""
+    sonarr = AsyncMock()
+    sonarr.get_series_by_tvdb.return_value = None
+    sonarr.add_series.return_value = SeriesInfo(tvdb_id=424, title="Frieren", sonarr_id=9, series_type="anime")
+    service = _service(sonarr=sonarr)
+
+    await service.add_series(
+        SeriesInfo(tvdb_id=424, title="Frieren"), quality_profile_id=1, root_folder_path="G:\\anime",
+        content_type=ContentType.ANIME,
+    )
+
+    assert sonarr.add_series.await_args.kwargs["series_type"] == "anime"
+
+
+@pytest.mark.asyncio
+async def test_add_series_failure_is_reported_without_raising():
+    sonarr = AsyncMock()
+    sonarr.get_series_by_tvdb.return_value = None
+    sonarr.add_series.side_effect = RuntimeError("Sonarr временно недоступен")
+    service = _service(sonarr=sonarr)
+
+    added, action = await service.add_series(
+        SeriesInfo(tvdb_id=654, title="Fargo"), quality_profile_id=7, root_folder_path="G:\\tv-sonarr",
+    )
+
+    assert added is None
+    assert action.success is False
+
+
+# ----------------------------------------------------- unconverted composites
+@pytest.mark.asyncio
+async def test_ensure_title_raises_not_implemented_naming_task_12():
+    """Fix round 1 (2026-08-10 review): a bare AttributeError is a worse
+    failure mode than a named stub for a real (if not-yet-repointed) caller —
+    bot/handlers/search/commands.py:215 still calls this."""
+    service = _service()
+    with pytest.raises(NotImplementedError, match="Task 12"):
+        await service.ensure_title()
+
+
+@pytest.mark.asyncio
+async def test_add_and_queue_best_raises_not_implemented_naming_task_12():
+    """Real caller: bot/handlers/trending.py:370."""
+    service = _service()
+    with pytest.raises(NotImplementedError, match="Task 12"):
+        await service.add_and_queue_best()
+
+
+@pytest.mark.asyncio
+async def test_grab_with_fallback_raises_not_implemented_naming_task_12():
+    """Real caller: bot/handlers/search/grab.py:212."""
+    service = _service()
+    with pytest.raises(NotImplementedError, match="Task 12"):
+        await service.grab_with_fallback()
 
 
 # ---------------------------------------------------------------------- music

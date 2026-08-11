@@ -104,19 +104,23 @@ class SearchResult(BaseModel):
 
     guid: str = Field(..., description="Unique identifier for the release")
     indexer: str = Field(default="Unknown", description="Indexer name")
-    # Rollback 2026-08-10 (Task 10): Optional, default None — distinguishes
-    # a release from *arr's own interactive search (which always carries its
-    # indexer id alongside the guid) from a Prowlarr free-text hit, which
-    # doesn't. `AddService.grab_release` uses "is this set?" to pick the grab
-    # path: set -> native `POST {prefix}/release`, unset -> the push/qBit/
-    # auto-search fallback chain. NOTE: Prowlarr's OWN client
-    # (bot/clients/prowlarr.py `_normalize_result`) still fills this with
-    # PROWLARR's indexer numbering (untouched, out of this task's scope) —
-    # that numbering is NOT interchangeable with *arr's, so a result built
-    # from Prowlarr's free-text search must not be routed to the native path
-    # by this field alone if that client ever stops leaving it unset.
+    # Rollback 2026-08-10 (Task 10, fix round 1): `indexer_id` alone is NOT a
+    # safe signal for the native grab path — ProwlarrClient._normalize_result
+    # also fills it, with PROWLARR's own indexer numbering, which is NOT
+    # interchangeable with *arr's. `source` records which parser actually
+    # built this SearchResult, and IS safe: only ArrBaseClient._parse_release
+    # (fed by *arr's own interactive search) sets "arr"; ProwlarrClient's
+    # free-text parser always sets "prowlarr". `AddService.grab_release`
+    # requires BOTH `indexer_id` set AND `source == "arr"` before taking the
+    # native path — a Prowlarr-sourced release can never take it, regardless
+    # of what its (Prowlarr-numbered) indexer_id happens to be.
+    source: Literal["arr", "prowlarr"] = Field(
+        default="arr", description="Which search produced this release — see indexer_id's docstring"
+    )
     indexer_id: Optional[int] = Field(
-        default=None, description="*arr's indexer id, paired with guid — required for the native grab path"
+        default=None,
+        description="Indexer id paired with guid — *arr's own numbering only when source == 'arr'; "
+                    "Prowlarr's own (incompatible) numbering when source == 'prowlarr'",
     )
     title: str = Field(..., description="Release title")
     size: int = Field(default=0, description="Size in bytes")

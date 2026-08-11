@@ -332,6 +332,11 @@ async def test_get_releases_carries_the_arr_verdict():
     assert bad.rejections == ["English is wanted, but found Russian"]
     assert bad.guid == "abc-2"
     assert bad.indexer_id == 4
+    # Fix round 1 (2026-08-10 review): source="arr" is what actually gates
+    # AddService.grab_release's native path — indexer_id truthiness alone
+    # isn't safe (ProwlarrClient's free-text results also carry one).
+    assert good.source == "arr"
+    assert bad.source == "arr"
 
 
 @pytest.mark.asyncio

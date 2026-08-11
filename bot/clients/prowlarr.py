@@ -256,6 +256,12 @@ class ProwlarrClient(BaseAPIClient):
 
         return SearchResult(
             guid=guid,
+            # Rollback 2026-08-10 (Task 10, fix round 1): this indexer_id is
+            # PROWLARR's own numbering, not *arr's — it must never be handed
+            # to *arr's native grab endpoint. `source="prowlarr"` is what
+            # actually blocks that in AddService.grab_release; indexer_id
+            # alone is not a safe signal (see SearchResult's docstring).
+            source="prowlarr",
             indexer=indexer,
             indexer_id=indexer_id,
             title=title,

@@ -651,6 +651,7 @@ class ArrBaseClient(BaseAPIClient):
 
         return SearchResult(
             guid=guid,
+            source="arr",
             indexer_id=item.get("indexerId") or 0,
             title=title,
             download_url=item.get("downloadUrl"),
