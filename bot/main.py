@@ -316,8 +316,22 @@ async def _warm_up_clients(logger) -> dict:
 
     Returns the per-backend outcome map, which the startup notification
     reuses so the probe isn't repeated.
+
+    Rollback 2026-08-11 (found during deploy verification): the *arr services
+    were missing here. Removing the previous backend's entry left warm-up
+    covering only the optional music backends, so a wrong RADARR_URL or a
+    revoked API key stayed invisible until a user's first search failed —
+    exactly what a startup probe exists to prevent. Radarr, Sonarr and
+    Prowlarr are required configuration, so they belong in the probe most of
+    all.
     """
-    from bot.clients.registry import get_lidarr, get_slskd
+    from bot.clients.registry import (
+        get_lidarr,
+        get_prowlarr,
+        get_radarr,
+        get_slskd,
+        get_sonarr,
+    )
 
     structlog.contextvars.bind_contextvars(component="warmup")
     try:
@@ -332,6 +346,9 @@ async def _warm_up_clients(logger) -> dict:
                 return name, ("error", str(e))
 
         results = await asyncio.gather(
+            _check("radarr", get_radarr),
+            _check("sonarr", get_sonarr),
+            _check("prowlarr", get_prowlarr),
             _check("lidarr", get_lidarr),
             _check("slskd", get_slskd),
             return_exceptions=True,
