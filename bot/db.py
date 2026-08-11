@@ -25,6 +25,29 @@ from bot.models import (
 logger = structlog.get_logger()
 
 
+def _as_optional_int(value: Any) -> Optional[int]:
+    """Coerce a stored preference id to int, or give up cleanly.
+
+    The Scryer era stored these as **strings on purpose**: its quality-profile
+    ids were slugs (`"4k"`) and its root folders had no id at all, so the bot
+    used a 12-char sha1 digest of the path. Copying such a value into the
+    `Optional[int]` fields it replaced makes the whole `UserPreferences` blob
+    fail validation, and `_row_to_user` then falls back to *all* defaults —
+    silently discarding the user's Lidarr profile, resolution and auto-grab
+    settings too. Since the migration rewrites the row and bumps the schema
+    version, that loss is permanent.
+
+    Returning None for anything non-numeric leaves the field unset, which is
+    exactly the "no preference yet" state the resolvers already handle.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class Database:
     """Async SQLite database manager."""
 
@@ -299,6 +322,8 @@ class Database:
             await self._migrate_to_v2()
         if version < 3:
             await self._migrate_to_v3()
+        if version < 4:
+            await self._migrate_to_v4()
 
     async def _migrate_to_v1(self) -> None:
         """
@@ -349,6 +374,78 @@ class Database:
         await self.conn.execute("DROP INDEX IF EXISTS idx_actions_user")
         await self.conn.commit()
         await self._set_schema_version(3)
+
+    async def _migrate_to_v4(self) -> None:
+        """Rollback 2026-08-10 (Task 13, carried-forward item 2): copy the
+        legacy combined profile/folder preference keys (written by the two
+        weeks the bot ran on the previous backend) into BOTH `radarr_*` and
+        `sonarr_*` — the fields `UserPreferences` split them into (Task 12;
+        Radarr and Sonarr have independent id spaces, live-measured: both
+        start at 1/2 but point at different paths).
+
+        Real stored rows may still carry the old keys. pydantic's
+        `extra="ignore"` drops unknown keys silently on load — no crash, but
+        the user's chosen profile/folder quietly reverts to whatever "first
+        available" resolves to (Radarr's first profile is id 1, "Any", the
+        profile whose custom-format scores had to be repaired because they
+        rewarded exactly the releases the language policy rejects).
+
+        Idempotent and non-destructive: only fills a `radarr_*`/`sonarr_*`
+        field that is still unset (`None`) — an already-explicit new-style
+        value is never overwritten. Rows with no legacy keys at all are
+        left untouched (no UPDATE issued).
+
+        The two legacy key names read below are an intentional exception to
+        this package's "no mention of the previous backend by name" guard
+        (`tests/test_r4_C3-dead-clients.py`) — they are read verbatim because
+        they must byte-match what that backend's era actually wrote to real
+        users' stored preference JSON; renaming the string here would just
+        break reading that historical data, not tidy anything. Marked
+        `LEGACY-DATA-KEY` so the guard test can carve out exactly these two
+        lines rather than exempting the whole file.
+        """
+        async with self.conn.execute("SELECT tg_id, preferences FROM users") as cursor:
+            rows = await cursor.fetchall()
+
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._write_lock:
+            for row in rows:
+                raw = row["preferences"]
+                try:
+                    data = json.loads(raw) if raw else {}
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+
+                legacy_profile = _as_optional_int(
+                    data.get("scryer_quality_profile_id")  # LEGACY-DATA-KEY
+                )
+                legacy_folder = _as_optional_int(
+                    data.get("scryer_root_folder_id")  # LEGACY-DATA-KEY
+                )
+                if legacy_profile is None and legacy_folder is None:
+                    continue
+
+                changed = False
+                if legacy_profile is not None:
+                    for key in ("radarr_quality_profile_id", "sonarr_quality_profile_id"):
+                        if data.get(key) is None:
+                            data[key] = legacy_profile
+                            changed = True
+                if legacy_folder is not None:
+                    for key in ("radarr_root_folder_id", "sonarr_root_folder_id"):
+                        if data.get(key) is None:
+                            data[key] = legacy_folder
+                            changed = True
+
+                if changed:
+                    await self.conn.execute(
+                        "UPDATE users SET preferences = ?, updated_at = ? WHERE tg_id = ?",
+                        (json.dumps(data), now, row["tg_id"]),
+                    )
+            await self.conn.commit()
+        await self._set_schema_version(4)
 
     # User methods
     async def get_user(self, tg_id: int) -> Optional[User]:

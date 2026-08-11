@@ -331,3 +331,259 @@ def test_format_search_result_handles_unicode_and_long_titles(title):
     out = Formatters.format_search_result(result, 1)
     assert isinstance(out, str)
     assert len(out) < 400
+
+
+# ---------------------------------------------------------------------------
+# Task 11: the release card surfaces *arr's own verdict (customFormatScore /
+# rejected / rejections) instead of a second, bot-local language policy.
+# ---------------------------------------------------------------------------
+def test_formatter_shows_why_arr_refuses_a_release():
+    """"Rejected" alone is useless — the reason is the actionable part."""
+    from bot.models import QualityInfo, SearchResult
+    from bot.ui.formatters.search import format_release
+
+    release = SearchResult(
+        guid="g1",
+        title="Дюна 2021 2160p DUB", download_url="u", indexer="RuTracker",
+        size=40_000_000_000, seeders=50, leechers=1, quality=QualityInfo(resolution="2160p"),
+        origin="arr", rejected=True, rejections=["English is wanted, but found Russian"],
+        custom_format_score=-1000,
+    )
+
+    text = format_release(release)
+
+    assert "English is wanted, but found Russian" in text
+
+
+def test_formatter_shows_arr_accepted_score_when_nonzero():
+    """An accepted release still carries a customFormatScore worth showing
+    (e.g. +250 for an English-audio release) — it explains why *arr ranked
+    it where it did."""
+    from bot.models import QualityInfo, SearchResult
+    from bot.ui.formatters.search import format_release
+
+    release = SearchResult(
+        guid="g2",
+        title="Dune 2021 2160p BluRay ENG", download_url="u", indexer="Knaben",
+        size=40_000_000_000, seeders=200, leechers=1, quality=QualityInfo(resolution="2160p"),
+        origin="arr", rejected=False, custom_format_score=250,
+    )
+
+    text = format_release(release)
+
+    assert "250" in text
+
+
+def test_formatter_distinguishes_no_verdict_from_accepted():
+    """A Prowlarr free-text hit (origin='prowlarr') never went through *arr's
+    profile — custom_format_score sits at its unset default of 0 and
+    rejections is empty not because the release passed, but because nobody
+    looked. The card must say so plainly and must NOT read as an *arr
+    approval, which is what an accepted arr-origin release with the same
+    zero score looks like.
+    """
+    from bot.models import QualityInfo, SearchResult
+    from bot.ui.formatters.search import format_release
+
+    no_verdict = SearchResult(
+        guid="g3", title="Some.Movie.2021.2160p", download_url="u", indexer="Prowlarr free-text",
+        size=40_000_000_000, seeders=10, leechers=1, quality=QualityInfo(resolution="2160p"),
+        origin="prowlarr", rejected=False, custom_format_score=0,
+    )
+    accepted_zero_score = SearchResult(
+        guid="g4", title="Some.Movie.2021.2160p", download_url="u", indexer="Radarr",
+        size=40_000_000_000, seeders=10, leechers=1, quality=QualityInfo(resolution="2160p"),
+        origin="arr", rejected=False, custom_format_score=0,
+    )
+
+    no_verdict_text = format_release(no_verdict)
+    accepted_text = format_release(accepted_zero_score)
+
+    assert no_verdict_text != accepted_text
+    # The "no verdict" card must not claim *arr approved/accepted it.
+    assert "одобр" not in no_verdict_text.lower()
+    assert "принял" not in no_verdict_text.lower()
+    # The accepted card must say something positive that *arr actually did evaluate it.
+    assert "arr" in accepted_text.lower()
+
+
+def test_search_result_list_item_omits_verdict_when_none_exists():
+    """The compact multi-release list card must not fabricate a verdict for
+    a Prowlarr free-text hit — silence there, not a false "approved" line.
+    """
+    result = SearchResult(
+        guid="g5", title="Some.Movie.2021.2160p", origin="prowlarr",
+        rejected=False, custom_format_score=0, calculated_score=10,
+    )
+    out = Formatters.format_search_result(result, 1)
+    assert "одобр" not in out.lower()
+    assert "отклон" not in out.lower()
+
+
+def test_search_result_list_item_shows_rejection_from_arr():
+    """The compact list card DOES surface a real *arr rejection — the user
+    should be able to tell from the list alone, before opening the detail
+    view."""
+    result = SearchResult(
+        guid="g6", title="Дюна 2021 2160p DUB", origin="arr",
+        rejected=True, rejections=["English is wanted, but found Russian"],
+        custom_format_score=-1000, calculated_score=10,
+    )
+    out = Formatters.format_search_result(result, 1)
+    assert "English is wanted, but found Russian" in out
+
+
+def test_search_result_list_item_shows_accepted_nonzero_score_from_arr():
+    """Fix round 1 (review finding, Important): the compact list card's
+    "accepted, non-zero score" branch had no covering test — the only
+    rendering path of the three verdict states left unverified. An accepted
+    release with a real customFormatScore (e.g. +250 for English audio) must
+    show that number in the compact card, same as it does in the detail card.
+    """
+    result = SearchResult(
+        guid="g7", title="Dune 2021 2160p BluRay ENG", origin="arr",
+        rejected=False, custom_format_score=250, calculated_score=10,
+    )
+    out = Formatters.format_search_result(result, 1)
+    assert "250" in out
+    assert "отклон" not in out.lower()
+
+
+def test_search_result_list_item_shows_accepted_zero_score_from_arr():
+    """The fourth state, for completeness: an *arr-accepted release with a
+    neutral (zero) customFormatScore must still show SOME acceptance marker
+    in the compact card — it is a real evaluated verdict, not an absence of
+    one (see test_formatter_distinguishes_no_verdict_from_accepted for the
+    same point on the detail card).
+    """
+    result = SearchResult(
+        guid="g8", title="Some.Movie.2021.2160p", origin="arr",
+        rejected=False, custom_format_score=0, calculated_score=10,
+    )
+    out = Formatters.format_search_result(result, 1)
+    assert "arr" in out.lower()
+    assert "отклон" not in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Task 13, carried-forward item 1: UserPreferences was split (Task 12) into
+# per-service radarr_*/sonarr_* fields — format_user_preferences must read
+# those, not the removed scryer_quality_profile_id/scryer_root_folder_id
+# (which would raise AttributeError at runtime, one of three sites the Task
+# 13 controller flagged as a live crash).
+# ---------------------------------------------------------------------------
+def test_format_user_preferences_shows_radarr_and_sonarr_profiles_independently():
+    from bot.models import QualityProfile, RootFolder, UserPreferences
+
+    prefs = UserPreferences(
+        radarr_quality_profile_id=7,
+        radarr_root_folder_id=1,
+        sonarr_quality_profile_id=9,
+        sonarr_root_folder_id=2,
+    )
+    radarr_profiles = [QualityProfile(id=7, name="4K/1080p Remux")]
+    radarr_folders = [RootFolder(id=1, path="G:\\radarr\\Films")]
+    sonarr_profiles = [QualityProfile(id=9, name="HD-1080p")]
+    sonarr_folders = [RootFolder(id=2, path="G:\\tv-sonarr\\Serials")]
+
+    text = Formatters.format_user_preferences(
+        prefs, radarr_profiles, radarr_folders, sonarr_profiles, sonarr_folders,
+    )
+
+    assert "4K/1080p Remux" in text
+    assert "HD-1080p" in text
+    # The two services' chosen folders must not be conflated — each path
+    # appears against its own service, proving independent id spaces.
+    assert "radarr" in text.lower() or "Radarr" in text
+    assert "Films" in text
+    assert "Serials" in text
+
+
+def test_format_user_preferences_unset_profile_shows_not_selected():
+    from bot.models import UserPreferences
+
+    prefs = UserPreferences()
+    text = Formatters.format_user_preferences(prefs, [], [], [], [])
+
+    assert "Не выбран" in text or "не выбран" in text.lower()
+
+
+def test_formatters_format_warning_is_still_a_class_method():
+    """Fix round 1 (review finding, Critical): inserting the module-level
+    `format_release` function without closing the `_SearchFormatters` class
+    body first left `format_warning` as dead code nested inside
+    `format_release`, after its `return` — `Formatters.format_warning`
+    silently stopped existing, breaking all 8 production call sites
+    (bot/handlers/music.py, torrserver.py, titles.py,
+    bot/handlers/search/commands.py). Pins the class's public surface so a
+    future structural edit to this file can't do the same thing unnoticed —
+    neither ruff nor the rest of the suite caught it, since nothing called
+    format_warning directly.
+    """
+    assert hasattr(Formatters, "format_warning")
+    assert Formatters.format_warning("test message") == "⚠️ test message"
+
+
+def test_every_formatters_attribute_referenced_under_bot_resolves():
+    """Generalizes the `format_warning` regression guard above: statically
+    collect every `Formatters.<name>` reference anywhere under `bot/` and
+    assert each one actually resolves on the class.
+
+    A method silently falling out of `_SearchFormatters`'s body (Task 11,
+    see `test_formatters_format_warning_is_still_a_class_method` above) broke
+    every production call site with nothing but an `AttributeError` at
+    request time — neither ruff nor the rest of the suite caught it, since
+    nothing exercised that one method directly. This test doesn't rely on
+    knowing which methods matter; it finds every reference itself.
+    """
+    import re
+    from pathlib import Path
+
+    pattern = re.compile(r"\bFormatters\.([A-Za-z_][A-Za-z0-9_]*)")
+    bot_dir = Path(__file__).resolve().parent.parent / "bot"
+    names: set[str] = set()
+    for path in bot_dir.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        names.update(pattern.findall(text))
+
+    # Sanity check on the scan itself — if this ever finds nothing, the
+    # pattern (or the bot/ layout) regressed, not the code it's checking.
+    assert len(names) > 20, f"suspiciously few Formatters.<name> references found: {names}"
+
+    missing = sorted(n for n in names if not hasattr(Formatters, n))
+    assert not missing, f"Formatters is missing referenced attribute(s): {missing}"
+
+
+def test_every_prefs_attribute_referenced_under_bot_resolves():
+    """Same idea as the Formatters guard above, for `UserPreferences`.
+
+    Task 12 split `scryer_quality_profile_id`/`scryer_root_folder_id` into
+    per-service `radarr_*`/`sonarr_*` fields. Three call sites kept reading
+    the removed names (`bot/handlers/settings.py`, `bot/handlers/trending.py`,
+    `bot/ui/formatters/search.py`) — each one an `AttributeError` waiting for
+    a real request. This statically collects every `prefs.<name>` /
+    `....preferences.<name>` read anywhere under `bot/` and asserts it
+    resolves on `UserPreferences`, so a future field rename/removal that
+    misses a call site fails the suite instead of production.
+    """
+    import re
+    from pathlib import Path
+
+    from bot.models import UserPreferences
+
+    # Two shapes cover how a UserPreferences instance is conventionally named
+    # in this codebase: a local `prefs = db_user.preferences` (trending.py,
+    # formatters/search.py), or the chained `db_user.preferences.<name>`
+    # (settings.py and elsewhere) with no intermediate local variable.
+    pattern = re.compile(r"\b(?:prefs|preferences)\.([A-Za-z_][A-Za-z0-9_]*)")
+    bot_dir = Path(__file__).resolve().parent.parent / "bot"
+    names: set[str] = set()
+    for path in bot_dir.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        names.update(pattern.findall(text))
+
+    assert len(names) > 3, f"suspiciously few prefs.<name>/preferences.<name> references found: {names}"
+
+    instance = UserPreferences()
+    missing = sorted(n for n in names if not hasattr(instance, n))
+    assert not missing, f"UserPreferences is missing referenced attribute(s): {missing}"

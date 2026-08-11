@@ -8,25 +8,31 @@ from bot.models import QualityInfo, SearchResult
 # ---------------------------------------------------------------------------
 # BUG-02: leechers=0 must be preserved (not collapsed to None by truthiness)
 # ---------------------------------------------------------------------------
-def test_scryer_release_preserves_zero_leechers():
-    """Migration 2026-07-28: same invariant, new source. `0 leechers` must stay
-    0 and not collapse to None — the release card renders "S/L" from it."""
-    from bot.clients.scryer import ScryerClient
+def test_arr_release_preserves_zero_leechers():
+    """Rollback 2026-08-10: same invariant, source is *arr again.
 
-    client = ScryerClient("http://scryer", "admin", "pw")
-    result = client._release_to_model(
-        {
-            "source": "RuTracker",
-            "title": "Movie.2024.1080p",
-            "seeders": 5,
-            "peers": 0,
-            "sizeBytes": 1024,
-            "sourceKind": "TORRENT_FILE",
-        },
-        "title-1",
-    )
+    `0 leechers` must stay 0 and not collapse to None — the release card
+    renders "S/L" from it, and a well-seeded release with no leechers is the
+    normal, healthy case rather than missing data.
+    """
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    result = client._parse_release({
+        "guid": "abc-1",
+        "indexerId": 3,
+        "indexer": "RuTracker",
+        "title": "Movie.2024.1080p",
+        "seeders": 5,
+        "leechers": 0,
+        "size": 1024,
+        "protocol": "torrent",
+        "downloadUrl": "http://prowlarr/1/download?apikey=x",
+    })
     assert result.seeders == 5
     assert result.leechers == 0
+    # Provenance must be tagged by the parser itself, not left to the default.
+    assert result.origin == "arr"
 
 
 def test_remux_bonus_applies_without_source_token():

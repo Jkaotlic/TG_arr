@@ -70,8 +70,8 @@ class NavidromeClient(BaseAPIClient):
     async def _subsonic(self, endpoint: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         """Call a Subsonic endpoint and unwrap `subsonic-response`.
 
-        Subsonic reports failures *inside* a 200 response (same trap as
-        Scryer's GraphQL errors), so the status field is checked explicitly.
+        Subsonic reports failures *inside* a 200 response — an HTTP-status
+        check alone would miss it — so the status field is checked explicitly.
         """
         query = self._auth_params()
         query.update(params or {})

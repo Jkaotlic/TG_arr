@@ -136,10 +136,22 @@ class TestLidarrClient:
         """DEAD-09: _parse_album had no production callers — removed."""
         assert not hasattr(lidarr, "_parse_album")
 
-    def test_grab_release_removed(self, lidarr):
-        """BUG-05: no client keeps a direct grab_release — Prowlarr's
-        guid/indexerId are meaningless to *arr's own /release cache."""
-        assert not hasattr(lidarr, "grab_release")
+    def test_grab_release_is_inherited_but_gated_by_provenance(self, lidarr):
+        """BUG-05 is still enforced — by provenance, not by absence.
+
+        Rollback 2026-08-10 (Task 10): `grab_release(guid, indexer_id)` now
+        lives on `ArrBaseClient`, because *arr's interactive search hands back
+        its OWN indexer numbering and grabbing natively is what lets *arr
+        resolve Prowlarr's `301 -> magnet` redirect itself.
+
+        The original concern — Prowlarr's guid/indexerId being meaningless to
+        *arr's `/release` cache — is now guarded one level up: `AddService`
+        takes the native path only when `release.origin == "arr"`, and
+        `SearchResult.origin` defaults to `"prowlarr"` so an untagged release
+        fails closed. See test_add_service.py's
+        `test_prowlarr_sourced_release_never_takes_the_native_path`.
+        """
+        assert hasattr(lidarr, "grab_release")
 
 
 class TestAlbumInfoRemoved:
@@ -301,23 +313,27 @@ class TestDownloadUrlValidation:
 
 
 class TestSearchServiceMusicDetection:
-    """SearchService.detect_with_confidence returns MUSIC when the music
-    backend finds an artist and Scryer's metadata search does not win.
+    """`SearchService.detect_content_type` returns MUSIC when the music backend
+    finds an artist and the video lookups do not win.
 
-    Migration 2026-07-28: the video side is one `searchMetadataMulti` call
-    instead of parallel Radarr/Sonarr lookups; the music side still comes from
-    Lidarr (falling back to slskd).
+    Rollback 2026-08-10 (Tasks 14/15): the video side is back to parallel
+    Radarr/Sonarr lookups instead of the removed backend's single metadata
+    query, and the method is `detect_content_type` again. The music side is
+    unchanged — Lidarr, falling back to slskd.
     """
 
     @staticmethod
-    def _scryer(movies=None, series=None, anime=None):
-        client = AsyncMock()
-        client.search_metadata_multi = AsyncMock(return_value={
-            ContentType.MOVIE: movies or [],
-            ContentType.SERIES: series or [],
-            ContentType.ANIME: anime or [],
-        })
-        return client
+    def _video(movies=None, series=None):
+        """Radarr/Sonarr mocks for the video half of detection.
+
+        Anime is no longer a separate lookup: it is a Sonarr `seriesType`, so
+        anime candidates arrive through `lookup_series` like any other show.
+        """
+        radarr = AsyncMock()
+        radarr.lookup_movie = AsyncMock(return_value=movies or [])
+        sonarr = AsyncMock()
+        sonarr.lookup_series = AsyncMock(return_value=series or [])
+        return radarr, sonarr
 
     async def test_music_detected_when_artist_matches(self):
         from bot.services.scoring import ScoringService
@@ -326,8 +342,8 @@ class TestSearchServiceMusicDetection:
         lidarr = AsyncMock()
         lidarr.lookup_artist = AsyncMock(return_value=[ArtistInfo(mb_id="mb-1", name="Metallica")])
 
-        svc = SearchService(self._scryer(), ScoringService(), lidarr=lidarr)
-        ct = (await svc.detect_with_confidence("Metallica")).content_type
+        svc = SearchService(*self._video(), lidarr=lidarr, scoring=ScoringService())
+        ct = (await svc.detect_content_type("Metallica")).content_type
         assert ct == ContentType.MUSIC
 
     async def test_close_artist_and_screen_match_asks_user_to_choose(self):
@@ -339,15 +355,15 @@ class TestSearchServiceMusicDetection:
         lidarr.lookup_artist = AsyncMock(return_value=[ArtistInfo(mb_id="mb-1", name="The Weeknd")])
 
         svc = SearchService(
-            self._scryer(
+            *self._video(
                 movies=[MovieInfo(tmdb_id=1, title="The Weeknd - Double Fantasy", year=2025)],
                 series=[SeriesInfo(tvdb_id=1, title="The Weekend")],
             ),
-            ScoringService(),
             lidarr=lidarr,
+            scoring=ScoringService(),
         )
 
-        assert (await svc.detect_with_confidence("The Weeknd")).content_type == ContentType.UNKNOWN
+        assert (await svc.detect_content_type("The Weeknd")).content_type == ContentType.UNKNOWN
 
     async def test_close_cross_type_match_asks_user_to_choose(self):
         """A narrow lead must remain a user choice, regardless of type."""
@@ -358,19 +374,19 @@ class TestSearchServiceMusicDetection:
         lidarr.lookup_artist = AsyncMock(return_value=[ArtistInfo(mb_id="mb-1", name="Metallicaa")])
 
         svc = SearchService(
-            self._scryer(movies=[MovieInfo(tmdb_id=1, title="Metallikaa", year=2025)]),
-            ScoringService(),
+            *self._video(movies=[MovieInfo(tmdb_id=1, title="Metallikaa", year=2025)]),
             lidarr=lidarr,
+            scoring=ScoringService(),
         )
 
-        assert (await svc.detect_with_confidence("Metallicaa")).content_type == ContentType.UNKNOWN
+        assert (await svc.detect_content_type("Metallicaa")).content_type == ContentType.UNKNOWN
 
     async def test_unknown_when_no_music_backend(self):
         from bot.services.scoring import ScoringService
         from bot.services.search_service import SearchService
 
-        svc = SearchService(self._scryer(), ScoringService(), lidarr=None, slskd=None)
-        ct = (await svc.detect_with_confidence("NoSuchArtist")).content_type
+        svc = SearchService(*self._video(), lidarr=None, slskd=None, scoring=ScoringService())
+        ct = (await svc.detect_content_type("NoSuchArtist")).content_type
         assert ct == ContentType.UNKNOWN
 
     async def test_slskd_is_used_when_lidarr_is_absent(self):
@@ -381,8 +397,8 @@ class TestSearchServiceMusicDetection:
         slskd = AsyncMock()
         slskd.lookup_artists = AsyncMock(return_value=[ArtistInfo(mb_id="slskd:Metallica", name="Metallica")])
 
-        svc = SearchService(self._scryer(), ScoringService(), lidarr=None, slskd=slskd)
-        ct = (await svc.detect_with_confidence("Metallica")).content_type
+        svc = SearchService(*self._video(), lidarr=None, slskd=slskd, scoring=ScoringService())
+        ct = (await svc.detect_content_type("Metallica")).content_type
         assert ct == ContentType.MUSIC
         slskd.lookup_artists.assert_awaited_once()
 
@@ -395,8 +411,8 @@ class TestSearchServiceMusicDetection:
         slskd = AsyncMock()
         slskd.lookup_artists = AsyncMock(return_value=[ArtistInfo(mb_id="slskd:Metallica", name="Metallica")])
 
-        svc = SearchService(self._scryer(), ScoringService(), lidarr=lidarr, slskd=slskd)
-        ct = (await svc.detect_with_confidence("Metallica")).content_type
+        svc = SearchService(*self._video(), lidarr=lidarr, slskd=slskd, scoring=ScoringService())
+        ct = (await svc.detect_content_type("Metallica")).content_type
         assert ct == ContentType.MUSIC
 
 
@@ -406,7 +422,7 @@ class TestAddServiceMusic:
     async def test_add_artist_no_lidarr_returns_error(self):
         from bot.services.add_service import AddService
 
-        svc = AddService(AsyncMock(), lidarr=None)
+        svc = AddService(AsyncMock(), AsyncMock(), lidarr=None)
         artist = ArtistInfo(mb_id="m-1", name="X")
         added, action = await svc.add_artist(
             artist=artist, quality_profile_id=1, metadata_profile_id=1, root_folder_path="/m",
@@ -421,7 +437,7 @@ class TestAddServiceMusic:
         lidarr = AsyncMock()
         existing = ArtistInfo(mb_id="m-1", name="X", lidarr_id=42)
         lidarr.get_artist_by_mbid = AsyncMock(return_value=existing)
-        svc = AddService(AsyncMock(), lidarr=lidarr)
+        svc = AddService(AsyncMock(), AsyncMock(), lidarr=lidarr)
         added, action = await svc.add_artist(
             artist=ArtistInfo(mb_id="m-1", name="X"),
             quality_profile_id=1,

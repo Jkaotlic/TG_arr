@@ -1,4 +1,21 @@
-"""Release scoring service."""
+"""Release scoring service.
+
+Rollback 2026-08-10 (Task 11): this score is a display/tie-break aid, not a
+policy. Radarr/Sonarr's own quality-profile custom formats already implement
+the English-audio/Russian-subtitles language policy and apply it to every
+grab, bot-initiated or not — so this module intentionally has no language
+rules. `bot/services/search_service.search_releases_for_title` sorts
+accepted-before-rejected and by *arr's own `customFormatScore` FIRST; the
+score computed here only breaks ties between releases *arr already ranked
+equally, plus decides ordering for anything with no *arr verdict at all
+(e.g. a Prowlarr free-text hit).
+
+The `ita`/`french`/`spanish`/`german`/`hindi`/`korean`/`chinese` entries in
+`ScoringWeights.bad_keywords` are NOT part of that removed policy and were
+deliberately left as-is: they are scene-tag hygiene (flagging a foreign-dub
+release tag the same way "sample"/"trailer" are flagged), not a duplicate of
+the specific English-Audio/RusSubs/Russian-Dub custom formats *arr runs.
+"""
 
 import re
 from dataclasses import dataclass
@@ -46,11 +63,6 @@ class ScoringWeights:
     audio_dtshd: int = 7
     audio_dts: int = 5
     audio_dd51: int = 3
-
-    # Subtitle bonuses
-    russian_subtitle_bonus: int = 15
-    english_audio_bonus: int = 35
-    russian_dub_without_english_penalty: int = -50
 
     # DEAD-06: bonus when a release's resolution matches the user's
     # preferred_resolution setting (previously collected but never consumed).
@@ -112,22 +124,16 @@ class ScoringWeights:
                 pat = re.compile(rf"\b{esc}\b", re.IGNORECASE)
             patterns.append((pat, penalty))
         self._bad_keyword_patterns = patterns
-        # Language markers are release-title tokens, not codec information.
-        # Keep ENG strict so normal words and titles do not produce false positives.
-        self._english_audio_pattern = re.compile(
-            r"(?<![A-Za-z0-9])(?:ENG|ENGLISH)(?![A-Za-z0-9])", re.IGNORECASE
-        )
-        self._russian_subtitle_pattern = re.compile(
-            r"(?<![A-Za-z0-9])(?:RUS\.?(?:SUB|SRT|FORCED)|SUBS?\.?RUS|"
-            r"RUSSIAN\.?(?:SUB|SRT|FORCED))(?![A-Za-z0-9])",
-            re.IGNORECASE,
-        )
-        self._russian_dub_pattern = re.compile(
-            r"(?<![A-Za-z0-9])(?:DUB\.?RUS|RUS\.?DUB|DVO|MVO|AVO|LOSTFILM|"
-            r"DUB(?:BED)?\.?(?:RU|RUS|RUSSIAN)|(?:RU|RUS|RUSSIAN)\.?(?:DUB|AUDIO)|"
-            r"SELEZEN|GLADIATOR|RG\.PARAVOZIK|HDREZKA|JASKIER)(?![A-Za-z0-9])",
-            re.IGNORECASE,
-        )
+        # Rollback 2026-08-10 (Task 11): the English-audio/Russian-subtitle/
+        # Russian-dub language patterns that used to live here are gone.
+        # Measured on the live stack: Radarr and Sonarr already implement that
+        # exact policy as custom formats attached to the quality profile
+        # (`English Audio` +250, `RusSubs` +250, `Russian Dub without English`
+        # -1000) and apply it to their own RSS/automatic grabs too — a second,
+        # bot-local copy would only cover bot-initiated searches and would
+        # inevitably drift from the first. See SearchResult.custom_format_score
+        # / .rejected / .rejections, surfaced verbatim by
+        # bot/ui/formatters/search.py instead of re-derived here.
 
 
 class ScoringService:
@@ -245,25 +251,6 @@ class ScoringService:
         if quality.is_proper:
             score += self.weights.proper_bonus
 
-        # Prefer the requested language combination. Russian
-        # voice-over markers land in quality.subtitle, so classify the value instead
-        # of treating every non-empty value as subtitles.
-        title = result.title
-        subtitle_marker = (quality.subtitle or "").lower()
-        has_english_audio = bool(self.weights._english_audio_pattern.search(title))
-        has_russian_subtitles = subtitle_marker == "russub" or bool(
-            self.weights._russian_subtitle_pattern.search(title)
-        )
-        has_russian_dub = subtitle_marker in {"dvo", "mvo", "avo"} or bool(
-            self.weights._russian_dub_pattern.search(title)
-        )
-        if has_english_audio:
-            score += self.weights.english_audio_bonus
-        if has_russian_subtitles:
-            score += self.weights.russian_subtitle_bonus
-        if has_russian_dub and not has_english_audio:
-            score += self.weights.russian_dub_without_english_penalty
-
         # Seeder bonus
         if result.seeders is not None and result.seeders > 0:
             seeder_bonus = min(
@@ -309,23 +296,26 @@ class ScoringService:
         preferred_resolution: Optional[str] = None,
     ) -> list[SearchResult]:
         """
-        Sort results best-first, deferring to Scryer's verdict when it exists.
+        Sort results best-first, deferring to *arr's own verdict when it exists.
 
-        Migration 2026-07-28 — how this coexists with Scryer's own policy:
+        Rollback 2026-08-10 (Tasks 14/15) — how this coexists with *arr's own
+        policy:
 
-        Scryer already evaluates every candidate against the configured quality
-        profile (`4K Remux + 1080P Fallback` for movies/series, `1080p` for
-        anime) AND the `English Audio + Russian Subtitles` Rego rule set. That
-        verdict is authoritative, so the bot ranks by it rather than re-deriving
-        an opinion that could contradict it:
+        Radarr/Sonarr's interactive search already evaluates every candidate
+        against the configured quality profile and its custom formats (the
+        English-audio/Russian-subtitles policy among them — see Task 11).
+        That verdict is authoritative, so the bot ranks by it rather than
+        re-deriving an opinion that could contradict it:
 
-          1. releases Scryer blocked (`scryer_allowed is False`) sink to the
-             bottom — they are shown (the user may still force one) but never
-             offered first;
-          2. among the rest, Scryer's `releaseScore` decides;
-          3. the bot's own heuristic only breaks ties between equal Scryer
-             scores, and is the sole ranking for results with no verdict at all
-             (e.g. a session persisted before the migration).
+          1. releases *arr refuses (`rejected is True`) sink to the bottom —
+             they are shown (the user may still force one) but never offered
+             first;
+          2. among the rest, *arr's own `customFormatScore` decides;
+          3. the bot's own heuristic only breaks ties between equal
+             customFormatScores, and is the sole ranking for results with no
+             verdict at all (a plain Prowlarr free-text hit, which never went
+             through *arr's profile and keeps `custom_format_score`'s unset
+             default of 0 — see `SearchResult.custom_format_score`).
 
         `calculated_score` is still computed for every result — the release card
         and the auto-grab threshold display it.
@@ -339,9 +329,9 @@ class ScoringService:
 
         results.sort(
             key=lambda r: (
-                # False sorts before True, so invert: allowed (or unknown) first.
-                r.scryer_allowed is False,
-                -(r.scryer_score if r.scryer_score is not None else 0),
+                # False sorts before True, so a rejected release sinks last.
+                r.rejected,
+                -r.custom_format_score,
                 -r.calculated_score,
             )
         )

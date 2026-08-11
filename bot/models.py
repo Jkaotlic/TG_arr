@@ -3,9 +3,9 @@
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, ClassVar, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
 
 
 def _utcnow() -> datetime:
@@ -21,8 +21,11 @@ QBIT_INFINITE_ETA = 8640000
 class ContentType(str, Enum):
     """Type of content being searched.
 
-    ANIME is a first-class facet in Scryer (own library, own `1080p` quality
-    profile) rather than a flavour of SERIES, so it gets its own member.
+    ANIME is not a separate service or library — rollback 2026-08-10 measured
+    the live Sonarr holding 15 `seriesType=standard` series and 1 `anime`, all
+    in the same root folders. It still gets its own member because search/UI
+    routing cares about the distinction, but it maps onto Sonarr's single
+    `seriesType` string rather than a facet of its own.
     """
 
     MOVIE = "movie"
@@ -32,36 +35,33 @@ class ContentType(str, Enum):
     UNKNOWN = "unknown"
 
     @property
-    def scryer_facet(self) -> Optional[str]:
-        """The `MediaFacetValue` Scryer expects, or None for non-video types."""
-        return _SCRYER_FACETS.get(self)
+    def sonarr_series_type(self) -> Optional[str]:
+        """Sonarr's `seriesType`, or None for types Sonarr does not hold.
+
+        Rollback 2026-08-10: anime is not a separate service or library — the
+        live Sonarr keeps 15 standard series and 1 anime in the same root
+        folders, so the facet collapses to this one field.
+        """
+        return _SONARR_SERIES_TYPES.get(self)
 
     @classmethod
-    def from_scryer_facet(cls, facet: Optional[str]) -> "ContentType":
-        """Map a Scryer `MediaFacetValue` (any case) back to a ContentType."""
-        if not facet:
+    def from_sonarr_series_type(cls, value: Optional[str]) -> "ContentType":
+        """Map a Sonarr `seriesType` (any case) back to a ContentType."""
+        if not value:
             return cls.UNKNOWN
-        return _FACET_TO_CONTENT_TYPE.get(facet.upper(), cls.UNKNOWN)
+        return _SERIES_TYPE_TO_CONTENT_TYPE.get(value.lower(), cls.UNKNOWN)
 
 
-_SCRYER_FACETS: dict["ContentType", str] = {}
-_FACET_TO_CONTENT_TYPE: dict[str, "ContentType"] = {}
+_SONARR_SERIES_TYPES: dict["ContentType", str] = {
+    ContentType.SERIES: "standard",
+    ContentType.ANIME: "anime",
+}
+_SERIES_TYPE_TO_CONTENT_TYPE: dict[str, "ContentType"] = {
+    "standard": ContentType.SERIES,
+    "anime": ContentType.ANIME,
+}
 
-
-def _init_facet_maps() -> None:
-    pairs = (
-        (ContentType.MOVIE, "MOVIE"),
-        (ContentType.SERIES, "SERIES"),
-        (ContentType.ANIME, "ANIME"),
-    )
-    for content_type, facet in pairs:
-        _SCRYER_FACETS[content_type] = facet
-        _FACET_TO_CONTENT_TYPE[facet] = content_type
-
-
-_init_facet_maps()
-
-#: Content types Scryer handles (i.e. everything except music/unknown).
+#: Content types the *arr stack handles (i.e. everything except music/unknown).
 VIDEO_CONTENT_TYPES = (ContentType.MOVIE, ContentType.SERIES, ContentType.ANIME)
 
 
@@ -100,11 +100,41 @@ class QualityInfo(BaseModel):
 
 
 class SearchResult(BaseModel):
-    """Normalized release candidate (from Scryer's indexer search)."""
+    """Normalized release candidate (from *arr's or Prowlarr's indexer search)."""
 
     guid: str = Field(..., description="Unique identifier for the release")
     indexer: str = Field(default="Unknown", description="Indexer name")
-    indexer_id: int = Field(default=0, description="Indexer id (unused since the Scryer migration)")
+    # Rollback 2026-08-10 (Task 10, fix round 1): `indexer_id` alone is NOT a
+    # safe signal for the native grab path — ProwlarrClient._normalize_result
+    # also fills it, with PROWLARR's own indexer numbering, which is NOT
+    # interchangeable with *arr's. `origin` records which parser actually
+    # built this SearchResult, and IS safe: only ArrBaseClient._parse_release
+    # (fed by *arr's own interactive search) sets "arr"; ProwlarrClient's
+    # free-text parser always sets "prowlarr". `AddService.grab_release`
+    # requires BOTH `indexer_id` set AND `origin == "arr"` before taking the
+    # native path — a Prowlarr-sourced release can never take it, regardless
+    # of what its (Prowlarr-numbered) indexer_id happens to be.
+    #
+    # Fix round 2 (2026-08-10 review): named `origin`, not `source` — this
+    # model already has an unrelated `QualityInfo.source` (the release medium:
+    # BluRay/WEB-DL/HDTV/...), and both are read off variables conventionally
+    # named `result`/`release` in the same code paths (formatters read
+    # `result.quality.source`; grab_release read `release.source`). Also
+    # defaults to "prowlarr" (fail CLOSED), not "arr" — an untagged
+    # SearchResult (hand-built, a future producer that forgets to tag it)
+    # must never be trusted for the native path by default. Only the two live
+    # producers explicitly opt into "arr"; nothing opts into it by omission.
+    origin: Literal["arr", "prowlarr"] = Field(
+        default="prowlarr",
+        description="Which search produced this release — 'arr' (native grab path eligible) is "
+                    "set ONLY by ArrBaseClient._parse_release; every other/unlabeled constructor "
+                    "reads as 'prowlarr' (never native), see indexer_id's docstring",
+    )
+    indexer_id: Optional[int] = Field(
+        default=None,
+        description="Indexer id paired with guid — *arr's own numbering only when origin == 'arr'; "
+                    "Prowlarr's own (incompatible) numbering when origin == 'prowlarr'",
+    )
     title: str = Field(..., description="Release title")
     size: int = Field(default=0, description="Size in bytes")
     seeders: Optional[int] = Field(default=None, description="Number of seeders")
@@ -120,33 +150,18 @@ class SearchResult(BaseModel):
     # Parsed quality info
     quality: QualityInfo = Field(default_factory=QualityInfo)
 
-    # Scoring
-    prowlarr_score: Optional[int] = Field(default=None, description="Legacy Prowlarr score; unset since the Scryer migration")
-    calculated_score: int = Field(default=0, description="Our calculated score")
+    # Rollback 2026-08-10: *arr's interactive search returns releases it has
+    # already judged against the user's quality profile and custom formats.
+    # That verdict is authoritative — the local scoring only breaks ties.
+    # Prowlarr's free-text path leaves these at their defaults.
+    custom_format_score: int = Field(default=0, description="*arr customFormatScore")
+    rejected: bool = Field(default=False, description="*arr refuses this release")
+    rejections: list[str] = Field(default_factory=list, description="Why *arr refuses it, verbatim")
+    languages: list[str] = Field(default_factory=list, description="Languages *arr parsed")
 
-    # Scryer release candidate (migration 2026-07-28). Scryer already applies
-    # the quality profile and the Rego rules, so its verdict is authoritative
-    # and the bot's own `calculated_score` is only a display/tie-break aid.
-    scryer_title_id: Optional[str] = Field(default=None, description="Scryer title id this release belongs to")
-    candidate_token: Optional[str] = Field(
-        default=None,
-        description="Short-lived Scryer token identifying this candidate. SECRET: embeds the "
-                    "indexer download URL (with the tracker passkey) — never log it.",
-    )
-    queue_scope: Optional[dict[str, Any]] = Field(
-        default=None, description="QueueDownloadScopeInput to reuse when queueing this candidate"
-    )
-    scryer_score: Optional[int] = Field(default=None, description="Scryer releaseScore (profile + rules)")
-    scryer_preference_score: Optional[int] = Field(default=None, description="Scryer preferenceScore")
-    scryer_allowed: Optional[bool] = Field(default=None, description="Whether Scryer's profile allows this release")
-    block_codes: list[str] = Field(default_factory=list, description="Scryer block codes when not allowed")
-    policy_codes: list[str] = Field(
-        default_factory=list,
-        description="Rule codes from Scryer's scoringLog (e.g. english_audio_bonus). Empty means "
-                    "the policy said nothing — which is not the same as 'it said no'.",
-    )
-    auto_eligible: bool = Field(default=False, description="Scryer would grab this release automatically")
-    auto_decision_summary: Optional[str] = Field(default=None)
+    # Scoring
+    prowlarr_score: Optional[int] = Field(default=None, description="Legacy Prowlarr score; unset since the 2026-08-10 *arr rollback")
+    calculated_score: int = Field(default=0, description="Our calculated score")
 
     # Content detection
     detected_type: ContentType = Field(default=ContentType.UNKNOWN)
@@ -170,18 +185,19 @@ class SearchResult(BaseModel):
 
 
 class MovieInfo(BaseModel):
-    """Movie information from a Scryer metadata search or catalog entry."""
+    """Movie information from a TMDb search or Radarr catalog entry."""
 
     content_model_type: Literal["movie"] = "movie"
-    # Migration 2026-07-28: Scryer's metadata search keys on its own id
-    # (`metadata_id`, surfaced as `tvdbId` in the GraphQL payload) and does not
-    # always carry a TMDb id, so `tmdb_id`/`year` are no longer required. They
-    # stay for TMDb-sourced trending items and the external-link keyboards.
-    tmdb_id: int = Field(default=0, description="TMDB ID (0 when unknown)")
+    # Rollback 2026-08-10: back to Radarr's shape. Radarr always has both a
+    # tmdb_id and a year, and a movie can't be added to Radarr without one, so
+    # these are required again (they were relaxed for the previous backend's
+    # metadata search, which keyed on its own id and didn't always carry a
+    # TMDb id).
+    tmdb_id: int = Field(..., description="TMDB ID")
     imdb_id: Optional[str] = Field(default=None, description="IMDB ID")
     title: str = Field(..., description="Movie title")
     original_title: Optional[str] = Field(default=None)
-    year: Optional[int] = Field(default=None, description="Release year")
+    year: int = Field(..., description="Release year")
     overview: Optional[str] = Field(default=None, description="Plot summary")
     runtime: Optional[int] = Field(default=None, description="Runtime in minutes")
     studio: Optional[str] = Field(default=None)
@@ -190,26 +206,21 @@ class MovieInfo(BaseModel):
     fanart_url: Optional[str] = Field(default=None)
     ratings: dict[str, Any] = Field(default_factory=dict)
 
-    # Scryer-specific
-    scryer_id: Optional[str] = Field(default=None, description="Title id in Scryer if already in the catalog")
-    metadata_id: Optional[str] = Field(default=None, description="Scryer metadata id (`tvdbId` in searchMetadata)")
-    slug: Optional[str] = Field(default=None, description="Latin-script slug — matched against when the title is localised")
-    library_id: Optional[str] = Field(default=None, description="Scryer library id")
-    quality_tier: Optional[str] = Field(default=None, description="Quality profile name applied by Scryer")
-    current_quality_tier: Optional[str] = Field(default=None, description="Quality actually on disk")
+    radarr_id: Optional[int] = Field(default=None, description="Movie id in Radarr if already added")
     monitored: bool = Field(default=False)
     is_available: bool = Field(default=False, description="Whether movie is available")
     has_file: bool = Field(default=False, description="Whether movie file exists")
-    quality_profile_id: Optional[str] = Field(default=None)
+    quality_profile_id: Optional[int] = Field(default=None)
     root_folder_path: Optional[str] = Field(default=None)
 
 
 class SeriesInfo(BaseModel):
-    """Series (or anime) information from Scryer.
+    """Series (or anime) information from a TVDB search or Sonarr catalog entry.
 
-    Anime rides this model too — Scryer models it as a separate *facet*, not a
-    separate entity shape. `facet` carries "SERIES"/"ANIME" so callers can route
-    add/search to the right library without a second lookup.
+    Anime rides this model too — rollback 2026-08-10 measured the live Sonarr
+    holding both `seriesType=standard` and `seriesType=anime` entries in the
+    same instance and root folders, so `series_type` is Sonarr's own field
+    rather than a separate facet/library concept.
     """
 
     content_model_type: Literal["series"] = "series"
@@ -230,26 +241,20 @@ class SeriesInfo(BaseModel):
     season_count: int = Field(default=0)
     total_episode_count: int = Field(default=0)
 
-    # Scryer-specific
-    scryer_id: Optional[str] = Field(default=None, description="Title id in Scryer if already in the catalog")
-    metadata_id: Optional[str] = Field(default=None, description="Scryer metadata id (`tvdbId` in searchMetadata)")
-    slug: Optional[str] = Field(default=None, description="Latin-script slug — matched against when the title is localised")
-    facet: str = Field(default="SERIES", description="Scryer MediaFacetValue: SERIES or ANIME")
-    library_id: Optional[str] = Field(default=None, description="Scryer library id")
-    quality_tier: Optional[str] = Field(default=None, description="Quality profile name applied by Scryer")
-    current_quality_tier: Optional[str] = Field(default=None, description="Quality actually on disk")
+    sonarr_id: Optional[int] = Field(default=None, description="Series id in Sonarr if already added")
+    series_type: str = Field(default="standard", description="Sonarr seriesType: standard or anime")
     monitored: bool = Field(default=False)
     has_file: bool = Field(default=False, description="Whether at least one episode file exists")
     episodes_owned: int = Field(default=0)
     episodes_total: int = Field(default=0)
-    quality_profile_id: Optional[str] = Field(default=None)
+    quality_profile_id: Optional[int] = Field(default=None)
     root_folder_path: Optional[str] = Field(default=None)
     seasons: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
     def content_type(self) -> ContentType:
-        """The ContentType matching this title's Scryer facet."""
-        return ContentType.from_scryer_facet(self.facet)
+        """The ContentType matching this title's Sonarr seriesType."""
+        return ContentType.from_sonarr_series_type(self.series_type)
 
 
 class ArtistInfo(BaseModel):
@@ -286,10 +291,12 @@ class MetadataProfile(BaseModel):
 
 
 class QualityProfile(BaseModel):
-    """Quality profile from Scryer or Lidarr.
+    """Quality profile from Radarr, Sonarr or Lidarr.
 
-    Scryer profile ids are slugs ("4k", "1080p"); Lidarr's are integers — hence
-    the union type. Compare with `str(...)` when matching a stored preference.
+    All three *arr services use plain integer ids; the union type is a
+    leftover from the previous backend (its profile ids were slugs like
+    "4k"/"1080p"). Compare with `str(...)` when matching a stored preference
+    — cheap and robust either way.
     """
 
     id: Union[int, str]
@@ -297,10 +304,11 @@ class QualityProfile(BaseModel):
 
 
 class RootFolder(BaseModel):
-    """Root folder from Scryer or Lidarr.
+    """Root folder from Radarr, Sonarr or Lidarr.
 
-    Scryer's `RootFolderPayload` has no id of its own — the path *is* the
-    identity, so the client mirrors the path into `id`.
+    All three *arr services carry their own integer id. The union type is a
+    leftover from the previous backend, whose root-folder payload had no id
+    of its own (the client mirrored the path into `id` instead).
     """
 
     id: Union[int, str]
@@ -314,192 +322,6 @@ class RootFolder(BaseModel):
         if self.free_space is None:
             return "N/A"
         return format_bytes(self.free_space)
-
-
-# ============================================================================
-# Scryer models (migration 2026-07-28)
-# ============================================================================
-
-
-class IndexerStat(BaseModel):
-    """Per-indexer 24h counters from Scryer's `systemHealth.indexerStats`."""
-
-    name: str
-    queries_24h: int = 0
-    successful_24h: int = 0
-    failed_24h: int = 0
-
-    @property
-    def failure_rate(self) -> float:
-        """Share of failed queries in the last 24h (0.0 when idle)."""
-        total = self.successful_24h + self.failed_24h
-        return (self.failed_24h / total) if total else 0.0
-
-
-class ScryerHealth(BaseModel):
-    """Snapshot of Scryer's `systemHealth` query."""
-
-    service_ready: bool = False
-    total_titles: int = 0
-    monitored_titles: int = 0
-    titles_movie: int = 0
-    titles_series: int = 0
-    titles_anime: int = 0
-    version: Optional[str] = None
-    indexers: list[IndexerStat] = Field(default_factory=list)
-
-
-class ScryerQueueItem(BaseModel):
-    """One row of Scryer's `downloadQueue`."""
-
-    id: str
-    title_id: Optional[str] = None
-    episode_id: Optional[str] = None
-    title_name: str = "?"
-    content_type: ContentType = ContentType.UNKNOWN
-    state: str = "UNKNOWN"
-    display_state: str = "UNKNOWN"
-    progress_percent: int = 0
-    size_bytes: Optional[int] = None
-    remaining_seconds: Optional[int] = None
-    queued_at: Optional[datetime] = None
-    client_name: Optional[str] = None
-    attention_required: bool = False
-    attention_reason: Optional[str] = None
-    import_status: Optional[str] = None
-    download_id: Optional[str] = None
-
-    @property
-    def size_formatted(self) -> str:
-        return format_bytes(self.size_bytes) if self.size_bytes else "N/A"
-
-    @property
-    def eta_formatted(self) -> str:
-        """Human-readable ETA; "∞" when Scryer has no estimate."""
-        if self.remaining_seconds is None or self.remaining_seconds < 0:
-            return "∞"
-        hours, remainder = divmod(self.remaining_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        if hours > 24:
-            return f"{hours // 24}d {hours % 24}h"
-        if hours:
-            return f"{hours}h {minutes}m"
-        if minutes:
-            return f"{minutes}m {seconds}s"
-        return f"{seconds}s"
-
-
-class ScryerCalendarItem(BaseModel):
-    """One row of Scryer's `calendarEpisodes`."""
-
-    id: str
-    title_id: str
-    title_name: str
-    content_type: ContentType = ContentType.SERIES
-    season_number: Optional[int] = None
-    episode_number: Optional[int] = None
-    episode_title: Optional[str] = None
-    air_date: Optional[str] = None
-    monitored: bool = True
-
-
-class ScryerWantedItem(BaseModel):
-    """One row of Scryer's `wantedItems`."""
-
-    id: str
-    title_id: str
-    title_name: str = "?"
-    content_type: ContentType = ContentType.UNKNOWN
-    season_number: Optional[int] = None
-    episode_number: Optional[int] = None
-    status: Optional[str] = None
-    media_type: Optional[str] = None
-
-
-class ScryerImportRecord(BaseModel):
-    """One row of Scryer's `importHistory` — the journal of finished imports.
-
-    This is the authoritative "did the file actually land" signal. The active
-    `downloadQueue` is not: a finished import leaves it, so watching the queue
-    misses the very event the user is waiting for (audit 2026-07-30, BUG-01).
-    """
-
-    id: str
-    source_title: str = "?"
-    title_id: Optional[str] = None
-    content_type: ContentType = ContentType.UNKNOWN
-    #: `ImportStatusValue`: PENDING/RUNNING/PROCESSING/COMPLETED/FAILED/SKIPPED.
-    status: Optional[str] = None
-    #: `ImportDecisionValue`: IMPORTED/REJECTED/SKIPPED/CONFLICT/UNMATCHED/FAILED.
-    decision: Optional[str] = None
-    skip_reason: Optional[str] = None
-    error_message: Optional[str] = None
-    dest_path: Optional[str] = None
-    finished_at: Optional[datetime] = None
-
-    #: Decisions that mean the media is in the library now.
-    IMPORTED_DECISIONS: ClassVar[frozenset[str]] = frozenset({"IMPORTED"})
-    #: …and the ones that mean it isn't, and won't be without help.
-    FAILED_DECISIONS: ClassVar[frozenset[str]] = frozenset(
-        {"REJECTED", "FAILED", "UNMATCHED", "CONFLICT"}
-    )
-    #: Statuses that mean the import is still in flight — say nothing yet.
-    PENDING_STATUSES: ClassVar[frozenset[str]] = frozenset(
-        {"PENDING", "RUNNING", "PROCESSING"}
-    )
-
-    @property
-    def is_finished(self) -> bool:
-        return (self.status or "").upper() not in self.PENDING_STATUSES
-
-    @property
-    def is_imported(self) -> bool:
-        return self.is_finished and (self.decision or "").upper() in self.IMPORTED_DECISIONS
-
-    @property
-    def is_failed(self) -> bool:
-        return self.is_finished and (self.decision or "").upper() in self.FAILED_DECISIONS
-
-    @property
-    def failure_reason(self) -> str:
-        """Shortest honest explanation of a failed import.
-
-        `skipReason` is the machine-readable cause (POLICY_MISMATCH,
-        ALREADY_IMPORTED…); `errorMessage` carries Scryer's own counts and last
-        error, which is what makes the failure actionable.
-        """
-        parts = [p for p in (self.skip_reason, self.error_message) if p]
-        return " — ".join(parts) if parts else (self.decision or "причина неизвестна")
-
-
-class QueueResult(BaseModel):
-    """Outcome of a queue mutation (`QueueDownloadPayload`)."""
-
-    status: str = "QUEUED"
-    job_id: Optional[str] = None
-    title_id: Optional[str] = None
-    title_name: Optional[str] = None
-    conflict: Optional[dict[str, Any]] = None
-
-    @property
-    def queued(self) -> bool:
-        return self.status == "QUEUED"
-
-
-class AddTitleOutcome(BaseModel):
-    """Outcome of `addTitle` / `addTitleAndQueueDownload` (`AddTitleResult`)."""
-
-    title: Union[MovieInfo, SeriesInfo] = Field(..., description="The added or reused title")
-    reused_existing: bool = False
-    download_job_id: Optional[str] = None
-    queued_download: Optional[QueueResult] = None
-
-    @property
-    def queued(self) -> bool:
-        """True when Scryer actually put a download in the queue."""
-        if self.queued_download is not None:
-            return self.queued_download.queued
-        return self.download_job_id is not None
 
 
 # ============================================================================
@@ -612,32 +434,47 @@ class NavidromeAlbum(BaseModel):
 class UserPreferences(BaseModel):
     """User preferences stored in database.
 
-    Migration 2026-07-28: the per-*arr profile/folder preferences collapsed into
-    one Scryer pair. Scryer ids are slugs/paths, so these are strings now; the
-    Lidarr trio stays integer-keyed. Legacy `radarr_*`/`sonarr_*` keys still
-    present in stored JSON are ignored (extra keys are dropped by pydantic).
+    Rollback 2026-08-10 (Task 12, fix round 1): the interim migration
+    (2026-07-28) had collapsed the per-*arr profile/folder preferences into
+    one shared pair keyed to the previous backend's own id shape. That
+    conflates two independent id spaces — live measurement: Radarr's root
+    folders are ids 1 and 2, and Sonarr's *are also* 1 and 2, pointing at
+    completely different paths — so a movie preference could silently be
+    applied to a newly added series. Split back into one pair per *arr
+    service. Both are plain ints now (Radarr/Sonarr ids always are — unlike
+    the previous backend's string slugs, which needed a coercing validator
+    this replaces; that validator is gone with the fields it guarded).
+
+    Legacy combined-pair keys (and the even older pre-migration
+    `radarr_*`/`sonarr_*` keys from before that) still present in stored JSON
+    are silently ignored on load — extra keys are dropped by pydantic's
+    default `extra="ignore"` — same graceful-degradation behaviour the
+    2026-07-28 migration already relied on for its own predecessor. That
+    alone would only degrade a stale row to "no preference set", not lose
+    it entirely — but "no preference set" still means the settings picker
+    falls back to "first available" (see `AddService.resolve_profile`),
+    which was live-measured to be Radarr's profile id 1, "Any" — the exact
+    profile whose custom-format scores had to be repaired because it
+    rewarded the releases the language policy exists to reject.
+    Correction (Task 13): this originally said no migration was needed
+    because "no settings UI has written the legacy pair yet" — wrong; the bot
+    ran on the previous backend for about two weeks before this rollback, so
+    real rows do carry the old keys. `Database._migrate_to_v4` (`bot/db.py`)
+    copies the legacy combined-pair keys forward into the `radarr_*`/
+    `sonarr_*` fields below (idempotent, fills only unset fields) so an
+    existing user's choice survives the rollback instead of silently
+    reverting.
     """
 
-    scryer_quality_profile_id: Optional[str] = None
-    scryer_root_folder_id: Optional[str] = None
+    radarr_quality_profile_id: Optional[int] = None
+    radarr_root_folder_id: Optional[int] = None
+    sonarr_quality_profile_id: Optional[int] = None
+    sonarr_root_folder_id: Optional[int] = None
     lidarr_quality_profile_id: Optional[int] = None
     lidarr_metadata_profile_id: Optional[int] = None
     lidarr_root_folder_id: Optional[int] = None
     preferred_resolution: Optional[str] = None  # 1080p, 2160p, etc.
     auto_grab_enabled: bool = False
-
-    @field_validator("scryer_quality_profile_id", "scryer_root_folder_id", mode="before")
-    @classmethod
-    def _coerce_scryer_id(cls, v):
-        """Scryer ids are slugs/paths, but a stored preference may still be a
-        number (a value written before the migration, or a numeric-looking
-        profile id). Coerce rather than reject: a ValidationError here makes
-        `_row_to_user` fall back to defaults and silently drop every other
-        preference the user had set.
-        """
-        if v is None or isinstance(v, str):
-            return v
-        return str(v)
 
 
 class User(BaseModel):
@@ -676,7 +513,7 @@ class SearchSession(BaseModel):
     selected_result: Optional[SearchResult] = None
     selected_content: Optional[ContentInfo] = None
     # LOGIC-06: full Radarr/Sonarr lookup candidates captured during content-type
-    # detection (search_service.detect_with_confidence), so handle_release_selection/
+    # detection (search_service.detect_content_type), so handle_release_selection/
     # _execute_grab can reuse them instead of repeating the same lookup up to
     # 2 more times per grab. None when detection didn't run or produced no
     # usable lookup (music winner, low-confidence, timeout, etc).

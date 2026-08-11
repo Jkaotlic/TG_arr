@@ -17,7 +17,7 @@ from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import strip_command
 from bot.models import ActionLog, ActionType, ContentType, SearchSession, User
-from bot.services.search_service import describe_scryer_failure
+from bot.services.search_service import SearchService, describe_search_failure
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import Keyboards
 from bot.ui.menu import MENU_BUTTONS, MENU_SEARCH
@@ -75,8 +75,8 @@ async def cmd_series(message: Message, db_user: User, db: Database) -> None:
 
 @router.message(Command("anime"))
 async def cmd_anime(message: Message, db_user: User, db: Database) -> None:
-    """Handle /anime <query> — anime is its own Scryer facet (own library and
-    `1080p` quality profile), not a flavour of series."""
+    """Handle /anime <query> — anime is its own ContentType (routes to
+    Sonarr's `seriesType=anime`), not a plain flavour of series."""
     if not message.text:
         await message.answer("Укажите название аниме: <code>/anime Frieren</code>")
         return
@@ -179,66 +179,146 @@ def _pick_metadata_candidate(candidates: list, query_year: Optional[int]):
     return candidates[0]
 
 
-async def _resolve_title(
-    search_service,
-    add_service,
-    detection,
-    content_type: ContentType,
-    lookup_term: str,
-    query_year: Optional[int],
-    candidates: Optional[list] = None,
-    chosen=None,
-):
-    """Resolve a query to a Scryer title id, adding the title if it's new.
+async def _lookup_metadata_candidates(search_service, term: str, content_type: ContentType) -> list:
+    """Metadata candidates for one facet.
 
-    Scryer can only list releases for a title in its catalog, so this is the
-    step that replaced "just send the query to Prowlarr". The title is added
-    **unmonitored** — browsing releases must not enrol anything into automatic
-    acquisition; `AddService.grab_release` turns monitoring on once the user
-    actually downloads something.
+    Replaces `SearchService.search_metadata`, which Task 9's own brief
+    neither tested nor specified and is left as a `NotImplementedError` stub
+    (see its docstring) — this handler no longer resolves a catalog title
+    before *listing* releases (that requirement is gone with the previous
+    backend), only before *adding* one.
 
-    `candidates` / `chosen` let the caller pass work it already did: the
-    metadata list it fetched to decide whether to ask, or the entry the user
-    picked from that question.
+    Fix round 1 (review finding 1): this used to call
+    `search_service.radarr.lookup_movie`/`.sonarr.lookup_series` directly,
+    bypassing `_lookup_branch`'s semaphore/circuit-breaker entirely — the
+    exact protection Task 8 restored to stop "a burst of searches takes all
+    three services down at once" (see `_lookup_branch`'s docstring). Every
+    explicit `/movie`, `/series`, `/anime` search now goes through
+    `SearchService.lookup_movies`/`lookup_series`, the same guarded path
+    `detect_content_type`'s own fan-out uses. Series/anime reuse
+    `SearchService.split_series_candidates`, the same genre-based split
+    `detect_content_type` uses, so a plain "/series" search and an
+    auto-detected one classify anime identically.
     """
-    if chosen is None:
-        if candidates is None:
-            candidates = (
-                detection.lookup_results
-                if detection and detection.content_type == content_type and detection.lookup_results
-                else await search_service.search_metadata(lookup_term, content_type)
-            )
-        chosen = _pick_metadata_candidate(candidates, query_year)
-    if chosen is None:
-        return None
+    if content_type is ContentType.MOVIE:
+        return await search_service.lookup_movies(term)
+    if content_type in (ContentType.SERIES, ContentType.ANIME):
+        all_series = await search_service.lookup_series(term)
+        series, anime = SearchService.split_series_candidates(all_series)
+        return anime if content_type is ContentType.ANIME else series
+    return []
 
-    title, created = await add_service.ensure_title(chosen, content_type)
-    if not getattr(title, "scryer_id", None):
-        logger.warning("scryer_title_without_id", title=getattr(title, "title", None))
-        return None
-    logger.info(
-        "title_resolved",
-        title=title.title,
-        title_id=title.scryer_id,
-        content_type=content_type.value,
-        created=created,
+
+async def _resolve_arr_entry(
+    add_service,
+    content_type: ContentType,
+    candidate,
+    db_user: User,
+):
+    """Turn a chosen metadata candidate into a library entry with an arr_id.
+
+    Rollback 2026-08-10 (Task 12). *arr's interactive release search needs a
+    movie/series id already in Radarr/Sonarr's own library — unlike the
+    previous backend, which searched releases per catalog title after an
+    explicit "ensure_title" add (unmonitored, purely to get an id).
+    Radarr/Sonarr have no such "list releases for something not yet added"
+    mode, and adding is cheap and is what the user wants anyway if they go on
+    to grab something — so this adds the title the moment a candidate is resolved
+    (`search_for_movie`/`search_for_missing=False`: nothing is grabbed
+    automatically, the user is about to pick one specific release), and the
+    caller tells the user plainly when that happened (`created=True`).
+
+    A candidate whose lookup already carries a `radarr_id`/`sonarr_id` is
+    already in the library — reused as-is, no add call, no extra network
+    round-trip.
+
+    Returns `(title_info, arr_id, created)`; `(None, None, False)` when
+    there is genuinely nothing to resolve (no candidate) or the add call
+    itself failed against a *reachable, configured* Radarr/Sonarr. Raises
+    `ValueError` when Radarr/Sonarr has no quality profiles or no root
+    folders configured at all — that is a setup problem, not "this title
+    doesn't exist", and the caller renders it as a distinct message instead
+    of the generic "nothing found" (fix round 1, review finding — the two
+    used to read identically to the user).
+
+    Fix round 1 (review finding 2): `radarr_quality_profile_id`/
+    `radarr_root_folder_id` and `sonarr_quality_profile_id`/
+    `sonarr_root_folder_id` are separate `UserPreferences` fields, not one
+    shared pair — Radarr's and Sonarr's ids are independent
+    sequences (live measurement: both start at 1, 2, pointing at unrelated
+    paths), so a single shared preference could silently apply a movie's
+    folder/profile choice to a series.
+    """
+    if candidate is None:
+        return None, None, False
+
+    if content_type is ContentType.MOVIE:
+        if candidate.radarr_id:
+            return candidate, candidate.radarr_id, False
+        client = add_service.radarr
+        profiles = await client.get_quality_profiles()
+        folders = await client.get_root_folders()
+        if not profiles or not folders:
+            logger.warning("radarr_add_blocked_no_profiles_or_folders")
+            raise ValueError("В Radarr не настроены профили качества или папки — обратитесь к администратору")
+        profile = add_service.resolve_profile(profiles, db_user.preferences.radarr_quality_profile_id)
+        folder_path = add_service.resolve_root_folder(folders, db_user.preferences.radarr_root_folder_id)
+        added, _action = await add_service.add_movie(
+            candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
+            search_for_movie=False,
+            # Added UNMONITORED: this add exists only to obtain a Radarr id so
+            # the interactive search can run. `search_for_movie=False` stops the
+            # immediate search, but a monitored title still joins Radarr's RSS
+            # loop — so a user who merely looked at the release list and walked
+            # away would get the film downloaded anyway. Monitoring is switched
+            # on in `_execute_grab`, once a release is actually taken.
+            monitored=False,
+        )
+        if added is None or not added.radarr_id:
+            return None, None, False
+        return added, added.radarr_id, True
+
+    # SERIES / ANIME
+    if candidate.sonarr_id:
+        return candidate, candidate.sonarr_id, False
+    client = add_service.sonarr
+    profiles = await client.get_quality_profiles()
+    folders = await client.get_root_folders()
+    if not profiles or not folders:
+        logger.warning("sonarr_add_blocked_no_profiles_or_folders")
+        raise ValueError("В Sonarr не настроены профили качества или папки — обратитесь к администратору")
+    profile = add_service.resolve_profile(profiles, db_user.preferences.sonarr_quality_profile_id)
+    folder_path = add_service.resolve_root_folder(folders, db_user.preferences.sonarr_root_folder_id)
+    added, _action = await add_service.add_series(
+        candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
+        content_type=content_type, search_for_missing=False,
+        # Same reasoning as the movie branch, and worse if ignored: the client
+        # default is `monitor="all"`, so browsing one season of a 10-season show
+        # would enlist every episode of every season into Sonarr's RSS loop.
+        monitored=False, monitor="none",
     )
-    return title
+    if added is None or not added.sonarr_id:
+        return None, None, False
+    return added, added.sonarr_id, True
 
 
-async def _known_seasons(search_service, title, content_type: ContentType) -> list:
-    """Seasons Scryer knows about for this title, newest-first-friendly.
-
-    Best-effort: if the catalog can't tell us, return nothing and the caller
-    simply won't offer the picker.
+def _known_seasons(title, content_type: ContentType) -> list[int]:
+    """Season numbers already carried by `title.seasons` (from Sonarr's own
+    lookup/add response — see `SonarrClient._parse_series`), newest-first-
+    friendly. No API call: Sonarr's `/series/lookup` returns the full season
+    list even for a title not yet in the library, so there is nothing left to
+    fetch separately (unlike the previous backend's dedicated seasons query,
+    which `SearchService.get_seasons` — a `NotImplementedError` stub — used
+    to serve).
     """
     if content_type not in (ContentType.SERIES, ContentType.ANIME):
         return []
-    try:
-        return await search_service.get_seasons(title.scryer_id)
-    except Exception as e:
-        logger.debug("seasons_lookup_failed", title_id=getattr(title, "scryer_id", None), error=str(e))
-        return []
+    seasons = getattr(title, "seasons", None) or []
+    numbers = {
+        s.get("seasonNumber") for s in seasons
+        if isinstance(s, dict) and isinstance(s.get("seasonNumber"), int) and s.get("seasonNumber", 0) > 0
+    }
+    return sorted(numbers)
 
 
 async def process_search(
@@ -297,10 +377,21 @@ async def process_search(
 
             # Note: a season marker no longer short-circuits to SERIES here.
             # It narrows detection to series-vs-anime *inside*
-            # detect_with_confidence, because those are separate Scryer
-            # libraries with separate quality profiles — see its docstring.
+            # detect_content_type, because those score separately (a genre
+            # split, not separate services) — see its docstring.
+            #
+            # Fix (Task 12): this called the nonexistent
+            # `search_service.detect_with_confidence` — a name from the
+            # previous backend's era that never existed on the rewritten
+            # *arr SearchService (only
+            # `detect_content_type`, which already returns the same
+            # confidence-carrying `DetectionResult`; see
+            # tests/test_detect_content_type.py, Task 8/9's own coverage,
+            # which never called it anything else). Every plain-text query
+            # (`handle_text_search` — the bot's single most common entry
+            # point) hit this `AttributeError` before it was caught here.
             t_detect = time.monotonic()
-            detection = await search_service.detect_with_confidence(query)
+            detection = await search_service.detect_content_type(query)
             log.info(
                 "stage_done",
                 stage="detect_content_type",
@@ -355,41 +446,58 @@ async def process_search(
 
         status_msg = await message.answer("🔍 Ищу релизы...")
 
-        # Migration 2026-07-28: Scryer searches releases per *title*, not by free
-        # text, so resolve the title first. Detection already fetched metadata
-        # candidates for the winning facet — reuse them instead of searching again.
+        # *arr's interactive search needs a movie/series id already in
+        # Radarr/Sonarr's library — resolve (or add) it before listing
+        # releases. `chosen_title` (the answer to "which title did you
+        # mean?", or a season-picker round trip) already names the exact
+        # candidate, so it skips the metadata lookup entirely — that lookup
+        # is a live TMDb/TVDB round trip through *arr (measured 2026-08-10:
+        # Sonarr ~34s), and repeating it on every "which season?" tap would
+        # be a multi-second regression for no reason, the candidate is
+        # already known.
         lookup_term = clean_title or query
-        candidates = (
-            detection.lookup_results
-            if detection and detection.content_type == content_type and detection.lookup_results
-            else await search_service.search_metadata(lookup_term, content_type)
-        )
+        if chosen_title is not None:
+            chosen = chosen_title
+        else:
+            candidates = (
+                detection.lookup_results
+                if detection and detection.content_type == content_type and detection.lookup_results
+                else await _lookup_metadata_candidates(search_service, lookup_term, content_type)
+            )
 
-        # 2026-07-29: don't guess. Adding the wrong title costs a junk catalog
-        # entry AND an indexer search for a film the user never asked for.
-        if chosen_title is None and needs_title_confirmation(
-            candidates, lookup_term, parsed.get("year")
-        ):
-            session = SearchSession(
-                user_id=user_id,
-                query=query,
-                content_type=content_type,
-                lookup_candidates=list(candidates[:5]),
-            )
-            await db.save_session(user_id, session)
-            await status_msg.edit_text(
-                f"🤔 Уточните, что именно нужно — <b>{html.escape(query)}</b>:",
-                reply_markup=Keyboards.title_candidates(candidates),
-                parse_mode="HTML",
-            )
-            log.info("search_branch", branch="ask_title", candidates=len(candidates))
+            # 2026-07-29: don't guess. Adding the wrong title costs a junk
+            # library entry AND an indexer search for a film the user never
+            # asked for.
+            if needs_title_confirmation(candidates, lookup_term, parsed.get("year")):
+                session = SearchSession(
+                    user_id=user_id,
+                    query=query,
+                    content_type=content_type,
+                    lookup_candidates=list(candidates[:5]),
+                )
+                await db.save_session(user_id, session)
+                await status_msg.edit_text(
+                    f"🤔 Уточните, что именно нужно — <b>{html.escape(query)}</b>:",
+                    reply_markup=Keyboards.title_candidates(candidates),
+                    parse_mode="HTML",
+                )
+                log.info("search_branch", branch="ask_title", candidates=len(candidates))
+                return
+
+            chosen = _pick_metadata_candidate(candidates, parsed.get("year"))
+
+        try:
+            title, arr_id, created = await _resolve_arr_entry(add_service, content_type, chosen, db_user)
+        except ValueError as ve:
+            # Fix round 1 (review finding, Minor): a misconfigured Radarr/
+            # Sonarr (no quality profiles or root folders at all) used to
+            # read to the user as "your title doesn't exist" — the generic
+            # "no_metadata" message below. This is a setup problem, distinct
+            # from a genuine no-match, so it gets its own message.
+            await status_msg.edit_text(Formatters.format_error(str(ve)))
+            log.warning("search_branch", branch="add_config_error", error=str(ve))
             return
-
-        title = await _resolve_title(
-            search_service, add_service, detection, content_type,
-            lookup_term, parsed.get("year"), candidates=candidates, chosen=chosen_title,
-        )
-        if title is None:
+        if title is None or arr_id is None:
             await status_msg.edit_text(
                 Formatters.format_warning(f"Ничего не найдено для <b>{html.escape(query)}</b>"),
                 parse_mode="HTML",
@@ -397,10 +505,30 @@ async def process_search(
             log.info("search_branch", branch="no_metadata")
             return
 
+        arr_name = "Radarr" if content_type is ContentType.MOVIE else "Sonarr"
+        if created:
+            # Honest about what just happened: unlike the previous backend
+            # (one bridge, one catalog), the title now really does exist in
+            # Radarr/Sonarr's own library, not just in a bot-side session.
+            add_action = ActionLog(
+                user_id=user_id,
+                action_type=ActionType.ADD,
+                content_type=content_type,
+                content_title=title.title,
+                content_id=str(getattr(title, "tmdb_id", None) or getattr(title, "tvdb_id", None) or ""),
+            )
+            add_action.success = True
+            await db.log_action(add_action)
+            await status_msg.edit_text(
+                f"🆕 <b>{html.escape(title.title)}</b> добавлен в {arr_name} — ищу релизы...",
+                parse_mode="HTML",
+            )
+            log.info("title_added", title=title.title, arr_id=arr_id, content_type=content_type.value)
+
         # A multi-season show searched whole returns packs the user may not
         # want and spends indexer quota on episodes already on disk — offer the
         # choice while it's still cheap to make.
-        seasons = await _known_seasons(search_service, title, content_type)
+        seasons = _known_seasons(title, content_type)
         if should_ask_for_season(content_type, seasons, parsed.get("season")):
             session = SearchSession(
                 user_id=user_id,
@@ -411,35 +539,35 @@ async def process_search(
             await db.save_session(user_id, session)
             await status_msg.edit_text(
                 f"📺 <b>{html.escape(title.title)}</b>\n\nЧто искать?",
-                reply_markup=Keyboards.season_scope(seasons, title.scryer_id),
+                reply_markup=Keyboards.season_scope(seasons, str(arr_id)),
                 parse_mode="HTML",
             )
             log.info("search_branch", branch="ask_season", seasons=len(seasons))
             return
 
         t_search = time.monotonic()
-        results = await search_service.search_releases(
-            title.scryer_id,
+        results = await search_service.search_releases_for_title(
             content_type,
+            arr_id,
             season=parsed.get("season") or season_override,
-            episode=parsed.get("episode"),
+            # DEAD-06: the user's resolution preference must reach the scorer,
+            # or "Качество" in /settings silently stops affecting the ranking.
             preferred_resolution=db_user.preferences.preferred_resolution,
-            timeout=settings.scryer_search_timeout,
         )
         log.info(
             "stage_done",
             stage="search_releases",
             elapsed_ms=round((time.monotonic() - t_search) * 1000, 1),
             result_count=len(results),
-            title_id=title.scryer_id,
+            arr_id=arr_id,
         )
 
         if not results:
             await status_msg.edit_text(
                 Formatters.format_warning(
                     f"Релизы для <b>{html.escape(title.title)}</b> не найдены.\n\n"
-                    "Тайтл добавлен в каталог Scryer — можно включить мониторинг, "
-                    "и он продолжит искать сам."
+                    f"Тайтл в библиотеке {arr_name} и будет доступен для "
+                    "автоматического поиска по расписанию."
                 ),
                 parse_mode="HTML",
             )
@@ -486,10 +614,10 @@ async def process_search(
         log.error("Search failed", error=str(e), exc_info=True)
         # LOGIC-23: edit the in-flight status message ("Ищу релизы...") rather
         # than leaving it hanging forever with a separate error message below it.
-        # 2026-07-29: say *what* failed when we know — a masked Scryer internal
+        # 2026-07-29: say *what* failed when we know — a masked internal
         # error is almost always "every indexer is rate-limited", and the user
         # can act on that (wait it out) but not on "временно недоступен".
-        error_text = Formatters.format_error(html.escape(describe_scryer_failure(e)))
+        error_text = Formatters.format_error(html.escape(describe_search_failure(e)))
         if status_msg is not None:
             try:
                 await status_msg.edit_text(error_text)

@@ -13,8 +13,9 @@ from bot.clients.registry import (
     get_lidarr,
     get_navidrome,
     get_qbittorrent,
-    get_scryer,
+    get_radarr,
     get_slskd,
+    get_sonarr,
 )
 from bot.config import get_settings
 from bot.db import Database
@@ -103,17 +104,28 @@ async def _get_music_services() -> tuple[SearchService, AddService] | None:
     Returns None only when *no* music backend is configured. Lidarr is the
     preferred one (it owns the library layout and hands work to slskd), but
     slskd alone is enough for search + direct download.
+
+    Rollback 2026-08-10 (Task 13 finish-up): this used to build both services
+    around the previous backend's single client. SearchService/AddService now take
+    Radarr+Sonarr positionally (same as every other handler) — Radarr/Sonarr
+    are always available from the registry (non-optional, see status.py's
+    `_collect_statuses` docstring), so they're fetched here too even though
+    music.py never acts on them directly; AddService also dropped the
+    `slskd` kwarg it never used.
     """
     lidarr = await get_lidarr()
     slskd = await get_slskd()
     if lidarr is None and slskd is None:
         return None
 
-    scryer = await get_scryer()
+    radarr = await get_radarr()
+    sonarr = await get_sonarr()
     qbittorrent = await get_qbittorrent()
 
-    search_service = SearchService(scryer, _SCORING_SERVICE, lidarr=lidarr, slskd=slskd)
-    add_service = AddService(scryer, qbittorrent=qbittorrent, lidarr=lidarr, slskd=slskd)
+    search_service = SearchService(
+        radarr, sonarr, lidarr=lidarr, scoring=_SCORING_SERVICE, slskd=slskd
+    )
+    add_service = AddService(radarr, sonarr, qbittorrent=qbittorrent, lidarr=lidarr)
     return search_service, add_service
 
 

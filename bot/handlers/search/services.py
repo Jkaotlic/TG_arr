@@ -15,7 +15,15 @@ import structlog
 from aiogram import Router
 from aiogram.types import Message
 
-from bot.clients.registry import get_emby, get_lidarr, get_qbittorrent, get_scryer, get_slskd  # noqa: F401 -- get_emby re-exported for patch.object(bot.handlers.search, "get_emby", ...)
+from bot.clients.registry import (  # noqa: F401 -- get_emby re-exported for patch.object(bot.handlers.search, "get_emby", ...)
+    get_emby,
+    get_lidarr,
+    get_prowlarr,
+    get_qbittorrent,
+    get_radarr,
+    get_slskd,
+    get_sonarr,
+)
 from bot.handlers.common import safe_edit
 from bot.models import ContentType, User
 from bot.services.add_service import AddService
@@ -60,14 +68,22 @@ async def get_services() -> tuple[SearchService, AddService]:
     LOGIC-22: used to return `ScoringService` as a third element, but no
     caller in this module ever consumed it (music.py imports the module-level
     `_SCORING_SERVICE` singleton directly instead — see below).
+
+    Rollback 2026-08-10 (Task 12): both services are now built on the *arr
+    clients (Radarr/Sonarr required, Prowlarr/Lidarr/qBittorrent optional)
+    instead of the previous backend's single bridge client.
     """
-    scryer = await get_scryer()
+    radarr = await get_radarr()
+    sonarr = await get_sonarr()
+    prowlarr = await get_prowlarr()
     qbittorrent = await get_qbittorrent()  # Returns None if not configured
     lidarr = await get_lidarr()  # Returns None if not configured
     slskd = await get_slskd()  # Returns None if not configured
 
-    search_service = SearchService(scryer, _SCORING_SERVICE, lidarr=lidarr, slskd=slskd)
-    add_service = AddService(scryer, qbittorrent=qbittorrent, lidarr=lidarr, slskd=slskd)
+    search_service = SearchService(
+        radarr, sonarr, lidarr=lidarr, prowlarr=prowlarr, scoring=_SCORING_SERVICE, slskd=slskd,
+    )
+    add_service = AddService(radarr, sonarr, qbittorrent=qbittorrent, lidarr=lidarr)
 
     return search_service, add_service
 

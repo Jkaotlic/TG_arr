@@ -30,19 +30,29 @@ class Settings(BaseSettings):
         default_factory=list, description="Admin Telegram user IDs"
     )
 
-    # Scryer — the single source for movies/series/anime since 2026-07-24.
-    # It owns indexers (via Prowlarr), quality profiles, scoring rules and the
-    # download clients; the bot is only a GraphQL client. Radarr/Sonarr and the
-    # bot's direct Prowlarr access were removed in the same migration.
-    scryer_url: str = Field(..., min_length=1, description="Scryer base URL (GraphQL at /graphql)")
-    scryer_username: str = Field(..., min_length=1, description="Scryer username")
-    scryer_password: str = Field(..., min_length=1, description="Scryer password")
-    # Scryer aggregates every routed indexer for a release search, which on
-    # rpie4 Wi-Fi regularly takes longer than a plain HTTP call. Kept separate
-    # from `http_timeout` so metadata/catalog reads stay snappy.
-    scryer_search_timeout: float = Field(
-        default=90.0, ge=10.0, le=300.0, description="Timeout for Scryer release searches (seconds)"
+    # Prowlarr — release search across every configured indexer.
+    prowlarr_url: str = Field(..., min_length=1, description="Prowlarr base URL")
+    prowlarr_api_key: str = Field(..., min_length=1, description="Prowlarr API key")
+    # A search fans out to every indexer. RuTracker sits behind Cloudflare and
+    # answers 521/522 under load, so 25s (the pre-migration default) timed out
+    # routinely — raised to 45s in round 4 and kept here as the code default.
+    prowlarr_search_timeout: float = Field(
+        default=45.0, ge=5.0, le=120.0, description="Prowlarr search timeout in seconds"
     )
+    prowlarr_search_retries: int = Field(
+        default=1, ge=0, le=3,
+        description="Extra attempts on a Prowlarr timeout (0=none, 1=one retry). "
+                    "A flaky tracker often succeeds on the second attempt.",
+    )
+
+    # Radarr — movie catalog.
+    radarr_url: str = Field(..., min_length=1, description="Radarr base URL")
+    radarr_api_key: str = Field(..., min_length=1, description="Radarr API key")
+
+    # Sonarr — series and anime catalog (anime is seriesType=anime, not a
+    # separate service: the live Sonarr holds both in the same root folders).
+    sonarr_url: str = Field(..., min_length=1, description="Sonarr base URL")
+    sonarr_api_key: str = Field(..., min_length=1, description="Sonarr API key")
 
     # Lidarr (optional, music)
     lidarr_url: Optional[str] = Field(default=None, description="Lidarr base URL")
@@ -80,13 +90,13 @@ class Settings(BaseSettings):
     emby_timeout: float = Field(default=30.0, ge=5.0, description="Emby request timeout in seconds")
 
     # TorrServer (optional) — streaming contour: "watch now" instead of
-    # "have it in the library". Separate from Scryer on purpose.
+    # "have it in the library". Deliberately its own search/add path.
     torrserver_url: Optional[str] = Field(default=None, description="TorrServer base URL")
     torrserver_username: Optional[str] = Field(default=None, description="TorrServer basic-auth user")
     torrserver_password: Optional[str] = Field(default=None, description="TorrServer basic-auth password")
     torrserver_timeout: float = Field(default=30.0, ge=5.0, description="TorrServer request timeout in seconds")
     # A torznab search fans out to every configured Prowlarr indexer, so it is
-    # far slower than the plain API calls — same split as scryer_search_timeout.
+    # far slower than the plain API calls — same split as prowlarr_search_timeout.
     torrserver_search_timeout: float = Field(
         default=60.0, ge=10.0, le=300.0, description="TorrServer torznab search timeout (seconds)"
     )
@@ -162,7 +172,7 @@ class Settings(BaseSettings):
             return ids
         return []
 
-    @field_validator("scryer_url", mode="after")
+    @field_validator("prowlarr_url", "radarr_url", "sonarr_url", mode="after")
     @classmethod
     def strip_trailing_slash(cls, v: str) -> str:
         """Remove trailing slash from URLs."""

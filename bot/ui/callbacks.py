@@ -62,7 +62,7 @@ class ArtistCB(CallbackData, prefix="art"):
 
 
 class AddContentCB(CallbackData, prefix="addc"):
-    """Add a trending movie/series to the Scryer catalog (was ``add_movie:ID`` /
+    """Add a trending movie/series to the library (was ``add_movie:ID`` /
     ``add_series:ID``). ``kind`` distinguishes the two so one class replaces
     both string prefixes without risking a movie/series id collision.
     """
@@ -144,9 +144,19 @@ class TitleActionCB(CallbackData, prefix="tm"):
 
     `action`: pick (chose among several matches) | mon | unmon |
     delete (asks to confirm) | delconf (does it).
+
+    Rollback 2026-08-10: `kind` ("movie"/"series") is its own field, not
+    folded into `title_id` as e.g. "movie:15" — aiogram's CallbackData uses
+    ':' as its OWN field separator, so a colon-joined value can never
+    survive a pack()/unpack() round trip (`ValueError: separator symbol
+    ':' can not be used in value`; `RootFolderCB` hit the same wall with
+    Windows paths). Radarr and Sonarr have independent id spaces, so `kind`
+    is what tells `handle_title_action` which *arr client `title_id`
+    belongs to.
     """
 
     action: str
+    kind: str
     title_id: str
 
 
@@ -197,6 +207,25 @@ class TsTorrentCB(CallbackData, prefix="tst"):
         crashing the screen outright.
         """
         return v[:40]
+
+
+class RootFolderCB(CallbackData, prefix="rf"):
+    """Pick a root folder when adding a title to Radarr/Sonarr (rollback
+    2026-08-10).
+
+    *arr root folders carry their own integer id — unlike the previous
+    backend's root-folder payload, which had none, forcing a sha1 digest of
+    the path to stand in for one (a Windows path contains ':', aiogram's
+    CallbackData field separator, so the raw path could not be packed
+    either). Live
+    measurement 2026-08-10: Radarr's folders are ids 1/2, Sonarr's are also
+    1/2 — a plain int is both simpler and stable across restarts, unlike a
+    list index. ``content_type`` says which *arr client the id belongs to,
+    since Radarr's and Sonarr's folder ids are independent sequences.
+    """
+
+    folder_id: int
+    content_type: str
 
 
 class TsAddCB(CallbackData, prefix="tsa"):

@@ -13,10 +13,10 @@ import pytest
 from bot.handlers import status as status_handlers
 
 
-def _quiet_scryer() -> MagicMock:
-    """Scryer is always checked in `_collect_statuses`; give it a clean,
-    successful `check_connection()` so its SystemStatus never interferes
-    with the TorrServer-focused assertions below."""
+def _quiet_arr_client() -> MagicMock:
+    """Radarr/Sonarr/Prowlarr are always checked in `_collect_statuses`; give
+    each a clean, successful `check_connection()` so their SystemStatus never
+    interferes with the TorrServer-focused assertions below."""
     client = MagicMock()
     client.check_connection = AsyncMock(return_value=(True, "1.0.0", 5.0))
     return client
@@ -27,10 +27,10 @@ async def test_status_includes_torrserver_when_configured():
     client = MagicMock()
     client.check_connection = AsyncMock(return_value=(True, "MatriX.142.2", 12.0))
 
-    with patch.object(status_handlers, "get_scryer", AsyncMock(return_value=_quiet_scryer())), \
+    with patch.object(status_handlers, "get_radarr", AsyncMock(return_value=_quiet_arr_client())), \
+         patch.object(status_handlers, "get_sonarr", AsyncMock(return_value=_quiet_arr_client())), \
+         patch.object(status_handlers, "get_prowlarr", AsyncMock(return_value=_quiet_arr_client())), \
          patch.object(status_handlers, "get_lidarr", AsyncMock(return_value=None)), \
-         patch.object(status_handlers, "get_slskd", AsyncMock(return_value=None)), \
-         patch.object(status_handlers, "get_navidrome", AsyncMock(return_value=None)), \
          patch.object(status_handlers, "get_qbittorrent", AsyncMock(return_value=None)), \
          patch.object(status_handlers, "get_emby", AsyncMock(return_value=None)), \
          patch.object(status_handlers, "get_torrserver", new_callable=AsyncMock,
@@ -47,10 +47,10 @@ async def test_status_includes_torrserver_when_configured():
 
 @pytest.mark.asyncio
 async def test_status_skips_torrserver_when_not_configured():
-    with patch.object(status_handlers, "get_scryer", AsyncMock(return_value=_quiet_scryer())), \
+    with patch.object(status_handlers, "get_radarr", AsyncMock(return_value=_quiet_arr_client())), \
+         patch.object(status_handlers, "get_sonarr", AsyncMock(return_value=_quiet_arr_client())), \
+         patch.object(status_handlers, "get_prowlarr", AsyncMock(return_value=_quiet_arr_client())), \
          patch.object(status_handlers, "get_lidarr", AsyncMock(return_value=None)), \
-         patch.object(status_handlers, "get_slskd", AsyncMock(return_value=None)), \
-         patch.object(status_handlers, "get_navidrome", AsyncMock(return_value=None)), \
          patch.object(status_handlers, "get_qbittorrent", AsyncMock(return_value=None)), \
          patch.object(status_handlers, "get_emby", AsyncMock(return_value=None)), \
          patch.object(status_handlers, "get_torrserver", new_callable=AsyncMock,

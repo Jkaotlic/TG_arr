@@ -52,7 +52,6 @@ from .grab import (  # noqa: E402,F401
     _decide_monitor_type,
     _execute_grab,
     _resolve_folder,
-    _scryer_monitor_type,
     _SEASON_PRESETS,
     grab_release,
     handle_confirm_grab,
@@ -74,8 +73,10 @@ from .results import (  # noqa: E402,F401
     handle_type_selection,
 )
 from .commands import (  # noqa: E402,F401
+    _known_seasons,
+    _lookup_metadata_candidates,
     _pick_metadata_candidate,
-    _resolve_title,
+    _resolve_arr_entry,
     cmd_anime,
     cmd_movie,
     cmd_search,

@@ -58,7 +58,7 @@ class Formatters(_SearchFormatters, _TorrentFormatters, _EmbyFormatters, _TorrSe
         days: int = 7,
         albums: Optional[list[dict]] = None,
     ) -> str:
-        """Format the combined calendar (Scryer episodes/movies + Lidarr albums)."""
+        """Format the combined calendar (Radarr/Sonarr episodes/movies + Lidarr albums)."""
         albums = albums or []
         lines = [f"📅 <b>Календарь релизов</b> ({days} дн.)\n"]
 

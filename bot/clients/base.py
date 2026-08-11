@@ -16,7 +16,8 @@ from tenacity import (
 )
 
 from bot.config import Settings, get_settings
-from bot.models import QualityProfile, RootFolder
+from bot.models import QualityProfile, RootFolder, SearchResult
+from bot.services.release_parser import parse_quality_name
 
 logger = structlog.get_logger()
 
@@ -173,8 +174,9 @@ class BaseAPIClient:
         """Make HTTP request with retry logic.
 
         ``headers`` are merged on top of the pooled client's defaults for this
-        one call — needed by ScryerClient, whose bearer token is refreshed
-        independently of the (long-lived) httpx client.
+        one call — needed by callers whose auth value can change between
+        requests independently of the (long-lived, cached-headers) httpx
+        client, e.g. `EmbySyncHookClient`'s per-request token header.
         """
         client = await self._get_client()
         url = endpoint if endpoint.startswith("/") else f"/{endpoint}"
@@ -339,7 +341,7 @@ class BaseAPIClient:
         return await self._safe_request("POST", endpoint, params=params, json_data=json_data, timeout=timeout)
 
     # DEAD-11: no HTTP DELETE method — removed (zero callers; Radarr/Sonarr/
-    # Lidarr/Scryer client methods never delete resources, and qBittorrent
+    # Lidarr client methods never delete resources, and qBittorrent
     # has its own dedicated `delete()` on QBittorrentClient, unrelated to
     # this base HTTP client).
 
@@ -354,8 +356,8 @@ class BaseAPIClient:
         """POST without retry — for non-idempotent operations like grab/push.
 
         ``headers`` are merged over the pooled client's defaults for this one
-        call, same as `_request` — ScryerClient needs it to attach a bearer
-        token that is refreshed independently of the httpx client.
+        call, same as `_request` — see its docstring for why a per-call
+        override is needed.
         """
         client = await self._get_client()
         url = endpoint if endpoint.startswith("/") else f"/{endpoint}"
@@ -441,6 +443,25 @@ class ArrBaseClient(BaseAPIClient):
             logger.warning("health_check_failed", service=self.service_name, error=str(e))
             return False, None, round(elapsed, 2)
 
+    async def grab_release(self, guid: str, indexer_id: int) -> bool:
+        """Grab a release *arr itself offered.
+
+        Rollback 2026-08-10 (Task 10): the native path. The release came
+        from *arr's own interactive search (`_get_releases`), so *arr
+        already has it in its release cache and can act on the guid alone.
+        *arr resolves Prowlarr's `301 -> magnet` redirect itself, hands the
+        torrent to its own download client and imports the result — exactly
+        the capability whose absence killed the previous backend, which
+        could not expand that redirect itself. Not retried:
+        `_post_no_retry` is used deliberately — grabbing twice would queue
+        the release twice.
+        """
+        await self._post_no_retry(
+            f"{self._api_prefix}/release",
+            json_data={"guid": guid, "indexerId": indexer_id},
+        )
+        return True
+
     async def push_release(
         self,
         title: str,
@@ -516,3 +537,183 @@ class ArrBaseClient(BaseAPIClient):
                 except (KeyError, TypeError) as e:
                     logger.warning("Skipping malformed root folder", error=str(e))
         return folders
+
+    async def _get_wanted(
+        self, page_size: int = 50, extra_params: Optional[dict[str, Any]] = None,
+    ) -> list[dict[str, Any]]:
+        """Read the "missing" list. Rollback 2026-08-10: /wanted lived on
+        the previous backend's catalog query before; *arr paginates it instead.
+
+        No `resource` parameter: Radarr and Sonarr hit the identical
+        `{prefix}/wanted/missing` endpoint — only the record shape in the
+        response differs, which callers parse themselves. (Fix round 1,
+        2026-08-10 review: the plan's own brief was self-contradictory here —
+        prose said no resource parameter, its code sample had an unused one.)
+
+        `extra_params` (fix round 1, task-13 re-review): lets a subclass add
+        query params the shared endpoint accepts but not every caller wants
+        — Sonarr sends `includeSeries=true` here (see
+        `SonarrClient.get_wanted_episodes`), Radarr sends nothing, since
+        Radarr's movie records have no series to embed and the param would
+        be meaningless noise on that call.
+        """
+        params: dict[str, Any] = {
+            "pageSize": page_size, "sortKey": "title", "sortDirection": "ascending",
+        }
+        if extra_params:
+            params.update(extra_params)
+        result = await self.get(f"{self._api_prefix}/wanted/missing", params=params)
+        if isinstance(result, dict):
+            records = result.get("records", [])
+            return records if isinstance(records, list) else []
+        return []
+
+    async def _set_monitored(self, resource: str, resource_id: int, monitored: bool) -> bool:
+        """Flip the monitored flag, preserving every other field.
+
+        *arr's PUT replaces the whole resource, so the current one is fetched
+        first — a partial body silently wipes profile and path.
+        """
+        current = await self.get(f"{self._api_prefix}/{resource}/{resource_id}")
+        if not isinstance(current, dict):
+            return False
+        current["monitored"] = monitored
+        # Fix round 1 (2026-08-10 review): go through _safe_request, not
+        # _request directly — _safe_request is what converts a timeout/connect
+        # error surviving tenacity's retries into the domain
+        # ServiceConnectionError every other public method raises. Calling
+        # _request bare here leaked a raw httpx exception instead.
+        await self._safe_request(
+            "PUT", f"{self._api_prefix}/{resource}/{resource_id}", json_data=current,
+        )
+        return True
+
+    async def _delete_resource(
+        self, resource: str, resource_id: int, delete_files: bool = False,
+    ) -> bool:
+        """Remove a catalog entry. `delete_files` defaults to False so a
+        catalog cleanup can never take the media with it.
+        """
+        # Fix round 1 (2026-08-10 review): same _safe_request fix as
+        # _set_monitored above. Retrying a DELETE is still safe (it's
+        # idempotent — a repeat DELETE 404s rather than double-deleting); the
+        # bug was the missing error translation, not the retry.
+        await self._safe_request(
+            "DELETE",
+            f"{self._api_prefix}/{resource}/{resource_id}",
+            params={"deleteFiles": delete_files, "addImportListExclusion": False},
+        )
+        return True
+
+    #: Servarr's shared History `eventType` filter is bound from the query
+    #: string as the enum's ordinal, not the camelCase name the JSON body
+    #: uses for the same field (`"eventType": "downloadFolderImported"` in a
+    #: record vs. `?eventType=3` to filter for it) — live-verified against
+    #: both Radarr and Sonarr 2026-08-11: sending the string name 400s
+    #: ("The value 'downloadFolderImported' is not valid"), sending `3`
+    #: returns exactly the downloadFolderImported rows on both services.
+    _HISTORY_EVENT_TYPE_CODES: dict[str, int] = {"downloadFolderImported": 3}
+
+    async def get_history(
+        self, event_type: str = "downloadFolderImported", page_size: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Read the *arr history journal, filtered to one event type.
+
+        Used by `LibraryWatcher` to detect media that has actually landed —
+        `downloadFolderImported` fires once the file is imported into the
+        library, unlike `grabbed` (queued) or the transient download-queue
+        state, which can flicker before a final decision.
+        """
+        try:
+            code = self._HISTORY_EVENT_TYPE_CODES[event_type]
+        except KeyError:
+            raise ValueError(f"Unsupported history eventType filter: {event_type!r}") from None
+
+        params: dict[str, Any] = {
+            "eventType": code,
+            "pageSize": page_size,
+            "sortKey": "date",
+            "sortDirection": "descending",
+        }
+        result = await self.get(f"{self._api_prefix}/history", params=params)
+        if isinstance(result, dict):
+            records = result.get("records", [])
+            return records if isinstance(records, list) else []
+        return []
+
+    async def _get_releases(self, params: dict[str, Any]) -> list["SearchResult"]:
+        """Interactive search: releases already judged by the user's profile.
+
+        Unlike a raw Prowlarr query this carries *arr's own verdict —
+        `customFormatScore`, `rejected` and the human-readable `rejections` —
+        so the bot can tell the user WHY a release will not be taken.
+        Slow: it fans out to every indexer, hence the search timeout.
+        """
+        settings = get_settings()
+        results = await self.get(
+            f"{self._api_prefix}/release",
+            params=params,
+            timeout=settings.prowlarr_search_timeout,
+        )
+        if not isinstance(results, list):
+            return []
+
+        releases = []
+        for item in results:
+            try:
+                release = self._parse_release(item)
+                if release:
+                    releases.append(release)
+            except Exception as e:
+                # Carry guid/title (when the row has them) so "why did release
+                # X vanish" is answerable from prod logs instead of just
+                # knowing *something* in this batch was malformed. `.get()` is
+                # guarded by isinstance since a truly malformed row may not
+                # even be a dict — logging the failure must never itself raise.
+                guid = item.get("guid") if isinstance(item, dict) else None
+                title = item.get("title") if isinstance(item, dict) else None
+                logger.warning(
+                    "Skipping malformed release", error=str(e), guid=guid, title=title,
+                )
+        return releases
+
+    def _parse_release(self, item: dict[str, Any]) -> Optional["SearchResult"]:
+        """Map one *arr release row onto SearchResult, verdict included."""
+        guid = item.get("guid")
+        title = item.get("title")
+        if not guid or not title:
+            return None
+
+        quality_name = ""
+        quality_block = item.get("quality")
+        if isinstance(quality_block, dict):
+            inner = quality_block.get("quality")
+            if isinstance(inner, dict):
+                quality_name = inner.get("name") or ""
+
+        languages = [
+            lang.get("name")
+            for lang in item.get("languages") or []
+            if isinstance(lang, dict) and lang.get("name")
+        ]
+
+        return SearchResult(
+            guid=guid,
+            origin="arr",  # fix round 2: renamed from `source` (collided with QualityInfo.source)
+            indexer_id=item.get("indexerId") or 0,
+            title=title,
+            download_url=item.get("downloadUrl"),
+            magnet_url=item.get("magnetUrl"),
+            info_url=item.get("infoUrl"),
+            indexer=item.get("indexer") or "Unknown",
+            size=item.get("size") or 0,
+            seeders=item.get("seeders") or 0,
+            leechers=item.get("leechers") or 0,
+            protocol=(item.get("protocol") or "torrent").lower(),
+            publish_date=item.get("publishDate"),
+            quality=parse_quality_name(quality_name),
+            custom_format_score=item.get("customFormatScore") or 0,
+            rejected=bool(item.get("rejected")) or bool(item.get("temporarilyRejected")),
+            rejections=[str(r) for r in (item.get("rejections") or [])],
+            languages=languages,
+        )

@@ -11,7 +11,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-D7FF64?logo=ruff&logoColor=black)](https://docs.astral.sh/ruff/)
 
-**Полноценный Telegram-бот для поиска, скачивания и управления фильмами, сериалами, аниме и музыкой через Scryer (+ Lidarr/slskd для музыки) с поддержкой qBittorrent, Emby, Navidrome, TMDb и Deezer.**
+**Полноценный Telegram-бот для поиска, скачивания и управления фильмами, сериалами, аниме и музыкой через Radarr/Sonarr/Prowlarr (+ Lidarr/slskd для музыки) с поддержкой qBittorrent, Emby, Navidrome, TMDb и Deezer.**
 
 [Возможности](#-возможности) &bull; [Быстрый старт](#-быстрый-старт) &bull; [Настройка](#-настройка) &bull; [Команды](#-команды) &bull; [Скоринг](#-система-скоринга)
 
@@ -26,8 +26,8 @@
 | **Поиск** | Умный поиск | Автоматически определяет фильм, сериал, аниме или музыку по запросу |
 | | Русские субтитры | Приоритизация релизов с RusSub, MVO, DVO, AVO |
 | | Качество в деталях | Разрешение, кодек, HDR, аудио, субтитры — всё видно |
-| | Вердикт Scryer | Профиль качества и Rego-правила решают, что первое в списке |
-| **Аниме** | Отдельный фасет | Своя библиотека и профиль `1080p`, команда `/anime` |
+| | Вердикт *arr | Профиль качества и custom formats решают, что первое в списке |
+| **Аниме** | `seriesType=anime` | Отдельная команда `/anime`; в Sonarr — те же папки, отличается одним полем |
 | **Музыка** | Поиск артистов | `/music <artist>` — поиск через MusicBrainz (Lidarr) |
 | | Альбомы и треки | Прямой поиск в Soulseek через slskd |
 | | Уже в библиотеке | Navidrome-проверка, чтобы не качать дубли |
@@ -35,13 +35,13 @@
 | | Календарь релизов | Грядущие альбомы в /calendar |
 | | Топ артистов | Deezer chart — популярные артисты недели |
 | **Скачивание** | One-click grab | Скачивание релиза одной кнопкой |
-| | qBittorrent fallback | Явный обход ограничений профиля Scryer (кнопка «Скачать всё равно») |
-| | Очередь Scryer | Постановка выбранного релиза по candidate-токену |
+| | qBittorrent fallback | Автоматически при отказе *arr, плюс явный обход (кнопка «Скачать всё равно») |
+| | Нативный grab | Постановка релиза через *arr по guid+indexerId (*arr сам разворачивает magnet-редирект) |
 | **Трендинг** | Популярные фильмы | Топ недели из TMDb с постерами |
 | | Популярные сериалы | Трендовые сериалы с детальной информацией |
 | **Мониторинг** | Календарь релизов | Расписание выходов с индикатором дней |
 | | Уведомления | Оповещения о завершении скачивания |
-| | Статус сервисов | Доступность Scryer/Lidarr/slskd/Navidrome + статистика индексеров |
+| | Статус сервисов | Доступность Radarr/Sonarr/Prowlarr/Lidarr/slskd/Navidrome |
 | **Emby** | Библиотека | Просмотр последних добавлений в Emby |
 | | Сканирование | Запуск сканирования библиотек |
 | **Управление** | Настройки | Профили качества, папки, разрешение — на пользователя |
@@ -61,7 +61,9 @@ TG_arr
 │   ├── models.py                  # Датаклассы и Pydantic-модели
 │   ├── clients/
 │   │   ├── base.py                # HTTP-клиент (httpx + tenacity)
-│   │   ├── scryer.py              # Scryer GraphQL (кино/сериалы/аниме)
+│   │   ├── radarr.py              # Radarr (фильмы)
+│   │   ├── sonarr.py              # Sonarr (сериалы и аниме)
+│   │   ├── prowlarr.py            # Prowlarr (поиск по индексерам)
 │   │   ├── lidarr.py              # Lidarr API v1 (музыка)
 │   │   ├── slskd.py               # slskd / Soulseek (альбомы и треки)
 │   │   ├── navidrome.py           # Navidrome (Subsonic API, read-only)
@@ -104,7 +106,7 @@ TG_arr
 ### Требования
 
 - **Docker** и **Docker Compose** (или Portainer)
-- Работающий **Scryer** (он сам ходит в Prowlarr за индексерами)
+- Работающие **Radarr**, **Sonarr** и **Prowlarr**
 - Telegram-бот от [@BotFather](https://t.me/BotFather)
 - Ваш Telegram ID (узнать: [@userinfobot](https://t.me/userinfobot))
 
@@ -129,9 +131,12 @@ nano .env  # Заполнить обязательные переменные
 |-----------|----------|
 | `TELEGRAM_BOT_TOKEN` | Токен бота из @BotFather |
 | `ALLOWED_TG_IDS` | Telegram ID пользователей (через запятую) |
-| `SCRYER_URL` | URL Scryer (например `http://scryer:8088`) |
-| `SCRYER_USERNAME` | Логин Scryer |
-| `SCRYER_PASSWORD` | Пароль Scryer |
+| `RADARR_URL` | URL Radarr (например `http://radarr:7878`), API `/api/v3` |
+| `RADARR_API_KEY` | API-ключ Radarr |
+| `SONARR_URL` | URL Sonarr (например `http://sonarr:8989`), API `/api/v3` |
+| `SONARR_API_KEY` | API-ключ Sonarr |
+| `PROWLARR_URL` | URL Prowlarr (например `http://prowlarr:9696`), API **`/api/v1`** |
+| `PROWLARR_API_KEY` | API-ключ Prowlarr |
 
 </details>
 
@@ -192,7 +197,7 @@ docker compose logs -f tg-arr-bot
 | `/search <запрос>` | Умный поиск (автоопределение фильм/сериал/аниме) |
 | `/movie <запрос>` | Поиск фильмов |
 | `/series <запрос>` | Поиск сериалов |
-| `/anime <запрос>` | Поиск аниме (отдельный фасет Scryer) |
+| `/anime <запрос>` | Поиск аниме (в Sonarr это `seriesType=anime`) |
 | `/music <артист>` | Поиск исполнителя |
 | `/album <альбом>` | Поиск альбома |
 | `/track <трек>` | Поиск трека |
@@ -202,7 +207,7 @@ docker compose logs -f tg-arr-bot
 | `/emby` | Что нового в библиотеке |
 | `/downloads` | Активные загрузки (qBittorrent + slskd) |
 | `/history` | История действий |
-| `/status` | Статус Scryer/Lidarr/slskd/Navidrome |
+| `/status` | Статус Radarr/Sonarr/Prowlarr/Lidarr/slskd/Navidrome |
 | `/health` | Диагностика проблем (индексеры, очередь поиска) |
 | `/settings` | Настройки профиля |
 | `/cancel` | Отмена текущей операции |
@@ -261,8 +266,9 @@ Andor S01E05           # Конкретный эпизод
 
 | Сервис | Для чего |
 |--------|----------|
-| [Scryer](https://github.com/scryer-media/scryer) | Каталог кино/сериалов/аниме, индексеры, скоринг, загрузки |
-| [Prowlarr](https://prowlarr.com) | Индексеры (бот обращается к ним только через Scryer) |
+| [Radarr](https://radarr.video) | Каталог фильмов, профили качества, загрузки |
+| [Sonarr](https://sonarr.tv) | Каталог сериалов и аниме, сезоны |
+| [Prowlarr](https://prowlarr.com) | Индексеры; свободный поиск для тайтлов вне каталога |
 
 </td>
 <td width="50%" valign="top">
@@ -356,7 +362,7 @@ make check-base-image   # docker buildx imagetools inspect python:3.12-slim
 </details>
 
 <details>
-<summary><b>Не подключается к Scryer</b></summary>
+<summary><b>Не подключается к *arr</b></summary>
 
 1. Убедитесь что сервисы запущены
 2. Проверьте URL-адреса из контейнера бота
@@ -375,9 +381,9 @@ make check-base-image   # docker buildx imagetools inspect python:3.12-slim
 <details>
 <summary><b>Ошибка добавления фильма/сериала</b></summary>
 
-1. Проверьте профили качества в Scryer
+1. Проверьте профили качества и custom formats в Radarr/Sonarr
 2. Проверьте настройку root folders
-3. Смотрите логи Scryer
+3. Смотрите логи Radarr/Sonarr
 </details>
 
 ---

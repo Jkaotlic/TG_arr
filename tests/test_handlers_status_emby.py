@@ -32,6 +32,22 @@ def _make_callback(data: str = "cb") -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
+def test_status_checks_lidarr_on_api_v1():
+    """Lidarr answers /api/v1; a v3 probe reports API DOWN on a live service."""
+    from bot.clients.lidarr import LidarrClient
+
+    assert LidarrClient._api_prefix == "/api/v1"
+
+
+def test_status_lists_the_arr_services_and_not_scryer():
+    from bot.handlers import status as status_handler
+
+    source = status_handler.__file__
+    with open(source, encoding="utf-8") as fh:
+        text = fh.read()
+    assert "scryer" not in text.lower()
+
+
 def test_format_health_escapes_malicious_version_string():
     """RED: a version string containing HTML must not break out of <code>."""
     from bot.handlers.status import _format_health
@@ -96,9 +112,9 @@ async def test_collect_statuses_include_deezer_true_adds_deezer():
 
     deezer_client = AsyncMock()
 
-    with patch.object(status_handler, "get_scryer", AsyncMock(return_value=AsyncMock())), \
-         patch.object(status_handler, "get_slskd", AsyncMock(return_value=None)), \
-         patch.object(status_handler, "get_navidrome", AsyncMock(return_value=None)), \
+    with patch.object(status_handler, "get_radarr", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_prowlarr", AsyncMock(return_value=AsyncMock())), \
          patch.object(status_handler, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_emby", AsyncMock(return_value=None)), \
@@ -111,16 +127,18 @@ async def test_collect_statuses_include_deezer_true_adds_deezer():
 
     names = {s.service for s in statuses}
     assert "Deezer" in names
-    assert "Scryer" in names
+    assert "Radarr" in names
+    assert "Sonarr" in names
+    assert "Prowlarr" in names
 
 
 @pytest.mark.asyncio
 async def test_collect_statuses_include_deezer_false_omits_deezer():
     from bot.handlers import status as status_handler
 
-    with patch.object(status_handler, "get_scryer", AsyncMock(return_value=AsyncMock())), \
-         patch.object(status_handler, "get_slskd", AsyncMock(return_value=None)), \
-         patch.object(status_handler, "get_navidrome", AsyncMock(return_value=None)), \
+    with patch.object(status_handler, "get_radarr", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_prowlarr", AsyncMock(return_value=AsyncMock())), \
          patch.object(status_handler, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_emby", AsyncMock(return_value=None)), \
@@ -137,19 +155,40 @@ async def test_collect_statuses_include_deezer_false_omits_deezer():
 
 
 @pytest.mark.asyncio
+async def test_collect_statuses_lidarr_qbit_emby_torrserver_included_when_configured():
+    """All four optional services show up in the fan-out when configured."""
+    from bot.handlers import status as status_handler
+
+    with patch.object(status_handler, "get_radarr", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_prowlarr", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_lidarr", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_emby", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_torrserver", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "check_service", AsyncMock(
+             side_effect=lambda client, name: SystemStatus(service=name, available=True)
+         )):
+        statuses = await status_handler._collect_statuses(include_deezer=False)
+
+    names = {s.service for s in statuses}
+    assert names == {"Radarr", "Sonarr", "Prowlarr", "Lidarr", "qBittorrent", "Emby", "TorrServer"}
+
+
+@pytest.mark.asyncio
 async def test_collect_statuses_exception_becomes_unknown_status():
     """A failed check_service() (unexpected exception, not caught internally)
     must degrade to an 'Unknown'/unavailable SystemStatus, not crash the gather."""
     from bot.handlers import status as status_handler
 
     async def flaky_check(client, name):
-        if name == "Scryer":
+        if name == "Radarr":
             raise RuntimeError("boom")
         return SystemStatus(service=name, available=True)
 
-    with patch.object(status_handler, "get_scryer", AsyncMock(return_value=AsyncMock())), \
-         patch.object(status_handler, "get_slskd", AsyncMock(return_value=None)), \
-         patch.object(status_handler, "get_navidrome", AsyncMock(return_value=None)), \
+    with patch.object(status_handler, "get_radarr", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_prowlarr", AsyncMock(return_value=AsyncMock())), \
          patch.object(status_handler, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_emby", AsyncMock(return_value=None)), \
@@ -158,7 +197,7 @@ async def test_collect_statuses_exception_becomes_unknown_status():
          patch.object(status_handler, "check_service", AsyncMock(side_effect=flaky_check)):
         statuses = await status_handler._collect_statuses(include_deezer=False)
 
-    assert len(statuses) == 1  # Scryer is the only always-checked service now
+    assert len(statuses) == 3  # Radarr, Sonarr, Prowlarr are the always-checked services
     unknown = [s for s in statuses if not s.available and s.service == "Unknown"]
     assert len(unknown) == 1
 
@@ -181,12 +220,130 @@ async def test_cmd_status_and_cmd_health_both_use_collect_statuses():
     collect_mock.assert_awaited_once_with(include_deezer=True)
 
     with patch.object(status_handler, "_collect_statuses", AsyncMock(return_value=[])) as collect_mock2, \
-         patch.object(status_handler, "get_scryer", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_radarr", AsyncMock(return_value=AsyncMock())), \
+         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=AsyncMock())), \
          patch.object(status_handler, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(status_handler, "get_qbittorrent", AsyncMock(return_value=None)):
         await status_handler.cmd_health(message)
 
     collect_mock2.assert_awaited_once_with(include_deezer=False)
+
+
+# ---------------------------------------------------------------------------
+# status.py: /wanted reads both Radarr and Sonarr (rollback 2026-08-10)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_wanted_reports_empty_queue_when_both_are_clear():
+    from bot.handlers import status as status_handler
+
+    radarr = AsyncMock()
+    radarr.get_wanted_movies = AsyncMock(return_value=[])
+    sonarr = AsyncMock()
+    sonarr.get_wanted_episodes = AsyncMock(return_value=[])
+
+    message = MagicMock()
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+    message.answer = AsyncMock(return_value=status_msg)
+
+    with patch.object(status_handler, "get_radarr", AsyncMock(return_value=radarr)), \
+         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=sonarr)):
+        await status_handler.cmd_wanted(message)
+
+    text = status_msg.edit_text.await_args.args[0]
+    assert "пуста" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_wanted_merges_radarr_movies_and_sonarr_episodes():
+    """Review fix round 1 (2026-08-10, task-13 re-review): this test mocks
+    `sonarr.get_wanted_episodes` — the already-parsed CLIENT method, not the
+    raw HTTP layer — with a `"series": {"title": ...}` shape. Before the fix,
+    that was fiction: `get_wanted_episodes` never sent `includeSeries=true`,
+    so no real record could ever carry a `series` key (confirmed live:
+    real records with the flag omitted had exactly these top-level keys —
+    airDate, airDateUtc, episodeFileId, episodeNumber, hasFile, id,
+    lastSearchTime, monitored, overview, runtime, seasonNumber, seriesId,
+    title, tvdbId, unverifiedSceneNumbering — no `series`, no
+    `seriesTitle`). `get_wanted_episodes` now sends that flag (see
+    `bot/clients/sonarr.py`), and a live probe with it set confirmed a
+    `series` dict with a `title` sub-key appears, matching this fixture.
+    `tests/test_sonarr_client.py::test_get_wanted_episodes_requests_include_series`
+    covers the request side (that the flag is actually sent); this test
+    covers the grouping/rendering side (what the handler does with the
+    result once it has it)."""
+    from bot.handlers import status as status_handler
+
+    radarr = AsyncMock()
+    radarr.get_wanted_movies = AsyncMock(return_value=[
+        {"id": 1, "title": "Missing Movie", "year": 2024},
+    ])
+    sonarr = AsyncMock()
+    sonarr.get_wanted_episodes = AsyncMock(return_value=[
+        {"id": 2, "title": "Ep1", "seasonNumber": 1, "seriesId": 8, "series": {"title": "Paw Patrol"}},
+        {"id": 3, "title": "Ep2", "seasonNumber": 2, "seriesId": 8, "series": {"title": "Paw Patrol"}},
+    ])
+
+    message = MagicMock()
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+    message.answer = AsyncMock(return_value=status_msg)
+
+    with patch.object(status_handler, "get_radarr", AsyncMock(return_value=radarr)), \
+         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=sonarr)):
+        await status_handler.cmd_wanted(message)
+
+    text = status_msg.edit_text.await_args.args[0]
+    assert "Missing Movie" in text
+    assert "Paw Patrol" in text
+    assert "2 эп" in text  # grouped, not listed as two separate series rows
+
+
+@pytest.mark.asyncio
+async def test_wanted_fetch_failure_reports_error_not_a_crash():
+    from bot.handlers import status as status_handler
+
+    radarr = AsyncMock()
+    radarr.get_wanted_movies = AsyncMock(side_effect=RuntimeError("radarr down"))
+    sonarr = AsyncMock()
+
+    message = MagicMock()
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+    message.answer = AsyncMock(return_value=status_msg)
+
+    with patch.object(status_handler, "get_radarr", AsyncMock(return_value=radarr)), \
+         patch.object(status_handler, "get_sonarr", AsyncMock(return_value=sonarr)):
+        await status_handler.cmd_wanted(message)
+
+    status_msg.edit_text.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# status.py: /health disk gathering across the configured *arr clients
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_gather_disks_dedupes_shared_paths_across_clients():
+    from bot.handlers.status import _gather_disks
+    from bot.models import RootFolder
+
+    radarr = AsyncMock()
+    radarr.get_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="G:\\radarr\\Films", free_space=100)])
+    sonarr = AsyncMock()
+    sonarr.get_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="G:\\tv-sonarr\\Serials", free_space=200)])
+
+    disks = await _gather_disks(radarr, sonarr, None)
+
+    paths = {p for p, _ in disks}
+    assert paths == {"G:\\radarr\\Films", "G:\\tv-sonarr\\Serials"}
+
+
+@pytest.mark.asyncio
+async def test_gather_disks_skips_none_clients():
+    from bot.handlers.status import _gather_disks
+
+    disks = await _gather_disks(None, None, None)
+    assert disks == []
 
 
 # ---------------------------------------------------------------------------

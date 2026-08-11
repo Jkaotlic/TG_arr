@@ -5,27 +5,32 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock
 
-from bot.models import ContentType, MovieInfo, QualityInfo, SearchResult
+from bot.models import ContentType, QualityInfo, SearchResult
 from bot.services.scoring import ScoringService
 from bot.services.search_service import SearchService
 
 
 @pytest.mark.asyncio
 async def test_detection_propagates_task_cancellation():
-    """BUG-04 (migrated): shutdown cancellation must not become a normal
-    detection result. `_guarded_lookup` (the semaphore/circuit-breaker wrapper
-    around the old multi-*arr fan-out) is gone — cancellation now travels
-    straight through the single metadata call."""
-    scryer = AsyncMock()
+    """BUG-04: shutdown cancellation must not become a normal detection result.
+
+    Rollback 2026-08-10: detection fans out to Radarr/Sonarr/Lidarr again, and
+    `gather(return_exceptions=True)` captures a child's own CancelledError into
+    the results list instead of propagating it — so `_lookup_branch` re-raises
+    it explicitly and the caller re-raises again. This test pins that path.
+    """
+    radarr = AsyncMock()
 
     async def cancelled_lookup(*_a, **_kw):
         raise asyncio.CancelledError()
 
-    scryer.search_metadata_multi = AsyncMock(side_effect=cancelled_lookup)
-    svc = SearchService(scryer)
+    radarr.lookup_movie = AsyncMock(side_effect=cancelled_lookup)
+    sonarr = AsyncMock()
+    sonarr.lookup_series = AsyncMock(return_value=[])
+    svc = SearchService(radarr, sonarr)
 
     with pytest.raises(asyncio.CancelledError):
-        await svc.detect_with_confidence("anything at all")
+        await svc.detect_content_type("anything at all")
 
 
 class TestSearchService:
@@ -33,17 +38,18 @@ class TestSearchService:
 
     @pytest.fixture
     def mock_clients(self):
-        """Create a mocked Scryer client with empty metadata results."""
-        scryer = AsyncMock()
-        scryer.search_metadata_multi = AsyncMock(return_value={
-            ContentType.MOVIE: [], ContentType.SERIES: [], ContentType.ANIME: [],
-        })
-        return scryer
+        """Radarr/Sonarr mocks that find nothing, so query heuristics decide."""
+        radarr = AsyncMock()
+        radarr.lookup_movie = AsyncMock(return_value=[])
+        sonarr = AsyncMock()
+        sonarr.lookup_series = AsyncMock(return_value=[])
+        return radarr, sonarr
 
     @pytest.fixture
     def search_service(self, mock_clients):
-        """Create search service with the mocked Scryer client."""
-        return SearchService(mock_clients)
+        """Search service backed by the mocked *arr clients."""
+        radarr, sonarr = mock_clients
+        return SearchService(radarr, sonarr)
 
     def test_parse_query_simple(self, search_service):
         """Test parsing a simple query."""
@@ -104,61 +110,50 @@ class TestSearchService:
 
     @pytest.mark.asyncio
     async def test_detect_content_type_with_season(self, search_service):
-        """Test content type detection with season in query.
-
-        DEAD-07: detect_content_type wrapper removed — use
-        detect_with_confidence(...).content_type directly (same as prod).
-        """
-        content_type = (await search_service.detect_with_confidence("Show S01")).content_type
+        """A season marker in the query means SERIES even with no metadata hit."""
+        content_type = (await search_service.detect_content_type("Show S01")).content_type
         assert content_type == ContentType.SERIES
 
     @pytest.mark.asyncio
     async def test_detect_content_type_with_episode(self, search_service):
         """Test content type detection with episode in query."""
-        content_type = (await search_service.detect_with_confidence("Show S01E05")).content_type
+        content_type = (await search_service.detect_content_type("Show S01E05")).content_type
         assert content_type == ContentType.SERIES
 
     @pytest.mark.asyncio
-    async def test_search_releases(self, search_service, mock_clients):
-        """Releases come from Scryer, keyed by title id rather than free text."""
-        mock_clients.search_releases = AsyncMock(return_value=[
+    async def test_search_releases_for_a_movie_reads_radarr(self, search_service, mock_clients):
+        """Releases come from Radarr's interactive search, keyed by movie id.
+
+        Rollback 2026-08-10: this replaces the removed backend's
+        `search_releases(title_id, ...)`. Radarr returns releases it has
+        already judged, so the service only orders them.
+        """
+        radarr, _ = mock_clients
+        radarr.get_releases = AsyncMock(return_value=[
             SearchResult(
-                guid="1",
-                title="Movie.1080p",
-                indexer="Test",
-                quality=QualityInfo(resolution="1080p"),
-                scryer_title_id="t1",
+                guid="1", title="Movie.1080p", indexer="Test",
+                quality=QualityInfo(resolution="1080p"), origin="arr",
             ),
             SearchResult(
-                guid="2",
-                title="Movie.720p",
-                indexer="Test",
-                quality=QualityInfo(resolution="720p"),
-                scryer_title_id="t1",
+                guid="2", title="Movie.720p", indexer="Test",
+                quality=QualityInfo(resolution="720p"), origin="arr",
             ),
         ])
 
-        results = await search_service.search_releases("t1", ContentType.MOVIE)
+        results = await search_service.search_releases_for_title(ContentType.MOVIE, arr_id=15)
 
         assert len(results) == 2
-        mock_clients.search_releases.assert_awaited_once()
+        radarr.get_releases.assert_awaited_once_with(15)
 
     @pytest.mark.asyncio
-    async def test_search_metadata_routes_to_the_requested_facet(self, search_service, mock_clients):
-        mock_clients.search_metadata = AsyncMock(return_value=[
-            MovieInfo(tmdb_id=123, title="Test Movie", year=2024),
-        ])
+    async def test_search_releases_for_a_series_reads_sonarr(self, search_service, mock_clients):
+        """A season pick must reach Sonarr rather than filtering locally."""
+        _, sonarr = mock_clients
+        sonarr.get_releases = AsyncMock(return_value=[])
 
-        movies = await search_service.search_metadata("test", ContentType.MOVIE)
+        await search_service.search_releases_for_title(ContentType.SERIES, arr_id=3, season=2)
 
-        assert len(movies) == 1
-        assert movies[0].tmdb_id == 123
-        mock_clients.search_metadata.assert_awaited_once_with("test", ContentType.MOVIE)
-
-    @pytest.mark.asyncio
-    async def test_search_metadata_ignores_non_video_types(self, search_service, mock_clients):
-        assert await search_service.search_metadata("test", ContentType.MUSIC) == []
-        mock_clients.search_metadata.assert_not_awaited()
+        sonarr.get_releases.assert_awaited_once_with(3, season_number=2)
 
 
 class TestScoringServiceEdgeCases:

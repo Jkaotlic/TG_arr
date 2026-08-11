@@ -246,6 +246,62 @@ async def test_render_artist_list_respects_results_per_page_setting(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# Rollback 2026-08-10 (Task 13 finish-up) — music.py: _get_music_services
+# was left calling get_scryer() (bot/clients/registry.py's bridge, which
+# raises unconditionally -- see its docstring). That broke /music, /album
+# and /track outright. No existing test built SearchService/AddService
+# through music.py, so nothing caught it. SearchService/AddService now
+# require radarr+sonarr positionally (Task 8/Task 11) -- music.py must wire
+# them like every other handler, not reach for the deleted Scryer client.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_music_services_wires_radarr_sonarr_lidarr_not_scryer():
+    from bot.handlers import music
+
+    radarr, sonarr, lidarr = AsyncMock(), AsyncMock(), AsyncMock()
+
+    with patch.object(music, "get_radarr", AsyncMock(return_value=radarr)), \
+         patch.object(music, "get_sonarr", AsyncMock(return_value=sonarr)), \
+         patch.object(music, "get_lidarr", AsyncMock(return_value=lidarr)), \
+         patch.object(music, "get_slskd", AsyncMock(return_value=None)), \
+         patch.object(music, "get_qbittorrent", AsyncMock(return_value=None)):
+        services = await music._get_music_services()
+
+    assert services is not None
+    search_service, add_service = services
+    assert search_service.radarr is radarr
+    assert search_service.sonarr is sonarr
+    assert search_service.lidarr is lidarr
+    assert add_service.radarr is radarr
+    assert add_service.sonarr is sonarr
+    assert add_service.lidarr is lidarr
+
+
+@pytest.mark.asyncio
+async def test_get_music_services_returns_none_without_any_music_backend():
+    from bot.handlers import music
+
+    with patch.object(music, "get_radarr", AsyncMock()), \
+         patch.object(music, "get_sonarr", AsyncMock()), \
+         patch.object(music, "get_lidarr", AsyncMock(return_value=None)), \
+         patch.object(music, "get_slskd", AsyncMock(return_value=None)):
+        services = await music._get_music_services()
+
+    assert services is None
+
+
+def test_music_module_never_imports_get_scryer():
+    """Structural guard: bot/clients/registry.get_scryer is a bridge that
+    unconditionally raises (deleted for good in Task 15) -- nothing in
+    music.py may reach for it."""
+    from bot.handlers import music
+
+    assert not hasattr(music, "get_scryer")
+
+
+# ---------------------------------------------------------------------------
 # BUG-10/PERF-12 — trending.py: TTL + LRU eviction
 # ---------------------------------------------------------------------------
 
@@ -362,7 +418,7 @@ async def test_add_movie_from_trending_escapes_error_message():
     """RED: action.error_message with raw '<'/'>' must not break HTML parsing
     — it must be html.escape()'d before interpolation."""
     from bot.handlers import trending
-    from bot.models import ActionLog, ActionType, ContentType
+    from bot.models import ActionLog, ActionType, ContentType, QualityProfile, RootFolder
 
     class FakeMovie:
         tmdb_id = 99
@@ -379,18 +435,18 @@ async def test_add_movie_from_trending_escapes_error_message():
         action_type=ActionType.ADD,
         content_type=ContentType.MOVIE,
         success=False,
-        error_message="Scryer rejected: <script>bad</script>",
+        error_message="Radarr rejected: <script>bad</script>",
     )
 
     add_service = AsyncMock()
-    add_service.add_and_queue_best = AsyncMock(
-        return_value=(False, action, "Scryer отклонил запрос: <script>bad</script>")
-    )
+    add_service.get_radarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="Any")])
+    add_service.get_radarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/movies")])
+    add_service.add_movie = AsyncMock(return_value=(None, action))
 
     db = AsyncMock()
     db_user = MagicMock()
     db_user.tg_id = 1
-    db_user.preferences = MagicMock(scryer_quality_profile_id=None, scryer_root_folder_id=None)
+    db_user.preferences = MagicMock(radarr_quality_profile_id=None, radarr_root_folder_id=None)
 
     cb = _make_callback(None)
     status_msg = MagicMock()
@@ -399,7 +455,8 @@ async def test_add_movie_from_trending_escapes_error_message():
 
     from bot.ui.callbacks import AddContentCB
 
-    with patch.object(trending, "get_scryer", AsyncMock()), \
+    with patch.object(trending, "get_radarr", AsyncMock()), \
+         patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
         await trending.handle_add_movie_from_trending(cb, AddContentCB(kind="movie", tmdb_id=99), db_user, db)
@@ -411,42 +468,44 @@ async def test_add_movie_from_trending_escapes_error_message():
 
 
 # ---------------------------------------------------------------------------
-# LOGIC-22 (migrated) — trending.py adds through Scryer exactly once
+# LOGIC-22 (migrated) — trending.py adds through Sonarr, resolving a real
+# tvdb_id first (TMDb trending doesn't carry one).
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_add_series_from_trending_adds_once_through_scryer():
-    """The old handler resolved a TVDB id via Sonarr before adding. Scryer keys
-    on its own metadata id, so the whole resolution step is gone — what must
-    hold now is a single add call with the SERIES facet."""
+async def test_add_series_from_trending_resolves_tvdb_id_then_adds_once():
+    """TMDb trending has no tvdb_id — the handler must resolve one via a
+    guarded Sonarr lookup before calling add_series exactly once."""
     from bot.handlers import trending
-    from bot.models import ActionLog, ActionType, ContentType
+    from bot.models import ActionLog, ActionType, ContentType, QualityProfile, RootFolder, SeriesInfo
 
-    class FakeSeries:
-        tmdb_id = 55
-        tvdb_id = 0
-        title = "Some Series"
-        year = 2024
-        poster_url = None
-
-    series = FakeSeries()
+    series = SeriesInfo(tmdb_id=55, tvdb_id=0, title="Some Series", year=2024)
     trending._trending_series_cache.clear()
-    trending._cache_put(trending._trending_series_cache, series.tmdb_id, series)
+    trending._cache_put(trending._trending_series_cache, 55, series)
 
+    resolved = SeriesInfo(tmdb_id=55, tvdb_id=12345, title="Some Series", year=2024)
     action = ActionLog(
         user_id=1,
         action_type=ActionType.ADD,
         content_type=ContentType.SERIES,
         success=True,
     )
+    added = SeriesInfo(tmdb_id=55, tvdb_id=12345, title="Some Series", year=2024, sonarr_id=7)
+
     add_service = AsyncMock()
-    add_service.add_and_queue_best = AsyncMock(return_value=(True, action, "Добавлено"))
+    add_service.radarr = AsyncMock()
+    add_service.get_sonarr_profiles = AsyncMock(return_value=[QualityProfile(id=9, name="HD")])
+    add_service.get_sonarr_root_folders = AsyncMock(return_value=[RootFolder(id=2, path="/tv")])
+    add_service.add_series = AsyncMock(return_value=(added, action))
+
+    search_service = AsyncMock()
+    search_service.lookup_series = AsyncMock(return_value=[resolved])
 
     db = AsyncMock()
     db_user = MagicMock()
     db_user.tg_id = 1
-    db_user.preferences = MagicMock(scryer_quality_profile_id=None, scryer_root_folder_id=None)
+    db_user.preferences = MagicMock(sonarr_quality_profile_id=None, sonarr_root_folder_id=None)
 
     cb = _make_callback(None)
     status_msg = MagicMock()
@@ -455,16 +514,62 @@ async def test_add_series_from_trending_adds_once_through_scryer():
 
     from bot.ui.callbacks import AddContentCB
 
-    with patch.object(trending, "get_scryer", AsyncMock()), \
+    with patch.object(trending, "get_radarr", AsyncMock()), \
+         patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
-         patch.object(trending, "AddService", return_value=add_service):
+         patch.object(trending, "AddService", return_value=add_service), \
+         patch.object(trending, "SearchService", return_value=search_service):
         await trending.handle_add_series_from_trending(
             cb, AddContentCB(kind="series", tmdb_id=55), db_user, db
         )
 
-    add_service.add_and_queue_best.assert_awaited_once()
-    assert add_service.add_and_queue_best.await_args.args[1] == ContentType.SERIES
+    search_service.lookup_series.assert_awaited_once_with("Some Series")
+    add_service.add_series.assert_awaited_once()
+    assert add_service.add_series.await_args.args[0] is resolved
     db.log_action.assert_awaited_once()
+    trending._trending_series_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_add_series_from_trending_reports_when_sonarr_has_no_match():
+    """No Sonarr lookup candidate at all -> a clear warning, no add attempt."""
+    from bot.handlers import trending
+    from bot.models import SeriesInfo
+
+    series = SeriesInfo(tmdb_id=66, tvdb_id=0, title="Unknown To Sonarr", year=2024)
+    trending._trending_series_cache.clear()
+    trending._cache_put(trending._trending_series_cache, 66, series)
+
+    add_service = AsyncMock()
+    add_service.radarr = AsyncMock()
+
+    search_service = AsyncMock()
+    search_service.lookup_series = AsyncMock(return_value=[])
+
+    db = AsyncMock()
+    db_user = MagicMock()
+    db_user.tg_id = 1
+    db_user.preferences = MagicMock(sonarr_quality_profile_id=None, sonarr_root_folder_id=None)
+
+    cb = _make_callback(None)
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+    cb.message.answer = AsyncMock(return_value=status_msg)
+
+    from bot.ui.callbacks import AddContentCB
+
+    with patch.object(trending, "get_radarr", AsyncMock()), \
+         patch.object(trending, "get_sonarr", AsyncMock()), \
+         patch.object(trending, "get_qbittorrent", AsyncMock()), \
+         patch.object(trending, "AddService", return_value=add_service), \
+         patch.object(trending, "SearchService", return_value=search_service):
+        await trending.handle_add_series_from_trending(
+            cb, AddContentCB(kind="series", tmdb_id=66), db_user, db
+        )
+
+    add_service.add_series.assert_not_awaited()
+    sent_text = status_msg.edit_text.call_args.args[0]
+    assert "Sonarr" in sent_text
     trending._trending_series_cache.clear()
 
 

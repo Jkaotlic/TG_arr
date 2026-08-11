@@ -58,19 +58,23 @@ def callback_with_status():
     return cb, status_msg
 
 
-def build_add_service(scryer=None, lidarr=None, qbt=None, slskd=None):
-    """Construct an AddService with an AsyncMock Scryer client by default
-    (lidarr/qbt/slskd stay None — not every test wants those wired up).
+def build_add_service(radarr=None, sonarr=None, lidarr=None, qbt=None):
+    """Construct an AddService with AsyncMock Radarr/Sonarr clients by default
+    (lidarr/qbt stay None — not every test wants those wired up).
 
-    Shared by test_add_service.py and test_r4_C4-services.py.
+    Rollback 2026-08-10 (Task 10): reshaped for the *arr-backed AddService —
+    was `build_add_service(scryer=..., lidarr=..., qbt=..., slskd=...)`.
+
+    Shared by test_add_service.py and test_r4_C4-services.py; both were
+    rewritten against the *arr grab paths in Task 15 and both pass.
     """
     from bot.services.add_service import AddService
 
     return AddService(
-        scryer or AsyncMock(),
+        radarr or AsyncMock(),
+        sonarr or AsyncMock(),
         qbittorrent=qbt,
         lidarr=lidarr,
-        slskd=slskd,
     )
 
 
@@ -84,29 +88,46 @@ def _default_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test_token_123:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
     monkeypatch.setenv("ALLOWED_TG_IDS", "123456789,987654321")
     monkeypatch.setenv("ADMIN_TG_IDS", "123456789")
-    monkeypatch.setenv("SCRYER_URL", "http://localhost:8088")
-    monkeypatch.setenv("SCRYER_USERNAME", "admin")
-    monkeypatch.setenv("SCRYER_PASSWORD", "test_scryer_password")
+    monkeypatch.setenv("PROWLARR_URL", "http://localhost:9696")
+    monkeypatch.setenv("PROWLARR_API_KEY", "test_prowlarr_key")
+    monkeypatch.setenv("RADARR_URL", "http://localhost:7878")
+    monkeypatch.setenv("RADARR_API_KEY", "test_radarr_key")
+    monkeypatch.setenv("SONARR_URL", "http://localhost:8989")
+    monkeypatch.setenv("SONARR_API_KEY", "test_sonarr_key")
     monkeypatch.setenv("DATABASE_PATH", ":memory:")
     monkeypatch.setenv("LOG_LEVEL", "DEBUG")
-    # Migration 2026-07-28: these are gone from Settings. Clear them so a
-    # developer's exported *arr env can't resurrect stale expectations.
-    for stale in (
-        "PROWLARR_URL", "PROWLARR_API_KEY",
-        "RADARR_URL", "RADARR_API_KEY",
-        "SONARR_URL", "SONARR_API_KEY",
-    ):
+    # Rollback 2026-08-10: Scryer is gone from Settings. Clear its vars so a
+    # developer's exported environment can't resurrect stale expectations.
+    for stale in ("SCRYER_URL", "SCRYER_USERNAME", "SCRYER_PASSWORD"):
         monkeypatch.delenv(stale, raising=False)
 
-    from bot.config import get_settings
-    from bot.services import search_service as _search_service
+    from bot.config import Settings, get_settings
+
+    # Settings.model_config points env_file at ".env" so the running bot
+    # picks up a developer's real credentials outside tests. Inside the
+    # suite that's a hazard: pydantic-settings falls back to reading that
+    # file for any var monkeypatch.delenv()'d off the process environment,
+    # so a repo-root .env with real RADARR_API_KEY etc. silently defeats
+    # tests that assert ValidationError/warnings on a *missing* var (it's
+    # no longer missing — it's just not in os.environ). Force every
+    # Settings()/get_settings() call inside the suite to see only
+    # monkeypatch'd process env, never the file, regardless of whether a
+    # developer's .env exists on disk.
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
 
     get_settings.cache_clear()
-    # The detection cache is module-level and shared between tests.
-    _search_service._cache_clear()
+    # The detection cache AND the per-service circuit breaker are both
+    # module-level and shared across every test in the process (pytest runs
+    # the whole suite in one process) — without resetting both, a test that
+    # trips the breaker for a service (e.g. 3 consecutive Radarr failures)
+    # can leave it open and cause order-dependent flakiness in a later,
+    # unrelated test. `_reset_module_state()` resets both in one call.
+    from bot.services import search_service as _search_service
+
+    _search_service._reset_module_state()
     yield
     get_settings.cache_clear()
-    _search_service._cache_clear()
+    _search_service._reset_module_state()
 
 
 @pytest.fixture

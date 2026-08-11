@@ -12,6 +12,41 @@ def scoring_service():
     return ScoringService()
 
 
+def test_scoring_does_not_duplicate_the_language_policy():
+    """The policy lives in *arr custom formats; a second copy here would drift.
+
+    Rollback 2026-08-10 (Task 11): Radarr/Sonarr already implement the
+    English-audio/Russian-subtitles policy as custom formats attached to the
+    quality profile (`English Audio` +250, `RusSubs` +250, `Russian Dub
+    without English` -1000) and apply it to their own RSS/automatic grabs
+    too. A second, bot-local copy of that policy would only cover
+    bot-initiated searches and would inevitably drift from the first. So two
+    releases identical but for language must score the same locally — the
+    difference is expressed by *arr's customFormatScore (SearchResult.
+    rejected/rejections/custom_format_score), not by ScoringService.
+
+    Brief note: the brief's own Step 1 snippet calls `scoring.score(...)`,
+    but ScoringService has no `.score()` method — only `.calculate_score()`
+    (established by Task 9, confirmed by search_service.search_releases_
+    for_title). Using the real method name here rather than adding a second
+    one just to match stale brief pseudo-code.
+    """
+    from bot.models import ContentType, QualityInfo, SearchResult
+    from bot.services.scoring import ScoringService
+
+    scoring = ScoringService()
+    common = dict(
+        download_url="u", indexer="i", size=50_000_000_000,
+        seeders=100, leechers=1, quality=QualityInfo(resolution="2160p"),
+    )
+    eng = SearchResult(guid="g-eng", title="Dune 2021 2160p BluRay ENG", **common)
+    rus = SearchResult(guid="g-rus", title="Дюна 2021 2160p BluRay RUS DUB", **common)
+
+    assert scoring.calculate_score(eng, ContentType.MOVIE) == scoring.calculate_score(
+        rus, ContentType.MOVIE
+    )
+
+
 @pytest.fixture
 def base_result():
     """Create a base search result for testing."""
@@ -209,50 +244,6 @@ class TestScoringService:
 
         assert score_remux > score_normal
 
-    def test_english_audio_marker_is_preferred(self, scoring_service, base_result):
-        base_result.title = "Test.Movie.2024.1080p.BluRay.ENG.x264-GROUP"
-        score_english = scoring_service.calculate_score(base_result)
-
-        base_result.title = "Test.Movie.2024.1080p.BluRay.x264-GROUP"
-        score_unmarked = scoring_service.calculate_score(base_result)
-
-        assert score_english > score_unmarked
-
-    def test_russian_subtitles_are_preferred(self, scoring_service, base_result):
-        base_result.title = "Test.Movie.2024.1080p.BluRay.RusSub.x264-GROUP"
-        base_result.quality.subtitle = "RusSub"
-        score_with_subtitles = scoring_service.calculate_score(base_result)
-
-        base_result.title = "Test.Movie.2024.1080p.BluRay.x264-GROUP"
-        base_result.quality.subtitle = None
-        score_without_subtitles = scoring_service.calculate_score(base_result)
-
-        assert score_with_subtitles > score_without_subtitles
-
-    def test_russian_dub_without_english_audio_is_penalized(self, scoring_service, base_result):
-        base_result.title = "Test.Movie.2024.1080p.BluRay.DVO.x264-GROUP"
-        base_result.quality.subtitle = "DVO"
-        score_dub_only = scoring_service.calculate_score(base_result)
-
-        base_result.title = "Test.Movie.2024.1080p.BluRay.ENG.x264-GROUP"
-        base_result.quality.subtitle = None
-        score_english = scoring_service.calculate_score(base_result)
-
-        assert score_dub_only < score_english
-
-    def test_russian_dub_is_not_penalized_when_english_audio_is_present(
-        self, scoring_service, base_result
-    ):
-        base_result.title = "Test.Movie.2024.1080p.BluRay.ENG.DVO.x264-GROUP"
-        base_result.quality.subtitle = "DVO"
-        score_multiaudio = scoring_service.calculate_score(base_result)
-
-        base_result.title = "Test.Movie.2024.1080p.BluRay.ENG.x264-GROUP"
-        base_result.quality.subtitle = None
-        score_english = scoring_service.calculate_score(base_result)
-
-        assert score_multiaudio == score_english
-
     def test_sort_results(self, scoring_service):
         """Test sorting results by score."""
         results = [
@@ -294,6 +285,42 @@ class TestScoringService:
     # dead code — removed from ScoringService. Their one useful idea
     # (preferred_resolution affecting ranking) is now covered by
     # TestPreferredResolutionBonus below, wired into calculate_score/sort_results.
+
+    def test_sort_results_sinks_a_rejected_release_to_the_bottom(self, scoring_service):
+        """Rollback 2026-08-10 (Tasks 14/15): `sort_results` used to defer to
+        the previous backend's own verdict (`scryer_allowed`/`scryer_score`,
+        removed with the client) — those fields are gone, and its *arr
+        equivalent (`SearchResult.rejected`/`.custom_format_score`, populated
+        by every *arr interactive-search release per `ArrBaseClient.
+        _parse_release`) was never wired into the sort key, so a release *arr
+        itself refuses could still rank first. `rejected` must sink a release
+        to the bottom — shown (the user may still force it) but never offered
+        first — exactly like the old scryer_allowed-based sort did."""
+        accepted = SearchResult(
+            guid="a", title="Accepted.Release", size=1, rejected=False, custom_format_score=0,
+        )
+        rejected = SearchResult(
+            guid="r", title="Rejected.Release", size=1, rejected=True, custom_format_score=1000,
+        )
+
+        sorted_results = scoring_service.sort_results([rejected, accepted])
+
+        assert [r.guid for r in sorted_results] == ["a", "r"]
+
+    def test_sort_results_orders_accepted_releases_by_custom_format_score(self, scoring_service):
+        """Among releases *arr did not refuse, its own customFormatScore
+        decides — the bot's own calculate_score only breaks ties, same
+        relationship the previous backend's releaseScore had."""
+        low = SearchResult(
+            guid="low", title="Low.Score", size=1, rejected=False, custom_format_score=10,
+        )
+        high = SearchResult(
+            guid="high", title="High.Score", size=1, rejected=False, custom_format_score=500,
+        )
+
+        sorted_results = scoring_service.sort_results([low, high])
+
+        assert [r.guid for r in sorted_results] == ["high", "low"]
 
 
 class TestPreferredResolutionBonus:

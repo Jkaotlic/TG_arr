@@ -42,24 +42,45 @@ def _clear_trending_caches():
 # ---------------------------------------------------------------------------
 # SEC-03: passkey in push-result logs must be stripped before logging
 # ---------------------------------------------------------------------------
-def test_release_secrets_are_masked_before_logging():
-    """SEC-03 (migrated): the *arr push response is gone, but Scryer's
-    downloadUrl carries Prowlarr's apikey and the tracker passkey and must
-    never reach the logs verbatim."""
-    from bot.clients.scryer import mask_release_secrets
+def test_push_result_never_carries_the_download_url_into_logs():
+    """SEC-03: a release URL carries Prowlarr's apikey and the tracker passkey
+    and must never reach the logs verbatim.
 
-    masked = mask_release_secrets(
-        "http://127.0.0.1:9696/2/download?apikey=6b7b4a9e4c7e&link=ZWVK&file=Movie"
-    )
-    assert "6b7b4a9e4c7e" not in masked
-    assert "ZWVK" not in masked
-    assert "127.0.0.1:9696" in masked
+    Rollback 2026-08-10: the previous backend masked the URL in place
+    (`mask_release_secrets`). The *arr push response is back, and it echoes the
+    whole pushed release including `downloadUrl` — so the invariant is now held
+    by dropping the field outright rather than redacting it. Same guarantee,
+    stricter mechanism. The end-to-end log assertion lives in
+    tests/test_add_service.py::test_push_release_response_is_never_logged_raw.
+    """
+    from bot.services.add_service import _safe_push_result
+
+    safe = _safe_push_result({
+        "approved": True,
+        "title": "Movie 2021 2160p",
+        "downloadUrl": "http://127.0.0.1:9696/2/download?apikey=6b7b4a9e4c7e&link=ZWVK",
+    })
+
+    assert "6b7b4a9e4c7e" not in str(safe)
+    assert "ZWVK" not in str(safe)
+    assert "downloadUrl" not in safe
+    assert safe.get("approved") is True
 
 
-def test_mask_release_secrets_handles_none():
-    from bot.clients.scryer import mask_release_secrets
+def test_safe_push_result_handles_a_non_dict_response():
+    """*arr can answer with an empty body — that must not raise.
 
-    assert mask_release_secrets(None) == ""
+    Characterizes current behaviour: the helper always returns the safe-field
+    skeleton (`approved`/`rejections`), never the raw payload, so a caller can
+    read `.get("approved")` unconditionally.
+    """
+    from bot.services.add_service import _safe_push_result
+
+    for payload in (None, {}):
+        safe = _safe_push_result(payload)
+        assert "downloadUrl" not in safe
+        assert safe.get("approved") is None
+        assert safe.get("rejections") == []
 
 _DANGEROUS_NAME = "Tom & Jerry <group>"
 
@@ -123,6 +144,28 @@ async def test_cmd_resume_escapes_torrent_name():
 _DANGEROUS_TITLE = "Fast & Furious <hd>"
 
 
+def _trending_add_service(add_result, kind: str):
+    """An `AddService` double shaped like the trending add flow expects.
+
+    Rollback 2026-08-10: the trending handlers no longer call a single
+    `add_and_queue_best`. They resolve the user's per-service profile and root
+    folder first (Radarr's and Sonarr's id spaces are independent), then call
+    `add_movie`/`add_series`, which return `(added, ActionLog)`.
+    """
+    svc = MagicMock()
+    profile = MagicMock(id=7, name="4k/1080p")
+    folder = MagicMock(id=1, path="G:\\radarr\\Films")
+    svc.get_radarr_profiles = AsyncMock(return_value=[profile])
+    svc.get_radarr_root_folders = AsyncMock(return_value=[folder])
+    svc.get_sonarr_profiles = AsyncMock(return_value=[profile])
+    svc.get_sonarr_root_folders = AsyncMock(return_value=[folder])
+    if kind == "movie":
+        svc.add_movie = AsyncMock(return_value=add_result)
+    else:
+        svc.add_series = AsyncMock(return_value=add_result)
+    return svc
+
+
 @pytest.mark.asyncio
 async def test_trending_add_movie_escapes_title():
     """SEC-02: a trending movie title with & / < must be escaped in the success edit."""
@@ -130,15 +173,15 @@ async def test_trending_add_movie_escapes_title():
 
     added = MovieInfo(tmdb_id=123, title=_DANGEROUS_TITLE, year=2024)
     action = MagicMock(success=True, error_message=None)
-    add_service = MagicMock()
-    add_service.add_and_queue_best = AsyncMock(
-        return_value=(True, action, "Добавлено, Scryer подбирает и качает лучший релиз")
-    )
+    add_service = _trending_add_service(add_result=(added, action), kind="movie")
 
     db = AsyncMock()
     db_user = MagicMock()
     db_user.tg_id = 123
-    db_user.preferences = MagicMock(scryer_quality_profile_id=None, scryer_root_folder_id=None)
+    db_user.preferences = MagicMock(
+        radarr_quality_profile_id=None, radarr_root_folder_id=None,
+        sonarr_quality_profile_id=None, sonarr_root_folder_id=None,
+    )
 
     cb, status_msg = _callback_with_status()
     cb.data = None
@@ -148,7 +191,8 @@ async def test_trending_add_movie_escapes_title():
 
     from bot.ui.callbacks import AddContentCB
 
-    with patch.object(trending, "get_scryer", AsyncMock()), \
+    with patch.object(trending, "get_radarr", AsyncMock()), \
+         patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
         await trending.handle_add_movie_from_trending(
@@ -326,26 +370,27 @@ async def test_trending_add_series_escapes_title():
     from bot.handlers import trending
 
     action = MagicMock(success=True, error_message=None)
-    add_service = MagicMock()
-    add_service.add_and_queue_best = AsyncMock(
-        return_value=(True, action, "Добавлено, Scryer подбирает и качает лучший релиз")
-    )
+    cached = SeriesInfo(tvdb_id=999, tmdb_id=123, title=_DANGEROUS_TITLE, year=2020)
+    add_service = _trending_add_service(add_result=(cached, action), kind="series")
 
     db = AsyncMock()
     db_user = MagicMock()
     db_user.tg_id = 123
-    db_user.preferences = MagicMock(scryer_quality_profile_id=None, scryer_root_folder_id=None)
+    db_user.preferences = MagicMock(
+        radarr_quality_profile_id=None, radarr_root_folder_id=None,
+        sonarr_quality_profile_id=None, sonarr_root_folder_id=None,
+    )
 
     cb, status_msg = _callback_with_status()
     cb.data = None
 
-    cached = SeriesInfo(tvdb_id=999, tmdb_id=123, title=_DANGEROUS_TITLE, year=2020)
     trending._trending_series_cache.clear()
     trending._trending_series_cache[123] = cached
 
     from bot.ui.callbacks import AddContentCB
 
-    with patch.object(trending, "get_scryer", AsyncMock()), \
+    with patch.object(trending, "get_radarr", AsyncMock()), \
+         patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
         await trending.handle_add_series_from_trending(

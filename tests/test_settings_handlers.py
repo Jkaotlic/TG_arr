@@ -6,6 +6,11 @@ right picker and every set-callback writes the right preference key.
 
 BUG-04b: set-handlers must call callback.answer() exactly once (previously
 they called handle_settings_back, which issued a second answer()).
+
+Rollback 2026-08-10 (Task 13): the interim single Scryer-shaped profile/folder
+pair is gone — Radarr and Sonarr have independent id spaces (live
+measurement: both have root folders 1/2 pointing at different paths), so each
+gets its own pair, restoring the pre-Scryer per-service shape.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,7 +19,6 @@ import pytest
 
 from bot.handlers import settings
 from bot.models import MetadataProfile, QualityProfile, RootFolder, User, UserPreferences
-from bot.clients.scryer import root_folder_id
 from bot.ui.callbacks import SettingCB
 
 
@@ -36,8 +40,10 @@ def _make_user(**prefs_kwargs) -> User:
 def _fake_add_service(**overrides) -> AsyncMock:
     """AsyncMock AddService with all getter methods stubbed to empty/defaults."""
     svc = AsyncMock()
-    svc.get_quality_profiles = AsyncMock(return_value=overrides.get("scryer_profiles", []))
-    svc.get_root_folders = AsyncMock(return_value=overrides.get("scryer_folders", []))
+    svc.get_radarr_profiles = AsyncMock(return_value=overrides.get("radarr_profiles", []))
+    svc.get_radarr_root_folders = AsyncMock(return_value=overrides.get("radarr_folders", []))
+    svc.get_sonarr_profiles = AsyncMock(return_value=overrides.get("sonarr_profiles", []))
+    svc.get_sonarr_root_folders = AsyncMock(return_value=overrides.get("sonarr_folders", []))
     svc.get_lidarr_profiles = AsyncMock(return_value=overrides.get("lidarr_profiles", []))
     svc.get_lidarr_metadata_profiles = AsyncMock(
         return_value=overrides.get("lidarr_meta_profiles", [])
@@ -54,18 +60,28 @@ def _fake_add_service(**overrides) -> AsyncMock:
     "menu_callback,getter_attr,choices,expected_key",
     [
         (
-            "settings:scryer_profile",
-            "scryer_profiles",
-            [QualityProfile(id="4k", name="4K Remux + 1080P Fallback")],
-            "scryer_quality_profile_id",
+            "settings:radarr_profile",
+            "radarr_profiles",
+            [QualityProfile(id=7, name="4K/1080p Remux")],
+            "radarr_quality_profile_id",
         ),
         (
-            "settings:scryer_folder",
-            "scryer_folders",
-            # The id must stay callback-safe: a raw Windows path contains ':',
-            # which aiogram's CallbackData uses as its field separator.
-            [RootFolder(id=root_folder_id("G:\\radarr\\Films"), path="G:\\radarr\\Films")],
-            "scryer_root_folder_id",
+            "settings:radarr_folder",
+            "radarr_folders",
+            [RootFolder(id=1, path="G:\\radarr\\Films")],
+            "radarr_root_folder_id",
+        ),
+        (
+            "settings:sonarr_profile",
+            "sonarr_profiles",
+            [QualityProfile(id=9, name="HD-1080p")],
+            "sonarr_quality_profile_id",
+        ),
+        (
+            "settings:sonarr_folder",
+            "sonarr_folders",
+            [RootFolder(id=2, path="G:\\tv-sonarr\\Serials")],
+            "sonarr_root_folder_id",
         ),
         (
             "settings:lidarr_profile",
@@ -107,8 +123,8 @@ async def test_settings_menu_opens_correct_picker(
 
 @pytest.mark.asyncio
 async def test_settings_menu_alerts_when_empty():
-    svc = _fake_add_service(scryer_profiles=[])
-    cb = _make_callback("settings:scryer_profile")
+    svc = _fake_add_service(radarr_profiles=[])
+    cb = _make_callback("settings:radarr_profile")
 
     with patch.object(settings, "_get_add_service", AsyncMock(return_value=svc)):
         await settings.handle_settings_menu(cb)
@@ -127,8 +143,10 @@ async def test_settings_menu_alerts_when_empty():
 @pytest.mark.parametrize(
     "pref_key,value",
     [
-        ("scryer_quality_profile_id", "4k"),
-        ("scryer_root_folder_id", "G:\\radarr\\Films"),
+        ("radarr_quality_profile_id", 7),
+        ("radarr_root_folder_id", 1),
+        ("sonarr_quality_profile_id", 9),
+        ("sonarr_root_folder_id", 2),
         ("lidarr_quality_profile_id", 11),
         ("lidarr_metadata_profile_id", 12),
         ("lidarr_root_folder_id", 13),
@@ -163,7 +181,7 @@ async def test_settings_set_calls_answer_exactly_once():
 
     with patch.object(settings, "_get_add_service", AsyncMock(return_value=svc)):
         await settings.handle_settings_set(
-            cb, SettingCB(key="scryer_quality_profile_id", value="4k"), db_user, db
+            cb, SettingCB(key="radarr_quality_profile_id", value="7"), db_user, db
         )
 
     assert cb.answer.call_count == 1
@@ -185,11 +203,11 @@ async def test_settings_set_render_failure_still_answers_exactly_once():
     cb = _make_callback(None)
 
     broken_add_service = AsyncMock()
-    broken_add_service.get_quality_profiles = AsyncMock(side_effect=RuntimeError("scryer down"))
+    broken_add_service.get_radarr_profiles = AsyncMock(side_effect=RuntimeError("radarr down"))
 
     with patch.object(settings, "_get_add_service", AsyncMock(return_value=broken_add_service)):
         await settings.handle_settings_set(
-            cb, SettingCB(key="scryer_quality_profile_id", value="4k"), db_user, db
+            cb, SettingCB(key="radarr_quality_profile_id", value="7"), db_user, db
         )
 
     assert cb.answer.call_count == 1
@@ -199,14 +217,15 @@ async def test_settings_set_render_failure_still_answers_exactly_once():
 
 @pytest.mark.asyncio
 async def test_settings_set_invalid_value_answers_once_no_render():
-    """Migration 2026-07-28: only Lidarr ids are numeric, so a non-numeric value
-    is a validation failure there — Scryer ids are slugs/paths and pass through."""
+    """Rollback 2026-08-10: Radarr/Sonarr/Lidarr ids are all plain integers —
+    unlike Scryer's slugs/paths, so a non-numeric value is now a validation
+    failure for every mapped setting, not just Lidarr's."""
     db_user = _make_user()
     db = AsyncMock()
     cb = _make_callback(None)
 
     await settings.handle_settings_set(
-        cb, SettingCB(key="lidarr_quality_profile_id", value="not-an-int"), db_user, db
+        cb, SettingCB(key="radarr_quality_profile_id", value="not-an-int"), db_user, db
     )
 
     assert cb.answer.call_count == 1
@@ -305,8 +324,10 @@ async def test_render_settings_menu_gathers_calls_concurrently():
     svc = AsyncMock()
     # Plain lambdas returning the coroutine directly — NOT AsyncMock(side_effect=...),
     # which does not await a coroutine returned by a synchronous side_effect.
-    svc.get_quality_profiles = lambda: slow("scryer_profiles", 0.05)
-    svc.get_root_folders = lambda *a, **kw: slow("scryer_folders", 0.05)
+    svc.get_radarr_profiles = lambda: slow("radarr_profiles", 0.05)
+    svc.get_radarr_root_folders = lambda: slow("radarr_folders", 0.05)
+    svc.get_sonarr_profiles = lambda: slow("sonarr_profiles", 0.05)
+    svc.get_sonarr_root_folders = lambda: slow("sonarr_folders", 0.05)
 
     db_user = _make_user()
 
@@ -314,8 +335,20 @@ async def test_render_settings_menu_gathers_calls_concurrently():
         await settings._render_settings_menu(db_user)
 
     # If calls were sequential, every *_end would appear before the next
-    # *_start. With gather, both *_start entries precede both *_end entries.
-    # Migration 2026-07-28: two reads (Scryer profiles + root folders) instead
-    # of the former Radarr+Sonarr quartet.
-    starts_before_first_end = call_order[:2]
+    # *_start. With gather, all four *_start entries precede any *_end.
+    starts_before_first_end = call_order[:4]
     assert all(entry.endswith("_start") for entry in starts_before_first_end)
+
+
+# ---------------------------------------------------------------------------
+# Task 13, carried-forward item 1: settings.py must not construct AddService
+# with a Scryer client, and must not reference the removed
+# scryer_quality_profile_id/scryer_root_folder_id preference keys anywhere.
+# ---------------------------------------------------------------------------
+def test_settings_module_does_not_reference_scryer_preference_keys():
+    from pathlib import Path
+
+    source = Path(settings.__file__).read_text(encoding="utf-8")
+    assert "scryer_quality_profile_id" not in source
+    assert "scryer_root_folder_id" not in source
+    assert "get_scryer" not in source

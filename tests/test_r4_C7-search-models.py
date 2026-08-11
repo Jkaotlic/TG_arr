@@ -172,3 +172,46 @@ async def test_back_saves_when_clearing_selection():
     db.save_session.assert_awaited_once()
     assert session.selected_result is None
     assert session.selected_content is None
+
+
+# ---------------------------------------------------------------------------
+# Rollback 2026-08-10: Scryer facets/string-ids replaced with *arr fields.
+# ---------------------------------------------------------------------------
+def test_content_type_maps_to_sonarr_series_type():
+    """Anime is a Sonarr seriesType, not a separate service or library."""
+    from bot.models import ContentType
+
+    assert ContentType.SERIES.sonarr_series_type == "standard"
+    assert ContentType.ANIME.sonarr_series_type == "anime"
+    assert ContentType.MOVIE.sonarr_series_type is None
+    assert ContentType.from_sonarr_series_type("anime") is ContentType.ANIME
+    assert ContentType.from_sonarr_series_type("ANIME") is ContentType.ANIME
+    assert ContentType.from_sonarr_series_type("standard") is ContentType.SERIES
+    assert ContentType.from_sonarr_series_type(None) is ContentType.UNKNOWN
+
+
+def test_movie_and_series_carry_integer_arr_ids():
+    """*arr ids are integers — the Scryer-era string ids and slugs are gone."""
+    from bot.models import MovieInfo, SeriesInfo
+
+    movie = MovieInfo(tmdb_id=42, title="M", year=2020, radarr_id=7, quality_profile_id=4)
+    assert movie.radarr_id == 7
+    assert movie.quality_profile_id == 4
+    assert not hasattr(movie, "scryer_id")
+    assert not hasattr(movie, "metadata_id")
+
+    series = SeriesInfo(tvdb_id=99, title="S", sonarr_id=3, series_type="anime")
+    assert series.sonarr_id == 3
+    assert series.content_type is ContentType.ANIME
+    assert not hasattr(series, "facet")
+
+
+def test_scryer_models_are_gone():
+    """The Scryer-only payload models must not survive the rollback."""
+    import bot.models as models
+
+    for name in (
+        "ScryerHealth", "ScryerQueueItem", "ScryerCalendarItem",
+        "ScryerWantedItem", "ScryerImportRecord", "IndexerStat",
+    ):
+        assert not hasattr(models, name), f"{name} should have been removed"

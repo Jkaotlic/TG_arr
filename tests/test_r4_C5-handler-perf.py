@@ -38,19 +38,19 @@ def _answer_capture():
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_calendar_runs_fetches_concurrently():
-    """The Scryer and Lidarr calendar calls must overlap (gather), not run
-    strictly back-to-back.
+    """The Radarr and Sonarr (and Lidarr) calendar calls must overlap
+    (gather), not run strictly back-to-back.
 
     TEST-09: deterministic barrier instead of a real asyncio.sleep race — each
-    fake call records "start", then blocks until both have started. If
+    fake call records "start", then blocks until all three have started. If
     `_fetch_and_send_calendar` awaited them sequentially, the first would
     deadlock and the test would time out instead of completing.
 
-    Migration 2026-07-28: two sources instead of three — Scryer's single
-    `calendarEpisodes` covers movies, series and anime.
+    Rollback 2026-08-10: three sources again (Radarr movies, Sonarr episodes,
+    Lidarr albums) — Scryer's single `calendarEpisodes` query covering every
+    video facet is gone; each *arr client answers its own facet.
     """
     from bot.handlers import calendar
-    from bot.models import ContentType, ScryerCalendarItem
 
     order: list[str] = []
     started = 0
@@ -62,28 +62,26 @@ async def test_calendar_runs_fetches_concurrently():
         order.append(f"{name}:start")
         async with lock:
             started += 1
-            if started == 2:
+            if started == 3:
                 all_started.set()
         await asyncio.wait_for(all_started.wait(), timeout=5)
         order.append(f"{name}:end")
 
-    scryer = MagicMock()
+    radarr = MagicMock()
 
-    async def scryer_calendar(start_date, end_date):
-        await _barrier("scryer")
-        return [
-            ScryerCalendarItem(
-                id="e1", title_id="t1", title_name="Show",
-                content_type=ContentType.SERIES, season_number=1, episode_number=2,
-                air_date="2026-07-05",
-            ),
-            ScryerCalendarItem(
-                id="m1", title_id="t2", title_name="Film",
-                content_type=ContentType.MOVIE, air_date="2026-07-06",
-            ),
-        ]
+    async def radarr_calendar(days):
+        await _barrier("radarr")
+        return [{"title": "Film", "release_date": "2026-07-06"}]
 
-    scryer.get_calendar = scryer_calendar
+    radarr.get_calendar = radarr_calendar
+
+    sonarr = MagicMock()
+
+    async def sonarr_calendar(days):
+        await _barrier("sonarr")
+        return [{"series_title": "Show", "title": "", "season": 1, "episode": 2, "air_date": "2026-07-05"}]
+
+    sonarr.get_calendar = sonarr_calendar
 
     lidarr = MagicMock()
 
@@ -95,15 +93,17 @@ async def test_calendar_runs_fetches_concurrently():
 
     answer_func, captured = _answer_capture()
 
-    with patch.object(calendar, "get_scryer", AsyncMock(return_value=scryer)), \
+    with patch.object(calendar, "get_radarr", AsyncMock(return_value=radarr)), \
+         patch.object(calendar, "get_sonarr", AsyncMock(return_value=sonarr)), \
          patch.object(calendar, "get_lidarr", AsyncMock(return_value=lidarr)), \
          patch.object(calendar.Formatters, "format_calendar", return_value="OK") as fmt:
         await calendar._fetch_and_send_calendar(7, answer_func=answer_func)
 
-    # Concurrency: both started before either finished.
-    assert order[:2] == ["scryer:start", "lidarr:start"], order
+    # Concurrency: all three started before any finished.
+    assert set(order[:3]) == {"radarr:start", "sonarr:start", "lidarr:start"}, order
 
-    # Scryer's single calendar is split back into episodes/movies for the formatter.
+    # Radarr's calendar feeds "movies", Sonarr's feeds "episodes" — no split
+    # step needed any more (that was Scryer's job).
     args = fmt.call_args.args
     kwargs = fmt.call_args.kwargs
     assert args[0][0]["series_title"] == "Show"
@@ -119,14 +119,17 @@ async def test_calendar_one_source_fails_others_survive():
     """A failing source contributes a warning, the other still renders."""
     from bot.handlers import calendar
 
-    scryer = MagicMock()
-    scryer.get_calendar = AsyncMock(side_effect=RuntimeError("scryer down"))
+    radarr = MagicMock()
+    radarr.get_calendar = AsyncMock(side_effect=RuntimeError("radarr down"))
+    sonarr = MagicMock()
+    sonarr.get_calendar = AsyncMock(return_value=[])
     lidarr = MagicMock()
     lidarr.get_calendar = AsyncMock(return_value=[{"a": 1}])
 
     answer_func, captured = _answer_capture()
 
-    with patch.object(calendar, "get_scryer", AsyncMock(return_value=scryer)), \
+    with patch.object(calendar, "get_radarr", AsyncMock(return_value=radarr)), \
+         patch.object(calendar, "get_sonarr", AsyncMock(return_value=sonarr)), \
          patch.object(calendar, "get_lidarr", AsyncMock(return_value=lidarr)), \
          patch.object(calendar.Formatters, "format_calendar", return_value="OK") as fmt:
         await calendar._fetch_and_send_calendar(7, answer_func=answer_func)
@@ -134,19 +137,22 @@ async def test_calendar_one_source_fails_others_survive():
     kwargs = fmt.call_args.kwargs
     assert kwargs.get("albums") == [{"a": 1}]
     assert "⚠️" in captured["text"]
-    assert "Scryer" in captured["text"]
+    assert "Radarr" in captured["text"]
 
 
 @pytest.mark.asyncio
 async def test_calendar_without_lidarr_omits_albums():
     from bot.handlers import calendar
 
-    scryer = MagicMock()
-    scryer.get_calendar = AsyncMock(return_value=[])
+    radarr = MagicMock()
+    radarr.get_calendar = AsyncMock(return_value=[])
+    sonarr = MagicMock()
+    sonarr.get_calendar = AsyncMock(return_value=[])
 
     answer_func, captured = _answer_capture()
 
-    with patch.object(calendar, "get_scryer", AsyncMock(return_value=scryer)), \
+    with patch.object(calendar, "get_radarr", AsyncMock(return_value=radarr)), \
+         patch.object(calendar, "get_sonarr", AsyncMock(return_value=sonarr)), \
          patch.object(calendar, "get_lidarr", AsyncMock(return_value=None)), \
          patch.object(calendar.Formatters, "format_calendar", return_value="OK") as fmt:
         await calendar._fetch_and_send_calendar(7, answer_func=answer_func)
@@ -156,38 +162,100 @@ async def test_calendar_without_lidarr_omits_albums():
 
 
 @pytest.mark.asyncio
-async def test_trending_add_series_goes_straight_to_scryer():
-    """PERF-07 (migrated): the TVDB-resolution round-trip is gone entirely —
-    Scryer keys on its own metadata id, so a trending add is one call."""
+async def test_collect_calendar_merges_both_services():
+    """Task 13 brief's mandated test — the shared `_collect_calendar(radarr,
+    sonarr, days)` helper merges both services' results into one date-sorted
+    list."""
+    from bot.handlers.calendar import _collect_calendar
+
+    radarr, sonarr = AsyncMock(), AsyncMock()
+    radarr.get_calendar.return_value = [{"title": "Dune", "release_date": "2026-08-11"}]
+    sonarr.get_calendar.return_value = [{"title": "Fargo", "release_date": "2026-08-12"}]
+
+    items = await _collect_calendar(radarr, sonarr, days=7)
+
+    titles = {item["title"] for item in items}
+    assert titles == {"Dune", "Fargo"}
+    # Sorted by date: Dune (08-11) before Fargo (08-12).
+    assert [item["title"] for item in items] == ["Dune", "Fargo"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_send_calendar_actually_calls_collect_calendar():
+    """Review fix round 1 (2026-08-10, task-13 re-review): `_collect_calendar`
+    existed, was directly tested (the test above), and was never called by
+    the production path — `_fetch_and_send_calendar` re-implemented an
+    equivalent gather inline instead, so the two could silently diverge on a
+    future edit. This pins the fix at the right level: patch
+    `calendar._collect_calendar` itself and assert the production handler
+    actually awaits it, rather than merely asserting on the end-to-end
+    rendered text (which can't tell "called the real helper" apart from
+    "coincidentally produced the same output" — the exact gap review found).
+    """
+    from bot.handlers import calendar
+
+    radarr, sonarr, lidarr = MagicMock(), MagicMock(), MagicMock()
+    lidarr.get_calendar = AsyncMock(return_value=[])
+
+    answer_func, _captured = _answer_capture()
+    spy = AsyncMock(return_value=[{"title": "Dune", "release_date": "2026-08-11"}])
+
+    with patch.object(calendar, "get_radarr", AsyncMock(return_value=radarr)), \
+         patch.object(calendar, "get_sonarr", AsyncMock(return_value=sonarr)), \
+         patch.object(calendar, "get_lidarr", AsyncMock(return_value=lidarr)), \
+         patch.object(calendar, "_collect_calendar", spy), \
+         patch.object(calendar.Formatters, "format_calendar", return_value="OK"):
+        await calendar._fetch_and_send_calendar(7, answer_func=answer_func)
+
+    spy.assert_awaited_once()
+    assert spy.await_args.args[:2] == (radarr, sonarr)
+    assert spy.await_args.args[2] == 7 or spy.await_args.kwargs.get("days") == 7
+
+
+@pytest.mark.asyncio
+async def test_trending_add_series_resolves_tvdb_id_via_sonarr_lookup():
+    """Rollback 2026-08-10: TMDb trending carries no tvdb_id (Scryer used to
+    resolve titles by name/metadata id instead) — the handler must resolve
+    one via a guarded Sonarr lookup before Sonarr's own `add_series`."""
     from bot.handlers import trending
-    from bot.models import ActionLog, ActionType, ContentType
+    from bot.models import ActionLog, ActionType, ContentType, QualityProfile, RootFolder
 
     series = SeriesInfo(tvdb_id=0, tmdb_id=55, title="Some Series", year=2024)
     trending._trending_series_cache.clear()
     trending._cache_put(trending._trending_series_cache, 55, series)
 
+    resolved = SeriesInfo(tvdb_id=999, tmdb_id=55, title="Some Series", year=2024)
+    added = SeriesInfo(tvdb_id=999, tmdb_id=55, title="Some Series", year=2024, sonarr_id=3)
     action = ActionLog(
         user_id=1, action_type=ActionType.ADD, content_type=ContentType.SERIES, success=True
     )
     add_service = AsyncMock()
-    add_service.add_and_queue_best = AsyncMock(return_value=(True, action, "Добавлено"))
+    add_service.radarr = AsyncMock()
+    add_service.get_sonarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="HD")])
+    add_service.get_sonarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/tv")])
+    add_service.add_series = AsyncMock(return_value=(added, action))
+
+    search_service = AsyncMock()
+    search_service.lookup_series = AsyncMock(return_value=[resolved])
 
     cb, status_msg = _callback_with_status()
     db = AsyncMock()
     db_user = MagicMock()
     db_user.tg_id = 1
-    db_user.preferences = MagicMock(scryer_quality_profile_id=None, scryer_root_folder_id=None)
+    db_user.preferences = MagicMock(sonarr_quality_profile_id=None, sonarr_root_folder_id=None)
 
     from bot.ui.callbacks import AddContentCB
 
-    with patch.object(trending, "get_scryer", AsyncMock()), \
+    with patch.object(trending, "get_radarr", AsyncMock()), \
+         patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
-         patch.object(trending, "AddService", return_value=add_service):
+         patch.object(trending, "AddService", return_value=add_service), \
+         patch.object(trending, "SearchService", return_value=search_service):
         await trending.handle_add_series_from_trending(
             cb, AddContentCB(kind="series", tmdb_id=55), db_user, db
         )
 
-    add_service.add_and_queue_best.assert_awaited_once()
+    add_service.add_series.assert_awaited_once()
     assert status_msg.edit_text.await_count >= 1
     trending._trending_series_cache.clear()
 
@@ -195,34 +263,38 @@ async def test_trending_add_series_goes_straight_to_scryer():
 @pytest.mark.asyncio
 async def test_trending_add_movie_still_works():
     from bot.handlers import trending
-    from bot.models import ActionLog, ActionType, ContentType
+    from bot.models import ActionLog, ActionType, ContentType, QualityProfile, RootFolder
 
     movie = MovieInfo(tmdb_id=99, title="Some Movie", year=2024)
     trending._trending_movies_cache.clear()
     trending._cache_put(trending._trending_movies_cache, 99, movie)
 
+    added = MovieInfo(tmdb_id=99, title="Some Movie", year=2024, radarr_id=5)
     action = ActionLog(
         user_id=1, action_type=ActionType.ADD, content_type=ContentType.MOVIE, success=True
     )
     add_service = AsyncMock()
-    add_service.add_and_queue_best = AsyncMock(return_value=(True, action, "Добавлено"))
+    add_service.get_radarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="HD")])
+    add_service.get_radarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/movies")])
+    add_service.add_movie = AsyncMock(return_value=(added, action))
 
     cb, status_msg = _callback_with_status()
     db = AsyncMock()
     db_user = MagicMock()
     db_user.tg_id = 1
-    db_user.preferences = MagicMock(scryer_quality_profile_id=None, scryer_root_folder_id=None)
+    db_user.preferences = MagicMock(radarr_quality_profile_id=None, radarr_root_folder_id=None)
 
     from bot.ui.callbacks import AddContentCB
 
-    with patch.object(trending, "get_scryer", AsyncMock()), \
+    with patch.object(trending, "get_radarr", AsyncMock()), \
+         patch.object(trending, "get_sonarr", AsyncMock()), \
          patch.object(trending, "get_qbittorrent", AsyncMock()), \
          patch.object(trending, "AddService", return_value=add_service):
         await trending.handle_add_movie_from_trending(
             cb, AddContentCB(kind="movie", tmdb_id=99), db_user, db
         )
 
-    add_service.add_and_queue_best.assert_awaited_once()
+    add_service.add_movie.assert_awaited_once()
     assert "Some Movie" in status_msg.edit_text.await_args.args[0]
     trending._trending_movies_cache.clear()
 
