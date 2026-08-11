@@ -105,9 +105,11 @@ def test_normalize_result_maps_a_realistic_prowlarr_item():
     assert result.indexer == "RuTracker.org"
     assert result.indexer_id == 5
     # Fix round 1 (2026-08-10 review): this indexer_id is PROWLARR's own
-    # numbering, not *arr's — source="prowlarr" is what keeps
+    # numbering, not *arr's — origin="prowlarr" is what keeps
     # AddService.grab_release from handing it to *arr's native endpoint.
-    assert result.source == "prowlarr"
+    # Fix round 2: renamed source -> origin (collided with QualityInfo.source,
+    # which this same file also asserts on, e.g. quality.source == "BluRay").
+    assert result.origin == "prowlarr"
     assert result.size == 47000000000
     assert result.seeders == 42
     assert result.leechers == 3

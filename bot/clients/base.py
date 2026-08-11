@@ -651,7 +651,7 @@ class ArrBaseClient(BaseAPIClient):
 
         return SearchResult(
             guid=guid,
-            source="arr",
+            origin="arr",  # fix round 2: renamed from `source` (collided with QualityInfo.source)
             indexer_id=item.get("indexerId") or 0,
             title=title,
             download_url=item.get("downloadUrl"),

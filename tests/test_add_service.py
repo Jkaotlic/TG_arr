@@ -2,21 +2,29 @@
 
 Replaces the Scryer-edition file. The single-candidate-token queue flow this
 file used to cover no longer exists — `AddService` no longer talks to Scryer
-at all. Two grab paths replace it, chosen by the release's `source` (which
+at all. Two grab paths replace it, chosen by the release's `origin` (which
 parser built it) AND `indexer_id`:
 
-- native: `source == "arr"` and `indexer_id` is set (it came from *arr's
+- native: `origin == "arr"` and `indexer_id` is set (it came from *arr's
   interactive search) — grab it with `ArrBaseClient.grab_release(guid,
   indexer_id)`.
-- push chain: anything else (today: `source == "prowlarr"`, a Prowlarr
-  free-text hit) — the restored pre-migration release/push -> qBittorrent ->
-  auto-search fallback.
+- push chain: anything else (today: `origin == "prowlarr"` — either a real
+  Prowlarr free-text hit, or ANY release built without an explicit origin,
+  since the field defaults to "prowlarr") — the restored pre-migration
+  release/push -> qBittorrent -> auto-search fallback.
 
 Fix round 1 (2026-08-10 review): `indexer_id` truthiness ALONE used to be the
 signal, which was wrong — `ProwlarrClient._normalize_result` also fills
-`indexer_id`, with PROWLARR's own (incompatible) numbering. `source` is the
-field that actually distinguishes the two producers safely; see
-`test_prowlarr_sourced_release_never_takes_the_native_path` below.
+`indexer_id`, with PROWLARR's own (incompatible) numbering. The field that
+actually distinguishes the two producers safely was originally named
+`source`; see `test_prowlarr_sourced_release_never_takes_the_native_path`
+below.
+
+Fix round 2 (2026-08-10 review): renamed `source` -> `origin` (collided with
+the unrelated `QualityInfo.source`, the release medium) and its default
+flipped from "arr" to "prowlarr" — fail CLOSED, so an untagged release can
+never take the native path by omission; see
+`test_untagged_release_never_takes_the_native_path` below.
 
 Invariants carried over unchanged: the SSRF guard (SEC-16) gates every URL
 handed to a downstream fetcher — *arr's `release/push` call AND every direct
@@ -45,10 +53,15 @@ def _release(**overrides) -> SearchResult:
     # hostname — SEC-16's `_validate_download_url` now genuinely gates the
     # push_release call (fix round 1), and this default must pass that gate
     # deterministically without depending on this machine's DNS.
+    #
+    # origin="arr" is explicit (fix round 2: the field now defaults to
+    # "prowlarr", fail-closed) — this helper's default `indexer_id=3` is
+    # meant to represent a native-path release, so it must say so.
     data = dict(
         guid="g1",
         title="Movie.2024.2160p.WEB-DL",
         indexer="RuTracker",
+        origin="arr",
         indexer_id=3,
         download_url="http://localhost:9696/1/download?apikey=SECRET",
         size=8 * 1024**3,
@@ -66,7 +79,14 @@ def _service(radarr=None, sonarr=None, qbt=None, lidarr=None) -> AddService:
 # --------------------------------------------------------------- native path
 @pytest.mark.asyncio
 async def test_release_from_interactive_search_is_grabbed_natively():
-    """guid + indexerId means *arr owns the download — including the magnet redirect."""
+    """guid + indexerId means *arr owns the download — including the magnet redirect.
+
+    Fix round 2 (2026-08-10 review): `origin="arr"` is explicit here — the
+    brief's literal test omitted it (predates the field), and `origin`
+    defaults to "prowlarr" (fail-closed) since fix round 2, so this release
+    would otherwise misroute to the push chain rather than the native path
+    it's meant to exercise.
+    """
     radarr = AsyncMock()
     radarr.grab_release.return_value = True
     service = _service(radarr=radarr)
@@ -74,7 +94,7 @@ async def test_release_from_interactive_search_is_grabbed_natively():
     release = SearchResult(
         title="Dune 2160p", download_url="http://prowlarr/1/download?apikey=x",
         indexer="TPB", size=1, seeders=10, leechers=0, quality=QualityInfo(),
-        guid="abc-1", indexer_id=3, custom_format_score=500,
+        guid="abc-1", indexer_id=3, custom_format_score=500, origin="arr",
     )
 
     ok, _ = await service.grab_release(release, ContentType.MOVIE, arr_id=15)
@@ -130,7 +150,7 @@ async def test_prowlarr_sourced_release_never_takes_the_native_path():
     a safe signal for the native path — `ProwlarrClient._normalize_result`
     also fills `indexer_id`, with PROWLARR's own indexer numbering, which is
     meaningless (or actively wrong) to *arr's native `/release` endpoint
-    (pre-migration BUG-05). A release with `source="prowlarr"` must be routed
+    (pre-migration BUG-05). A release with `origin="prowlarr"` must be routed
     to the push chain even though it carries a truthy `indexer_id` — exactly
     the shape `ProwlarrClient._normalize_result` produces today.
     """
@@ -138,13 +158,41 @@ async def test_prowlarr_sourced_release_never_takes_the_native_path():
     radarr.push_release.return_value = {"approved": True}
     service = _service(radarr=radarr)
 
-    release = _release(source="prowlarr", indexer_id=7)  # Prowlarr's OWN numbering
+    release = _release(origin="prowlarr", indexer_id=7)  # Prowlarr's OWN numbering
     assert release.indexer_id  # sanity: the truthy signal alone WOULD say "native"
 
     ok, _ = await service.grab_release(release, ContentType.MOVIE, arr_id=15)
 
     assert ok is True
     radarr.grab_release.assert_not_awaited()  # never routed to the native path
+    radarr.push_release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_untagged_release_never_takes_the_native_path():
+    """Fix round 2 (2026-08-10 review): `SearchResult.origin` must fail
+    CLOSED, not open — a release built without an explicit `origin` (a
+    hand-built one, or a future producer that forgets to tag it) must never
+    be trusted for the native path just because `indexer_id` happens to be
+    set. Constructs a `SearchResult` directly (not via the `_release()`
+    helper, which explicitly sets `origin="arr"`) to prove the MODEL's own
+    default is safe, independent of any test helper's choices.
+    """
+    radarr = AsyncMock()
+    radarr.push_release.return_value = {"approved": True}
+    service = _service(radarr=radarr)
+
+    release = SearchResult(
+        guid="g1", title="Movie.2024.2160p.WEB-DL", indexer="RuTracker",
+        indexer_id=3,  # truthy — WOULD say "native" if origin weren't checked
+        download_url="http://localhost:9696/1/download?apikey=SECRET",
+    )
+    assert release.origin == "prowlarr"  # sanity: the model's own default
+
+    ok, _ = await service.grab_release(release, ContentType.MOVIE, arr_id=15)
+
+    assert ok is True
+    radarr.grab_release.assert_not_awaited()
     radarr.push_release.assert_awaited_once()
 
 

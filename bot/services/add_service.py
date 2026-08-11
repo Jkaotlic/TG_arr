@@ -6,7 +6,7 @@ Task 2 deleted) was the root cause of most of the suite's collection errors
 mid-rollback. Replaced with the two *arr grab paths:
 
     grab_release(release, content_type, arr_id=...)
-        native  — release.indexer_id is set AND release.source == "arr" (it
+        native  — release.indexer_id is set AND release.origin == "arr" (it
                    came from *arr's own interactive search, Task 9's
                    `get_releases`): grab it with
                    `ArrBaseClient.grab_release(guid, indexer_id)`. *arr
@@ -21,13 +21,18 @@ mid-rollback. Replaced with the two *arr grab paths:
                    ALONE is not a safe signal — ProwlarrClient's free-text
                    parser also fills `indexer_id`, with PROWLARR's own
                    numbering, which is meaningless (or actively wrong) to
-                   *arr's native endpoint. `source` records which parser
-                   actually built the SearchResult and is what really gates
-                   this path; see SearchResult's docstring in bot/models.py.
-        push chain — release.source != "arr" (today: a Prowlarr free-text
-                   hit — Prowlarr numbers indexers differently from *arr, so
-                   its id is meaningless to the native endpoint): the
-                   restored pre-migration three-step chain — release/push
+                   *arr's native endpoint. `origin` (named `source` in round
+                   1; renamed in fix round 2 — collided with the unrelated
+                   `QualityInfo.source`) records which parser actually built
+                   the SearchResult and is what really gates this path; it
+                   defaults to "prowlarr" (fail CLOSED — an untagged release
+                   is never native by default), see SearchResult's docstring
+                   in bot/models.py.
+        push chain — release.origin != "arr" (today: a Prowlarr free-text
+                   hit, OR anything hand-built without an explicit origin —
+                   Prowlarr numbers indexers differently from *arr, so its id
+                   is meaningless to the native endpoint): the restored
+                   pre-migration three-step chain — release/push
                    (SEC-16-gated, see `_validate_download_url`) ->
                    qBittorrent by downloadUrl -> *arr auto-search command.
 
@@ -536,10 +541,12 @@ class AddService:
 
         # Fix round 1 (2026-08-10 review): `indexer_id` alone is not a safe
         # signal — ProwlarrClient's free-text parser also fills it, with
-        # PROWLARR's own (incompatible) indexer numbering. `source == "arr"`
+        # PROWLARR's own (incompatible) indexer numbering. `origin == "arr"`
         # is what actually guarantees this release came from *arr's own
-        # interactive search, where the id is *arr's own.
-        if release.indexer_id and release.source == "arr":
+        # interactive search, where the id is *arr's own. Fix round 2:
+        # `origin` defaults to "prowlarr", so an untagged release fails
+        # closed here rather than being trusted as native by omission.
+        if release.indexer_id and release.origin == "arr":
             return await self._grab_native(log, action, arr_client, release, content_type)
 
         return await self._grab_via_push_chain(

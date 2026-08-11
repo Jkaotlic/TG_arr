@@ -258,10 +258,13 @@ class ProwlarrClient(BaseAPIClient):
             guid=guid,
             # Rollback 2026-08-10 (Task 10, fix round 1): this indexer_id is
             # PROWLARR's own numbering, not *arr's — it must never be handed
-            # to *arr's native grab endpoint. `source="prowlarr"` is what
-            # actually blocks that in AddService.grab_release; indexer_id
-            # alone is not a safe signal (see SearchResult's docstring).
-            source="prowlarr",
+            # to *arr's native grab endpoint. `origin="prowlarr"` (renamed
+            # from `source` in fix round 2 — collided with QualityInfo.source)
+            # is what actually blocks that in AddService.grab_release;
+            # indexer_id alone is not a safe signal (see SearchResult's
+            # docstring). Kept explicit even though it's now also the default
+            # — self-documenting, and defensive against the default changing.
+            origin="prowlarr",
             indexer=indexer,
             indexer_id=indexer_id,
             title=title,

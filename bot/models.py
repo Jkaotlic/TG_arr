@@ -107,20 +107,33 @@ class SearchResult(BaseModel):
     # Rollback 2026-08-10 (Task 10, fix round 1): `indexer_id` alone is NOT a
     # safe signal for the native grab path — ProwlarrClient._normalize_result
     # also fills it, with PROWLARR's own indexer numbering, which is NOT
-    # interchangeable with *arr's. `source` records which parser actually
+    # interchangeable with *arr's. `origin` records which parser actually
     # built this SearchResult, and IS safe: only ArrBaseClient._parse_release
     # (fed by *arr's own interactive search) sets "arr"; ProwlarrClient's
     # free-text parser always sets "prowlarr". `AddService.grab_release`
-    # requires BOTH `indexer_id` set AND `source == "arr"` before taking the
+    # requires BOTH `indexer_id` set AND `origin == "arr"` before taking the
     # native path — a Prowlarr-sourced release can never take it, regardless
     # of what its (Prowlarr-numbered) indexer_id happens to be.
-    source: Literal["arr", "prowlarr"] = Field(
-        default="arr", description="Which search produced this release — see indexer_id's docstring"
+    #
+    # Fix round 2 (2026-08-10 review): named `origin`, not `source` — this
+    # model already has an unrelated `QualityInfo.source` (the release medium:
+    # BluRay/WEB-DL/HDTV/...), and both are read off variables conventionally
+    # named `result`/`release` in the same code paths (formatters read
+    # `result.quality.source`; grab_release read `release.source`). Also
+    # defaults to "prowlarr" (fail CLOSED), not "arr" — an untagged
+    # SearchResult (hand-built, a future producer that forgets to tag it)
+    # must never be trusted for the native path by default. Only the two live
+    # producers explicitly opt into "arr"; nothing opts into it by omission.
+    origin: Literal["arr", "prowlarr"] = Field(
+        default="prowlarr",
+        description="Which search produced this release — 'arr' (native grab path eligible) is "
+                    "set ONLY by ArrBaseClient._parse_release; every other/unlabeled constructor "
+                    "reads as 'prowlarr' (never native), see indexer_id's docstring",
     )
     indexer_id: Optional[int] = Field(
         default=None,
-        description="Indexer id paired with guid — *arr's own numbering only when source == 'arr'; "
-                    "Prowlarr's own (incompatible) numbering when source == 'prowlarr'",
+        description="Indexer id paired with guid — *arr's own numbering only when origin == 'arr'; "
+                    "Prowlarr's own (incompatible) numbering when origin == 'prowlarr'",
     )
     title: str = Field(..., description="Release title")
     size: int = Field(default=0, description="Size in bytes")
