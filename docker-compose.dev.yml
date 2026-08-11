@@ -5,7 +5,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml build
 # It is also NOT usable standalone (`docker compose -f docker-compose.dev.yml
 # up` on its own): only LOG_LEVEL is set below, so the required
-# TELEGRAM_BOT_TOKEN/SCRYER_* variables from
+# TELEGRAM_BOT_TOKEN / RADARR_* / SONARR_* / PROWLARR_* variables from
 # docker-compose.yml are missing and the container will fail pydantic
 # validation on startup. Always layer this on top of docker-compose.yml.
 

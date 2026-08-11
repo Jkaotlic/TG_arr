@@ -18,11 +18,15 @@ services:
     environment:
       # Required
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN}
-      # Scryer replaced Radarr/Sonarr on 2026-07-24 and owns the indexers, so
-      # the bot no longer needs Prowlarr credentials of its own.
-      SCRYER_URL: ${SCRYER_URL:?Set SCRYER_URL}
-      SCRYER_USERNAME: ${SCRYER_USERNAME:?Set SCRYER_USERNAME}
-      SCRYER_PASSWORD: ${SCRYER_PASSWORD:?Set SCRYER_PASSWORD}
+      # Rolled back to *arr on 2026-08-10. Radarr and Sonarr own the catalog
+      # and the quality profiles; Prowlarr serves free-text search for titles
+      # not yet in the catalog, so the bot needs its own credentials again.
+      RADARR_URL: ${RADARR_URL:?Set RADARR_URL}
+      RADARR_API_KEY: ${RADARR_API_KEY:?Set RADARR_API_KEY}
+      SONARR_URL: ${SONARR_URL:?Set SONARR_URL}
+      SONARR_API_KEY: ${SONARR_API_KEY:?Set SONARR_API_KEY}
+      PROWLARR_URL: ${PROWLARR_URL:?Set PROWLARR_URL}
+      PROWLARR_API_KEY: ${PROWLARR_API_KEY:?Set PROWLARR_API_KEY}
       # Users
       ALLOWED_TG_IDS: ${ALLOWED_TG_IDS:-}
       ADMIN_TG_IDS: ${ADMIN_TG_IDS:-}
@@ -77,10 +81,12 @@ services:
       LOG_FORMAT: ${LOG_FORMAT:-json}
       AUTO_GRAB_SCORE_THRESHOLD: ${AUTO_GRAB_SCORE_THRESHOLD:-80}
       HTTP_TIMEOUT: ${HTTP_TIMEOUT:-30.0}
-      # A Scryer release search fans out to every routed indexer, so it needs
-      # far more headroom than a plain API call (DEPLOY-01: must be listed
-      # here, or setting it in .env never reaches the container).
-      SCRYER_SEARCH_TIMEOUT: ${SCRYER_SEARCH_TIMEOUT:-90.0}
+      # A Prowlarr search fans out to every configured indexer, so it needs far
+      # more headroom than a plain API call (DEPLOY-01: must be listed here, or
+      # setting it in .env never reaches the container). 45s, not 25s: RuTracker
+      # behind Cloudflare answers 521/522 under load.
+      PROWLARR_SEARCH_TIMEOUT: ${PROWLARR_SEARCH_TIMEOUT:-45.0}
+      PROWLARR_SEARCH_RETRIES: ${PROWLARR_SEARCH_RETRIES:-1}
       RESULTS_PER_PAGE: ${RESULTS_PER_PAGE:-5}
       # Database path (relative to /app inside the container)
       DATABASE_PATH: ${DATABASE_PATH:-data/bot.db}

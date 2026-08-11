@@ -65,8 +65,8 @@ def build_add_service(radarr=None, sonarr=None, lidarr=None, qbt=None):
     Rollback 2026-08-10 (Task 10): reshaped for the *arr-backed AddService —
     was `build_add_service(scryer=..., lidarr=..., qbt=..., slskd=...)`.
 
-    Shared by test_add_service.py and test_r4_C4-services.py (the latter is
-    Scryer-era and expected to keep failing until it is rewritten/removed).
+    Shared by test_add_service.py and test_r4_C4-services.py; both were
+    rewritten against the *arr grab paths in Task 15 and both pass.
     """
     from bot.services.add_service import AddService
 
