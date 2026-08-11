@@ -17,52 +17,68 @@ from bot.models import (
 )
 from bot.ui.formatters._common import _e, _safe_truncate, _to_local
 
-#: Rule codes from Scryer's `scoringLog` that carry the language verdict.
-#: The language rule set ("English Audio + Russian Subtitles") only *penalises*
-#: a release without English audio — it never blocks one — and it has no clause
-#: at all for, say, Italian-only audio. So a release can rank, be allowed, and
-#: still have no English track. The card has to say that out loud (2026-07-30).
-_ENGLISH_AUDIO_CODE = "english_audio_bonus"
-_RUSSIAN_SUBS_CODE = "russian_subtitles_bonus"
-_NO_ENGLISH_CODES = ("russian_audio_without_english", "verified_file_without_english")
+#: Rollback 2026-08-10 (Task 11): the old Scryer `scoringLog`-based language
+#: verdict (`_format_language_verdict`, keyed on `policy_codes`) is gone.
+#: Radarr/Sonarr's own interactive search already judges every release
+#: against the quality profile's custom formats before the bot ever sees it
+#: — that verdict lives on `SearchResult.rejected` / `.rejections` /
+#: `.custom_format_score` (see bot/services/scoring.py's module docstring for
+#: the full rationale). `_format_arr_verdict` below surfaces it verbatim
+#: instead of re-deriving an opinion from the title.
 
 
-def _format_language_verdict(policy_codes: list[str]) -> str:
-    """One line on what the language policy found, or "" when it never ran.
+def _format_arr_verdict(result: SearchResult, *, compact: bool = False) -> str:
+    """*arr's own verdict on this release, or the honest statement that none
+    exists.
 
     Three outcomes, and the difference between the last two matters a lot:
 
-    - English was found → say so.
-    - Languages were declared and English is not among them → the policy docked
-      the score (−1000) but still allowed the release.
-    - **No language was declared at all** → the policy could not judge. Verified
-      on the live stack: the top candidate for "Michael 2026" was an English
-      BluRay Remux from Knaben that earned *no* language code, while a RuTracker
-      release whose description lists its tracks earned +250 for English and
-      +250 for Russian subs. So a well-described multi-audio release outranks an
-      English one that simply didn't say. Calling that "no English audio" would
-      be wrong; the honest statement is that the languages are unknown.
+    - `origin == "arr"` and `rejected` → *arr's quality profile refuses this
+      release; show the marker and its own human-readable reason(s)
+      verbatim (e.g. "English is wanted, but found Russian").
+    - `origin == "arr"` and not `rejected` → *arr accepted it. Show
+      `custom_format_score` when it is non-zero (it explains *why* this
+      release outranks another); when it is exactly zero, still say "*arr
+      accepted this" rather than nothing — a 0 score is a real, evaluated
+      verdict, not an absence of one (confirmed on the live stack: an
+      accepted release can carry `customFormatScore == 0` when no custom
+      format matched).
+    - `origin == "prowlarr"` (a free-text hit) → **no verdict exists at
+      all**. Prowlarr never evaluates a release against *arr's profile, so
+      `custom_format_score` sits at its unset default of 0 and `rejections`
+      is empty not because the release passed, but because nobody looked.
+      That must never render the same as "*arr accepted it with a neutral
+      score" — the two would be visually identical otherwise.
 
-    An empty scoring log means the policy did not run (older session, unscored
-    release) — stay silent rather than invent a verdict.
+    `compact=True` renders for the multi-release list view, where Telegram's
+    message budget is shared across up to 5 releases (BUG-11/TEST-07): the
+    "no verdict" case is omitted entirely (silence makes no claim, and stays
+    within the existing truncation budget) and a rejection shows only its
+    first reason. `compact=False` (the single-release detail card) always
+    renders something, spelling out "*arr never evaluated this one" rather
+    than leaving the reader to guess why the line is missing.
     """
-    if not policy_codes:
-        return ""
-
-    codes = set(policy_codes)
-    subs = " • 💬 RU-субтитры" if _RUSSIAN_SUBS_CODE in codes else ""
-
-    if _ENGLISH_AUDIO_CODE in codes:
-        return f"🔊 <b>Аудио:</b> есть английское{subs}"
-    if codes & set(_NO_ENGLISH_CODES):
+    if result.origin != "arr":
+        if compact:
+            return ""
         return (
-            f"⚠️ <b>Аудио:</b> английского нет — политика снизила рейтинг, "
-            f"но релиз не запрещён{subs}"
+            "❔ <b>Вердикт *arr:</b> недоступен — релиз найден напрямую через "
+            "Prowlarr, *arr его не оценивал"
         )
-    return (
-        f"❔ <b>Аудио:</b> языки не указаны в раздаче — политика не смогла "
-        f"их проверить{subs}"
-    )
+
+    if result.rejected:
+        reasons = result.rejections[:1] if compact else result.rejections[:3]
+        reasons_str = "; ".join(_e(r) for r in reasons) if reasons else "причина не указана"
+        label = "⛔ *arr:" if compact else "⛔ <b>*arr отклоняет этот релиз:</b>"
+        return f"{label} {reasons_str}"
+
+    if result.custom_format_score:
+        sign = "+" if result.custom_format_score > 0 else ""
+        if compact:
+            return f"✅ *arr {sign}{result.custom_format_score}"
+        return f"✅ <b>Одобрено *arr</b> (доп. очки: {sign}{result.custom_format_score})"
+
+    return "✅ одобрено *arr" if compact else "✅ <b>Одобрено *arr</b>"
 
 
 class _SearchFormatters:
@@ -114,6 +130,13 @@ class _SearchFormatters:
 
         # Indexer and score
         lines.append(f"🔍 {_e(result.indexer)} | Score: {result.calculated_score}")
+
+        # *arr's verdict (Task 11) — compact form, omitted entirely when no
+        # verdict exists (a Prowlarr free-text hit) so silence doesn't have to
+        # share the page's tight character budget for nothing.
+        verdict = _format_arr_verdict(result, compact=True)
+        if verdict:
+            lines.append(verdict)
 
         return "\n".join(lines)
 
@@ -199,9 +222,10 @@ class _SearchFormatters:
             date_str = _to_local(result.publish_date).strftime("%d.%m.%Y %H:%M")
             lines.append(f"📆 <b>Опубликовано:</b> {date_str}")
 
-        language_note = _format_language_verdict(result.policy_codes)
-        if language_note:
-            lines.append(f"\n{language_note}")
+        # *arr's verdict (Task 11): always rendered here — unlike the compact
+        # list card, the single-release detail view has room to spell out
+        # "*arr never evaluated this one" instead of just omitting the line.
+        lines.append(f"\n{_format_arr_verdict(result)}")
 
         return "\n".join(lines)
 
@@ -482,6 +506,19 @@ class _SearchFormatters:
     def format_success(message: str) -> str:
         """Format success message."""
         return f"✅ {message}"
+
+
+def format_release(result: SearchResult) -> str:
+    """Public, module-level entry point for a single release card (Task 11).
+
+    Delegates to `_SearchFormatters.format_release_details`, which is already
+    the function wired into the grab-confirmation and release-detail handlers
+    (`bot/handlers/search/grab.py`, `bot/handlers/search/results.py`) — this
+    task does not touch handlers, so routing the new verdict text through the
+    existing production entry point is what makes it actually reach a user,
+    rather than sitting behind an interface nothing calls yet.
+    """
+    return _SearchFormatters.format_release_details(result)
 
     @staticmethod
     def format_warning(message: str) -> str:

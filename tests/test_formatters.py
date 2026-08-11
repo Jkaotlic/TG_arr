@@ -331,3 +331,103 @@ def test_format_search_result_handles_unicode_and_long_titles(title):
     out = Formatters.format_search_result(result, 1)
     assert isinstance(out, str)
     assert len(out) < 400
+
+
+# ---------------------------------------------------------------------------
+# Task 11: the release card surfaces *arr's own verdict (customFormatScore /
+# rejected / rejections) instead of a second, bot-local language policy.
+# ---------------------------------------------------------------------------
+def test_formatter_shows_why_arr_refuses_a_release():
+    """"Rejected" alone is useless — the reason is the actionable part."""
+    from bot.models import QualityInfo, SearchResult
+    from bot.ui.formatters.search import format_release
+
+    release = SearchResult(
+        guid="g1",
+        title="Дюна 2021 2160p DUB", download_url="u", indexer="RuTracker",
+        size=40_000_000_000, seeders=50, leechers=1, quality=QualityInfo(resolution="2160p"),
+        origin="arr", rejected=True, rejections=["English is wanted, but found Russian"],
+        custom_format_score=-1000,
+    )
+
+    text = format_release(release)
+
+    assert "English is wanted, but found Russian" in text
+
+
+def test_formatter_shows_arr_accepted_score_when_nonzero():
+    """An accepted release still carries a customFormatScore worth showing
+    (e.g. +250 for an English-audio release) — it explains why *arr ranked
+    it where it did."""
+    from bot.models import QualityInfo, SearchResult
+    from bot.ui.formatters.search import format_release
+
+    release = SearchResult(
+        guid="g2",
+        title="Dune 2021 2160p BluRay ENG", download_url="u", indexer="Knaben",
+        size=40_000_000_000, seeders=200, leechers=1, quality=QualityInfo(resolution="2160p"),
+        origin="arr", rejected=False, custom_format_score=250,
+    )
+
+    text = format_release(release)
+
+    assert "250" in text
+
+
+def test_formatter_distinguishes_no_verdict_from_accepted():
+    """A Prowlarr free-text hit (origin='prowlarr') never went through *arr's
+    profile — custom_format_score sits at its unset default of 0 and
+    rejections is empty not because the release passed, but because nobody
+    looked. The card must say so plainly and must NOT read as an *arr
+    approval, which is what an accepted arr-origin release with the same
+    zero score looks like.
+    """
+    from bot.models import QualityInfo, SearchResult
+    from bot.ui.formatters.search import format_release
+
+    no_verdict = SearchResult(
+        guid="g3", title="Some.Movie.2021.2160p", download_url="u", indexer="Prowlarr free-text",
+        size=40_000_000_000, seeders=10, leechers=1, quality=QualityInfo(resolution="2160p"),
+        origin="prowlarr", rejected=False, custom_format_score=0,
+    )
+    accepted_zero_score = SearchResult(
+        guid="g4", title="Some.Movie.2021.2160p", download_url="u", indexer="Radarr",
+        size=40_000_000_000, seeders=10, leechers=1, quality=QualityInfo(resolution="2160p"),
+        origin="arr", rejected=False, custom_format_score=0,
+    )
+
+    no_verdict_text = format_release(no_verdict)
+    accepted_text = format_release(accepted_zero_score)
+
+    assert no_verdict_text != accepted_text
+    # The "no verdict" card must not claim *arr approved/accepted it.
+    assert "одобр" not in no_verdict_text.lower()
+    assert "принял" not in no_verdict_text.lower()
+    # The accepted card must say something positive that *arr actually did evaluate it.
+    assert "arr" in accepted_text.lower()
+
+
+def test_search_result_list_item_omits_verdict_when_none_exists():
+    """The compact multi-release list card must not fabricate a verdict for
+    a Prowlarr free-text hit — silence there, not a false "approved" line.
+    """
+    result = SearchResult(
+        guid="g5", title="Some.Movie.2021.2160p", origin="prowlarr",
+        rejected=False, custom_format_score=0, calculated_score=10,
+    )
+    out = Formatters.format_search_result(result, 1)
+    assert "одобр" not in out.lower()
+    assert "отклон" not in out.lower()
+
+
+def test_search_result_list_item_shows_rejection_from_arr():
+    """The compact list card DOES surface a real *arr rejection — the user
+    should be able to tell from the list alone, before opening the detail
+    view."""
+    result = SearchResult(
+        guid="g6", title="Дюна 2021 2160p DUB", origin="arr",
+        rejected=True, rejections=["English is wanted, but found Russian"],
+        custom_format_score=-1000, calculated_score=10,
+    )
+    out = Formatters.format_search_result(result, 1)
+    assert "English is wanted, but found Russian" in out
