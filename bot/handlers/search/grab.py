@@ -226,6 +226,19 @@ async def _execute_grab(
         await db.log_action(action)
 
         if success:
+            # The title was added UNMONITORED so that merely browsing releases
+            # could not enlist it in *arr's RSS loop (see `_resolve_arr_entry`).
+            # Now that a release has actually been taken, the user does want it
+            # tracked — future upgrades and missing episodes included. A failure
+            # here must not undo a successful grab, so it is logged, not raised.
+            try:
+                if isinstance(title, MovieInfo):
+                    await add_service.radarr.set_movie_monitored(arr_id, True)
+                else:
+                    await add_service.sonarr.set_series_monitored(arr_id, True)
+            except Exception as e:
+                logger.warning("monitor_enable_failed", arr_id=arr_id, error=str(e))
+
             year_str = f" ({title.year})" if title.year else ""
             await message.edit_text(
                 Formatters.format_success(

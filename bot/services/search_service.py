@@ -26,11 +26,10 @@ Rollback 2026-08-10. What changed back and why:
   `customFormatScore`, `rejected`, human-readable `rejections`. That verdict
   is authoritative; the local `ScoringService` only breaks ties (see
   docs/superpowers/sdd/2026-08-10-arr-restore/task-9-brief.md for the
-  live-measurement rationale). `search_metadata`/`get_seasons` still call the
-  removed previous-backend client — Task 9's own brief neither tests nor
-  specifies them, and Task 12 (search handlers) removes the "resolve a
-  catalog title first" step they served, so they are left as
-  NotImplementedError rather than guessed at without a driving test.
+  live-measurement rationale). `search_metadata`/`get_seasons` are **gone**:
+  they served the "resolve a catalog title, then list its releases by title
+  id" flow, and the handlers now resolve the Radarr/Sonarr id themselves via
+  `lookup_movies`/`lookup_series` before calling `search_releases_for_title`.
 """
 
 import asyncio
@@ -592,6 +591,7 @@ class SearchService:
         content_type: ContentType,
         arr_id: int,
         season: Optional[int] = None,
+        preferred_resolution: Optional[str] = None,
     ) -> list[SearchResult]:
         """Releases for a title already in the catalog, ordered by *arr's verdict.
 
@@ -599,20 +599,21 @@ class SearchService:
         local ScoringService as a tie-break only. Rejected releases are kept
         rather than hidden — the user may still want one, and `rejections`
         explains the cost.
+
+        Ordering is delegated to `ScoringService.sort_results` rather than
+        re-implemented here. That matters beyond DRY: `sort_results` also
+        *writes* `calculated_score` onto each result, which the release card
+        renders and which gates the "Скачать лучшее" button against
+        `auto_grab_score_threshold`. An inline sort using the score only as a
+        sort key left every result at its default 0 — the card showed
+        "Оценка: 0/100" and the auto-grab button could never appear.
         """
         if content_type is ContentType.MOVIE:
             releases = await self.radarr.get_releases(arr_id)
         else:
             releases = await self.sonarr.get_releases(arr_id, season_number=season)
 
-        ordered = sorted(
-            releases,
-            key=lambda r: (
-                r.rejected,
-                -r.custom_format_score,
-                -self.scoring.calculate_score(r, content_type),
-            ),
-        )
+        ordered = self.scoring.sort_results(releases, content_type, preferred_resolution)
 
         # DEAD-13/OBS: log what the user is about to be shown, so a complaint
         # like "it picked the wrong one" can be reconstructed from prod logs

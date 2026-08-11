@@ -1021,6 +1021,49 @@ class TestLegacyPreferenceMigration:
         assert user.preferences.auto_grab_enabled is True
 
     @pytest.mark.asyncio
+    async def test_non_numeric_legacy_values_do_not_destroy_the_whole_row(self, tmp_path):
+        """The values the Scryer era ACTUALLY wrote were strings, not ints.
+
+        Its quality-profile ids were slugs (`"4k"`) and its root folders had no
+        id at all, so the bot stored a 12-char sha1 digest of the path. The old
+        settings handler saved `SettingCB.value` verbatim precisely because
+        coercing to int rejected every Scryer pick.
+
+        Copying such a value into the `Optional[int]` fields that replaced them
+        makes the whole `UserPreferences` blob fail validation, and
+        `_row_to_user` then falls back to ALL defaults — so the user silently
+        loses their Lidarr profile, resolution and auto-grab settings too. The
+        migration rewrites the row and bumps the schema version, so that loss
+        never repairs itself: it is strictly worse than not migrating at all.
+        """
+        db_path = str(tmp_path / "legacy.db")
+        await self._write_legacy_row(db_path, 777, {
+            "scryer_quality_profile_id": "4k",            # slug, not an int
+            "scryer_root_folder_id": "392dfb1283a3",      # sha1 digest of the path
+            "lidarr_quality_profile_id": 3,
+            "preferred_resolution": "2160p",
+            "auto_grab_enabled": True,
+        })
+
+        database = Database(db_path)
+        await database.connect()
+        try:
+            user = await database.get_user(777)
+        finally:
+            await database.close()
+
+        assert user is not None
+        # Unmigratable ids are simply left unset — the "no preference yet"
+        # state every resolver already handles.
+        assert user.preferences.radarr_quality_profile_id is None
+        assert user.preferences.radarr_root_folder_id is None
+        # Everything unrelated MUST survive. This is the assertion that fails
+        # loudly if the row ever falls back to defaults again.
+        assert user.preferences.lidarr_quality_profile_id == 3
+        assert user.preferences.preferred_resolution == "2160p"
+        assert user.preferences.auto_grab_enabled is True
+
+    @pytest.mark.asyncio
     async def test_migration_does_not_clobber_an_already_set_arr_field(self, tmp_path):
         """Defensive: if a `radarr_*` field is somehow already populated, the
         migration must not overwrite it with the legacy value — only fill in

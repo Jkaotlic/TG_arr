@@ -25,6 +25,29 @@ from bot.models import (
 logger = structlog.get_logger()
 
 
+def _as_optional_int(value: Any) -> Optional[int]:
+    """Coerce a stored preference id to int, or give up cleanly.
+
+    The Scryer era stored these as **strings on purpose**: its quality-profile
+    ids were slugs (`"4k"`) and its root folders had no id at all, so the bot
+    used a 12-char sha1 digest of the path. Copying such a value into the
+    `Optional[int]` fields it replaced makes the whole `UserPreferences` blob
+    fail validation, and `_row_to_user` then falls back to *all* defaults —
+    silently discarding the user's Lidarr profile, resolution and auto-grab
+    settings too. Since the migration rewrites the row and bumps the schema
+    version, that loss is permanent.
+
+    Returning None for anything non-numeric leaves the field unset, which is
+    exactly the "no preference yet" state the resolvers already handle.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class Database:
     """Async SQLite database manager."""
 
@@ -395,8 +418,12 @@ class Database:
                 if not isinstance(data, dict):
                     continue
 
-                legacy_profile = data.get("scryer_quality_profile_id")  # LEGACY-DATA-KEY
-                legacy_folder = data.get("scryer_root_folder_id")  # LEGACY-DATA-KEY
+                legacy_profile = _as_optional_int(
+                    data.get("scryer_quality_profile_id")  # LEGACY-DATA-KEY
+                )
+                legacy_folder = _as_optional_int(
+                    data.get("scryer_root_folder_id")  # LEGACY-DATA-KEY
+                )
                 if legacy_profile is None and legacy_folder is None:
                     continue
 

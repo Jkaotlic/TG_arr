@@ -547,8 +547,11 @@ async def test_process_search_auto_detection_uses_detect_content_type():
     search_service.detect_content_type.assert_awaited_once_with("Dune")
     # The resolved movie already carries a radarr_id — no add call, straight
     # to listing releases for it.
+    # `preferred_resolution` must be threaded through from the user's settings:
+    # without it the scorer never sees the "Качество" preference and the
+    # setting silently stops affecting the ranking (DEAD-06).
     search_service.search_releases_for_title.assert_awaited_once_with(
-        ContentType.MOVIE, 42, season=None,
+        ContentType.MOVIE, 42, season=None, preferred_resolution=None,
     )
 
 
@@ -846,3 +849,81 @@ async def test_process_search_reports_a_config_error_distinctly_from_no_match():
     edits = [c.args[0] for c in status_msg.edit_text.await_args_list if c.args]
     assert any("не настроены" in t for t in edits)
     assert not any("Ничего не найдено" in t for t in edits)
+
+
+@pytest.mark.asyncio
+async def test_search_releases_writes_calculated_score_onto_each_result():
+    """Final-review finding: the score shown to the user was always 0.
+
+    `search_releases_for_title` used to sort with `calculate_score(...)` as a
+    sort key only, never assigning it, so every `SearchResult` kept the model
+    default of 0. Three things broke silently: the release card rendered
+    "Оценка: 0/100", the "Скачать лучшее" button was gated on
+    `calculated_score >= auto_grab_score_threshold` (default 80) and could
+    therefore never appear, and `handle_grab_best` was unreachable.
+
+    Pinning a non-zero score here keeps that from regressing.
+    """
+    from bot.models import ContentType, QualityInfo, SearchResult
+    from bot.services.search_service import SearchService
+
+    radarr = AsyncMock()
+    radarr.get_releases = AsyncMock(return_value=[
+        SearchResult(
+            guid="g1", title="Dune.2021.2160p.BluRay.REMUX", indexer="RuTracker",
+            size=60_000_000_000, seeders=200, leechers=2,
+            quality=QualityInfo(resolution="2160p", source="BluRay", is_remux=True),
+            origin="arr", custom_format_score=500,
+        ),
+    ])
+
+    service = SearchService(radarr, AsyncMock())
+    results = await service.search_releases_for_title(ContentType.MOVIE, arr_id=15)
+
+    assert len(results) == 1
+    assert results[0].calculated_score > 0, "the score must reach the user, not stay at 0"
+
+
+@pytest.mark.asyncio
+async def test_browsing_releases_does_not_enlist_the_title_in_arr_rss():
+    """Final-review finding: searching a title used to enlist it for download.
+
+    `_resolve_arr_entry` adds the title to get an *arr id before releases can
+    be listed. The client defaults are `monitored=True` and, for series,
+    `monitor="all"` — so a user who typed `/series Some Show`, glanced at the
+    list and closed the chat would have every season of that show grabbed on
+    Sonarr's next RSS sync. `search_for_*=False` only suppresses the immediate
+    search, not the RSS loop.
+    """
+    from bot.handlers.search import commands
+    from bot.models import ContentType, MovieInfo, SeriesInfo
+
+    add_service = MagicMock()
+    add_service.radarr = AsyncMock()
+    add_service.sonarr = AsyncMock()
+    add_service.radarr.get_quality_profiles = AsyncMock(return_value=[MagicMock(id=7)])
+    add_service.radarr.get_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="G:\f")])
+    add_service.sonarr.get_quality_profiles = AsyncMock(return_value=[MagicMock(id=7)])
+    add_service.sonarr.get_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="G:\s")])
+    add_service.resolve_profile = MagicMock(return_value=MagicMock(id=7))
+    add_service.resolve_root_folder = MagicMock(return_value="G:\f")
+    add_service.add_movie = AsyncMock(
+        return_value=(MovieInfo(tmdb_id=1, title="M", year=2024, radarr_id=15), MagicMock())
+    )
+    add_service.add_series = AsyncMock(
+        return_value=(SeriesInfo(tvdb_id=9, title="S", sonarr_id=3), MagicMock())
+    )
+
+    db_user = _make_db_user()
+
+    await commands._resolve_arr_entry(
+        add_service, ContentType.MOVIE, MovieInfo(tmdb_id=1, title="M", year=2024), db_user,
+    )
+    assert add_service.add_movie.await_args.kwargs["monitored"] is False
+
+    await commands._resolve_arr_entry(
+        add_service, ContentType.SERIES, SeriesInfo(tvdb_id=9, title="S"), db_user,
+    )
+    kwargs = add_service.add_series.await_args.kwargs
+    assert kwargs["monitored"] is False
+    assert kwargs["monitor"] == "none", "monitor='all' would enlist every season"

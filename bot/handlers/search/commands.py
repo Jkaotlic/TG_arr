@@ -266,6 +266,13 @@ async def _resolve_arr_entry(
         added, _action = await add_service.add_movie(
             candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
             search_for_movie=False,
+            # Added UNMONITORED: this add exists only to obtain a Radarr id so
+            # the interactive search can run. `search_for_movie=False` stops the
+            # immediate search, but a monitored title still joins Radarr's RSS
+            # loop — so a user who merely looked at the release list and walked
+            # away would get the film downloaded anyway. Monitoring is switched
+            # on in `_execute_grab`, once a release is actually taken.
+            monitored=False,
         )
         if added is None or not added.radarr_id:
             return None, None, False
@@ -285,6 +292,10 @@ async def _resolve_arr_entry(
     added, _action = await add_service.add_series(
         candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
         content_type=content_type, search_for_missing=False,
+        # Same reasoning as the movie branch, and worse if ignored: the client
+        # default is `monitor="all"`, so browsing one season of a 10-season show
+        # would enlist every episode of every season into Sonarr's RSS loop.
+        monitored=False, monitor="none",
     )
     if added is None or not added.sonarr_id:
         return None, None, False
@@ -539,6 +550,9 @@ async def process_search(
             content_type,
             arr_id,
             season=parsed.get("season") or season_override,
+            # DEAD-06: the user's resolution preference must reach the scorer,
+            # or "Качество" in /settings silently stops affecting the ranking.
+            preferred_resolution=db_user.preferences.preferred_resolution,
         )
         log.info(
             "stage_done",

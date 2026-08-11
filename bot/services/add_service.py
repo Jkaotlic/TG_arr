@@ -397,10 +397,17 @@ class AddService:
         quality_profile_id: int,
         root_folder_path: str,
         search_for_movie: bool = True,
+        monitored: bool = True,
         tags: Optional[list[int]] = None,
     ) -> tuple[Optional[MovieInfo], ActionLog]:
-        """Add a movie to Radarr (restored from `f30545d~1`, unchanged shape —
-        `RadarrClient.add_movie`'s signature didn't move under the rollback)."""
+        """Add a movie to Radarr (restored from `f30545d~1`).
+
+        `monitored` is caller-facing because the search flow adds a title just
+        to obtain its Radarr id before listing releases. Added monitored, a
+        title the user merely looked at and abandoned joins Radarr's RSS loop
+        and gets downloaded on the next sync — so that path adds unmonitored
+        and flips the flag only when a release is actually grabbed.
+        """
         log = logger.bind(title=movie.title, tmdb_id=movie.tmdb_id)
         log.info("Adding movie to Radarr")
 
@@ -424,6 +431,7 @@ class AddService:
                 quality_profile_id=quality_profile_id,
                 root_folder_path=root_folder_path,
                 search_for_movie=search_for_movie,
+                monitored=monitored,
                 tags=tags,
             )
 
@@ -445,6 +453,7 @@ class AddService:
         content_type: ContentType = ContentType.SERIES,
         monitor: str = "all",
         search_for_missing: bool = True,
+        monitored: bool = True,
         tags: Optional[list[int]] = None,
     ) -> tuple[Optional[SeriesInfo], ActionLog]:
         """Add a series (or anime) to Sonarr — restored from `f30545d~1`,
@@ -480,6 +489,7 @@ class AddService:
                 root_folder_path=root_folder_path,
                 monitor=monitor,
                 search_for_missing=search_for_missing,
+                monitored=monitored,
                 series_type=content_type.sonarr_series_type or "standard",
                 tags=tags,
             )
