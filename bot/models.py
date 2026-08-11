@@ -473,12 +473,21 @@ class UserPreferences(BaseModel):
     older pre-migration `radarr_*`/`sonarr_*` keys) still present in stored
     JSON are silently ignored on load — extra keys are dropped by pydantic's
     default `extra="ignore"` — same graceful-degradation behaviour the
-    2026-07-28 migration already relied on for its own predecessor. No
-    explicit data migration needed: no settings UI has written the
-    Scryer-shaped pair yet (Task 13 wires the *arr-shaped one), so no
-    deployed row is expected to carry a value under the old keys, and even
-    if one did, it degrades to "no preference set" (the pre-migration
-    default) rather than an error.
+    2026-07-28 migration already relied on for its own predecessor. That
+    alone would only degrade a stale row to "no preference set", not lose
+    it entirely — but "no preference set" still means the settings picker
+    falls back to "first available" (see `AddService.resolve_profile`),
+    which was live-measured to be Radarr's profile id 1, "Any" — the exact
+    profile whose custom-format scores had to be repaired because it
+    rewarded the releases the language policy exists to reject.
+    Correction (Task 13): this originally said no migration was needed
+    because "no settings UI has written the Scryer-shaped pair yet" — wrong;
+    the bot ran on Scryer for about two weeks before this rollback, so real
+    rows do carry the old keys. `Database._migrate_to_v4`
+    (`bot/db.py`) copies `scryer_quality_profile_id`/`scryer_root_folder_id`
+    forward into the `radarr_*`/`sonarr_*` fields below (idempotent, fills
+    only unset fields) so an existing user's choice survives the rollback
+    instead of silently reverting.
     """
 
     radarr_quality_profile_id: Optional[int] = None

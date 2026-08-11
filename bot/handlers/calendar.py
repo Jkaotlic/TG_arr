@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Optional
 
 import structlog
 from aiogram import F, Router
@@ -46,19 +46,64 @@ def _calendar_date_key(item: dict[str, Any]) -> str:
     )
 
 
-async def _collect_calendar(radarr, sonarr, days: int) -> list[dict[str, Any]]:
+def _is_movie_calendar_item(item: dict[str, Any]) -> bool:
+    """Tells a Radarr calendar row from a Sonarr one after they've been
+    merged by `_collect_calendar`. Radarr's rows always carry `release_date`
+    (`RadarrClient.get_calendar`), Sonarr's always carry `air_date`
+    (`SonarrClient.get_calendar`) instead — the same distinction
+    `_calendar_date_key` already relies on. Used to split the merged list
+    back into the separate movies/episodes buckets
+    `Formatters.format_calendar` renders.
+    """
+    return "release_date" in item
+
+
+async def _collect_calendar(
+    radarr, sonarr, days: int, *, errors: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
     """Fetch Radarr's and Sonarr's calendars concurrently, merged and sorted
     by date into one list.
 
-    A small, pure, directly-testable step — no per-source error tolerance
-    here (a failing client's exception propagates to the caller); that
-    tolerance lives in `_fetch_and_send_calendar`, which needs to know WHICH
-    source failed so it can report it by name.
+    A small, directly-testable step. Default (`errors=None`, the original
+    contract this function shipped with): no per-source error tolerance — a
+    failing client's exception propagates to the caller.
+
+    Review fix round 1 (2026-08-10, task-13 re-review): `_fetch_and_send_calendar`
+    used to reimplement an equivalent Radarr+Sonarr gather inline instead of
+    calling this function — two implementations of the same fetch that could
+    silently diverge on a future edit. It now calls this directly. To keep
+    its per-source "⚠️ Radarr: ..." error reporting without a second,
+    separately-maintained error-tolerant reimplementation, pass a mutable
+    `errors` list: a failing source then contributes nothing (instead of
+    raising) and an "<Source>: <message>" entry is appended to `errors`, so
+    the caller learns which source failed without losing the other's data.
     """
-    movies, episodes = await asyncio.gather(
-        radarr.get_calendar(days=days),
-        sonarr.get_calendar(days=days),
-    )
+    if errors is None:
+        movies, episodes = await asyncio.gather(
+            radarr.get_calendar(days=days),
+            sonarr.get_calendar(days=days),
+        )
+    else:
+        # SEC-21: text is sent with parse_mode=HTML — escape exception strings.
+        import html as _html
+
+        results = await asyncio.gather(
+            radarr.get_calendar(days=days),
+            sonarr.get_calendar(days=days),
+            return_exceptions=True,
+        )
+        movies, episodes = [], []
+        for source, result in zip(("Radarr", "Sonarr"), results, strict=True):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "calendar_fetch_failed", service=source, error=str(result), exc_info=result,
+                )
+                errors.append(f"{source}: {_html.escape(str(result))[:100]}")
+            elif source == "Radarr":
+                movies = result
+            else:
+                episodes = result
+
     combined = list(movies) + list(episodes)
     return sorted(combined, key=_calendar_date_key)
 
@@ -78,37 +123,35 @@ async def _fetch_and_send_calendar(
     # SEC-21: text is sent with parse_mode=HTML — escape exception strings.
     import html as _html
 
-    # PERF-03/LOGIC-05: fetch the Radarr/Sonarr/Lidarr calendars concurrently.
-    # return_exceptions=True keeps the per-source error tolerance: a failing
-    # source contributes an empty list + a warning entry while the other
-    # still renders.
-    fetchers: list[tuple[str, Any]] = [
-        ("Radarr", radarr.get_calendar(days=days)),
-        ("Sonarr", sonarr.get_calendar(days=days)),
-    ]
+    # PERF-03/LOGIC-05: Radarr+Sonarr (via _collect_calendar, error-tolerant
+    # when `errors=` is passed) and Lidarr run concurrently in one gather —
+    # nesting _collect_calendar's own inner gather inside this one does not
+    # serialize anything; all three sources still start together.
+    # return_exceptions=True covers Lidarr's slot (_collect_calendar's own
+    # slot never raises once `errors=` is set — it swallows its own
+    # per-source failures internally, see its docstring).
     if lidarr is not None:
-        fetchers.append(("Lidarr", lidarr.get_calendar(days=days)))
-
-    results = await asyncio.gather(
-        *(coro for _, coro in fetchers),
-        return_exceptions=True,
-    )
-
-    payloads: dict[str, list] = {}
-    for (source, _), result in zip(fetchers, results, strict=True):
-        if isinstance(result, BaseException):
-            logger.error("calendar_fetch_failed", service=source, error=str(result), exc_info=result)
-            errors.append(f"{source}: {_html.escape(str(result))[:100]}")
+        combined, lidarr_result = await asyncio.gather(
+            _collect_calendar(radarr, sonarr, days, errors=errors),
+            lidarr.get_calendar(days=days),
+            return_exceptions=True,
+        )
+        if isinstance(lidarr_result, BaseException):
+            logger.error(
+                "calendar_fetch_failed", service="Lidarr", error=str(lidarr_result), exc_info=lidarr_result,
+            )
+            errors.append(f"Lidarr: {_html.escape(str(lidarr_result))[:100]}")
+            albums: list = []
         else:
-            payloads[source] = list(result)
+            albums = list(lidarr_result)
+    else:
+        combined = await _collect_calendar(radarr, sonarr, days, errors=errors)
+        albums = []
 
-    # Radarr's calendar rows are already movie-shaped, Sonarr's already
-    # episode-shaped — no split step needed (that was Scryer's single
-    # calendarEpisodes query covering every facet; each *arr client answers
-    # its own facet directly).
-    movies = payloads.get("Radarr", [])
-    episodes = payloads.get("Sonarr", [])
-    albums = payloads.get("Lidarr", [])
+    # Split the merged, date-sorted list back into the separate
+    # movies/episodes buckets Formatters.format_calendar renders.
+    movies = [item for item in combined if _is_movie_calendar_item(item)]
+    episodes = [item for item in combined if not _is_movie_calendar_item(item)]
 
     text = Formatters.format_calendar(episodes, movies, days=days, albums=albums)
     if errors:

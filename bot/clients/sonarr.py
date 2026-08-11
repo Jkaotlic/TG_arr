@@ -184,8 +184,18 @@ class SonarrClient(ArrBaseClient):
         return result if isinstance(result, dict) else {}
 
     async def get_wanted_episodes(self, page_size: int = 50) -> list[dict[str, Any]]:
-        """Episodes that are monitored but have no file."""
-        return await self._get_wanted(page_size)
+        """Episodes that are monitored but have no file.
+
+        Review fix round 1 (2026-08-10, task-13 re-review): `includeSeries=
+        true` embeds the parent series object per record — the same flag
+        `get_calendar` already sends. Live-measured against the real Sonarr
+        instance: without it, `/wanted/missing` records carry no `series` or
+        `seriesTitle` field at all, so status.py's per-show grouping
+        (`_group_wanted_episodes`) silently bucketed every real episode
+        under "Неизвестный сериал" — exactly the failure `/wanted` exists to
+        prevent, per its own docstring.
+        """
+        return await self._get_wanted(page_size, extra_params={"includeSeries": "true"})
 
     async def get_releases(
         self, series_id: int, season_number: Optional[int] = None,

@@ -74,7 +74,22 @@ def _use_real_dot_env_credentials(monkeypatch, _default_env):
     hosts, and every test fails with ConnectError — not a live-service
     defect, a test-harness/fixture conflict discovered while wiring this
     module up.
+
+    Fix round 1 (Task 13 review): `_default_env` forces
+    `Settings.model_config["env_file"] = None` (so the hermetic suite never
+    reads a developer's real `.env` for a `monkeypatch.delenv`'d var — see
+    its own docstring). `monkeypatch` is function-scoped, so that mutation
+    is still in effect here since both fixtures share the same `monkeypatch`
+    instance for this test. Left alone, `get_settings()` below would see
+    every *arr var missing from both the environment AND the (disabled)
+    file and raise `ValidationError`, not fall through to `.env` as this
+    fixture's whole docstring promises. Restore `env_file` before deleting
+    the fake vars so this module gets what it actually asks for.
     """
+    from bot.config import Settings
+
+    monkeypatch.setitem(Settings.model_config, "env_file", ".env")
+
     for var in (
         "PROWLARR_URL", "PROWLARR_API_KEY",
         "RADARR_URL", "RADARR_API_KEY",

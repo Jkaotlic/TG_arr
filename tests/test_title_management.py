@@ -355,6 +355,77 @@ async def test_monitor_action_dispatches_to_sonarr_for_a_series():
     titles_handler._title_candidates.pop(42, None)
 
 
+# ---------------------------------------------------------------------------
+# Review fix round 1 (2026-08-10, task-13 re-review): a Radarr/Sonarr-side
+# refusal (set_movie_monitored/delete_movie etc. returning False — the id no
+# longer exists there, say) used to be recorded in the audit trail as a
+# success, since ActionLog.success defaults to True and nothing set it.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_failed_monitor_toggle_is_logged_as_a_failure_not_a_success():
+    from bot.handlers import titles as titles_handler
+    from bot.models import ActionLog
+
+    radarr = AsyncMock()
+    radarr.set_movie_monitored = AsyncMock(return_value=False)
+    sonarr = AsyncMock()
+    db = AsyncMock()
+    cb = _callback()
+
+    titles_handler._title_candidates[42] = {"movie:15": _movie(radarr_id=15, monitored=True)}
+
+    with patch.object(titles_handler, "get_radarr", AsyncMock(return_value=radarr)), \
+         patch.object(titles_handler, "get_sonarr", AsyncMock(return_value=sonarr)):
+        await titles_handler.handle_title_action(
+            cb, TitleActionCB(action="unmon", kind="movie", title_id="15"), MagicMock(tg_id=42), db
+        )
+
+    logged: ActionLog = db.log_action.await_args.args[0]
+    assert logged.success is False
+    assert logged.error_message
+
+    # The cache must not silently flip to "unmonitored" when the *arr side
+    # refused — the card the user sees on their next /title still reflects
+    # the real (unchanged) state.
+    assert titles_handler._title_candidates[42]["movie:15"].monitored is True
+
+    text = cb.message.edit_text.await_args.args[0]
+    assert "не удалось" in text.lower()
+    titles_handler._title_candidates.pop(42, None)
+
+
+@pytest.mark.asyncio
+async def test_failed_delete_is_logged_as_a_failure_not_a_success():
+    from bot.handlers import titles as titles_handler
+    from bot.models import ActionLog
+
+    radarr = AsyncMock()
+    radarr.delete_movie = AsyncMock(return_value=False)
+    sonarr = AsyncMock()
+    db = AsyncMock()
+    cb = _callback()
+
+    titles_handler._title_candidates[42] = {"movie:15": _movie(radarr_id=15)}
+
+    with patch.object(titles_handler, "get_radarr", AsyncMock(return_value=radarr)), \
+         patch.object(titles_handler, "get_sonarr", AsyncMock(return_value=sonarr)):
+        await titles_handler.handle_title_action(
+            cb, TitleActionCB(action="delconf", kind="movie", title_id="15"), MagicMock(tg_id=42), db
+        )
+
+    logged: ActionLog = db.log_action.await_args.args[0]
+    assert logged.success is False
+    assert logged.error_message
+
+    # A refused delete must not be dropped from the cache — the user can
+    # still act on it (retry, or pick something else) on the next tap.
+    assert "movie:15" in titles_handler._title_candidates[42]
+
+    text = cb.message.edit_text.await_args.args[0]
+    assert "не удалось" in text.lower()
+    titles_handler._title_candidates.pop(42, None)
+
+
 @pytest.mark.asyncio
 async def test_pick_action_renders_the_chosen_candidate():
     from bot.handlers import titles as titles_handler

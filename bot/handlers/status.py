@@ -208,11 +208,15 @@ async def check_service(client, name: str) -> SystemStatus:
 def _group_wanted_episodes(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """Group Sonarr's flat wanted/missing episode records by series title.
 
-    Sonarr's `/wanted/missing` embeds a `series` object only when the caller
-    asks for it; `ArrBaseClient._get_wanted` doesn't (it's the same endpoint
-    Radarr uses, where there is no series to embed) — fall back to whatever
-    the response happens to carry rather than assuming a shape that may not
-    be there.
+    Review fix round 1 (2026-08-10, task-13 re-review): this used to say
+    Sonarr's `/wanted/missing` embeds a `series` object "only when the
+    caller asks for it", then didn't ask — every real record came back with
+    neither `series` nor `seriesTitle`, and every episode fell through to
+    "Неизвестный сериал" (live-verified against the real instance).
+    `SonarrClient.get_wanted_episodes` now sends `includeSeries=true` (same
+    flag `get_calendar` already used), so `rec["series"]["title"]` is
+    populated in practice. The `seriesTitle`/"Неизвестный сериал" fallbacks
+    stay as defence in depth for any caller that doesn't request the flag.
     """
     grouped: dict[str, list[dict[str, Any]]] = {}
     for rec in records:

@@ -89,6 +89,22 @@ async def test_get_wanted_movies_reads_the_missing_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_get_wanted_movies_does_not_send_include_series():
+    """Review fix round 1 (2026-08-10): Sonarr's wanted query needed
+    `includeSeries=true` to embed the parent title (see the Sonarr-side
+    test) — Radarr's `/wanted/missing` has no series concept, so the shared
+    `_get_wanted` must not leak that param onto Radarr's call."""
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    payload = {"records": []}
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)) as get:
+        await client.get_wanted_movies()
+
+    assert "includeSeries" not in get.call_args.kwargs["params"]
+
+
+@pytest.mark.asyncio
 async def test_set_movie_monitored_patches_the_resource():
     """Unmonitoring 102 unobtainable episodes must not need a hand-written script."""
     from bot.clients.radarr import RadarrClient

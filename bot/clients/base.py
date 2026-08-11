@@ -537,7 +537,9 @@ class ArrBaseClient(BaseAPIClient):
                     logger.warning("Skipping malformed root folder", error=str(e))
         return folders
 
-    async def _get_wanted(self, page_size: int = 50) -> list[dict[str, Any]]:
+    async def _get_wanted(
+        self, page_size: int = 50, extra_params: Optional[dict[str, Any]] = None,
+    ) -> list[dict[str, Any]]:
         """Read the "missing" list. Rollback 2026-08-10: /wanted lived on
         Scryer's catalog query before; *arr paginates it instead.
 
@@ -546,11 +548,20 @@ class ArrBaseClient(BaseAPIClient):
         response differs, which callers parse themselves. (Fix round 1,
         2026-08-10 review: the plan's own brief was self-contradictory here —
         prose said no resource parameter, its code sample had an unused one.)
+
+        `extra_params` (fix round 1, task-13 re-review): lets a subclass add
+        query params the shared endpoint accepts but not every caller wants
+        — Sonarr sends `includeSeries=true` here (see
+        `SonarrClient.get_wanted_episodes`), Radarr sends nothing, since
+        Radarr's movie records have no series to embed and the param would
+        be meaningless noise on that call.
         """
-        result = await self.get(
-            f"{self._api_prefix}/wanted/missing",
-            params={"pageSize": page_size, "sortKey": "title", "sortDirection": "ascending"},
-        )
+        params: dict[str, Any] = {
+            "pageSize": page_size, "sortKey": "title", "sortDirection": "ascending",
+        }
+        if extra_params:
+            params.update(extra_params)
+        result = await self.get(f"{self._api_prefix}/wanted/missing", params=params)
         if isinstance(result, dict):
             records = result.get("records", [])
             return records if isinstance(records, list) else []

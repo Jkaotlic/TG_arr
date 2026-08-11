@@ -181,6 +181,38 @@ async def test_collect_calendar_merges_both_services():
 
 
 @pytest.mark.asyncio
+async def test_fetch_and_send_calendar_actually_calls_collect_calendar():
+    """Review fix round 1 (2026-08-10, task-13 re-review): `_collect_calendar`
+    existed, was directly tested (the test above), and was never called by
+    the production path — `_fetch_and_send_calendar` re-implemented an
+    equivalent gather inline instead, so the two could silently diverge on a
+    future edit. This pins the fix at the right level: patch
+    `calendar._collect_calendar` itself and assert the production handler
+    actually awaits it, rather than merely asserting on the end-to-end
+    rendered text (which can't tell "called the real helper" apart from
+    "coincidentally produced the same output" — the exact gap review found).
+    """
+    from bot.handlers import calendar
+
+    radarr, sonarr, lidarr = MagicMock(), MagicMock(), MagicMock()
+    lidarr.get_calendar = AsyncMock(return_value=[])
+
+    answer_func, _captured = _answer_capture()
+    spy = AsyncMock(return_value=[{"title": "Dune", "release_date": "2026-08-11"}])
+
+    with patch.object(calendar, "get_radarr", AsyncMock(return_value=radarr)), \
+         patch.object(calendar, "get_sonarr", AsyncMock(return_value=sonarr)), \
+         patch.object(calendar, "get_lidarr", AsyncMock(return_value=lidarr)), \
+         patch.object(calendar, "_collect_calendar", spy), \
+         patch.object(calendar.Formatters, "format_calendar", return_value="OK"):
+        await calendar._fetch_and_send_calendar(7, answer_func=answer_func)
+
+    spy.assert_awaited_once()
+    assert spy.await_args.args[:2] == (radarr, sonarr)
+    assert spy.await_args.args[2] == 7 or spy.await_args.kwargs.get("days") == 7
+
+
+@pytest.mark.asyncio
 async def test_trending_add_series_resolves_tvdb_id_via_sonarr_lookup():
     """Rollback 2026-08-10: TMDb trending carries no tvdb_id (Scryer used to
     resolve titles by name/metadata id instead) — the handler must resolve

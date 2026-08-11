@@ -110,6 +110,24 @@ async def test_get_wanted_episodes_reads_the_missing_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_get_wanted_episodes_requests_include_series():
+    """Review fix round 1 (2026-08-10): without `includeSeries=true`,
+    Sonarr's real `/wanted/missing` records carry no `series` or
+    `seriesTitle` field at all (live-measured — see
+    docs/superpowers/sdd/2026-08-10-arr-restore/task-13-report.md) — every
+    episode collapsed into status.py's "Неизвестный сериал" fallback. Same
+    flag `get_calendar` already sends."""
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    payload = {"records": []}
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)) as get:
+        await client.get_wanted_episodes()
+
+    assert get.call_args.kwargs["params"]["includeSeries"] == "true"
+
+
+@pytest.mark.asyncio
 async def test_set_series_monitored_patches_the_resource():
     from bot.clients.sonarr import SonarrClient
 

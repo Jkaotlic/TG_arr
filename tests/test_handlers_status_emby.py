@@ -256,6 +256,22 @@ async def test_wanted_reports_empty_queue_when_both_are_clear():
 
 @pytest.mark.asyncio
 async def test_wanted_merges_radarr_movies_and_sonarr_episodes():
+    """Review fix round 1 (2026-08-10, task-13 re-review): this test mocks
+    `sonarr.get_wanted_episodes` — the already-parsed CLIENT method, not the
+    raw HTTP layer — with a `"series": {"title": ...}` shape. Before the fix,
+    that was fiction: `get_wanted_episodes` never sent `includeSeries=true`,
+    so no real record could ever carry a `series` key (confirmed live:
+    real records with the flag omitted had exactly these top-level keys —
+    airDate, airDateUtc, episodeFileId, episodeNumber, hasFile, id,
+    lastSearchTime, monitored, overview, runtime, seasonNumber, seriesId,
+    title, tvdbId, unverifiedSceneNumbering — no `series`, no
+    `seriesTitle`). `get_wanted_episodes` now sends that flag (see
+    `bot/clients/sonarr.py`), and a live probe with it set confirmed a
+    `series` dict with a `title` sub-key appears, matching this fixture.
+    `tests/test_sonarr_client.py::test_get_wanted_episodes_requests_include_series`
+    covers the request side (that the flag is actually sent); this test
+    covers the grouping/rendering side (what the handler does with the
+    result once it has it)."""
     from bot.handlers import status as status_handler
 
     radarr = AsyncMock()
@@ -264,8 +280,8 @@ async def test_wanted_merges_radarr_movies_and_sonarr_episodes():
     ])
     sonarr = AsyncMock()
     sonarr.get_wanted_episodes = AsyncMock(return_value=[
-        {"id": 2, "title": "Ep1", "seasonNumber": 1, "series": {"title": "Paw Patrol"}},
-        {"id": 3, "title": "Ep2", "seasonNumber": 2, "series": {"title": "Paw Patrol"}},
+        {"id": 2, "title": "Ep1", "seasonNumber": 1, "seriesId": 8, "series": {"title": "Paw Patrol"}},
+        {"id": 3, "title": "Ep2", "seasonNumber": 2, "seriesId": 8, "series": {"title": "Paw Patrol"}},
     ])
 
     message = MagicMock()

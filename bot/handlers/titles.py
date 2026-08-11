@@ -66,8 +66,9 @@ async def _apply_delete(client, resource_id: int, is_movie: bool, delete_files: 
 
 def _title_key(title: "MovieInfo | SeriesInfo") -> str:
     """`movie:<radarr_id>` / `series:<sonarr_id>` — mirrors
-    `Keyboards._title_action_id`, which builds the same string for the
-    buttons this cache key is looked up by."""
+    `_SearchKeyboards._title_action_ref` (`bot/ui/keyboards/search.py`),
+    which builds the same (kind, id) pair for the buttons this cache key is
+    looked up by."""
     if isinstance(title, MovieInfo):
         return f"movie:{title.radarr_id}"
     return f"series:{title.sonarr_id}"
@@ -200,6 +201,11 @@ async def handle_title_action(
             if title is not None and ok:
                 title = title.model_copy(update={"monitored": monitored})
                 cache[title_id] = title
+            # Review fix round 1 (2026-08-10, task-13 re-review): `ok` used
+            # to be discarded here — `ActionLog.success` defaults to True,
+            # so a Radarr/Sonarr-side refusal (e.g. the id no longer exists)
+            # was recorded in the audit trail as a success with no way to
+            # tell it apart from a real one.
             await db.log_action(ActionLog(
                 user_id=db_user.tg_id,
                 action_type=ActionType.MONITOR,
@@ -207,7 +213,14 @@ async def handle_title_action(
                 content_title=getattr(title, "title", None),
                 content_id=str(resource_id),
                 details=f"monitored={monitored}",
+                success=ok,
+                error_message=None if ok else "Radarr/Sonarr declined the monitor-toggle request",
             ))
+            if not ok:
+                await message.edit_text(
+                    Formatters.format_error("Не удалось изменить мониторинг — попробуйте ещё раз")
+                )
+                return
             if title is not None:
                 await message.edit_text(
                     _render_title_card(title),
@@ -248,7 +261,10 @@ async def handle_title_action(
 
         if action == "delconf":
             title = cache.get(title_id)
-            await _apply_delete(client, resource_id, is_movie, delete_files=False)
+            ok = await _apply_delete(client, resource_id, is_movie, delete_files=False)
+            # Review fix round 1 (2026-08-10, task-13 re-review): same gap
+            # as the monitor toggle above — the delete's own success/failure
+            # was never fed into the audit trail.
             await db.log_action(ActionLog(
                 user_id=db_user.tg_id,
                 action_type=ActionType.DELETE,
@@ -256,7 +272,14 @@ async def handle_title_action(
                 content_title=getattr(title, "title", None),
                 content_id=str(resource_id),
                 details="deleted",
+                success=ok,
+                error_message=None if ok else "Radarr/Sonarr declined the delete request",
             ))
+            if not ok:
+                await message.edit_text(
+                    Formatters.format_error("Не удалось удалить из библиотеки — попробуйте ещё раз")
+                )
+                return
             cache.pop(title_id, None)
             await message.edit_text(
                 Formatters.format_success("Удалено из библиотеки. Файлы на диске не тронуты.")
