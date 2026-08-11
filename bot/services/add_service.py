@@ -36,6 +36,20 @@ collection errors mid-rollback. Replaced with the two *arr grab paths:
                    (SEC-16-gated, see `_validate_download_url`) ->
                    qBittorrent by downloadUrl -> *arr auto-search command.
 
+⚠️ KNOWN GAP (whole-branch review, 2026-08-10): the push chain is currently
+UNREACHABLE in normal operation. Every release the user can select comes from
+`SearchService.search_releases_for_title`, i.e. *arr's interactive search, and
+is therefore tagged `origin="arr"`. `ProwlarrClient.search()` — the free-text
+mode that would produce `origin="prowlarr"` releases — is constructed and
+health-checked but has no caller: the method that used to serve it belonged to
+the removed backend and nothing replaced it. The chain only fires today if
+*arr returns a release row with `indexerId` absent or 0.
+
+The chain is kept rather than deleted because free-text search for titles NOT
+yet in the catalog is a real gap in the current UX, and this is the grab path
+it needs. It is covered by unit tests, but it has not run against the live
+stack — treat it as unproven until it does.
+
 `arr_id` is the movie/series id already in Radarr/Sonarr. `grab_release`'s
 caller is expected to have ensured the title exists in the library before
 calling this (the same precondition `SearchService.search_releases_for_title`
