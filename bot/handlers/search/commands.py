@@ -186,17 +186,25 @@ async def _lookup_metadata_candidates(search_service, term: str, content_type: C
     neither tested nor specified and is left as a `NotImplementedError` stub
     (see its docstring) — this handler no longer resolves a catalog title
     before *listing* releases (that requirement is gone with Scryer), only
-    before *adding* one, so the lookup itself is done directly against the
-    two clients `SearchService` already holds. Series/anime reuse
-    `SearchService._split_series_candidates`, the same genre-based split
+    before *adding* one.
+
+    Fix round 1 (review finding 1): this used to call
+    `search_service.radarr.lookup_movie`/`.sonarr.lookup_series` directly,
+    bypassing `_lookup_branch`'s semaphore/circuit-breaker entirely — the
+    exact protection Task 8 restored to stop "a burst of searches takes all
+    three services down at once" (see `_lookup_branch`'s docstring). Every
+    explicit `/movie`, `/series`, `/anime` search now goes through
+    `SearchService.lookup_movies`/`lookup_series`, the same guarded path
+    `detect_content_type`'s own fan-out uses. Series/anime reuse
+    `SearchService.split_series_candidates`, the same genre-based split
     `detect_content_type` uses, so a plain "/series" search and an
     auto-detected one classify anime identically.
     """
     if content_type is ContentType.MOVIE:
-        return await search_service.radarr.lookup_movie(term)
+        return await search_service.lookup_movies(term)
     if content_type in (ContentType.SERIES, ContentType.ANIME):
-        all_series = await search_service.sonarr.lookup_series(term)
-        series, anime = SearchService._split_series_candidates(all_series)
+        all_series = await search_service.lookup_series(term)
+        series, anime = SearchService.split_series_candidates(all_series)
         return anime if content_type is ContentType.ANIME else series
     return []
 
@@ -224,8 +232,22 @@ async def _resolve_arr_entry(
     already in the library — reused as-is, no add call, no extra network
     round-trip.
 
-    Returns `(title_info, arr_id, created)`; `(None, None, False)` if there
-    is nothing to resolve or the add itself failed.
+    Returns `(title_info, arr_id, created)`; `(None, None, False)` when
+    there is genuinely nothing to resolve (no candidate) or the add call
+    itself failed against a *reachable, configured* Radarr/Sonarr. Raises
+    `ValueError` when Radarr/Sonarr has no quality profiles or no root
+    folders configured at all — that is a setup problem, not "this title
+    doesn't exist", and the caller renders it as a distinct message instead
+    of the generic "nothing found" (fix round 1, review finding — the two
+    used to read identically to the user).
+
+    Fix round 1 (review finding 2): `radarr_quality_profile_id`/
+    `radarr_root_folder_id` and `sonarr_quality_profile_id`/
+    `sonarr_root_folder_id` are separate `UserPreferences` fields, not one
+    shared Scryer-shaped pair — Radarr's and Sonarr's ids are independent
+    sequences (live measurement: both start at 1, 2, pointing at unrelated
+    paths), so a single shared preference could silently apply a movie's
+    folder/profile choice to a series.
     """
     if candidate is None:
         return None, None, False
@@ -238,9 +260,9 @@ async def _resolve_arr_entry(
         folders = await client.get_root_folders()
         if not profiles or not folders:
             logger.warning("radarr_add_blocked_no_profiles_or_folders")
-            return None, None, False
-        profile = add_service.resolve_profile(profiles, db_user.preferences.scryer_quality_profile_id)
-        folder_path = add_service.resolve_root_folder(folders, db_user.preferences.scryer_root_folder_id)
+            raise ValueError("В Radarr не настроены профили качества или папки — обратитесь к администратору")
+        profile = add_service.resolve_profile(profiles, db_user.preferences.radarr_quality_profile_id)
+        folder_path = add_service.resolve_root_folder(folders, db_user.preferences.radarr_root_folder_id)
         added, _action = await add_service.add_movie(
             candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
             search_for_movie=False,
@@ -257,9 +279,9 @@ async def _resolve_arr_entry(
     folders = await client.get_root_folders()
     if not profiles or not folders:
         logger.warning("sonarr_add_blocked_no_profiles_or_folders")
-        return None, None, False
-    profile = add_service.resolve_profile(profiles, db_user.preferences.scryer_quality_profile_id)
-    folder_path = add_service.resolve_root_folder(folders, db_user.preferences.scryer_root_folder_id)
+        raise ValueError("В Sonarr не настроены профили качества или папки — обратитесь к администратору")
+    profile = add_service.resolve_profile(profiles, db_user.preferences.sonarr_quality_profile_id)
+    folder_path = add_service.resolve_root_folder(folders, db_user.preferences.sonarr_root_folder_id)
     added, _action = await add_service.add_series(
         candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
         content_type=content_type, search_for_missing=False,
@@ -452,7 +474,17 @@ async def process_search(
 
             chosen = _pick_metadata_candidate(candidates, parsed.get("year"))
 
-        title, arr_id, created = await _resolve_arr_entry(add_service, content_type, chosen, db_user)
+        try:
+            title, arr_id, created = await _resolve_arr_entry(add_service, content_type, chosen, db_user)
+        except ValueError as ve:
+            # Fix round 1 (review finding, Minor): a misconfigured Radarr/
+            # Sonarr (no quality profiles or root folders at all) used to
+            # read to the user as "your title doesn't exist" — the generic
+            # "no_metadata" message below. This is a setup problem, distinct
+            # from a genuine no-match, so it gets its own message.
+            await status_msg.edit_text(Formatters.format_error(str(ve)))
+            log.warning("search_branch", branch="add_config_error", error=str(ve))
+            return
         if title is None or arr_id is None:
             await status_msg.edit_text(
                 Formatters.format_warning(f"Ничего не найдено для <b>{html.escape(query)}</b>"),

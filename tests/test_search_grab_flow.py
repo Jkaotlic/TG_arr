@@ -31,6 +31,7 @@ from bot.models import (
     MovieInfo,
     SearchResult,
     SearchSession,
+    SeriesInfo,
     User,
     UserPreferences,
 )
@@ -549,3 +550,299 @@ async def test_process_search_auto_detection_uses_detect_content_type():
     search_service.search_releases_for_title.assert_awaited_once_with(
         ContentType.MOVIE, 42, season=None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (review finding 1): an explicit /movie, /series or /anime
+# search used to call search_service.radarr.lookup_movie / .sonarr.
+# lookup_series directly, bypassing SearchService._lookup_branch's
+# semaphore/circuit-breaker entirely — the exact guard Task 8 restored to
+# stop "a burst of searches takes all three services down at once" (see
+# _lookup_branch's own docstring). Both SearchService.lookup_movies/
+# lookup_series (the new guarded public methods) and the handler helper that
+# calls them must honour an open breaker.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_lookup_movies_respects_an_open_circuit_breaker():
+    from bot.services import search_service as search_service_mod
+    from bot.services.search_service import SearchService
+
+    radarr = AsyncMock()
+    service = SearchService(radarr, AsyncMock())
+
+    for _ in range(3):
+        search_service_mod._CIRCUIT_BREAKER.record_failure("radarr")
+    assert search_service_mod._CIRCUIT_BREAKER.is_open("radarr")
+
+    result = await service.lookup_movies("Dune")
+
+    assert result == []
+    radarr.lookup_movie.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lookup_series_respects_an_open_circuit_breaker():
+    from bot.services import search_service as search_service_mod
+    from bot.services.search_service import SearchService
+
+    sonarr = AsyncMock()
+    service = SearchService(AsyncMock(), sonarr)
+
+    for _ in range(3):
+        search_service_mod._CIRCUIT_BREAKER.record_failure("sonarr")
+    assert search_service_mod._CIRCUIT_BREAKER.is_open("sonarr")
+
+    result = await service.lookup_series("Frieren")
+
+    assert result == []
+    sonarr.lookup_series.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handler_lookup_uses_the_guarded_search_service_path_not_raw_clients():
+    """Wiring guard: _lookup_metadata_candidates must go through
+    SearchService.lookup_movies (guarded), not search_service.radarr
+    directly — proven by the breaker actually being honoured end to end
+    through the handler helper, not just the SearchService method in
+    isolation (the two tests above)."""
+    from bot.handlers.search.commands import _lookup_metadata_candidates
+    from bot.services import search_service as search_service_mod
+    from bot.services.search_service import SearchService
+
+    radarr = AsyncMock()
+    service = SearchService(radarr, AsyncMock())
+
+    for _ in range(3):
+        search_service_mod._CIRCUIT_BREAKER.record_failure("radarr")
+
+    result = await _lookup_metadata_candidates(service, "Dune", ContentType.MOVIE)
+
+    assert result == []
+    radarr.lookup_movie.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (review finding 3): _resolve_arr_entry's add branch — the
+# single branch in the whole diff that mutates the user's real Radarr/Sonarr
+# library — had zero coverage. Uses a real AddService (not a MagicMock) so
+# the profile/folder/series_type plumbing is verified against the actual
+# implementation, not a guess at its call shape.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_resolve_arr_entry_adds_a_new_movie_with_the_right_profile_and_folder():
+    from bot.handlers.search.commands import _resolve_arr_entry
+    from bot.models import QualityProfile, RootFolder
+    from bot.services.add_service import AddService
+
+    candidate = MovieInfo(tmdb_id=603, title="The Matrix", year=1999)  # no radarr_id yet
+
+    radarr = AsyncMock()
+    radarr.get_movie_by_tmdb = AsyncMock(return_value=None)  # not already in Radarr
+    radarr.get_quality_profiles = AsyncMock(return_value=[
+        QualityProfile(id=4, name="HD-1080p"), QualityProfile(id=5, name="4K"),
+    ])
+    radarr.get_root_folders = AsyncMock(return_value=[
+        RootFolder(id=1, path="/movies"), RootFolder(id=2, path="/movies-4k"),
+    ])
+    added = MovieInfo(tmdb_id=603, title="The Matrix", year=1999, radarr_id=42)
+    radarr.add_movie = AsyncMock(return_value=added)
+
+    add_service = AddService(radarr, AsyncMock())
+    db_user = _make_db_user(radarr_quality_profile_id=5, radarr_root_folder_id=2)
+
+    title, arr_id, created = await _resolve_arr_entry(add_service, ContentType.MOVIE, candidate, db_user)
+
+    assert (title, arr_id, created) == (added, 42, True)
+    radarr.add_movie.assert_awaited_once()
+    kwargs = radarr.add_movie.await_args.kwargs
+    assert kwargs["quality_profile_id"] == 5
+    assert kwargs["root_folder_path"] == "/movies-4k"
+    assert kwargs["search_for_movie"] is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_arr_entry_reuses_a_movie_already_in_radarr_without_adding():
+    from bot.handlers.search.commands import _resolve_arr_entry
+    from bot.services.add_service import AddService
+
+    candidate = MovieInfo(tmdb_id=603, title="The Matrix", year=1999, radarr_id=42)
+
+    radarr = AsyncMock()
+    add_service = AddService(radarr, AsyncMock())
+    db_user = _make_db_user()
+
+    title, arr_id, created = await _resolve_arr_entry(add_service, ContentType.MOVIE, candidate, db_user)
+
+    assert (title, arr_id, created) == (candidate, 42, False)
+    radarr.add_movie.assert_not_awaited()
+    radarr.get_quality_profiles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_arr_entry_adds_anime_with_series_type_anime():
+    from bot.handlers.search.commands import _resolve_arr_entry
+    from bot.models import QualityProfile, RootFolder
+    from bot.services.add_service import AddService
+
+    candidate = SeriesInfo(tvdb_id=1, title="Frieren", genres=["Animation"])  # no sonarr_id
+
+    sonarr = AsyncMock()
+    sonarr.get_series_by_tvdb = AsyncMock(return_value=None)
+    sonarr.get_quality_profiles = AsyncMock(return_value=[QualityProfile(id=3, name="1080p")])
+    sonarr.get_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/anime")])
+    added = SeriesInfo(tvdb_id=1, title="Frieren", sonarr_id=77, series_type="anime")
+    sonarr.add_series = AsyncMock(return_value=added)
+
+    add_service = AddService(AsyncMock(), sonarr)
+    db_user = _make_db_user(sonarr_quality_profile_id=3, sonarr_root_folder_id=1)
+
+    title, arr_id, created = await _resolve_arr_entry(add_service, ContentType.ANIME, candidate, db_user)
+
+    assert (title, arr_id, created) == (added, 77, True)
+    sonarr.add_series.assert_awaited_once()
+    kwargs = sonarr.add_series.await_args.kwargs
+    assert kwargs["series_type"] == "anime"
+    assert kwargs["quality_profile_id"] == 3
+    assert kwargs["root_folder_path"] == "/anime"
+    assert kwargs["search_for_missing"] is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_arr_entry_adds_a_plain_series_with_series_type_standard():
+    from bot.handlers.search.commands import _resolve_arr_entry
+    from bot.models import QualityProfile, RootFolder
+    from bot.services.add_service import AddService
+
+    candidate = SeriesInfo(tvdb_id=2, title="Breaking Bad")  # no sonarr_id, no anime genre
+
+    sonarr = AsyncMock()
+    sonarr.get_series_by_tvdb = AsyncMock(return_value=None)
+    sonarr.get_quality_profiles = AsyncMock(return_value=[QualityProfile(id=3, name="1080p")])
+    sonarr.get_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/tv")])
+    added = SeriesInfo(tvdb_id=2, title="Breaking Bad", sonarr_id=88, series_type="standard")
+    sonarr.add_series = AsyncMock(return_value=added)
+
+    add_service = AddService(AsyncMock(), sonarr)
+    db_user = _make_db_user()
+
+    title, arr_id, created = await _resolve_arr_entry(add_service, ContentType.SERIES, candidate, db_user)
+
+    assert (title, arr_id, created) == (added, 88, True)
+    assert sonarr.add_series.await_args.kwargs["series_type"] == "standard"
+
+
+@pytest.mark.asyncio
+async def test_resolve_arr_entry_raises_when_radarr_has_no_profiles_or_folders_configured():
+    """Fix round 1 (review, Minor): a misconfigured *arr must not be
+    reported to the user the same way as "this title doesn't exist"."""
+    from bot.handlers.search.commands import _resolve_arr_entry
+    from bot.services.add_service import AddService
+
+    candidate = MovieInfo(tmdb_id=603, title="The Matrix", year=1999)
+
+    radarr = AsyncMock()
+    radarr.get_quality_profiles = AsyncMock(return_value=[])
+    radarr.get_root_folders = AsyncMock(return_value=[])
+
+    add_service = AddService(radarr, AsyncMock())
+    db_user = _make_db_user()
+
+    with pytest.raises(ValueError):
+        await _resolve_arr_entry(add_service, ContentType.MOVIE, candidate, db_user)
+
+    radarr.add_movie.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# process_search end-to-end — the add branch's user-facing disclosure
+# (fix round 1, review finding 3) and the config-error message (Minor).
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_process_search_add_branch_discloses_the_add_and_logs_it():
+    """The central UX decision of this rollback: adding a title to the
+    user's real Radarr library on their behalf must be disclosed, not
+    silent — and recorded in /history, not just a transient message."""
+    from bot.handlers import search
+    from bot.models import QualityProfile, RootFolder
+    from bot.services.add_service import AddService
+    from bot.services.search_service import DetectionResult
+
+    candidate = MovieInfo(tmdb_id=603, title="The Matrix", year=1999)  # no radarr_id
+    detection = DetectionResult(
+        content_type=ContentType.MOVIE, confidence=0.95, reason="movie_match",
+        candidates={}, lookup_results=[candidate],
+    )
+
+    search_service = MagicMock()
+    search_service.parse_query = MagicMock(return_value={
+        "title": "Matrix", "year": None, "season": None, "episode": None, "quality": None,
+    })
+    search_service.detect_content_type = AsyncMock(return_value=detection)
+    search_service.search_releases_for_title = AsyncMock(return_value=[])
+
+    radarr = AsyncMock()
+    radarr.get_movie_by_tmdb = AsyncMock(return_value=None)
+    radarr.get_quality_profiles = AsyncMock(return_value=[QualityProfile(id=5, name="HD")])
+    radarr.get_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/movies")])
+    radarr.add_movie = AsyncMock(
+        return_value=MovieInfo(tmdb_id=603, title="The Matrix", year=1999, radarr_id=42)
+    )
+    add_service = AddService(radarr, AsyncMock())
+
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+    status_msg.delete = AsyncMock()
+    message = MagicMock()
+    message.answer = AsyncMock(return_value=status_msg)
+
+    db = _make_db(session=None)
+    db_user = _make_db_user()
+
+    with patch.object(search, "get_services", AsyncMock(return_value=(search_service, add_service))):
+        await search.process_search(message, "Matrix", ContentType.UNKNOWN, db_user, db)
+
+    radarr.add_movie.assert_awaited_once()
+    edits = [c.args[0] for c in status_msg.edit_text.await_args_list if c.args]
+    assert any("добавлен в Radarr" in t for t in edits)
+    logged_types = [c.args[0].action_type for c in db.log_action.await_args_list]
+    assert ActionType.ADD in logged_types
+
+
+@pytest.mark.asyncio
+async def test_process_search_reports_a_config_error_distinctly_from_no_match():
+    """Fix round 1 (review, Minor): "no profiles/folders configured" must
+    not read the same as "nothing found for your query"."""
+    from bot.handlers import search
+    from bot.services.search_service import DetectionResult
+
+    candidate = MovieInfo(tmdb_id=603, title="The Matrix", year=1999)  # no radarr_id
+    detection = DetectionResult(
+        content_type=ContentType.MOVIE, confidence=0.95, reason="movie_match",
+        candidates={}, lookup_results=[candidate],
+    )
+
+    search_service = MagicMock()
+    search_service.parse_query = MagicMock(return_value={
+        "title": "Matrix", "year": None, "season": None, "episode": None, "quality": None,
+    })
+    search_service.detect_content_type = AsyncMock(return_value=detection)
+
+    add_service = MagicMock()
+    add_service.radarr.get_quality_profiles = AsyncMock(return_value=[])
+    add_service.radarr.get_root_folders = AsyncMock(return_value=[])
+
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+    status_msg.delete = AsyncMock()
+    message = MagicMock()
+    message.answer = AsyncMock(return_value=status_msg)
+
+    db = _make_db(session=None)
+    db_user = _make_db_user()
+
+    with patch.object(search, "get_services", AsyncMock(return_value=(search_service, add_service))):
+        await search.process_search(message, "Matrix", ContentType.UNKNOWN, db_user, db)
+
+    edits = [c.args[0] for c in status_msg.edit_text.await_args_list if c.args]
+    assert any("не настроены" in t for t in edits)
+    assert not any("Ничего не найдено" in t for t in edits)

@@ -45,7 +45,7 @@ from bot.clients.lidarr import LidarrClient
 from bot.clients.prowlarr import ProwlarrClient
 from bot.clients.radarr import RadarrClient
 from bot.clients.sonarr import SonarrClient
-from bot.models import ArtistInfo, ContentType, SearchResult, VIDEO_CONTENT_TYPES
+from bot.models import ArtistInfo, ContentType, MovieInfo, SearchResult, SeriesInfo, VIDEO_CONTENT_TYPES
 from bot.services.scoring import ScoringService
 
 logger = structlog.get_logger()
@@ -242,8 +242,28 @@ class SearchService:
             logger.warning("lookup_failed", service=service, error=str(e))
             return []
 
+    async def lookup_movies(self, query: str) -> list[MovieInfo]:
+        """Guarded Radarr title lookup for a caller outside `detect_content_type`
+        (Task 12, review fix round 1: an explicit `/movie` search, or a
+        title-candidate re-lookup, used to call `self.radarr.lookup_movie`
+        directly — bypassing the semaphore/circuit-breaker `_lookup_branch`
+        exists specifically to provide. Every entry point that hits *arr's
+        slow, externally rate-limited TMDb-backed lookup goes through the
+        same protection now, not just auto-detection; see `_lookup_branch`'s
+        docstring for the "burst of searches takes the service down"
+        incident this exists to prevent).
+        """
+        return await self._lookup_branch("radarr", lambda: self.radarr.lookup_movie(query))
+
+    async def lookup_series(self, query: str) -> list[SeriesInfo]:
+        """Guarded Sonarr title lookup — see `lookup_movies`. Returns the raw,
+        unsplit list; pair with `split_series_candidates` to separate anime
+        from plain series, the same way `detect_content_type` does.
+        """
+        return await self._lookup_branch("sonarr", lambda: self.sonarr.lookup_series(query))
+
     @staticmethod
-    def _split_series_candidates(series_list: list) -> tuple[list, list]:
+    def split_series_candidates(series_list: list) -> tuple[list, list]:
         """Partition Sonarr's lookup_series results into (series, anime).
 
         *arr has no separate anime facet: Sonarr's `/series/lookup` returns
@@ -252,6 +272,10 @@ class SearchService:
         the only signal *arr offers before a title is added, so an
         "Animation" genre marks a result as an anime candidate instead of a
         plain series one.
+
+        Public (Task 12, review fix round 1 — was `_split_series_candidates`):
+        `bot/handlers/search/commands.py` needed this same split for an
+        explicit `/series`/`/anime` search, not just auto-detection.
         """
         series, anime = [], []
         for item in series_list:
@@ -339,7 +363,7 @@ class SearchService:
         all_series = series_result if isinstance(series_result, list) else []
         artists = artists_result if isinstance(artists_result, list) else []
 
-        series_candidates, anime_candidates = self._split_series_candidates(all_series)
+        series_candidates, anime_candidates = self.split_series_candidates(all_series)
         facet_candidates = {
             ContentType.MOVIE: movies,
             ContentType.SERIES: series_candidates,

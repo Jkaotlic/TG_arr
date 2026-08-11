@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
 
 
 def _utcnow() -> datetime:
@@ -454,32 +454,39 @@ class NavidromeAlbum(BaseModel):
 class UserPreferences(BaseModel):
     """User preferences stored in database.
 
-    Migration 2026-07-28: the per-*arr profile/folder preferences collapsed into
-    one Scryer pair. Scryer ids are slugs/paths, so these are strings now; the
-    Lidarr trio stays integer-keyed. Legacy `radarr_*`/`sonarr_*` keys still
-    present in stored JSON are ignored (extra keys are dropped by pydantic).
+    Rollback 2026-08-10 (Task 12, fix round 1): the interim migration
+    (2026-07-28) had collapsed the per-*arr profile/folder preferences into
+    one shared Scryer-shaped pair (`scryer_quality_profile_id`/
+    `scryer_root_folder_id`). That conflates two independent id spaces —
+    live measurement: Radarr's root folders are ids 1 and 2, and Sonarr's
+    *are also* 1 and 2, pointing at completely different paths — so a movie
+    preference could silently be applied to a newly added series. Split back
+    into one pair per *arr service. Both are plain ints now (Radarr/Sonarr
+    ids always are — unlike Scryer's string slugs, which needed the
+    `_coerce_scryer_id` validator this replaces; that validator is gone with
+    the fields it guarded).
+
+    Legacy `scryer_quality_profile_id`/`scryer_root_folder_id` (and the even
+    older pre-migration `radarr_*`/`sonarr_*` keys) still present in stored
+    JSON are silently ignored on load — extra keys are dropped by pydantic's
+    default `extra="ignore"` — same graceful-degradation behaviour the
+    2026-07-28 migration already relied on for its own predecessor. No
+    explicit data migration needed: no settings UI has written the
+    Scryer-shaped pair yet (Task 13 wires the *arr-shaped one), so no
+    deployed row is expected to carry a value under the old keys, and even
+    if one did, it degrades to "no preference set" (the pre-migration
+    default) rather than an error.
     """
 
-    scryer_quality_profile_id: Optional[str] = None
-    scryer_root_folder_id: Optional[str] = None
+    radarr_quality_profile_id: Optional[int] = None
+    radarr_root_folder_id: Optional[int] = None
+    sonarr_quality_profile_id: Optional[int] = None
+    sonarr_root_folder_id: Optional[int] = None
     lidarr_quality_profile_id: Optional[int] = None
     lidarr_metadata_profile_id: Optional[int] = None
     lidarr_root_folder_id: Optional[int] = None
     preferred_resolution: Optional[str] = None  # 1080p, 2160p, etc.
     auto_grab_enabled: bool = False
-
-    @field_validator("scryer_quality_profile_id", "scryer_root_folder_id", mode="before")
-    @classmethod
-    def _coerce_scryer_id(cls, v):
-        """Scryer ids are slugs/paths, but a stored preference may still be a
-        number (a value written before the migration, or a numeric-looking
-        profile id). Coerce rather than reject: a ValidationError here makes
-        `_row_to_user` fall back to defaults and silently drop every other
-        preference the user had set.
-        """
-        if v is None or isinstance(v, str):
-            return v
-        return str(v)
 
 
 class User(BaseModel):
