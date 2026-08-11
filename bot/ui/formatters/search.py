@@ -260,18 +260,18 @@ class _SearchFormatters:
                 overview += "..."
             lines.append(f"\n📝 {_e(overview)}")
 
-        # Status in the Scryer catalog. `scryer_id` alone only means "known to
-        # Scryer" — a title is added unmonitored just to list its releases — so
-        # the label distinguishes on-disk / tracked / merely present.
-        if movie.scryer_id:
+        # Status in the Radarr library. Rollback 2026-08-10: `radarr_id` alone
+        # only means "known to Radarr" — the search flow adds a title the
+        # moment it's resolved, before the user has grabbed anything — so the
+        # label distinguishes on-disk / tracked / merely present, same as the
+        # pre-Scryer wording this replaces.
+        if movie.radarr_id:
             if movie.has_file:
                 status = "✅ В библиотеке (скачан)"
             elif movie.monitored:
                 status = "👀 В библиотеке, отслеживается"
             else:
-                status = "📇 Есть в каталоге Scryer"
-            if movie.current_quality_tier:
-                status += f" · {_e(movie.current_quality_tier)}"
+                status = "📇 Есть в каталоге Radarr"
             lines.append(f"\n{status}")
 
         return "\n".join(lines)
@@ -317,8 +317,8 @@ class _SearchFormatters:
                 overview += "..."
             lines.append(f"\n📝 {_e(overview)}")
 
-        # Status in the Scryer catalog (see format_movie_info for the labels).
-        if series.scryer_id:
+        # Status in the Sonarr library (see format_movie_info for the labels).
+        if series.sonarr_id:
             if series.episodes_total:
                 lines.append(
                     f"\n📥 Скачано серий: {series.episodes_owned}/{series.episodes_total}"
@@ -328,7 +328,7 @@ class _SearchFormatters:
             elif series.monitored:
                 status = "👀 В библиотеке, отслеживается"
             else:
-                status = "📇 Есть в каталоге Scryer"
+                status = "📇 Есть в каталоге Sonarr"
             lines.append(f"\n{status}")
 
         return "\n".join(lines)

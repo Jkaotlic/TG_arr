@@ -2,6 +2,7 @@
 
 import asyncio
 import html
+from typing import Any
 
 import structlog
 from aiogram import F, Router
@@ -21,7 +22,6 @@ from bot.clients.registry import (
 from bot.models import (
     ContentType,
     QBittorrentStatus,
-    ScryerHealth,
     SystemStatus,
     VIDEO_CONTENT_TYPES,
     format_bytes,
@@ -29,6 +29,17 @@ from bot.models import (
 )
 from bot.ui.formatters import Formatters
 from bot.ui.menu import MENU_STATUS
+
+# Rollback 2026-08-10 (Task 12, collection-unblock only): `ScryerHealth` was
+# deleted from bot.models in Task 2. This whole file is still Scryer-shaped
+# (get_scryer(), scryer.get_root_folders(content_type), scryer.get_wanted())
+# and belongs to Task 13 to repoint properly — every path through it already
+# raises at runtime via the get_scryer() bridge. This module-level name was
+# the one thing actually blocking collection: `bot/handlers/__init__.py`
+# imports every handler module unconditionally, so an ImportError here failed
+# `import bot.handlers.search` too, not just /status. Fixed here ONLY so the
+# package imports; the Scryer-shaped body below is untouched.
+ScryerHealth = Any
 
 logger = structlog.get_logger()
 router = Router()

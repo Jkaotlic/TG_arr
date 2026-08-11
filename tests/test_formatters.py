@@ -479,3 +479,33 @@ def test_formatters_format_warning_is_still_a_class_method():
     """
     assert hasattr(Formatters, "format_warning")
     assert Formatters.format_warning("test message") == "⚠️ test message"
+
+
+def test_every_formatters_attribute_referenced_under_bot_resolves():
+    """Generalizes the `format_warning` regression guard above: statically
+    collect every `Formatters.<name>` reference anywhere under `bot/` and
+    assert each one actually resolves on the class.
+
+    A method silently falling out of `_SearchFormatters`'s body (Task 11,
+    see `test_formatters_format_warning_is_still_a_class_method` above) broke
+    every production call site with nothing but an `AttributeError` at
+    request time — neither ruff nor the rest of the suite caught it, since
+    nothing exercised that one method directly. This test doesn't rely on
+    knowing which methods matter; it finds every reference itself.
+    """
+    import re
+    from pathlib import Path
+
+    pattern = re.compile(r"\bFormatters\.([A-Za-z_][A-Za-z0-9_]*)")
+    bot_dir = Path(__file__).resolve().parent.parent / "bot"
+    names: set[str] = set()
+    for path in bot_dir.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        names.update(pattern.findall(text))
+
+    # Sanity check on the scan itself — if this ever finds nothing, the
+    # pattern (or the bot/ layout) regressed, not the code it's checking.
+    assert len(names) > 20, f"suspiciously few Formatters.<name> references found: {names}"
+
+    missing = sorted(n for n in names if not hasattr(Formatters, n))
+    assert not missing, f"Formatters is missing referenced attribute(s): {missing}"

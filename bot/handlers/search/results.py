@@ -177,11 +177,11 @@ async def handle_release_selection(
 
     # Show release details.
     #
-    # Migration 2026-07-28: the title is already resolved — process_search had
-    # to create/find it in Scryer before releases could be searched at all, and
-    # stored it on the session. So there is no second *arr lookup here (which
-    # used to cost 30-95s when a service was degraded), only the optional Emby
-    # "already in library" probe.
+    # Rollback 2026-08-10: the title is already resolved — process_search had
+    # to create/find it in Radarr/Sonarr before releases could be searched at
+    # all, and stored it on the session. So there is no second *arr lookup
+    # here (which used to cost 30-95s when a service was degraded), only the
+    # optional Emby "already in library" probe.
     text = Formatters.format_release_details(result)
     has_qbittorrent = add_service.qbittorrent is not None
     content = session.selected_content

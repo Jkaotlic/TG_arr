@@ -11,10 +11,12 @@ Covers the previously-untested paths flagged in 08-testing-quality.md:
 Also covers BUG-07 (search.py:handle_release_selection) — callback.answer()
 must fire right after session validation, before any slower work.
 
-Migration 2026-07-28: `_execute_grab` no longer looks the title up, picks a
-quality profile or resolves a root folder — the title was already resolved (and
-created in Scryer) before releases could be listed at all, and Scryer owns the
-profile/folder. Grabbing is redeeming a candidate token.
+Rollback 2026-08-10: `_execute_grab` no longer looks the title up, picks a
+quality profile or resolves a root folder — the title (and its Radarr/Sonarr
+id) was already resolved before releases could be listed at all; see
+bot/handlers/search/commands.py's module docstring for how a query becomes a
+library entry. Grabbing is `AddService.grab_release` for the one release the
+user selected.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,6 +24,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bot.models import (
+    ActionLog,
+    ActionType,
     ArtistInfo,
     ContentType,
     MovieInfo,
@@ -247,16 +251,18 @@ async def test_confirm_grab_no_session_shows_expired():
 
 
 # ---------------------------------------------------------------------------
-# _execute_grab — Scryer edition
+# _execute_grab — rollback 2026-08-10: AddService.grab_release(release,
+# content_type, arr_id=...) replaces Scryer's grab_with_fallback(title,
+# candidates, content_type) — one release, not a multi-candidate fallback
+# list, and (bool, ActionLog) instead of (bool, ActionLog, msg).
 # ---------------------------------------------------------------------------
 def _session_with_title(**overrides) -> SearchSession:
     release = SearchResult(
         guid="g1",
         title="Test.Release.2160p",
         indexer="RuTracker",
-        candidate_token="cand-1",
-        scryer_title_id="t1",
-        queue_scope={"title": True},
+        origin="arr",
+        indexer_id=7,
     )
     data = dict(
         user_id=42,
@@ -264,10 +270,18 @@ def _session_with_title(**overrides) -> SearchSession:
         content_type=ContentType.MOVIE,
         results=[release],
         selected_result=release,
-        selected_content=MovieInfo(tmdb_id=157336, title="Interstellar", year=2014, scryer_id="t1"),
+        selected_content=MovieInfo(tmdb_id=157336, title="Interstellar", year=2014, radarr_id=99),
     )
     data.update(overrides)
     return SearchSession(**data)
+
+
+def _grab_action(**overrides) -> ActionLog:
+    fields = dict(
+        user_id=0, action_type=ActionType.GRAB, content_type=ContentType.MOVIE, success=True,
+    )
+    fields.update(overrides)
+    return ActionLog(**fields)
 
 
 @pytest.mark.asyncio
@@ -282,19 +296,16 @@ async def test_execute_grab_uses_the_session_title_without_a_lookup():
 
     search_service = MagicMock()
     add_service = MagicMock()
-    add_service.grab_with_fallback = AsyncMock(
-        return_value=(True, MagicMock(user_id=0), "Релиз поставлен в очередь на скачивание")
-    )
+    add_service.grab_release = AsyncMock(return_value=(True, _grab_action()))
 
     await search._execute_grab(message, session, db_user, db, search_service, add_service)
 
-    add_service.grab_with_fallback.assert_awaited_once()
-    args = add_service.grab_with_fallback.await_args.args
-    assert args[0].scryer_id == "t1"
-    # The chosen release leads the list; the rest are fallbacks in case it
-    # turns out to be unfetchable (GRAB-01).
-    assert args[1][0].candidate_token == "cand-1"
-    assert args[2] == ContentType.MOVIE
+    add_service.grab_release.assert_awaited_once()
+    args = add_service.grab_release.await_args.args
+    kwargs = add_service.grab_release.await_args.kwargs
+    assert args[0].guid == "g1"  # the release the user selected, not re-looked-up
+    assert args[1] == ContentType.MOVIE
+    assert kwargs["arr_id"] == 99  # the radarr_id already on the session's title
     db.log_action.assert_awaited_once()
     db.delete_session.assert_awaited_once_with(42)
 
@@ -309,18 +320,19 @@ async def test_execute_grab_propagates_force_download():
     message.edit_text = AsyncMock()
 
     add_service = MagicMock()
-    add_service.grab_with_fallback = AsyncMock(return_value=(True, MagicMock(user_id=0), "ok"))
+    add_service.grab_release = AsyncMock(return_value=(True, _grab_action()))
 
     await search._execute_grab(
         message, session, _make_db_user(), db, MagicMock(), add_service, force_download=True
     )
 
-    assert add_service.grab_with_fallback.await_args.kwargs["force_download"] is True
+    assert add_service.grab_release.await_args.kwargs["force_download"] is True
 
 
 @pytest.mark.asyncio
 async def test_execute_grab_without_a_resolved_title_asks_to_search_again():
-    """A session persisted before the migration has no Scryer title id."""
+    """A session with no resolved arr_id (predates this rollback, or the
+    title vanished from the library between search and grab)."""
     from bot.handlers import search
 
     session = _session_with_title(selected_content=None)
@@ -329,13 +341,14 @@ async def test_execute_grab_without_a_resolved_title_asks_to_search_again():
     message.edit_text = AsyncMock()
 
     add_service = MagicMock()
-    add_service.grab_with_fallback = AsyncMock()
+    add_service.grab_release = AsyncMock()
 
     await search._execute_grab(message, session, _make_db_user(), db, MagicMock(), add_service)
 
-    add_service.grab_with_fallback.assert_not_awaited()
+    add_service.grab_release.assert_not_awaited()
     text = message.edit_text.await_args.args[0]
-    assert "Scryer" in text
+    assert "Radarr" in text or "Sonarr" in text
+    assert "Scryer" not in text
     db.delete_session.assert_awaited_once_with(42)
 
 
@@ -349,8 +362,8 @@ async def test_execute_grab_failure_shows_the_service_message():
     message.edit_text = AsyncMock()
 
     add_service = MagicMock()
-    add_service.grab_with_fallback = AsyncMock(
-        return_value=(False, MagicMock(user_id=0), "Scryer не принял релиз (CONFLICT)")
+    add_service.grab_release = AsyncMock(
+        return_value=(False, _grab_action(success=False, error_message="*arr не принял релиз (CONFLICT)"))
     )
 
     await search._execute_grab(message, session, _make_db_user(), db, MagicMock(), add_service)
@@ -398,10 +411,12 @@ async def test_release_selection_does_not_hit_the_network_again():
     db.session_lock = MagicMock(return_value=_null_lock())
 
     search_service = MagicMock()
-    search_service.search_metadata = AsyncMock()
+    search_service.radarr.lookup_movie = AsyncMock()
+    search_service.sonarr.lookup_series = AsyncMock()
     add_service = MagicMock()
     add_service.qbittorrent = None
-    add_service.ensure_title = AsyncMock()
+    add_service.add_movie = AsyncMock()
+    add_service.add_series = AsyncMock()
 
     callback = _make_callback()
 
@@ -409,8 +424,10 @@ async def test_release_selection_does_not_hit_the_network_again():
          patch.object(search, "_emby_library_note", AsyncMock(return_value="")):
         await search.handle_release_selection(callback, ReleaseCB(idx=0), _make_db_user(), db)
 
-    search_service.search_metadata.assert_not_awaited()
-    add_service.ensure_title.assert_not_awaited()
+    search_service.radarr.lookup_movie.assert_not_awaited()
+    search_service.sonarr.lookup_series.assert_not_awaited()
+    add_service.add_movie.assert_not_awaited()
+    add_service.add_series.assert_not_awaited()
     assert "Interstellar" in callback.message.edit_text.await_args.args[0]
 
 
@@ -465,3 +482,70 @@ async def test_releases_are_ordered_by_the_arr_verdict_not_local_heuristics():
 
     # Seeders and size favour the rejected one; the verdict must win anyway.
     assert [r.guid for r in results] == ["g2", "g1"]
+
+
+# ---------------------------------------------------------------------------
+# describe_search_failure — rollback 2026-08-10 rename (was
+# describe_scryer_failure), *arr-appropriate wording.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_search_command_reports_an_indexer_failure_clearly():
+    """"Поиск временно недоступен" hides the only actionable fact."""
+    from bot.clients.base import ServiceConnectionError
+    from bot.services.search_service import describe_search_failure
+
+    message = describe_search_failure(ServiceConnectionError("Таймаут Prowlarr"))
+    assert "индексер" in message.lower()
+    assert "scryer" not in message.lower()
+
+
+# ---------------------------------------------------------------------------
+# process_search auto-detection — regression guard (found during self-review,
+# not covered by any prior test): commands.py called the nonexistent
+# `search_service.detect_with_confidence`, a Scryer-era name the rewritten
+# *arr SearchService never carried (only `detect_content_type` — see
+# tests/test_detect_content_type.py, which never calls it anything else).
+# `handle_text_search` routes every plain-text message through
+# `process_search(..., ContentType.UNKNOWN, ...)`, so this was an
+# AttributeError on the bot's single most common entry point.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_process_search_auto_detection_uses_detect_content_type():
+    from bot.handlers import search
+    from bot.services.search_service import DetectionResult
+
+    movie = MovieInfo(tmdb_id=1, title="Dune", year=2021, radarr_id=42)
+    detection = DetectionResult(
+        content_type=ContentType.MOVIE,
+        confidence=0.95,
+        reason="movie_match",
+        candidates={},
+        lookup_results=[movie],
+    )
+
+    search_service = MagicMock()
+    search_service.parse_query = MagicMock(return_value={
+        "title": "Dune", "year": None, "season": None, "episode": None, "quality": None,
+    })
+    search_service.detect_content_type = AsyncMock(return_value=detection)
+    search_service.search_releases_for_title = AsyncMock(return_value=[])
+    add_service = MagicMock()
+
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+    status_msg.delete = AsyncMock()
+    message = MagicMock()
+    message.answer = AsyncMock(return_value=status_msg)
+
+    db = _make_db(session=None)
+    db_user = _make_db_user()
+
+    with patch.object(search, "get_services", AsyncMock(return_value=(search_service, add_service))):
+        await search.process_search(message, "Dune", ContentType.UNKNOWN, db_user, db)
+
+    search_service.detect_content_type.assert_awaited_once_with("Dune")
+    # The resolved movie already carries a radarr_id — no add call, straight
+    # to listing releases for it.
+    search_service.search_releases_for_title.assert_awaited_once_with(
+        ContentType.MOVIE, 42, season=None,
+    )

@@ -21,17 +21,11 @@ from .services import router
 logger = structlog.get_logger()
 
 # Feature #2: season-monitoring presets exposed on the series release card.
-# These map onto Scryer's `MonitorTypeValue` when a title is added.
+# These strings match Sonarr's own `monitor` addOptions values verbatim (see
+# SonarrClient.add_series) — rollback 2026-08-10 removed the Scryer
+# `MonitorTypeValue` translation table this used to feed, since there is
+# nothing left to translate to.
 _SEASON_PRESETS = {"all", "future", "latestSeason", "firstSeason", "none"}
-
-#: Bot preset → Scryer `MonitorTypeValue`.
-_SCRYER_MONITOR_TYPES = {
-    "all": "ALL_EPISODES",
-    "future": "FUTURE_EPISODES",
-    "latestSeason": "MONITORED",
-    "firstSeason": "MONITORED",
-    "none": "NONE",
-}
 
 
 @router.callback_query(F.data == CallbackData.GRAB_BEST)
@@ -148,13 +142,6 @@ def _decide_monitor_type(result, force_download: bool, override: str | None = No
     return "all"
 
 
-def _scryer_monitor_type(preset: str | None) -> str | None:
-    """Translate a bot season preset into Scryer's `MonitorTypeValue`."""
-    if not preset:
-        return None
-    return _SCRYER_MONITOR_TYPES.get(preset)
-
-
 def _resolve_folder(folders: list, preferred_id) -> str:
     """Resolve root folder path from user preference or first available.
 
@@ -177,10 +164,16 @@ async def _execute_grab(
 ) -> None:
     """Common grab logic for normal and force grab.
 
-    Migration 2026-07-28: the title is resolved (and present in Scryer) before
-    releases were ever listed, so this no longer re-looks-up the content, and
-    it no longer picks a quality profile or a root folder — Scryer owns both.
-    Grabbing is just "redeem this candidate token".
+    Rollback 2026-08-10 (Task 12): the title was already added to Radarr/
+    Sonarr (and its releases listed) before this point — see
+    ``commands.py``'s module docstring for how a query becomes a library
+    entry — so this still doesn't re-look-up the content or pick a quality
+    profile/root folder (that happened at add time). Grabbing is
+    ``AddService.grab_release`` for the ONE release the user selected —
+    unlike Scryer's ``grab_with_fallback``, *arr's own interactive search
+    already excludes releases it cannot act on, so there is no
+    multi-candidate retry loop to drive (no task in this rollback has
+    specified one; see ``AddService.grab_with_fallback``'s docstring).
     """
     user_id = session.user_id
     result = session.selected_result
@@ -191,28 +184,31 @@ async def _execute_grab(
 
     title = session.selected_content
     # Music is dispatched to its own handler well before this point; narrowing
-    # here keeps the movie/series attribute access below honest.
-    if not isinstance(title, (MovieInfo, SeriesInfo)) or not title.scryer_id:
-        # The session predates the migration, or the title vanished from the
-        # catalog between search and grab.
+    # here keeps the movie/series attribute access below honest (and lets
+    # mypy carry the narrowing through the rest of the function, unlike an
+    # isinstance check split across separate if/elif branches).
+    if not isinstance(title, (MovieInfo, SeriesInfo)):
         await message.edit_text(
-            Formatters.format_error("Тайтл не найден в Scryer — повторите поиск")
+            Formatters.format_error("Тайтл не найден в Radarr/Sonarr — повторите поиск")
+        )
+        await db.delete_session(user_id)
+        return
+
+    arr_id = title.radarr_id if isinstance(title, MovieInfo) else title.sonarr_id
+    if arr_id is None:
+        # The session predates this rollback, or the title vanished from the
+        # library between search and grab.
+        await message.edit_text(
+            Formatters.format_error("Тайтл не найден в Radarr/Sonarr — повторите поиск")
         )
         await db.delete_session(user_id)
         return
 
     try:
-        # Start with what the user chose, then fall back to the other allowed
-        # candidates — some releases (Knaben's, notably) cannot be handed to the
-        # download client at all, and they are usually the top-ranked ones.
-        candidates = [result] + [
-            r for r in (session.results or [])
-            if r.guid != result.guid and r.scryer_allowed
-        ]
-        success, action, msg = await add_service.grab_with_fallback(
-            title,
-            candidates,
+        success, action = await add_service.grab_release(
+            result,
             session.content_type,
+            arr_id=arr_id,
             force_download=force_download,
         )
 
@@ -223,21 +219,17 @@ async def _execute_grab(
             year_str = f" ({title.year})" if title.year else ""
             await message.edit_text(
                 Formatters.format_success(
-                    f"<b>{html.escape(title.title)}</b>{year_str}\n\n{msg}\n\n"
+                    f"<b>{html.escape(title.title)}</b>{year_str}\n\n"
                     f"Релиз: <i>{html.escape(result.title)}</i>"
                 ),
                 parse_mode="HTML",
             )
         else:
-            await message.edit_text(Formatters.format_error(msg))
+            error_text = action.error_message or "Не удалось скачать релиз"
+            await message.edit_text(Formatters.format_error(error_text))
 
         await db.delete_session(user_id)
 
-    except ValueError as ve:
-        # LOGIC-16: surface "no folders" / similar config errors with their text.
-        logger.warning("Grab config error", error=str(ve))
-        await message.edit_text(Formatters.format_error(html.escape(str(ve))[:200]))
-        await db.delete_session(user_id)
     except Exception as e:
         logger.error("Grab failed", error=str(e), exc_info=True)
         await message.edit_text(Formatters.format_error("Операция временно недоступна"))
