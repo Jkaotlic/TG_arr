@@ -60,7 +60,7 @@ async def _render_settings_menu(db_user: User) -> tuple[str, InlineKeyboardMarku
     Rollback 2026-08-10 (Task 13): Radarr and Sonarr have independent id
     spaces (live measurement: both have root folders 1/2 pointing at
     different paths) — back to a profile+folder pair PER service, replacing
-    the interim single Scryer-shaped pair.
+    the interim single shared-pair shape.
 
     PERF-07c: the four lookups (Radarr profiles/folders, Sonarr
     profiles/folders) are independent calls — fire them concurrently.
@@ -275,9 +275,9 @@ async def handle_settings_set(
 
     # Rollback 2026-08-10: every entry in _SETTINGS_MAP now picks a
     # Radarr/Sonarr/Lidarr profile or root-folder id — all plain integers
-    # (unlike Scryer's slug/path-based ids, which needed a mixed-type path
-    # here). Resolution/auto-grab have their own dedicated handlers below and
-    # never reach this one.
+    # (unlike the previous backend's slug/path-based ids, which needed a
+    # mixed-type path here). Resolution/auto-grab have their own dedicated
+    # handlers below and never reach this one.
     try:
         value: object = int(callback_data.value)
     except ValueError:

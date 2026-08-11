@@ -296,23 +296,26 @@ class ScoringService:
         preferred_resolution: Optional[str] = None,
     ) -> list[SearchResult]:
         """
-        Sort results best-first, deferring to Scryer's verdict when it exists.
+        Sort results best-first, deferring to *arr's own verdict when it exists.
 
-        Migration 2026-07-28 — how this coexists with Scryer's own policy:
+        Rollback 2026-08-10 (Tasks 14/15) — how this coexists with *arr's own
+        policy:
 
-        Scryer already evaluates every candidate against the configured quality
-        profile (`4K Remux + 1080P Fallback` for movies/series, `1080p` for
-        anime) AND the `English Audio + Russian Subtitles` Rego rule set. That
-        verdict is authoritative, so the bot ranks by it rather than re-deriving
-        an opinion that could contradict it:
+        Radarr/Sonarr's interactive search already evaluates every candidate
+        against the configured quality profile and its custom formats (the
+        English-audio/Russian-subtitles policy among them — see Task 11).
+        That verdict is authoritative, so the bot ranks by it rather than
+        re-deriving an opinion that could contradict it:
 
-          1. releases Scryer blocked (`scryer_allowed is False`) sink to the
-             bottom — they are shown (the user may still force one) but never
-             offered first;
-          2. among the rest, Scryer's `releaseScore` decides;
-          3. the bot's own heuristic only breaks ties between equal Scryer
-             scores, and is the sole ranking for results with no verdict at all
-             (e.g. a session persisted before the migration).
+          1. releases *arr refuses (`rejected is True`) sink to the bottom —
+             they are shown (the user may still force one) but never offered
+             first;
+          2. among the rest, *arr's own `customFormatScore` decides;
+          3. the bot's own heuristic only breaks ties between equal
+             customFormatScores, and is the sole ranking for results with no
+             verdict at all (a plain Prowlarr free-text hit, which never went
+             through *arr's profile and keeps `custom_format_score`'s unset
+             default of 0 — see `SearchResult.custom_format_score`).
 
         `calculated_score` is still computed for every result — the release card
         and the auto-grab threshold display it.
@@ -326,9 +329,9 @@ class ScoringService:
 
         results.sort(
             key=lambda r: (
-                # False sorts before True, so invert: allowed (or unknown) first.
-                r.scryer_allowed is False,
-                -(r.scryer_score if r.scryer_score is not None else 0),
+                # False sorts before True, so a rejected release sinks last.
+                r.rejected,
+                -r.custom_format_score,
                 -r.calculated_score,
             )
         )

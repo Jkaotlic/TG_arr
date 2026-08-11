@@ -2,36 +2,30 @@
 
 Written after the 2026-07-29 incident. The indexers had been failing since
 11:00 — 378 failures an hour, every hour — and nobody found out until a user
-search broke at 16:56 and someone read the Scryer logs by hand. Every signal
-needed was already available through `systemHealth` and `wantedItems`; nothing
-was watching them.
+search broke at 16:56 and someone read the logs by hand.
+
+Rollback 2026-08-10 (Tasks 14/15): the previous backend's `systemHealth` query
+gave one call visibility into per-indexer 24h success/fail ratios and the
+wanted-queue size; neither has an *arr equivalent in this rollback's scope —
+the queue size is still visible on demand via /wanted
+(`bot/handlers/status.py`), just no longer proactively alerted on. What every
+*arr client already exposes is `check_connection()` — "is the service even
+reachable" — so that is the one signal this monitor watches now.
 
 The monitor alerts on *transitions*, not on state: a sustained outage produces
 one message, not one per cycle, and recovery is announced too. Anything else
 turns into noise the user learns to ignore.
 """
 
+import asyncio
 import enum
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any, Optional
 
 import structlog
 
-from bot.models import ScryerHealth
-
 logger = structlog.get_logger()
-
-#: An indexer failing more than this share of its queries is broken, not flaky.
-#: The prod signature was 2143/2641 = 81%; normal tracker flakiness sits well
-#: under half.
-_INDEXER_FAILURE_RATIO = 0.5
-
-#: Below this many queries there isn't enough evidence to call it broken.
-_INDEXER_MIN_QUERIES = 20
-
-#: Wanted items above this cost more indexer queries per pass than the daily
-#: quota allows (127 items × 3 indexers ≈ 400 queries vs a 500/day limit).
-_WANTED_BACKLOG_LIMIT = 60
 
 
 class HealthState(enum.Enum):
@@ -56,60 +50,34 @@ class Problem:
     resolved_text: str
 
 
-def diagnose(health: ScryerHealth, wanted_total: int) -> list[Problem]:
-    """Turn a health snapshot into the list of things worth waking someone for."""
+def diagnose(report: dict[str, dict[str, Any]]) -> list[Problem]:
+    """Turn a `HealthMonitor.check_all()` report into the list of things
+    worth waking someone for: any service `check_connection()` couldn't reach.
+    """
     problems: list[Problem] = []
-
-    if not health.service_ready:
-        problems.append(Problem(
-            "service_down",
-            "🗂 Scryer не готов обслуживать запросы",
-            "🗂 Scryer снова обслуживает запросы",
-        ))
-
-    for stat in health.indexers:
-        total = stat.successful_24h + stat.failed_24h
-        if total < _INDEXER_MIN_QUERIES:
+    for name in sorted(report):
+        status = report[name]
+        if status.get("available"):
             continue
-        if stat.failure_rate > _INDEXER_FAILURE_RATIO:
-            problems.append(Problem(
-                f"indexer:{stat.name}",
-                f"🔎 {stat.name}: {stat.failed_24h} из {total} запросов падают "
-                f"({stat.failure_rate:.0%}) — вероятно, исчерпан суточный лимит",
-                f"🔎 {stat.name} снова отвечает",
-            ))
-
-    if wanted_total > _WANTED_BACKLOG_LIMIT:
+        detail = status.get("error")
+        suffix = f": {detail}" if detail else ""
         problems.append(Problem(
-            "wanted_backlog",
-            f"📋 В очереди поиска {wanted_total} позиций — столько Scryer не осилит "
-            f"за сутки, лимиты индексеров выгорят. Посмотрите /wanted",
-            f"📋 Очередь поиска сократилась до {wanted_total} позиций",
+            key=f"service:{name}",
+            text=f"🔌 {name} недоступен{suffix}",
+            resolved_text=f"🔌 {name} снова доступен",
         ))
-
     return problems
 
 
-def _indexers_without_evidence(health: ScryerHealth) -> set[str]:
-    """Problem keys we currently have too little data to judge.
-
-    Scryer's 24h counters restart when it re-syncs its indexer list. Right after
-    that every tracker sits below `_INDEXER_MIN_QUERIES` and drops out of
-    `diagnose` — which is absence of evidence, not evidence of recovery. On
-    2026-07-30 that produced "восстановлено" for trackers still failing 100% of
-    their requests.
-    """
-    return {
-        f"indexer:{stat.name}"
-        for stat in health.indexers
-        if stat.successful_24h + stat.failed_24h < _INDEXER_MIN_QUERIES
-    }
-
-
 class HealthMonitor:
-    """Tracks which problems are open and notifies on every change."""
+    """Polls a set of *arr clients and notifies on every availability change."""
 
-    def __init__(self, notify: Callable[[str], Awaitable[None]]):
+    def __init__(
+        self,
+        clients: dict[str, Any],
+        notify: Optional[Callable[[str], Awaitable[None]]] = None,
+    ):
+        self.clients = clients
         self.notify = notify
         self._open: dict[str, Problem] = {}
 
@@ -117,32 +85,59 @@ class HealthMonitor:
     def state(self) -> HealthState:
         return HealthState.DEGRADED if self._open else HealthState.OK
 
-    async def evaluate(self, health: ScryerHealth, wanted_total: int) -> None:
-        """Diagnose and announce anything that changed since the last call."""
-        current = {p.key: p for p in diagnose(health, wanted_total)}
-        # A tracker that dropped out only because its counters were reset is not
-        # fixed — we simply can't tell yet. Keep it open and stay quiet.
-        undecided = _indexers_without_evidence(health)
+    async def check_all(self) -> dict[str, dict[str, Any]]:
+        """Poll every configured client's own `check_connection()` in parallel.
+
+        Delegates the API-version prefix entirely to each client (Radarr and
+        Sonarr answer on `/api/v3`; Prowlarr and Lidarr on `/api/v1`) instead
+        of hardcoding it here — a `/api/v3` probe against a healthy Lidarr
+        reports "API DOWN" (live-verified 2026-08-10). Prowlarr subclasses
+        `BaseAPIClient` directly (not `ArrBaseClient`) but exposes the same
+        `check_connection()` contract, so it needs no special-casing either.
+        """
+        async def _check(name: str, client: Any) -> tuple[str, dict[str, Any]]:
+            try:
+                available, version, elapsed_ms = await client.check_connection()
+                return name, {
+                    "available": available,
+                    "version": version,
+                    "response_time_ms": elapsed_ms,
+                }
+            except Exception as e:
+                logger.warning("health_check_failed", service=name, error=str(e))
+                return name, {
+                    "available": False,
+                    "version": None,
+                    "response_time_ms": None,
+                    "error": str(e),
+                }
+
+        results = await asyncio.gather(*(_check(name, client) for name, client in self.clients.items()))
+        return dict(results)
+
+    async def evaluate(self) -> dict[str, dict[str, Any]]:
+        """Poll every service and announce anything that changed since the
+        last call. Returns the raw report, so a caller doesn't have to poll
+        twice if it also wants the per-service detail (e.g. /health)."""
+        report = await self.check_all()
+        current = {p.key: p for p in diagnose(report)}
 
         for key, problem in current.items():
             if key not in self._open:
                 await self._announce(f"⚠️ <b>Проблема</b>\n\n{problem.text}")
 
-        still_open = dict(current)
         for key, problem in self._open.items():
-            if key in current:
-                continue
-            if key in undecided:
-                still_open[key] = problem
-                logger.info("health_problem_unverifiable", problem=key)
-                continue
-            await self._announce(f"✅ <b>Восстановлено</b>\n\n{problem.resolved_text}")
+            if key not in current:
+                await self._announce(f"✅ <b>Восстановлено</b>\n\n{problem.resolved_text}")
 
-        self._open = still_open
+        self._open = current
+        return report
 
     async def _announce(self, text: str) -> None:
         """Send one alert. A delivery failure must not stop the monitor —
         otherwise a Telegram blip would leave the state machine stuck."""
+        if self.notify is None:
+            return
         try:
             await self.notify(text)
         except Exception as e:

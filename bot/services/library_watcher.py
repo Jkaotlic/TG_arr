@@ -1,24 +1,30 @@
 """"It's in the library now" notifications.
 
 Before this, the only completion notice came from qBittorrent — "the torrent
-finished", which is not the same as "Scryer imported it and you can watch it".
-Music got nothing at all: slskd is a separate download client that qBittorrent
-knows nothing about.
+finished", which is not the same as "the file is imported and you can watch
+it". Music got nothing at all: slskd is a separate download client that
+qBittorrent knows nothing about.
 
-Scryer has no generic webhook (its only notification channel type is
-`mediabrowser`, for Emby — re-verified by introspection on 2026-07-30), so this
-polls. What it polls matters:
+Rollback 2026-08-10 (Tasks 14/15): imports now come from Radarr's and
+Sonarr's own history journal (`ArrBaseClient.get_history`, `GET
+{prefix}/history?eventType=downloadFolderImported`) instead of the previous
+backend's. The principle that made this necessary in the first place is
+unchanged:
 
-- **Imports come from the journal** (`importHistory`), not from the active
-  `downloadQueue`. A finished import leaves the queue, so diffing the queue only
-  catches an import if a poll lands inside that window — on the live instance it
-  never did, and every real import went unannounced (audit 2026-07-30, BUG-01).
+- **Imports come from the history journal**, not from the active download
+  queue. A finished import leaves the queue, so diffing the queue only
+  catches an import if a poll happens to land inside that window — on the
+  live instance it never did, and every real import went unannounced (audit
+  2026-07-30, BUG-01).
 - **Music comes from terminal transfer states**, not from a key disappearing.
-  "It vanished from the active list" also describes a cancelled transfer, and a
-  slskd restart makes *everything* vanish at once (BUG-02).
+  "It vanished from the active list" also describes a cancelled transfer, and
+  a slskd restart makes *everything* vanish at once (BUG-02).
 
-State lives in memory: the first poll after a restart only records what it sees,
-so history is never replayed at the user.
+Seen-import ids are scoped per service (Radarr and Sonarr both hand out their
+own autoincrementing `id`, so the same integer can legitimately mean two
+different records) and, across services, landed records are ordered by their
+own `date` field rather than per-client return order, so a mixed movie+
+episode burst reads in the order it actually happened.
 """
 
 import html
@@ -29,14 +35,14 @@ import structlog
 
 logger = structlog.get_logger()
 
-#: How many journal rows to ask for per poll. Comfortably more than a single
-#: interval can produce, so nothing is missed between polls; the seen-set keeps
-#: re-reads silent.
-_HISTORY_LIMIT = 25
+#: How many history rows to ask each *arr service for per poll. Comfortably
+#: more than a single interval can produce, so nothing is missed between
+#: polls; the seen-set keeps re-reads silent.
+_HISTORY_PAGE_SIZE = 50
 
 #: Cap on remembered import ids — bounded so a long-running process can't grow
-#: the set without limit. Well above `_HISTORY_LIMIT` so an id is never
-#: forgotten while it is still being returned by the journal.
+#: the set without limit. Well above `_HISTORY_PAGE_SIZE` so an id is never
+#: forgotten while it is still being returned by the history endpoint.
 _SEEN_IMPORTS_CAP = 500
 
 #: slskd transfer states that mean "this transfer is over". slskd reports e.g.
@@ -47,73 +53,90 @@ _TRANSFER_ERRORED = "Errored"
 
 
 class LibraryWatcher:
-    """Polls Scryer's import journal and slskd's transfers, announcing outcomes."""
+    """Polls Radarr/Sonarr's import history and slskd's transfers, announcing outcomes."""
 
     def __init__(
         self,
-        notify: Callable[[str], Awaitable[None]],
-        get_scryer: Optional[Callable[[], Awaitable[Any]]] = None,
+        radarr: Any,
+        sonarr: Any,
+        *,
+        notify: Optional[Callable[[str], Awaitable[None]]] = None,
         get_slskd: Optional[Callable[[], Awaitable[Any]]] = None,
     ):
+        self.radarr = radarr
+        self.sonarr = sonarr
         self.notify = notify
-        self._get_scryer = get_scryer
         self._get_slskd = get_slskd
-        #: import-record ids already reported (insertion-ordered, bounded)
-        self._seen_imports: dict[str, None] = {}
+        #: (service_label, record id) already reported (insertion-ordered, bounded)
+        self._seen_imports: dict[tuple[str, Any], None] = {}
         #: slskd "user/file" -> last seen state
         self._transfers: dict[str, str] = {}
-        self._seeded_imports = False
+        #: Whether `poll()` has completed a cycle yet. *arr's history journal
+        #: already contains everything imported before this process started —
+        #: unlike slskd's transfer list (which only reports on a *change* of
+        #: state, so a first sight is inherently quiet), `poll_once()` reports
+        #: a fresh watcher's very first read verbatim by design (see its own
+        #: docstring and tests/test_library_watcher.py's
+        #: test_library_watcher_reports_imported_media). Left unguarded here,
+        #: every process (re)start would announce up to
+        #: `_HISTORY_PAGE_SIZE` already-known imports per service as if they
+        #: had just landed. `poll()` — what `bot.main._library_watch` actually
+        #: drives — seeds `_seen_imports` on its first cycle without
+        #: announcing anything, then reports normally from the second cycle on.
+        self._imports_primed = False
 
-    async def poll(self) -> None:
-        """One cycle. Never raises: a backend outage must not kill the loop."""
-        await self._poll_imports()
-        await self._poll_transfers()
+    # --------------------------------------------------------------- *arr
+    async def poll_once(self) -> list[dict[str, Any]]:
+        """One history cycle across both services.
 
-    # ------------------------------------------------------------- Scryer
-    async def _poll_imports(self) -> None:
-        if self._get_scryer is None:
-            return
-        try:
-            scryer = await self._get_scryer()
-            if scryer is None:
-                return
-            records = await scryer.get_import_history(limit=_HISTORY_LIMIT)
-        except Exception as e:
-            logger.warning("library_watch_imports_failed", error=str(e))
-            return
-
-        # First poll of this process: the journal is history, not news.
-        if not self._seeded_imports:
-            for record in records:
-                self._remember(record.id)
-            self._seeded_imports = True
-            logger.info("library_watch_seeded", imports=len(records))
-            return
-
-        # Oldest first, so a burst is announced in the order it happened.
-        for record in reversed(records):
-            if record.id in self._seen_imports:
-                continue
-            if not record.is_finished:
-                # Still importing — leave it unrecorded so the next poll, which
-                # will see its final decision, reports it.
-                continue
-
-            self._remember(record.id)
-            title = html.escape(record.source_title)
-            if record.is_imported:
-                await self._announce(f"✅ <b>{title}</b> — в библиотеке.")
-            elif record.is_failed:
-                await self._announce(
-                    f"⚠️ <b>{title}</b> — импорт не удался: "
-                    f"{html.escape(record.failure_reason)[:200]}"
+        Returns newly-imported records not seen on a previous call, sorted by
+        their own `date` field so a mixed movie+episode burst is returned in
+        the order it actually happened. Never raises — an outage on one
+        service must not stop the other from being checked.
+        """
+        landed: list[dict[str, Any]] = []
+        for label, client in (("radarr", self.radarr), ("sonarr", self.sonarr)):
+            try:
+                records = await client.get_history(
+                    event_type="downloadFolderImported", page_size=_HISTORY_PAGE_SIZE,
                 )
-            # SKIPPED (e.g. ALREADY_IMPORTED) is neither news nor a problem.
+            except Exception as e:
+                logger.warning("library_watch_imports_failed", service=label, error=str(e))
+                continue
 
-    def _remember(self, record_id: str) -> None:
-        self._seen_imports[record_id] = None
+            for record in records:
+                record_id = record.get("id")
+                if record_id is None:
+                    continue
+                key = (label, record_id)
+                if key in self._seen_imports:
+                    continue
+                self._remember(key)
+                landed.append(record)
+
+        landed.sort(key=lambda r: r.get("date") or "")
+        return landed
+
+    def _remember(self, key: tuple[str, Any]) -> None:
+        self._seen_imports[key] = None
         while len(self._seen_imports) > _SEEN_IMPORTS_CAP:
             self._seen_imports.pop(next(iter(self._seen_imports)))
+
+    async def poll(self) -> None:
+        """One full cycle: announce newly-landed *arr imports, then slskd
+        transfers. Never raises — a backend outage must not kill the loop."""
+        landed = await self.poll_once()
+        if self._imports_primed:
+            for record in landed:
+                title = html.escape(str(record.get("sourceTitle") or "Unknown"))
+                await self._announce(f"✅ <b>{title}</b> — в библиотеке.")
+        else:
+            # First cycle after (re)start: `poll_once()` already recorded
+            # every currently-known import in `_seen_imports` above, so this
+            # is a silent seed, not a missed announcement — genuinely new
+            # imports from here on are still reported normally.
+            self._imports_primed = True
+        await self._poll_transfers()
 
     # -------------------------------------------------------------- slskd
     async def _poll_transfers(self) -> None:
@@ -161,6 +184,8 @@ class LibraryWatcher:
         State is updated by the caller regardless, so a Telegram blip costs one
         missed message rather than a stuck watcher that repeats forever.
         """
+        if self.notify is None:
+            return
         try:
             await self.notify(text)
         except Exception as e:

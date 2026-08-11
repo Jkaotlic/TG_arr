@@ -32,9 +32,9 @@ async def _search_picked_season(sonarr, series_id: int, season_number: int) -> d
 
 # Feature #2: season-monitoring presets exposed on the series release card.
 # These strings match Sonarr's own `monitor` addOptions values verbatim (see
-# SonarrClient.add_series) — rollback 2026-08-10 removed the Scryer
-# `MonitorTypeValue` translation table this used to feed, since there is
-# nothing left to translate to.
+# SonarrClient.add_series) — rollback 2026-08-10 removed the previous
+# backend's translation table this used to feed, since there is nothing left
+# to translate to.
 _SEASON_PRESETS = {"all", "future", "latestSeason", "firstSeason", "none"}
 
 
@@ -180,8 +180,8 @@ async def _execute_grab(
     entry — so this still doesn't re-look-up the content or pick a quality
     profile/root folder (that happened at add time). Grabbing is
     ``AddService.grab_release`` for the ONE release the user selected —
-    unlike Scryer's ``grab_with_fallback``, *arr's own interactive search
-    already excludes releases it cannot act on, so there is no
+    unlike the previous backend's ``grab_with_fallback``, *arr's own
+    interactive search already excludes releases it cannot act on, so there is no
     multi-candidate retry loop to drive (no task in this rollback has
     specified one; see ``AddService.grab_with_fallback``'s docstring).
     """

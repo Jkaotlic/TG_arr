@@ -62,7 +62,7 @@ class ArtistCB(CallbackData, prefix="art"):
 
 
 class AddContentCB(CallbackData, prefix="addc"):
-    """Add a trending movie/series to the Scryer catalog (was ``add_movie:ID`` /
+    """Add a trending movie/series to the library (was ``add_movie:ID`` /
     ``add_series:ID``). ``kind`` distinguishes the two so one class replaces
     both string prefixes without risking a movie/series id collision.
     """
@@ -213,10 +213,11 @@ class RootFolderCB(CallbackData, prefix="rf"):
     """Pick a root folder when adding a title to Radarr/Sonarr (rollback
     2026-08-10).
 
-    *arr root folders carry their own integer id — unlike Scryer's
-    ``RootFolderPayload``, which had none, forcing a sha1 digest of the path
-    to stand in for one (a Windows path contains ':', aiogram's CallbackData
-    field separator, so the raw path could not be packed either). Live
+    *arr root folders carry their own integer id — unlike the previous
+    backend's root-folder payload, which had none, forcing a sha1 digest of
+    the path to stand in for one (a Windows path contains ':', aiogram's
+    CallbackData field separator, so the raw path could not be packed
+    either). Live
     measurement 2026-08-10: Radarr's folders are ids 1/2, Sonarr's are also
     1/2 — a plain int is both simpler and stable across restarts, unlike a
     list index. ``content_type`` says which *arr client the id belongs to,

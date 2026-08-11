@@ -354,24 +354,32 @@ class Database:
 
     async def _migrate_to_v4(self) -> None:
         """Rollback 2026-08-10 (Task 13, carried-forward item 2): copy the
-        legacy Scryer-era `scryer_quality_profile_id`/`scryer_root_folder_id`
-        preference keys into BOTH `radarr_*` and `sonarr_*` — the fields
-        `UserPreferences` split them into (Task 12; Radarr and Sonarr have
-        independent id spaces, live-measured: both start at 1/2 but point at
-        different paths).
+        legacy combined profile/folder preference keys (written by the two
+        weeks the bot ran on the previous backend) into BOTH `radarr_*` and
+        `sonarr_*` — the fields `UserPreferences` split them into (Task 12;
+        Radarr and Sonarr have independent id spaces, live-measured: both
+        start at 1/2 but point at different paths).
 
-        The bot ran on Scryer for about two weeks, so real rows may still
-        carry the old keys. pydantic's `extra="ignore"` drops unknown keys
-        silently on load — no crash, but the user's chosen profile/folder
-        quietly reverts to whatever "first available" resolves to (Radarr's
-        first profile is id 1, "Any", the profile whose custom-format scores
-        had to be repaired because they rewarded exactly the releases the
-        language policy rejects).
+        Real stored rows may still carry the old keys. pydantic's
+        `extra="ignore"` drops unknown keys silently on load — no crash, but
+        the user's chosen profile/folder quietly reverts to whatever "first
+        available" resolves to (Radarr's first profile is id 1, "Any", the
+        profile whose custom-format scores had to be repaired because they
+        rewarded exactly the releases the language policy rejects).
 
         Idempotent and non-destructive: only fills a `radarr_*`/`sonarr_*`
         field that is still unset (`None`) — an already-explicit new-style
         value is never overwritten. Rows with no legacy keys at all are
         left untouched (no UPDATE issued).
+
+        The two legacy key names read below are an intentional exception to
+        this package's "no mention of the previous backend by name" guard
+        (`tests/test_r4_C3-dead-clients.py`) — they are read verbatim because
+        they must byte-match what that backend's era actually wrote to real
+        users' stored preference JSON; renaming the string here would just
+        break reading that historical data, not tidy anything. Marked
+        `LEGACY-DATA-KEY` so the guard test can carve out exactly these two
+        lines rather than exempting the whole file.
         """
         async with self.conn.execute("SELECT tg_id, preferences FROM users") as cursor:
             rows = await cursor.fetchall()
@@ -387,8 +395,8 @@ class Database:
                 if not isinstance(data, dict):
                     continue
 
-                legacy_profile = data.get("scryer_quality_profile_id")
-                legacy_folder = data.get("scryer_root_folder_id")
+                legacy_profile = data.get("scryer_quality_profile_id")  # LEGACY-DATA-KEY
+                legacy_folder = data.get("scryer_root_folder_id")  # LEGACY-DATA-KEY
                 if legacy_profile is None and legacy_folder is None:
                     continue
 

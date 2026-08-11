@@ -4,21 +4,22 @@ Rollback 2026-08-10. What changed back and why:
 
 - **Detection** fans out parallel `lookup` calls to Radarr, Sonarr and Lidarr
   again, guarded by a global semaphore and a per-service circuit breaker.
-  The Scryer migration removed both because Scryer answered all three video
-  facets in ONE `searchMetadataMulti` query — a concurrency limiter guarding
-  three parallel calls had nothing to guard. Now there ARE three parallel
-  calls again, and *arr's `lookup` proxies out to TMDb/TVDB/MusicBrainz (slow,
-  externally rate-limited), so without a ceiling a burst of searches takes
-  all three services down at once — the incident these existed to prevent
-  before the migration. The TTL cache survived the migration unchanged and
-  stays: a retried or double-tapped search still shouldn't hit the network
-  twice.
+  The rollback removed both because the previous backend answered all three
+  video facets in ONE `searchMetadataMulti` query — a concurrency limiter
+  guarding three parallel calls had nothing to guard. Now there ARE three
+  parallel calls again, and *arr's `lookup` proxies out to
+  TMDb/TVDB/MusicBrainz (slow, externally rate-limited), so without a ceiling
+  a burst of searches takes all three services down at once — the incident
+  these existed to prevent before that migration. The TTL cache survived that
+  migration unchanged and stays: a retried or double-tapped search still
+  shouldn't hit the network twice.
 - **Anime** is still a first-class outcome, not a flavour of SERIES, but it no
-  longer comes from a dedicated Scryer facet. Sonarr's `/series/lookup`
-  returns one flat list, and `series_type` on a result not yet in the catalog
-  is always "standard" — so anime-ness is read from the `Animation` genre
-  Sonarr/TVDB attaches to the title, splitting the flat list into series and
-  anime candidate sets before the existing scoring/tie-break logic runs.
+  longer comes from a dedicated facet on the previous backend. Sonarr's
+  `/series/lookup` returns one flat list, and `series_type` on a result not
+  yet in the catalog is always "standard" — so anime-ness is read from the
+  `Animation` genre Sonarr/TVDB attaches to the title, splitting the flat
+  list into series and anime candidate sets before the existing
+  scoring/tie-break logic runs.
 - **Release search** is `search_releases_for_title` (Task 9): Radarr/Sonarr's
   interactive search (`GET .../release?movieId=`/`?seriesId=`) already judges
   every candidate against the user's quality profile and custom formats —
@@ -26,10 +27,10 @@ Rollback 2026-08-10. What changed back and why:
   is authoritative; the local `ScoringService` only breaks ties (see
   docs/superpowers/sdd/2026-08-10-arr-restore/task-9-brief.md for the
   live-measurement rationale). `search_metadata`/`get_seasons` still call the
-  removed Scryer client — Task 9's own brief neither tests nor specifies them,
-  and Task 12 (search handlers) removes the "resolve a catalog title first"
-  step they served, so they are left as NotImplementedError rather than
-  guessed at without a driving test.
+  removed previous-backend client — Task 9's own brief neither tests nor
+  specifies them, and Task 12 (search handlers) removes the "resolve a
+  catalog title first" step they served, so they are left as
+  NotImplementedError rather than guessed at without a driving test.
 """
 
 import asyncio
@@ -67,9 +68,9 @@ _SE_RE = re.compile(r"s(\d{1,2})(?:e(\d{1,3}))?", re.IGNORECASE)
 _SEASON_WORD_RE = re.compile(r"(?:season|сезон)\s*(\d+)", re.IGNORECASE)
 _QUALITY_TOKENS = ("2160p", "4k", "4к", "uhd", "1080p", "720p", "480p")
 # Each lookup fans out to TMDb/TVDB/MusicBrainz directly now (no more single
-# Scryer round-trip). Live measurement 2026-08-10: Radarr lookup ~3.4s,
-# Sonarr ~34.4s — 15s (the Scryer-era value) would spuriously time out most
-# real Sonarr detections, so this needs real headroom above that.
+# round-trip to the previous backend). Live measurement 2026-08-10: Radarr
+# lookup ~3.4s, Sonarr ~34.4s — 15s (the pre-rollback value) would spuriously
+# time out most real Sonarr detections, so this needs real headroom above that.
 _DETECT_TIMEOUT_S = 40.0
 _MUSIC_QUERY_HARD_FLOOR = 3   # ignore music matches when query <3 chars
 
@@ -90,8 +91,8 @@ _ANIME_OVER_SERIES_MARGIN = 0.1
 # One user search = three parallel metadata lookups, and *arr's `lookup`
 # proxies to TMDb/TVDB/MusicBrainz, so it is slow. Without a ceiling a burst
 # of searches takes all three services down at once — which is why these
-# existed before the Scryer migration removed them (Scryer answered in one
-# query, so they were genuinely dead weight then).
+# existed before the previous-backend migration removed them (that backend
+# answered in one query, so they were genuinely dead weight then).
 _DETECTION_SEMAPHORE = asyncio.Semaphore(6)
 
 
@@ -574,33 +575,17 @@ class SearchService:
 
         return best
 
-    # NOTE (rollback 2026-08-10, Task 8): search_metadata/get_seasons used to
-    # call `self.scryer`, which this class no longer constructs. Task 9's own
-    # brief (docs/superpowers/sdd/2026-08-10-arr-restore/task-9-brief.md)
-    # tests and specifies only the release-listing path — `search_releases`
-    # below is replaced by `search_releases_for_title`. It does not test or
-    # specify these two: Task 12 ("Хендлеры поиска") removes the "resolve a
-    # catalog title, then list its releases" flow they served — the new
-    # interactive search lists releases straight from a Radarr/Sonarr id — so
-    # implementing a signature nobody has specified yet, with no driving test,
-    # would be guessing rather than repointing. Left as a clear TODO naming
-    # Task 12 rather than falling through to an AttributeError on the
-    # nonexistent `self.scryer` — same scoping, a more legible failure.
-    _METADATA_SEARCH_NOT_CONVERTED = (
-        "still depends on the removed Scryer client — Task 12 (search handlers) "
-        "removes the catalog-title-resolution step this served, rather than "
-        "repointing it (see docs/superpowers/plans/2026-08-10-arr-restore.md)"
-    )
-
-    async def search_metadata(self, query: str, content_type: ContentType) -> list:
-        """Metadata candidates for one facet (used when the user picks a type)."""
-        if content_type not in VIDEO_CONTENT_TYPES:
-            return []
-        raise NotImplementedError(f"search_metadata {self._METADATA_SEARCH_NOT_CONVERTED}")
-
-    async def get_seasons(self, title_id: str) -> list:
-        """Seasons available to search for a title (see ScryerClient.get_seasons)."""
-        raise NotImplementedError(f"get_seasons {self._METADATA_SEARCH_NOT_CONVERTED}")
+    # `search_metadata` and `get_seasons` are gone (rollback 2026-08-10,
+    # Tasks 14/15). They existed to serve the removed backend's "resolve a
+    # catalog title, then list its releases by title id" flow. *arr's
+    # interactive search lists releases straight from a Radarr/Sonarr id, so
+    # Task 12's handlers resolve the id themselves via `lookup_movies` /
+    # `lookup_series` and call `search_releases_for_title` directly. The two
+    # methods survived Tasks 8-12 only as NotImplementedError stubs naming a
+    # future task; with no caller left in `bot/`, keeping permanently-raising
+    # public methods on the service would be worse than deleting them.
+    # Season data now comes from Sonarr's own series payload, and the picker
+    # searches one season via `SonarrClient.search_season`.
 
     async def search_releases_for_title(
         self,
@@ -620,7 +605,7 @@ class SearchService:
         else:
             releases = await self.sonarr.get_releases(arr_id, season_number=season)
 
-        return sorted(
+        ordered = sorted(
             releases,
             key=lambda r: (
                 r.rejected,
@@ -628,6 +613,31 @@ class SearchService:
                 -self.scoring.calculate_score(r, content_type),
             ),
         )
+
+        # DEAD-13/OBS: log what the user is about to be shown, so a complaint
+        # like "it picked the wrong one" can be reconstructed from prod logs
+        # without asking them to search again. The preview carries *arr's
+        # verdict alongside the size, since the verdict now drives the order.
+        logger.info(
+            "search_completed",
+            content_type=content_type.value,
+            arr_id=arr_id,
+            season=season,
+            result_count=len(ordered),
+            rejected_count=sum(1 for r in ordered if r.rejected),
+            top=[
+                {
+                    "title": r.title[:120],
+                    "indexer": r.indexer,
+                    "size_gb": round(r.get_size_gb(), 2),
+                    "seeders": r.seeders,
+                    "custom_format_score": r.custom_format_score,
+                    "rejected": r.rejected,
+                }
+                for r in ordered[:3]
+            ],
+        )
+        return ordered
 
     async def lookup_artist(self, query: str) -> list[ArtistInfo]:
         """Look up artists (Lidarr, falling back to slskd)."""

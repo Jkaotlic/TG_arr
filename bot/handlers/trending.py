@@ -344,7 +344,7 @@ async def handle_series_from_trending(callback: CallbackQuery, callback_data: Tr
 
 async def _resolve_series_for_add(search_service: SearchService, series: SeriesInfo) -> SeriesInfo | None:
     """TMDb trending carries no `tvdb_id` (see `TMDbClient.get_trending_series`
-    — it stays 0, "resolved by name" was Scryer's job) but Sonarr's
+    — it stays 0, "resolved by name" was the previous backend's job) but Sonarr's
     `add_series` needs a real one. Resolve it via Sonarr's own guarded
     lookup (`SearchService.lookup_series`, same semaphore/circuit-breaker
     path every other Sonarr lookup goes through) before adding.

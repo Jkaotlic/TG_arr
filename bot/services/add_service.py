@@ -1,9 +1,9 @@
 """Service for adding titles to and grabbing releases through Radarr/Sonarr.
 
 Rollback 2026-08-10, Task 10. This is the last module in the package that
-imported the Scryer client at module level — that single import (of models
-Task 2 deleted) was the root cause of most of the suite's collection errors
-mid-rollback. Replaced with the two *arr grab paths:
+imported the previous backend's client at module level — that single import
+(of models Task 2 deleted) was the root cause of most of the suite's
+collection errors mid-rollback. Replaced with the two *arr grab paths:
 
     grab_release(release, content_type, arr_id=...)
         native  — release.indexer_id is set AND release.origin == "arr" (it
@@ -13,9 +13,9 @@ mid-rollback. Replaced with the two *arr grab paths:
                    resolves Prowlarr's `301 -> magnet` redirect itself, hands
                    the torrent to its own download client and imports the
                    result. This is precisely the capability whose absence
-                   killed the previous (Scryer) backend — it could not
-                   expand that redirect, so every download failed with a
-                   bare "Internal server error".
+                   killed the previous backend — it could not expand that
+                   redirect, so every download failed with a bare
+                   "Internal server error".
 
                    Fix round 1 (2026-08-10 review): `indexer_id` truthiness
                    ALONE is not a safe signal — ProwlarrClient's free-text
@@ -47,8 +47,9 @@ which was too aggressive: real callers already exist in
 bot/handlers/{trending.py,search/commands.py,search/grab.py}, even though
 fixing those call sites is Task 12's job, not this one's).
 
-Scryer-specific composite flows with no *arr equivalent specified by any task
-yet (`ensure_title`, `add_and_queue_best`, `grab_with_fallback`) are kept as
+Composite flows specific to the previous backend, with no *arr equivalent
+specified by any task yet (`ensure_title`, `add_and_queue_best`,
+`grab_with_fallback`), are kept as
 `NotImplementedError` stubs naming Task 12/13, matching the precedent
 `search_service.py` set for `search_metadata`/`get_seasons` — a stub that
 fails loudly beats both silently guessing a shape and a bare
@@ -503,27 +504,30 @@ class AddService:
     # a message naming the task that owns the replacement, rather than
     # guessing a shape with no driving test.
     _COMPOSITE_FLOW_NOT_CONVERTED = (
-        "was Scryer-specific (its composite add+queue/redeem-candidate-token "
-        "flow has no *arr equivalent specified by any task yet) and was not "
-        "carried into the *arr rollback — see Task 12/13, "
+        "was specific to the previous backend (its composite "
+        "add+queue/redeem-candidate-token flow has no *arr equivalent "
+        "specified by any task yet) and was not carried into the *arr "
+        "rollback — see Task 12/13, "
         "docs/superpowers/plans/2026-08-10-arr-restore.md"
     )
 
     async def ensure_title(self, *args, **kwargs):
-        """Scryer's "find or add unmonitored" step. Task 12 explicitly
-        removes this step from the search flow rather than repointing it."""
+        """The previous backend's "find or add unmonitored" step. Task 12
+        explicitly removes this step from the search flow rather than
+        repointing it."""
         raise NotImplementedError(f"ensure_title {self._COMPOSITE_FLOW_NOT_CONVERTED}")
 
     async def add_and_queue_best(self, *args, **kwargs):
-        """Scryer's "add + let the profile pick + queue automatically"
-        one-shot. The nearest *arr equivalent is `add_movie`/`add_series`
-        with `search_for_movie`/`search_for_missing=True`, but no task has
-        specified the caller-facing shape ("Скачать лучшее") yet."""
+        """The previous backend's "add + let the profile pick + queue
+        automatically" one-shot. The nearest *arr equivalent is
+        `add_movie`/`add_series` with `search_for_movie`/
+        `search_for_missing=True`, but no task has specified the
+        caller-facing shape ("Скачать лучшее") yet."""
         raise NotImplementedError(f"add_and_queue_best {self._COMPOSITE_FLOW_NOT_CONVERTED}")
 
     async def grab_with_fallback(self, *args, **kwargs):
-        """Scryer's multi-candidate retry loop (some indexers' download
-        links Scryer couldn't resolve to an info-hash). `grab_release`'s
+        """The previous backend's multi-candidate retry loop (some indexers'
+        download links it couldn't resolve to an info-hash). `grab_release`'s
         native/push split already handles the one release *arr's own verdict
         picked; no task has specified multi-candidate retry for the *arr
         rollback."""

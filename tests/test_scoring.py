@@ -286,6 +286,42 @@ class TestScoringService:
     # (preferred_resolution affecting ranking) is now covered by
     # TestPreferredResolutionBonus below, wired into calculate_score/sort_results.
 
+    def test_sort_results_sinks_a_rejected_release_to_the_bottom(self, scoring_service):
+        """Rollback 2026-08-10 (Tasks 14/15): `sort_results` used to defer to
+        the previous backend's own verdict (`scryer_allowed`/`scryer_score`,
+        removed with the client) — those fields are gone, and its *arr
+        equivalent (`SearchResult.rejected`/`.custom_format_score`, populated
+        by every *arr interactive-search release per `ArrBaseClient.
+        _parse_release`) was never wired into the sort key, so a release *arr
+        itself refuses could still rank first. `rejected` must sink a release
+        to the bottom — shown (the user may still force it) but never offered
+        first — exactly like the old scryer_allowed-based sort did."""
+        accepted = SearchResult(
+            guid="a", title="Accepted.Release", size=1, rejected=False, custom_format_score=0,
+        )
+        rejected = SearchResult(
+            guid="r", title="Rejected.Release", size=1, rejected=True, custom_format_score=1000,
+        )
+
+        sorted_results = scoring_service.sort_results([rejected, accepted])
+
+        assert [r.guid for r in sorted_results] == ["a", "r"]
+
+    def test_sort_results_orders_accepted_releases_by_custom_format_score(self, scoring_service):
+        """Among releases *arr did not refuse, its own customFormatScore
+        decides — the bot's own calculate_score only breaks ties, same
+        relationship the previous backend's releaseScore had."""
+        low = SearchResult(
+            guid="low", title="Low.Score", size=1, rejected=False, custom_format_score=10,
+        )
+        high = SearchResult(
+            guid="high", title="High.Score", size=1, rejected=False, custom_format_score=500,
+        )
+
+        sorted_results = scoring_service.sort_results([low, high])
+
+        assert [r.guid for r in sorted_results] == ["high", "low"]
+
 
 class TestPreferredResolutionBonus:
     """DEAD-06: preferred_resolution (settings 'Качество') is wired into

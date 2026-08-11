@@ -71,7 +71,7 @@ async def get_services() -> tuple[SearchService, AddService]:
 
     Rollback 2026-08-10 (Task 12): both services are now built on the *arr
     clients (Radarr/Sonarr required, Prowlarr/Lidarr/qBittorrent optional)
-    instead of the single Scryer bridge client.
+    instead of the previous backend's single bridge client.
     """
     radarr = await get_radarr()
     sonarr = await get_sonarr()

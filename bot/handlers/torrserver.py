@@ -1,8 +1,8 @@
 """TorrServer section — the "watch it now" contour.
 
-Kept apart from the Scryer search flow on purpose: Scryer answers "I want to
-own this", TorrServer answers "I want to watch this tonight". They share no
-state.
+Kept apart from the main *arr search flow on purpose: that flow answers "I
+want to own this", TorrServer answers "I want to watch this tonight". They
+share no state.
 """
 
 import html
@@ -93,7 +93,7 @@ async def handle_search_prompt(callback: CallbackQuery) -> None:
     """Ask for a query with ForceReply.
 
     No state is stored: the reply carries the prompt with it, so a user who
-    changes their mind and types something else simply gets the normal Scryer
+    changes their mind and types something else simply gets the normal
     search instead of a stale "waiting for TorrServer query" flag.
     """
     if (message := accessible_message(callback)) is not None:

@@ -122,22 +122,12 @@ def _default_env(monkeypatch):
     # trips the breaker for a service (e.g. 3 consecutive Radarr failures)
     # can leave it open and cause order-dependent flakiness in a later,
     # unrelated test. `_reset_module_state()` resets both in one call.
-    # Rollback 2026-08-10: as of Task 8, search_service.py no longer imports
-    # the Scryer client, so this import now always succeeds — the try/except
-    # is dead in practice but kept as a safety net per Task 8's brief (so a
-    # future edit here can't reintroduce a hard collection failure mid-
-    # rollback). Remove it once Task 15 finishes deleting Scryer for good.
-    try:
-        from bot.services import search_service as _search_service
-    except ImportError:
-        _search_service = None
+    from bot.services import search_service as _search_service
 
-    if _search_service is not None:
-        _search_service._reset_module_state()
+    _search_service._reset_module_state()
     yield
     get_settings.cache_clear()
-    if _search_service is not None:
-        _search_service._reset_module_state()
+    _search_service._reset_module_state()
 
 
 @pytest.fixture

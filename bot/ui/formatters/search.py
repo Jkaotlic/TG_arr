@@ -17,8 +17,8 @@ from bot.models import (
 )
 from bot.ui.formatters._common import _e, _safe_truncate, _to_local
 
-#: Rollback 2026-08-10 (Task 11): the old Scryer `scoringLog`-based language
-#: verdict (`_format_language_verdict`, keyed on `policy_codes`) is gone.
+#: Rollback 2026-08-10 (Task 11): the previous backend's `scoringLog`-based
+#: language verdict (`_format_language_verdict`, keyed on a rule-code list) is gone.
 #: Radarr/Sonarr's own interactive search already judges every release
 #: against the quality profile's custom formats before the bot ever sees it
 #: — that verdict lives on `SearchResult.rejected` / `.rejections` /
@@ -264,7 +264,7 @@ class _SearchFormatters:
         # only means "known to Radarr" — the search flow adds a title the
         # moment it's resolved, before the user has grabbed anything — so the
         # label distinguishes on-disk / tracked / merely present, same as the
-        # pre-Scryer wording this replaces.
+        # pre-rollback wording this replaces.
         if movie.radarr_id:
             if movie.has_file:
                 status = "✅ В библиотеке (скачан)"
@@ -438,7 +438,7 @@ class _SearchFormatters:
         spaces — live measurement, both have root folders 1/2 pointing at
         different paths (`G:\\radarr\\Films` vs `G:\\tv-sonarr\\Serials`) —
         so each service's profile/folder is resolved and shown separately,
-        replacing the interim single Scryer-shaped pair.
+        replacing the interim single shared-pair shape.
         """
         lines = ["<b>⚙️ Ваши настройки</b>\n"]
 

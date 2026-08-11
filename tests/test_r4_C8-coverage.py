@@ -362,86 +362,111 @@ def _public_release(**over) -> SearchResult:
 
 def _build_service(radarr=None, qbt=None) -> AddService:
     return AddService(
-        prowlarr=AsyncMock(),
-        radarr=radarr or AsyncMock(),
-        sonarr=AsyncMock(),
+        radarr or AsyncMock(),
+        AsyncMock(),
         qbittorrent=qbt,
         lidarr=None,
     )
 
 
 @pytest.mark.asyncio
-async def test_grab_queue_success_path():
-    """Migrated from the push-release coverage: the happy path is now
-    "redeem the candidate token, then start monitoring"."""
-    from bot.models import ContentType, MovieInfo
-    from bot.services.add_service import AddService
+async def test_grab_native_success_path():
+    """Rollback 2026-08-10: the happy path is *arr's own grab endpoint.
 
-    scryer = AsyncMock()
-    scryer.queue_existing_title_download = AsyncMock(
-        return_value=MagicMock(queued=True, status="QUEUED", job_id="j1")
-    )
-    svc = AddService(scryer)
+    A release carrying both an indexer id and `origin="arr"` came from *arr's
+    interactive search, so *arr can grab it natively — which is also what lets
+    it resolve Prowlarr's `301 -> magnet` redirect itself.
+    """
+    from bot.models import ContentType
 
-    success, action, msg = await svc.grab_release(
-        MovieInfo(tmdb_id=1, title="M", year=2024, scryer_id="t1"),
-        _release_with_token(),
+    radarr = AsyncMock()
+    radarr.grab_release = AsyncMock(return_value=True)
+    svc = _build_service(radarr=radarr)
+
+    success, action = await svc.grab_release(
+        _release_with_token(guid="abc-1", indexer_id=3, origin="arr"),
         ContentType.MOVIE,
+        arr_id=15,
     )
 
     assert success is True
     assert action.success is True
-    assert msg
-    scryer.set_title_monitored.assert_awaited_once_with("t1", True)
+    radarr.grab_release.assert_awaited_once_with("abc-1", 3)
+    radarr.push_release.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_grab_falls_back_to_qbittorrent_only_when_forced():
-    """The old flow auto-fell-back to qBittorrent whenever *arr rejected a
-    release. Scryer's verdict is authoritative now, so the bypass is explicit:
-    only `force_download=True` reaches qBittorrent."""
-    from bot.models import ContentType, MovieInfo
-    from bot.services.add_service import AddService
+async def test_rejected_push_falls_back_to_qbittorrent():
+    """The push -> qBittorrent -> auto-search chain is restored deliberately.
 
-    scryer = AsyncMock()
-    scryer.queue_existing_title_download = AsyncMock(
-        return_value=MagicMock(queued=False, status="CONFLICT", job_id=None)
-    )
+    The removed backend treated its own verdict as final and only reached
+    qBittorrent on an explicit `force_download`. The *arr rollback brings back
+    the pre-migration chain: a release *arr refuses is still handed to
+    qBittorrent, because qBittorrent handles magnet redirects that *arr's push
+    endpoint may refuse — the exact gap that made the previous backend unusable.
+    """
+    from bot.models import ContentType
+
+    radarr = AsyncMock()
+    radarr.push_release = AsyncMock(return_value={"approved": False, "rejections": ["blocked"]})
     qbt = AsyncMock()
     qbt.add_torrent_url = AsyncMock(return_value=True)
-    svc = AddService(scryer, qbittorrent=qbt)
+    svc = _build_service(radarr=radarr, qbt=qbt)
 
-    success, _action, _msg = await svc.grab_release(
-        MovieInfo(tmdb_id=1, title="M", year=2024, scryer_id="t1"),
-        _release_with_token(),
-        ContentType.MOVIE,
+    success, action = await svc.grab_release(
+        _release_with_token(origin="prowlarr"), ContentType.MOVIE, arr_id=15,
     )
-    assert success is False
-    qbt.add_torrent_url.assert_not_awaited()
 
-    success, _action, _msg = await svc.grab_release(
-        MovieInfo(tmdb_id=1, title="M", year=2024, scryer_id="t1"),
-        _release_with_token(magnet="magnet:?xt=urn:btih:abcdef0123456789"),
-        ContentType.MOVIE,
-        force_download=True,
-    )
     assert success is True
+    assert action.success is True
     qbt.add_torrent_url.assert_awaited_once()
 
 
-def _release_with_token(magnet=None):
+@pytest.mark.asyncio
+async def test_force_download_bypasses_both_grab_paths():
+    """`force_download=True` is the explicit escape hatch straight to qBittorrent.
+
+    It exists for a release *arr refuses but the user wants anyway; neither the
+    native grab nor the push may run in that case.
+    """
+    from bot.models import ContentType
+
+    radarr = AsyncMock()
+    qbt = AsyncMock()
+    qbt.add_torrent_url = AsyncMock(return_value=True)
+    svc = _build_service(radarr=radarr, qbt=qbt)
+
+    success, _action = await svc.grab_release(
+        _release_with_token(guid="abc-1", indexer_id=3, origin="arr"),
+        ContentType.MOVIE,
+        arr_id=15,
+        force_download=True,
+    )
+
+    assert success is True
+    qbt.add_torrent_url.assert_awaited_once()
+    radarr.grab_release.assert_not_awaited()
+    radarr.push_release.assert_not_awaited()
+
+
+def _release_with_token(magnet=None, **over):
+    """A release candidate. `origin`/`indexer_id` decide which grab path runs.
+
+    Defaults to the Prowlarr free-text shape (fail-closed provenance), so a
+    test must opt in to the native path explicitly.
+    """
     from bot.models import SearchResult
 
-    return SearchResult(
+    url = magnet or "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01"
+    kwargs = dict(
         guid="g1",
         title="Movie.2160p",
         indexer="RuTracker",
-        candidate_token="cand-1",
-        scryer_title_id="t1",
-        queue_scope={"title": True},
-        magnet_url=magnet,
-        download_url=magnet,
+        magnet_url=url,
+        download_url=url,
     )
+    kwargs.update(over)
+    return SearchResult(**kwargs)
 
 
 # ---------------------------------------------------------------------------

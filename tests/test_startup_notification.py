@@ -14,7 +14,6 @@ from bot.main import build_startup_message, notify_admins_on_start
 
 def _warmup(**overrides):
     summary = {
-        "scryer": (True, 683.4, "0.17.2"),
         "lidarr": (True, 407.2, "3.1.2.4938"),
         "slskd": (True, 268.7, "0.24.5.0"),
     }
@@ -24,10 +23,10 @@ def _warmup(**overrides):
 
 def test_message_lists_every_probed_backend():
     text = build_startup_message(
-        warmup=_warmup(), admin_ids=[1], allowed_ids=[1, 2], version="0.17.2"
+        warmup=_warmup(), admin_ids=[1], allowed_ids=[1, 2], version="3.1.2.4938"
     )
     assert "запущен" in text
-    for name in ("Scryer", "Lidarr", "slskd"):
+    for name in ("Lidarr", "slskd"):
         assert name in text
 
 
@@ -35,9 +34,9 @@ def test_healthy_and_failed_backends_are_visually_distinct():
     text = build_startup_message(
         warmup=_warmup(lidarr=(False, 5000.0, None)), admin_ids=[1], allowed_ids=[1], version=None
     )
-    scryer_line = next(line for line in text.splitlines() if "Scryer" in line)
+    slskd_line = next(line for line in text.splitlines() if "slskd" in line)
     lidarr_line = next(line for line in text.splitlines() if "Lidarr" in line)
-    assert "✅" in scryer_line
+    assert "✅" in slskd_line
     assert "❌" in lidarr_line
 
 
@@ -52,11 +51,11 @@ def test_unconfigured_backend_is_not_reported_as_broken():
 
 def test_probe_error_is_reported_without_leaking_a_stacktrace():
     text = build_startup_message(
-        warmup=_warmup(scryer=("error", "connection refused to http://user:pw@host")),
+        warmup=_warmup(lidarr=("error", "connection refused to http://user:pw@host")),
         admin_ids=[1], allowed_ids=[1], version=None,
     )
-    scryer_line = next(line for line in text.splitlines() if "Scryer" in line)
-    assert "❌" in scryer_line
+    lidarr_line = next(line for line in text.splitlines() if "Lidarr" in line)
+    assert "❌" in lidarr_line
     assert "user:pw" not in text
 
 
@@ -66,13 +65,13 @@ def test_message_reports_user_counts_and_backend_versions():
         warmup=_warmup(), admin_ids=[1, 2], allowed_ids=[1, 2, 3]
     )
     assert "2" in text and "3" in text
-    assert "0.17.2" in text        # Scryer
+    assert "3.1.2.4938" in text    # Lidarr
     assert "0.24.5.0" in text      # slskd
 
 
 def test_message_escapes_html_from_a_probe_error():
     text = build_startup_message(
-        warmup=_warmup(scryer=("error", "<script>alert(1)</script>")),
+        warmup=_warmup(lidarr=("error", "<script>alert(1)</script>")),
         admin_ids=[1], allowed_ids=[1], version=None,
     )
     assert "<script>" not in text
@@ -128,9 +127,9 @@ async def test_startup_wires_the_notification_in():
     db.cleanup_old_searches = AsyncMock(return_value=0)
     db.list_allowed_users = AsyncMock(return_value=[])
 
-    with patch.object(main_mod, "_warm_up_clients", AsyncMock(return_value={"scryer": (True, 1.0)})), \
+    with patch.object(main_mod, "_warm_up_clients", AsyncMock(return_value={"lidarr": (True, 1.0)})), \
          patch.object(main_mod, "notify_admins_on_start", AsyncMock()) as notify:
         await main_mod.on_startup(bot, db, None)
 
     notify.assert_awaited_once()
-    assert notify.await_args.kwargs["warmup"] == {"scryer": (True, 1.0)}
+    assert notify.await_args.kwargs["warmup"] == {"lidarr": (True, 1.0)}

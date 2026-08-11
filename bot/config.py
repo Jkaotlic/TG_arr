@@ -90,13 +90,13 @@ class Settings(BaseSettings):
     emby_timeout: float = Field(default=30.0, ge=5.0, description="Emby request timeout in seconds")
 
     # TorrServer (optional) — streaming contour: "watch now" instead of
-    # "have it in the library". Separate from Scryer on purpose.
+    # "have it in the library". Deliberately its own search/add path.
     torrserver_url: Optional[str] = Field(default=None, description="TorrServer base URL")
     torrserver_username: Optional[str] = Field(default=None, description="TorrServer basic-auth user")
     torrserver_password: Optional[str] = Field(default=None, description="TorrServer basic-auth password")
     torrserver_timeout: float = Field(default=30.0, ge=5.0, description="TorrServer request timeout in seconds")
     # A torznab search fans out to every configured Prowlarr indexer, so it is
-    # far slower than the plain API calls — same split as scryer_search_timeout.
+    # far slower than the plain API calls — same split as prowlarr_search_timeout.
     torrserver_search_timeout: float = Field(
         default=60.0, ge=10.0, le=300.0, description="TorrServer torznab search timeout (seconds)"
     )

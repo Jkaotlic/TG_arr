@@ -185,8 +185,8 @@ async def _lookup_metadata_candidates(search_service, term: str, content_type: C
     Replaces `SearchService.search_metadata`, which Task 9's own brief
     neither tested nor specified and is left as a `NotImplementedError` stub
     (see its docstring) — this handler no longer resolves a catalog title
-    before *listing* releases (that requirement is gone with Scryer), only
-    before *adding* one.
+    before *listing* releases (that requirement is gone with the previous
+    backend), only before *adding* one.
 
     Fix round 1 (review finding 1): this used to call
     `search_service.radarr.lookup_movie`/`.sonarr.lookup_series` directly,
@@ -218,12 +218,12 @@ async def _resolve_arr_entry(
     """Turn a chosen metadata candidate into a library entry with an arr_id.
 
     Rollback 2026-08-10 (Task 12). *arr's interactive release search needs a
-    movie/series id already in Radarr/Sonarr's own library — unlike Scryer,
-    which searched releases per catalog title after an explicit
-    "ensure_title" add (unmonitored, purely to get an id). Radarr/Sonarr have
-    no such "list releases for something not yet added" mode, and adding is
-    cheap and is what the user wants anyway if they go on to grab something —
-    so this adds the title the moment a candidate is resolved
+    movie/series id already in Radarr/Sonarr's own library — unlike the
+    previous backend, which searched releases per catalog title after an
+    explicit "ensure_title" add (unmonitored, purely to get an id).
+    Radarr/Sonarr have no such "list releases for something not yet added"
+    mode, and adding is cheap and is what the user wants anyway if they go on
+    to grab something — so this adds the title the moment a candidate is resolved
     (`search_for_movie`/`search_for_missing=False`: nothing is grabbed
     automatically, the user is about to pick one specific release), and the
     caller tells the user plainly when that happened (`created=True`).
@@ -244,7 +244,7 @@ async def _resolve_arr_entry(
     Fix round 1 (review finding 2): `radarr_quality_profile_id`/
     `radarr_root_folder_id` and `sonarr_quality_profile_id`/
     `sonarr_root_folder_id` are separate `UserPreferences` fields, not one
-    shared Scryer-shaped pair — Radarr's and Sonarr's ids are independent
+    shared pair — Radarr's and Sonarr's ids are independent
     sequences (live measurement: both start at 1, 2, pointing at unrelated
     paths), so a single shared preference could silently apply a movie's
     folder/profile choice to a series.
@@ -296,9 +296,9 @@ def _known_seasons(title, content_type: ContentType) -> list[int]:
     lookup/add response — see `SonarrClient._parse_series`), newest-first-
     friendly. No API call: Sonarr's `/series/lookup` returns the full season
     list even for a title not yet in the library, so there is nothing left to
-    fetch separately (unlike Scryer's dedicated `get_seasons` query, which
-    `SearchService.get_seasons` — a `NotImplementedError` stub — used to
-    serve).
+    fetch separately (unlike the previous backend's dedicated seasons query,
+    which `SearchService.get_seasons` — a `NotImplementedError` stub — used
+    to serve).
     """
     if content_type not in (ContentType.SERIES, ContentType.ANIME):
         return []
@@ -370,8 +370,9 @@ async def process_search(
             # split, not separate services) — see its docstring.
             #
             # Fix (Task 12): this called the nonexistent
-            # `search_service.detect_with_confidence` — a Scryer-era name
-            # that never existed on the rewritten *arr SearchService (only
+            # `search_service.detect_with_confidence` — a name from the
+            # previous backend's era that never existed on the rewritten
+            # *arr SearchService (only
             # `detect_content_type`, which already returns the same
             # confidence-carrying `DetectionResult`; see
             # tests/test_detect_content_type.py, Task 8/9's own coverage,
@@ -495,9 +496,9 @@ async def process_search(
 
         arr_name = "Radarr" if content_type is ContentType.MOVIE else "Sonarr"
         if created:
-            # Honest about what just happened: unlike Scryer (one bridge, one
-            # catalog), the title now really does exist in Radarr/Sonarr's
-            # own library, not just in a bot-side session.
+            # Honest about what just happened: unlike the previous backend
+            # (one bridge, one catalog), the title now really does exist in
+            # Radarr/Sonarr's own library, not just in a bot-side session.
             add_action = ActionLog(
                 user_id=user_id,
                 action_type=ActionType.ADD,

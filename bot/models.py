@@ -160,32 +160,8 @@ class SearchResult(BaseModel):
     languages: list[str] = Field(default_factory=list, description="Languages *arr parsed")
 
     # Scoring
-    prowlarr_score: Optional[int] = Field(default=None, description="Legacy Prowlarr score; unset since the Scryer migration")
+    prowlarr_score: Optional[int] = Field(default=None, description="Legacy Prowlarr score; unset since the 2026-08-10 *arr rollback")
     calculated_score: int = Field(default=0, description="Our calculated score")
-
-    # Scryer release candidate (migration 2026-07-28). Scryer already applies
-    # the quality profile and the Rego rules, so its verdict is authoritative
-    # and the bot's own `calculated_score` is only a display/tie-break aid.
-    scryer_title_id: Optional[str] = Field(default=None, description="Scryer title id this release belongs to")
-    candidate_token: Optional[str] = Field(
-        default=None,
-        description="Short-lived Scryer token identifying this candidate. SECRET: embeds the "
-                    "indexer download URL (with the tracker passkey) — never log it.",
-    )
-    queue_scope: Optional[dict[str, Any]] = Field(
-        default=None, description="QueueDownloadScopeInput to reuse when queueing this candidate"
-    )
-    scryer_score: Optional[int] = Field(default=None, description="Scryer releaseScore (profile + rules)")
-    scryer_preference_score: Optional[int] = Field(default=None, description="Scryer preferenceScore")
-    scryer_allowed: Optional[bool] = Field(default=None, description="Whether Scryer's profile allows this release")
-    block_codes: list[str] = Field(default_factory=list, description="Scryer block codes when not allowed")
-    policy_codes: list[str] = Field(
-        default_factory=list,
-        description="Rule codes from Scryer's scoringLog (e.g. english_audio_bonus). Empty means "
-                    "the policy said nothing — which is not the same as 'it said no'.",
-    )
-    auto_eligible: bool = Field(default=False, description="Scryer would grab this release automatically")
-    auto_decision_summary: Optional[str] = Field(default=None)
 
     # Content detection
     detected_type: ContentType = Field(default=ContentType.UNKNOWN)
@@ -214,8 +190,9 @@ class MovieInfo(BaseModel):
     content_model_type: Literal["movie"] = "movie"
     # Rollback 2026-08-10: back to Radarr's shape. Radarr always has both a
     # tmdb_id and a year, and a movie can't be added to Radarr without one, so
-    # these are required again (they were relaxed for Scryer's metadata search,
-    # which keyed on its own id and didn't always carry a TMDb id).
+    # these are required again (they were relaxed for the previous backend's
+    # metadata search, which keyed on its own id and didn't always carry a
+    # TMDb id).
     tmdb_id: int = Field(..., description="TMDB ID")
     imdb_id: Optional[str] = Field(default=None, description="IMDB ID")
     title: str = Field(..., description="Movie title")
@@ -317,7 +294,7 @@ class QualityProfile(BaseModel):
     """Quality profile from Radarr, Sonarr or Lidarr.
 
     All three *arr services use plain integer ids; the union type is a
-    leftover from the Scryer migration (its profile ids were slugs like
+    leftover from the previous backend (its profile ids were slugs like
     "4k"/"1080p"). Compare with `str(...)` when matching a stored preference
     — cheap and robust either way.
     """
@@ -330,7 +307,7 @@ class RootFolder(BaseModel):
     """Root folder from Radarr, Sonarr or Lidarr.
 
     All three *arr services carry their own integer id. The union type is a
-    leftover from the Scryer migration, whose `RootFolderPayload` had no id
+    leftover from the previous backend, whose root-folder payload had no id
     of its own (the client mirrored the path into `id` instead).
     """
 
@@ -459,19 +436,18 @@ class UserPreferences(BaseModel):
 
     Rollback 2026-08-10 (Task 12, fix round 1): the interim migration
     (2026-07-28) had collapsed the per-*arr profile/folder preferences into
-    one shared Scryer-shaped pair (`scryer_quality_profile_id`/
-    `scryer_root_folder_id`). That conflates two independent id spaces —
-    live measurement: Radarr's root folders are ids 1 and 2, and Sonarr's
-    *are also* 1 and 2, pointing at completely different paths — so a movie
-    preference could silently be applied to a newly added series. Split back
-    into one pair per *arr service. Both are plain ints now (Radarr/Sonarr
-    ids always are — unlike Scryer's string slugs, which needed the
-    `_coerce_scryer_id` validator this replaces; that validator is gone with
-    the fields it guarded).
+    one shared pair keyed to the previous backend's own id shape. That
+    conflates two independent id spaces — live measurement: Radarr's root
+    folders are ids 1 and 2, and Sonarr's *are also* 1 and 2, pointing at
+    completely different paths — so a movie preference could silently be
+    applied to a newly added series. Split back into one pair per *arr
+    service. Both are plain ints now (Radarr/Sonarr ids always are — unlike
+    the previous backend's string slugs, which needed a coercing validator
+    this replaces; that validator is gone with the fields it guarded).
 
-    Legacy `scryer_quality_profile_id`/`scryer_root_folder_id` (and the even
-    older pre-migration `radarr_*`/`sonarr_*` keys) still present in stored
-    JSON are silently ignored on load — extra keys are dropped by pydantic's
+    Legacy combined-pair keys (and the even older pre-migration
+    `radarr_*`/`sonarr_*` keys from before that) still present in stored JSON
+    are silently ignored on load — extra keys are dropped by pydantic's
     default `extra="ignore"` — same graceful-degradation behaviour the
     2026-07-28 migration already relied on for its own predecessor. That
     alone would only degrade a stale row to "no preference set", not lose
@@ -481,13 +457,13 @@ class UserPreferences(BaseModel):
     profile whose custom-format scores had to be repaired because it
     rewarded the releases the language policy exists to reject.
     Correction (Task 13): this originally said no migration was needed
-    because "no settings UI has written the Scryer-shaped pair yet" — wrong;
-    the bot ran on Scryer for about two weeks before this rollback, so real
-    rows do carry the old keys. `Database._migrate_to_v4`
-    (`bot/db.py`) copies `scryer_quality_profile_id`/`scryer_root_folder_id`
-    forward into the `radarr_*`/`sonarr_*` fields below (idempotent, fills
-    only unset fields) so an existing user's choice survives the rollback
-    instead of silently reverting.
+    because "no settings UI has written the legacy pair yet" — wrong; the bot
+    ran on the previous backend for about two weeks before this rollback, so
+    real rows do carry the old keys. `Database._migrate_to_v4` (`bot/db.py`)
+    copies the legacy combined-pair keys forward into the `radarr_*`/
+    `sonarr_*` fields below (idempotent, fills only unset fields) so an
+    existing user's choice survives the rollback instead of silently
+    reverting.
     """
 
     radarr_quality_profile_id: Optional[int] = None

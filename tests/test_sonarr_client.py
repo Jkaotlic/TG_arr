@@ -128,6 +128,23 @@ async def test_get_wanted_episodes_requests_include_series():
 
 
 @pytest.mark.asyncio
+async def test_get_history_uses_sonarrs_own_api_prefix():
+    """`get_history` lives on the shared `ArrBaseClient` — confirm Sonarr's
+    `/api/v3` prefix is honoured, not just Radarr's (same prefix here, but the
+    method must read `self._api_prefix`, not a hardcoded string)."""
+    from bot.clients.sonarr import SonarrClient
+
+    client = SonarrClient("http://sonarr", "key")
+    payload = {"records": [{"id": 5, "eventType": "downloadFolderImported", "sourceTitle": "Ep"}]}
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)) as get:
+        records = await client.get_history()
+
+    assert get.call_args.args[0] == "/api/v3/history"
+    assert get.call_args.kwargs["params"]["eventType"] == 3
+    assert records[0]["sourceTitle"] == "Ep"
+
+
+@pytest.mark.asyncio
 async def test_set_series_monitored_patches_the_resource():
     from bot.clients.sonarr import SonarrClient
 

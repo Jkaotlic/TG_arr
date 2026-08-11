@@ -106,7 +106,7 @@ async def _get_music_services() -> tuple[SearchService, AddService] | None:
     slskd alone is enough for search + direct download.
 
     Rollback 2026-08-10 (Task 13 finish-up): this used to build both services
-    around the single Scryer client. SearchService/AddService now take
+    around the previous backend's single client. SearchService/AddService now take
     Radarr+Sonarr positionally (same as every other handler) — Radarr/Sonarr
     are always available from the registry (non-optional, see status.py's
     `_collect_statuses` docstring), so they're fetched here too even though

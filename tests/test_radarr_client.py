@@ -105,6 +105,34 @@ async def test_get_wanted_movies_does_not_send_include_series():
 
 
 @pytest.mark.asyncio
+async def test_get_history_reads_the_history_endpoint_with_the_numeric_event_code():
+    """Live-verified 2026-08-10 against the real Radarr: the `eventType` query
+    param is bound as the History enum's ordinal, not the camelCase name the
+    JSON body reports for the same field — `?eventType=downloadFolderImported`
+    400s, `?eventType=3` returns exactly the downloadFolderImported rows."""
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    payload = {"records": [{"id": 1, "eventType": "downloadFolderImported", "sourceTitle": "Dune"}]}
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)) as get:
+        records = await client.get_history()
+
+    assert get.call_args.args[0] == "/api/v3/history"
+    assert get.call_args.kwargs["params"]["eventType"] == 3
+    assert get.call_args.kwargs["params"]["pageSize"] == 50
+    assert records[0]["sourceTitle"] == "Dune"
+
+
+@pytest.mark.asyncio
+async def test_get_history_rejects_an_unmapped_event_type():
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    with pytest.raises(ValueError):
+        await client.get_history(event_type="grabbed")
+
+
+@pytest.mark.asyncio
 async def test_set_movie_monitored_patches_the_resource():
     """Unmonitoring 102 unobtainable episodes must not need a hand-written script."""
     from bot.clients.radarr import RadarrClient

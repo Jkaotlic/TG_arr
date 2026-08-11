@@ -63,7 +63,7 @@ class _SettingsKeyboards:
         """Create main settings menu keyboard.
 
         Rollback 2026-08-10 (Task 13): one Radarr row and one Sonarr row
-        instead of a shared "Scryer" pair — Radarr's and Sonarr's profile/
+        instead of a shared pair — Radarr's and Sonarr's profile/
         folder ids are independent sequences (live measurement: both start
         at 1/2 but point at different paths), so a single shared preference
         could silently apply a movie's folder/profile choice to a series.

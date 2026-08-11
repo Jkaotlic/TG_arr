@@ -229,7 +229,6 @@ async def publish_bot_commands(bot) -> None:
 
 #: Display names for the warm-up probe keys, in the order they're shown.
 _BACKEND_LABELS = (
-    ("scryer", "🗂 Scryer"),
     ("lidarr", "🎵 Lidarr"),
     ("slskd", "🎧 slskd"),
 )
@@ -318,7 +317,7 @@ async def _warm_up_clients(logger) -> dict:
     Returns the per-backend outcome map, which the startup notification
     reuses so the probe isn't repeated.
     """
-    from bot.clients.registry import get_lidarr, get_scryer, get_slskd
+    from bot.clients.registry import get_lidarr, get_slskd
 
     structlog.contextvars.bind_contextvars(component="warmup")
     try:
@@ -327,15 +326,12 @@ async def _warm_up_clients(logger) -> dict:
                 client = await factory()
                 if client is None:
                     return name, None
-                # Scryer's probe includes the login round-trip, so give it more
-                # room than a plain health endpoint would need.
                 ok, version, ms = await asyncio.wait_for(client.check_connection(), timeout=15.0)
                 return name, (ok, ms, version)
             except Exception as e:
                 return name, ("error", str(e))
 
         results = await asyncio.gather(
-            _check("scryer", get_scryer),
             _check("lidarr", get_lidarr),
             _check("slskd", get_slskd),
             return_exceptions=True,
@@ -348,14 +344,22 @@ async def _warm_up_clients(logger) -> dict:
 
 
 async def _health_watch(bot: Bot, admin_ids: list, logger) -> None:
-    """Poll Scryer's health and alert admins when the stack degrades.
+    """Poll the four *arr services' health and alert admins when the stack
+    degrades.
 
     Added after the 2026-07-29 incident: the indexers had been failing for six
-    hours before anyone noticed, and every signal needed was already sitting in
-    `systemHealth` + `wantedItems`. 15 minutes is frequent enough to catch a
-    real outage and far too slow to add meaningful load.
+    hours before anyone noticed. Rollback 2026-08-10 (Tasks 14/15): the
+    previous backend's single `systemHealth` query gave one call visibility
+    into per-indexer 24h success/fail ratios and the wanted-queue size;
+    neither has an *arr equivalent in this rollback's scope — the queue is
+    still visible on demand via /wanted (`bot/handlers/status.py`), just no
+    longer proactively alerted on. What every *arr client already exposes is
+    `check_connection()` — "is the service even reachable" — so that is the
+    one signal this watch relies on now, across all four services. 15 minutes
+    is frequent enough to catch a real outage and far too slow to add
+    meaningful load.
     """
-    from bot.clients.registry import get_scryer
+    from bot.clients.registry import get_lidarr, get_prowlarr, get_radarr, get_sonarr
     from bot.services.health_monitor import HealthMonitor
 
     interval = 15 * 60
@@ -367,16 +371,24 @@ async def _health_watch(bot: Bot, admin_ids: list, logger) -> None:
             except Exception as e:
                 logger.warning("health_alert_send_failed", user_id=admin_id, error=str(e))
 
-    monitor = HealthMonitor(_notify)
+    clients = {
+        "Radarr": await get_radarr(),
+        "Sonarr": await get_sonarr(),
+        "Prowlarr": await get_prowlarr(),
+        "Lidarr": await get_lidarr(),
+    }
+    # Lidarr is the one optional service among the four (settings.lidarr_enabled);
+    # get_lidarr() answers None when it is not configured, and HealthMonitor
+    # must not be handed a None "client" to poll.
+    clients = {name: client for name, client in clients.items() if client is not None}
+
+    monitor = HealthMonitor(clients, notify=_notify)
     structlog.contextvars.bind_contextvars(component="health_watch")
     try:
         while True:
             try:
                 await asyncio.sleep(interval)
-                scryer = await get_scryer()
-                health = await scryer.system_health()
-                _items, wanted_total, _more = await scryer.get_wanted("MISSING", limit=1)
-                await monitor.evaluate(health, wanted_total)
+                await monitor.evaluate()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -422,10 +434,11 @@ async def _library_watch(bot: Bot, db: Database, logger) -> None:
     """Announce library imports and finished music downloads.
 
     qBittorrent's watcher only knows "the torrent finished"; this covers the
-    part the user actually waits for — Scryer importing the file — and music,
-    which never had completion notices at all (slskd is a separate client).
+    part the user actually waits for — the file being imported into Radarr's
+    or Sonarr's library (rollback 2026-08-10, Tasks 14/15) — and music, which
+    never had completion notices at all (slskd is a separate client).
     """
-    from bot.clients.registry import get_scryer, get_slskd
+    from bot.clients.registry import get_radarr, get_slskd, get_sonarr
     from bot.services.library_watcher import LibraryWatcher
 
     settings = get_settings()
@@ -436,7 +449,9 @@ async def _library_watch(bot: Bot, db: Database, logger) -> None:
         recipients = set(settings.allowed_tg_ids) | set(settings.admin_tg_ids) | set(db_user_ids)
         await send_library_notification(bot, sorted(recipients), text, logger)
 
-    watcher = LibraryWatcher(_notify, get_scryer=get_scryer, get_slskd=get_slskd)
+    radarr = await get_radarr()
+    sonarr = await get_sonarr()
+    watcher = LibraryWatcher(radarr, sonarr, notify=_notify, get_slskd=get_slskd)
     structlog.contextvars.bind_contextvars(component="library_watch")
     try:
         while True:

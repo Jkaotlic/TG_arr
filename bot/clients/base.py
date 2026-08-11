@@ -174,8 +174,9 @@ class BaseAPIClient:
         """Make HTTP request with retry logic.
 
         ``headers`` are merged on top of the pooled client's defaults for this
-        one call — needed by ScryerClient, whose bearer token is refreshed
-        independently of the (long-lived) httpx client.
+        one call — needed by callers whose auth value can change between
+        requests independently of the (long-lived, cached-headers) httpx
+        client, e.g. `EmbySyncHookClient`'s per-request token header.
         """
         client = await self._get_client()
         url = endpoint if endpoint.startswith("/") else f"/{endpoint}"
@@ -340,7 +341,7 @@ class BaseAPIClient:
         return await self._safe_request("POST", endpoint, params=params, json_data=json_data, timeout=timeout)
 
     # DEAD-11: no HTTP DELETE method — removed (zero callers; Radarr/Sonarr/
-    # Lidarr/Scryer client methods never delete resources, and qBittorrent
+    # Lidarr client methods never delete resources, and qBittorrent
     # has its own dedicated `delete()` on QBittorrentClient, unrelated to
     # this base HTTP client).
 
@@ -355,8 +356,8 @@ class BaseAPIClient:
         """POST without retry — for non-idempotent operations like grab/push.
 
         ``headers`` are merged over the pooled client's defaults for this one
-        call, same as `_request` — ScryerClient needs it to attach a bearer
-        token that is refreshed independently of the httpx client.
+        call, same as `_request` — see its docstring for why a per-call
+        override is needed.
         """
         client = await self._get_client()
         url = endpoint if endpoint.startswith("/") else f"/{endpoint}"
@@ -450,8 +451,8 @@ class ArrBaseClient(BaseAPIClient):
         already has it in its release cache and can act on the guid alone.
         *arr resolves Prowlarr's `301 -> magnet` redirect itself, hands the
         torrent to its own download client and imports the result — exactly
-        the capability whose absence killed the previous (Scryer) backend,
-        which could not expand that redirect itself. Not retried:
+        the capability whose absence killed the previous backend, which
+        could not expand that redirect itself. Not retried:
         `_post_no_retry` is used deliberately — grabbing twice would queue
         the release twice.
         """
@@ -541,7 +542,7 @@ class ArrBaseClient(BaseAPIClient):
         self, page_size: int = 50, extra_params: Optional[dict[str, Any]] = None,
     ) -> list[dict[str, Any]]:
         """Read the "missing" list. Rollback 2026-08-10: /wanted lived on
-        Scryer's catalog query before; *arr paginates it instead.
+        the previous backend's catalog query before; *arr paginates it instead.
 
         No `resource` parameter: Radarr and Sonarr hit the identical
         `{prefix}/wanted/missing` endpoint — only the record shape in the
@@ -603,6 +604,42 @@ class ArrBaseClient(BaseAPIClient):
             params={"deleteFiles": delete_files, "addImportListExclusion": False},
         )
         return True
+
+    #: Servarr's shared History `eventType` filter is bound from the query
+    #: string as the enum's ordinal, not the camelCase name the JSON body
+    #: uses for the same field (`"eventType": "downloadFolderImported"` in a
+    #: record vs. `?eventType=3` to filter for it) — live-verified against
+    #: both Radarr and Sonarr 2026-08-11: sending the string name 400s
+    #: ("The value 'downloadFolderImported' is not valid"), sending `3`
+    #: returns exactly the downloadFolderImported rows on both services.
+    _HISTORY_EVENT_TYPE_CODES: dict[str, int] = {"downloadFolderImported": 3}
+
+    async def get_history(
+        self, event_type: str = "downloadFolderImported", page_size: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Read the *arr history journal, filtered to one event type.
+
+        Used by `LibraryWatcher` to detect media that has actually landed —
+        `downloadFolderImported` fires once the file is imported into the
+        library, unlike `grabbed` (queued) or the transient download-queue
+        state, which can flicker before a final decision.
+        """
+        try:
+            code = self._HISTORY_EVENT_TYPE_CODES[event_type]
+        except KeyError:
+            raise ValueError(f"Unsupported history eventType filter: {event_type!r}") from None
+
+        params: dict[str, Any] = {
+            "eventType": code,
+            "pageSize": page_size,
+            "sortKey": "date",
+            "sortDirection": "descending",
+        }
+        result = await self.get(f"{self._api_prefix}/history", params=params)
+        if isinstance(result, dict):
+            records = result.get("records", [])
+            return records if isinstance(records, list) else []
+        return []
 
     async def _get_releases(self, params: dict[str, Any]) -> list["SearchResult"]:
         """Interactive search: releases already judged by the user's profile.

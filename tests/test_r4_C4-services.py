@@ -7,16 +7,14 @@ Covers:
 """
 
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
 from bot.clients.base import BaseAPIClient
 from bot.models import (
     ContentType,
-    MovieInfo,
     SearchResult,
-    SeriesInfo,
 )
 from bot.services.search_service import SearchService
 from tests.conftest import build_add_service as _build_add_service
@@ -29,12 +27,12 @@ _PUBLIC_MAGNET = "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01"
 
 
 def _rejected_release(url: str = _PUBLIC_MAGNET) -> SearchResult:
-    # Carries a candidate token so the queue call is actually reached — the
-    # refusal under test comes from Scryer, not from a missing token.
+    """A release *arr will refuse, shaped like a Prowlarr free-text hit.
+
+    `indexer_id=0` plus the default `origin="prowlarr"` keeps it off the native
+    grab path, so the refusal under test comes from `push_release`'s verdict.
+    """
     return SearchResult(
-        candidate_token="cand-1",
-        scryer_title_id="t1",
-        queue_scope={"title": True},
         guid="rej-guid",
         indexer="TestIndexer",
         indexer_id=0,
@@ -168,48 +166,43 @@ async def test_blocked_release_records_the_reason_in_the_action():
     """OBS-03 (migrated): the *arr "rejections" array is gone; Scryer refuses a
     candidate with a queue status (or a GraphQL error). Either way the reason
     must survive into the ActionLog for forensics."""
-    from bot.clients.scryer import ScryerGraphQLError
-
-    scryer = AsyncMock()
-    scryer.queue_existing_title_download = AsyncMock(
-        side_effect=ScryerGraphQLError("Scryer вернул ошибку: release blocked by profile")
+    radarr = AsyncMock()
+    radarr.push_release = AsyncMock(
+        return_value={"approved": False, "rejections": ["release blocked by profile"]}
     )
-    svc = _build_add_service(scryer=scryer)
+    svc = _build_add_service(radarr=radarr)
 
-    success, action, _msg = await svc.grab_release(
-        MovieInfo(tmdb_id=123, title="Test Movie", year=2024, scryer_id="t1"),
-        _rejected_release(),
-        ContentType.MOVIE,
+    success, action = await svc.grab_release(
+        _rejected_release(), ContentType.MOVIE, arr_id=15,
     )
 
     assert success is False
     assert action.error_message
     assert "release blocked by profile" in action.error_message
+    # OBS-03: the structured reasons must also survive for history forensics.
+    assert "release blocked by profile" in (action.details or "")
 
 
 @pytest.mark.asyncio
 async def test_queue_conflict_records_the_status_in_the_action():
-    scryer = AsyncMock()
-    scryer.queue_existing_title_download = AsyncMock(
-        return_value=MagicMock(queued=False, status="CONFLICT", job_id=None)
-    )
-    svc = _build_add_service(scryer=scryer)
+    """A refusal with no stated reason must still read as a refusal, not silence."""
+    sonarr = AsyncMock()
+    sonarr.push_release = AsyncMock(return_value={"approved": False, "rejections": []})
+    svc = _build_add_service(sonarr=sonarr)
 
-    success, action, _msg = await svc.grab_release(
-        SeriesInfo(tvdb_id=654, title="Test Series", year=2020, scryer_id="t1"),
-        _rejected_release(),
-        ContentType.SERIES,
+    success, action = await svc.grab_release(
+        _rejected_release(), ContentType.SERIES, arr_id=3,
     )
 
     assert success is False
-    assert "CONFLICT" in (action.error_message or "")
+    assert action.error_message == "Отклонено"
 
 
 @pytest.mark.asyncio
 async def test_search_releases_top_preview_includes_size_gb():
     """DEAD-13: size_gb in the search_completed top-preview is computed directly
     from SearchResult.get_size_gb() (no dead hasattr branch)."""
-    scryer = AsyncMock()
+    radarr = AsyncMock()
 
     result = SearchResult(
         guid="g-1",
@@ -219,8 +212,9 @@ async def test_search_releases_top_preview_includes_size_gb():
         seeders=10,
         protocol="torrent",
         detected_type=ContentType.MOVIE,
+        origin="arr",
     )
-    scryer.search_releases = AsyncMock(return_value=[result])
+    radarr.get_releases = AsyncMock(return_value=[result])
 
     captured: dict = {}
 
@@ -240,8 +234,8 @@ async def test_search_releases_top_preview_includes_size_gb():
     orig_logger = ss.logger
     ss.logger = _Log()
     try:
-        svc = SearchService(scryer)
-        results = await svc.search_releases("title-id", ContentType.MOVIE)
+        svc = SearchService(radarr, AsyncMock())
+        results = await svc.search_releases_for_title(ContentType.MOVIE, arr_id=15)
     finally:
         ss.logger = orig_logger
 
