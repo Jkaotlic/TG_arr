@@ -349,3 +349,18 @@ async def test_get_releases_survives_a_malformed_entry():
         releases = await client.get_releases(15)
 
     assert [r.guid for r in releases] == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_grab_release_posts_guid_and_indexer_id():
+    """Task 10: the native path — *arr already knows this release from its
+    own interactive search, so grabbing it is just guid+indexerId."""
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    with patch.object(client, "_post_no_retry", new=AsyncMock(return_value={})) as post:
+        ok = await client.grab_release("abc-1", 3)
+
+    assert ok is True
+    assert post.call_args.args[0] == "/api/v3/release"
+    assert post.call_args.kwargs["json_data"] == {"guid": "abc-1", "indexerId": 3}

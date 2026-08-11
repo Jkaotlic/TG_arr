@@ -442,6 +442,25 @@ class ArrBaseClient(BaseAPIClient):
             logger.warning("health_check_failed", service=self.service_name, error=str(e))
             return False, None, round(elapsed, 2)
 
+    async def grab_release(self, guid: str, indexer_id: int) -> bool:
+        """Grab a release *arr itself offered.
+
+        Rollback 2026-08-10 (Task 10): the native path. The release came
+        from *arr's own interactive search (`_get_releases`), so *arr
+        already has it in its release cache and can act on the guid alone.
+        *arr resolves Prowlarr's `301 -> magnet` redirect itself, hands the
+        torrent to its own download client and imports the result — exactly
+        the capability whose absence killed the previous (Scryer) backend,
+        which could not expand that redirect itself. Not retried:
+        `_post_no_retry` is used deliberately — grabbing twice would queue
+        the release twice.
+        """
+        await self._post_no_retry(
+            f"{self._api_prefix}/release",
+            json_data={"guid": guid, "indexerId": indexer_id},
+        )
+        return True
+
     async def push_release(
         self,
         title: str,

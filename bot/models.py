@@ -100,11 +100,24 @@ class QualityInfo(BaseModel):
 
 
 class SearchResult(BaseModel):
-    """Normalized release candidate (from Scryer's indexer search)."""
+    """Normalized release candidate (from *arr's or Prowlarr's indexer search)."""
 
     guid: str = Field(..., description="Unique identifier for the release")
     indexer: str = Field(default="Unknown", description="Indexer name")
-    indexer_id: int = Field(default=0, description="Indexer id (unused since the Scryer migration)")
+    # Rollback 2026-08-10 (Task 10): Optional, default None — distinguishes
+    # a release from *arr's own interactive search (which always carries its
+    # indexer id alongside the guid) from a Prowlarr free-text hit, which
+    # doesn't. `AddService.grab_release` uses "is this set?" to pick the grab
+    # path: set -> native `POST {prefix}/release`, unset -> the push/qBit/
+    # auto-search fallback chain. NOTE: Prowlarr's OWN client
+    # (bot/clients/prowlarr.py `_normalize_result`) still fills this with
+    # PROWLARR's indexer numbering (untouched, out of this task's scope) —
+    # that numbering is NOT interchangeable with *arr's, so a result built
+    # from Prowlarr's free-text search must not be routed to the native path
+    # by this field alone if that client ever stops leaving it unset.
+    indexer_id: Optional[int] = Field(
+        default=None, description="*arr's indexer id, paired with guid — required for the native grab path"
+    )
     title: str = Field(..., description="Release title")
     size: int = Field(default=0, description="Size in bytes")
     seeders: Optional[int] = Field(default=None, description="Number of seeders")

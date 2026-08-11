@@ -58,19 +58,23 @@ def callback_with_status():
     return cb, status_msg
 
 
-def build_add_service(scryer=None, lidarr=None, qbt=None, slskd=None):
-    """Construct an AddService with an AsyncMock Scryer client by default
-    (lidarr/qbt/slskd stay None — not every test wants those wired up).
+def build_add_service(radarr=None, sonarr=None, lidarr=None, qbt=None):
+    """Construct an AddService with AsyncMock Radarr/Sonarr clients by default
+    (lidarr/qbt stay None — not every test wants those wired up).
 
-    Shared by test_add_service.py and test_r4_C4-services.py.
+    Rollback 2026-08-10 (Task 10): reshaped for the *arr-backed AddService —
+    was `build_add_service(scryer=..., lidarr=..., qbt=..., slskd=...)`.
+
+    Shared by test_add_service.py and test_r4_C4-services.py (the latter is
+    Scryer-era and expected to keep failing until it is rewritten/removed).
     """
     from bot.services.add_service import AddService
 
     return AddService(
-        scryer or AsyncMock(),
+        radarr or AsyncMock(),
+        sonarr or AsyncMock(),
         qbittorrent=qbt,
         lidarr=lidarr,
-        slskd=slskd,
     )
 
 
