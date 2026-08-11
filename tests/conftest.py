@@ -101,7 +101,19 @@ def _default_env(monkeypatch):
     for stale in ("SCRYER_URL", "SCRYER_USERNAME", "SCRYER_PASSWORD"):
         monkeypatch.delenv(stale, raising=False)
 
-    from bot.config import get_settings
+    from bot.config import Settings, get_settings
+
+    # Settings.model_config points env_file at ".env" so the running bot
+    # picks up a developer's real credentials outside tests. Inside the
+    # suite that's a hazard: pydantic-settings falls back to reading that
+    # file for any var monkeypatch.delenv()'d off the process environment,
+    # so a repo-root .env with real RADARR_API_KEY etc. silently defeats
+    # tests that assert ValidationError/warnings on a *missing* var (it's
+    # no longer missing — it's just not in os.environ). Force every
+    # Settings()/get_settings() call inside the suite to see only
+    # monkeypatch'd process env, never the file, regardless of whether a
+    # developer's .env exists on disk.
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
 
     get_settings.cache_clear()
     # The detection cache AND the per-service circuit breaker are both

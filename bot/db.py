@@ -299,6 +299,8 @@ class Database:
             await self._migrate_to_v2()
         if version < 3:
             await self._migrate_to_v3()
+        if version < 4:
+            await self._migrate_to_v4()
 
     async def _migrate_to_v1(self) -> None:
         """
@@ -349,6 +351,66 @@ class Database:
         await self.conn.execute("DROP INDEX IF EXISTS idx_actions_user")
         await self.conn.commit()
         await self._set_schema_version(3)
+
+    async def _migrate_to_v4(self) -> None:
+        """Rollback 2026-08-10 (Task 13, carried-forward item 2): copy the
+        legacy Scryer-era `scryer_quality_profile_id`/`scryer_root_folder_id`
+        preference keys into BOTH `radarr_*` and `sonarr_*` — the fields
+        `UserPreferences` split them into (Task 12; Radarr and Sonarr have
+        independent id spaces, live-measured: both start at 1/2 but point at
+        different paths).
+
+        The bot ran on Scryer for about two weeks, so real rows may still
+        carry the old keys. pydantic's `extra="ignore"` drops unknown keys
+        silently on load — no crash, but the user's chosen profile/folder
+        quietly reverts to whatever "first available" resolves to (Radarr's
+        first profile is id 1, "Any", the profile whose custom-format scores
+        had to be repaired because they rewarded exactly the releases the
+        language policy rejects).
+
+        Idempotent and non-destructive: only fills a `radarr_*`/`sonarr_*`
+        field that is still unset (`None`) — an already-explicit new-style
+        value is never overwritten. Rows with no legacy keys at all are
+        left untouched (no UPDATE issued).
+        """
+        async with self.conn.execute("SELECT tg_id, preferences FROM users") as cursor:
+            rows = await cursor.fetchall()
+
+        now = datetime.now(timezone.utc).isoformat()
+        async with self._write_lock:
+            for row in rows:
+                raw = row["preferences"]
+                try:
+                    data = json.loads(raw) if raw else {}
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+
+                legacy_profile = data.get("scryer_quality_profile_id")
+                legacy_folder = data.get("scryer_root_folder_id")
+                if legacy_profile is None and legacy_folder is None:
+                    continue
+
+                changed = False
+                if legacy_profile is not None:
+                    for key in ("radarr_quality_profile_id", "sonarr_quality_profile_id"):
+                        if data.get(key) is None:
+                            data[key] = legacy_profile
+                            changed = True
+                if legacy_folder is not None:
+                    for key in ("radarr_root_folder_id", "sonarr_root_folder_id"):
+                        if data.get(key) is None:
+                            data[key] = legacy_folder
+                            changed = True
+
+                if changed:
+                    await self.conn.execute(
+                        "UPDATE users SET preferences = ?, updated_at = ? WHERE tg_id = ?",
+                        (json.dumps(data), now, row["tg_id"]),
+                    )
+            await self.conn.commit()
+        await self._set_schema_version(4)
 
     # User methods
     async def get_user(self, tg_id: int) -> Optional[User]:

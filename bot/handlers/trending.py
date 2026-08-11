@@ -9,12 +9,13 @@ from aiogram.types import CallbackQuery, Message
 from typing import Any
 
 from bot.config import get_settings
-from bot.clients.registry import get_qbittorrent, get_scryer, get_tmdb
+from bot.clients.registry import get_qbittorrent, get_radarr, get_sonarr, get_tmdb
 from bot.db import Database
 from bot.handlers.common import accessible_message
 from bot.handlers._cache import get_ttl, put_ttl
-from bot.models import ContentType, User
+from bot.models import MovieInfo, SeriesInfo, User
 from bot.services.add_service import AddService
+from bot.services.search_service import SearchService
 from bot.ui.callbacks import AddContentCB, TrendingItemCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -247,9 +248,10 @@ async def handle_movie_from_trending(callback: CallbackQuery, callback_data: Tre
         await message.answer("❌ Неверный ID фильма")
         return
 
-    # The trending list itself is the source of truth here: the item came from
-    # TMDb, and Scryer's catalog only knows titles that were already added — so
-    # a cache miss means "the list is stale", not "look it up elsewhere".
+    # The trending list itself is the source of truth here: the item came
+    # straight from TMDb, keyed by a TMDb id Radarr's own library lookup
+    # doesn't take — so a cache miss means "the list is stale", not "look it
+    # up elsewhere".
     movie = _cache_get(_trending_movies_cache, tmdb_id)
 
     if not movie:
@@ -305,7 +307,7 @@ async def handle_series_from_trending(callback: CallbackQuery, callback_data: Tr
     series = _cache_get(_trending_series_cache, series_id)
 
     if not series:
-        # series_id is a TMDb id from trending — not a Scryer title id
+        # series_id is a TMDb id from trending — not a Sonarr id
         await message.answer(
             "❌ Сериал не найден в кэше.\n"
             "Попробуйте обновить список или используйте обычный поиск."
@@ -340,65 +342,141 @@ async def handle_series_from_trending(callback: CallbackQuery, callback_data: Tr
         )
 
 
-async def _add_from_trending(
-    callback: CallbackQuery,
-    content,
-    content_type: ContentType,
-    db_user: User,
-    db: Database,
-    status_text: str,
-) -> None:
-    """Shared "add this trending item" path for movies and series.
+async def _resolve_series_for_add(search_service: SearchService, series: SeriesInfo) -> SeriesInfo | None:
+    """TMDb trending carries no `tvdb_id` (see `TMDbClient.get_trending_series`
+    — it stays 0, "resolved by name" was Scryer's job) but Sonarr's
+    `add_series` needs a real one. Resolve it via Sonarr's own guarded
+    lookup (`SearchService.lookup_series`, same semaphore/circuit-breaker
+    path every other Sonarr lookup goes through) before adding.
 
-    Migration 2026-07-28: both used to pick a quality profile and a root folder
-    and then call Radarr/Sonarr `add`. Scryer owns both settings, so the bot
-    just adds the title and lets Scryer pick + queue the best release under its
-    own profile and rules.
+    Returns `series` unchanged if it already carries a `tvdb_id`, the best
+    title/year match from Sonarr's lookup otherwise, or `None` if Sonarr
+    has nothing matching the title at all.
+    """
+    if series.tvdb_id:
+        return series
+    candidates = await search_service.lookup_series(series.title)
+    if not candidates:
+        return None
+    if series.year:
+        exact = next((c for c in candidates if c.year == series.year), None)
+        if exact is not None:
+            return exact
+    return candidates[0]
+
+
+async def _add_movie_from_trending(callback: CallbackQuery, movie: MovieInfo, db_user: User, db: Database) -> None:
+    """Add a trending movie to Radarr, using the user's Radarr profile/folder
+    preference (falling back to "first available" — see `AddService.resolve_profile`).
     """
     message = accessible_message(callback)
     if message is None:
         return
-    status_msg = await message.answer(status_text)
+    status_msg = await message.answer("⏳ Добавляю фильм в Radarr...")
 
     try:
-        add_service = AddService(
-            await get_scryer(),
-            qbittorrent=await get_qbittorrent(),
+        radarr = await get_radarr()
+        add_service = AddService(radarr, await get_sonarr(), qbittorrent=await get_qbittorrent())
+
+        profiles, folders = await asyncio.gather(
+            add_service.get_radarr_profiles(), add_service.get_radarr_root_folders(),
         )
+        if not profiles or not folders:
+            await status_msg.edit_text(
+                Formatters.format_error("В Radarr не настроены профили качества или папки")
+            )
+            return
+
         prefs = db_user.preferences
+        profile = AddService.resolve_profile(profiles, prefs.radarr_quality_profile_id)
+        folder_path = AddService.resolve_root_folder(folders, prefs.radarr_root_folder_id)
 
-        success, action, detail = await add_service.add_and_queue_best(
-            content,
-            content_type,
-            quality_profile_id=prefs.scryer_quality_profile_id,
-            root_folder_path=prefs.scryer_root_folder_id,
+        added, action = await add_service.add_movie(
+            movie, quality_profile_id=profile.id, root_folder_path=folder_path,
         )
-
         action.user_id = db_user.tg_id
         await db.log_action(action)
 
-        if success:
-            year_str = f" ({content.year})" if getattr(content, "year", None) else ""
+        if added is not None:
+            year_str = f" ({added.year})" if added.year else ""
             await status_msg.edit_text(
-                f"✅ <b>{html.escape(content.title)}</b>{year_str}\n\n{html.escape(detail)}",
+                f"✅ <b>{html.escape(added.title)}</b>{year_str} добавлен в Radarr — ищу релиз...",
                 parse_mode="HTML",
             )
         else:
             # BUG-12b: error text can contain raw markup from the upstream
             # service — escape before interpolating into an HTML message.
-            await status_msg.edit_text(f"❌ {html.escape(detail)}")
+            error_text = action.error_message or "Не удалось добавить фильм"
+            await status_msg.edit_text(f"❌ {html.escape(error_text)[:200]}")
 
     except Exception as e:
         logger.error(
-            "trending_add_failed",
-            title=getattr(content, "title", None),
-            content_type=content_type.value,
-            error=str(e),
-            exc_info=True,
+            "trending_add_movie_failed", title=movie.title, error=str(e), exc_info=True,
         )
         await status_msg.edit_text(
-            Formatters.format_error("Не удалось добавить"),
-            parse_mode="HTML",
+            Formatters.format_error("Не удалось добавить"), parse_mode="HTML",
+        )
+
+
+async def _add_series_from_trending(callback: CallbackQuery, series: SeriesInfo, db_user: User, db: Database) -> None:
+    """Add a trending series to Sonarr — first resolving a real `tvdb_id`
+    (TMDb trending doesn't carry one), then the user's Sonarr profile/folder
+    preference (falling back to "first available")."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+    status_msg = await message.answer("⏳ Добавляю сериал в Sonarr...")
+
+    try:
+        sonarr = await get_sonarr()
+        add_service = AddService(await get_radarr(), sonarr, qbittorrent=await get_qbittorrent())
+        search_service = SearchService(add_service.radarr, sonarr)
+
+        resolved = await _resolve_series_for_add(search_service, series)
+        if resolved is None:
+            await status_msg.edit_text(
+                Formatters.format_warning(
+                    f"Не удалось сопоставить <b>{html.escape(series.title)}</b> с Sonarr"
+                ),
+                parse_mode="HTML",
+            )
+            return
+
+        profiles, folders = await asyncio.gather(
+            add_service.get_sonarr_profiles(), add_service.get_sonarr_root_folders(),
+        )
+        if not profiles or not folders:
+            await status_msg.edit_text(
+                Formatters.format_error("В Sonarr не настроены профили качества или папки")
+            )
+            return
+
+        prefs = db_user.preferences
+        profile = AddService.resolve_profile(profiles, prefs.sonarr_quality_profile_id)
+        folder_path = AddService.resolve_root_folder(folders, prefs.sonarr_root_folder_id)
+
+        added, action = await add_service.add_series(
+            resolved, quality_profile_id=profile.id, root_folder_path=folder_path,
+        )
+        action.user_id = db_user.tg_id
+        await db.log_action(action)
+
+        if added is not None:
+            year_str = f" ({added.year})" if added.year else ""
+            await status_msg.edit_text(
+                f"✅ <b>{html.escape(added.title)}</b>{year_str} добавлен в Sonarr — ищу релиз...",
+                parse_mode="HTML",
+            )
+        else:
+            error_text = action.error_message or "Не удалось добавить сериал"
+            await status_msg.edit_text(f"❌ {html.escape(error_text)[:200]}")
+
+    except Exception as e:
+        logger.error(
+            "trending_add_series_failed", title=series.title, error=str(e), exc_info=True,
+        )
+        await status_msg.edit_text(
+            Formatters.format_error("Не удалось добавить"), parse_mode="HTML",
         )
 
 
@@ -406,7 +484,7 @@ async def _add_from_trending(
 async def handle_add_movie_from_trending(
     callback: CallbackQuery, callback_data: AddContentCB, db_user: User, db: Database
 ) -> None:
-    """Add a movie to Scryer from the trending list."""
+    """Add a movie to Radarr from the trending list."""
     await callback.answer()
     message = accessible_message(callback)
     if message is None:
@@ -422,16 +500,14 @@ async def handle_add_movie_from_trending(
         )
         return
 
-    await _add_from_trending(
-        callback, movie, ContentType.MOVIE, db_user, db, "⏳ Добавляю фильм в Scryer..."
-    )
+    await _add_movie_from_trending(callback, movie, db_user, db)
 
 
 @router.callback_query(AddContentCB.filter(F.kind == "series"))
 async def handle_add_series_from_trending(
     callback: CallbackQuery, callback_data: AddContentCB, db_user: User, db: Database
 ) -> None:
-    """Add a series to Scryer from the trending list."""
+    """Add a series to Sonarr from the trending list."""
     await callback.answer()
     message = accessible_message(callback)
     if message is None:
@@ -447,9 +523,7 @@ async def handle_add_series_from_trending(
         )
         return
 
-    await _add_from_trending(
-        callback, series, ContentType.SERIES, db_user, db, "⏳ Добавляю сериал в Scryer..."
-    )
+    await _add_series_from_trending(callback, series, db_user, db)
 
 
 # ---------------------------------------------------------------------------

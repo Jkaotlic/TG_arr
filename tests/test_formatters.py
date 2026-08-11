@@ -465,6 +465,49 @@ def test_search_result_list_item_shows_accepted_zero_score_from_arr():
     assert "отклон" not in out.lower()
 
 
+# ---------------------------------------------------------------------------
+# Task 13, carried-forward item 1: UserPreferences was split (Task 12) into
+# per-service radarr_*/sonarr_* fields — format_user_preferences must read
+# those, not the removed scryer_quality_profile_id/scryer_root_folder_id
+# (which would raise AttributeError at runtime, one of three sites the Task
+# 13 controller flagged as a live crash).
+# ---------------------------------------------------------------------------
+def test_format_user_preferences_shows_radarr_and_sonarr_profiles_independently():
+    from bot.models import QualityProfile, RootFolder, UserPreferences
+
+    prefs = UserPreferences(
+        radarr_quality_profile_id=7,
+        radarr_root_folder_id=1,
+        sonarr_quality_profile_id=9,
+        sonarr_root_folder_id=2,
+    )
+    radarr_profiles = [QualityProfile(id=7, name="4K/1080p Remux")]
+    radarr_folders = [RootFolder(id=1, path="G:\\radarr\\Films")]
+    sonarr_profiles = [QualityProfile(id=9, name="HD-1080p")]
+    sonarr_folders = [RootFolder(id=2, path="G:\\tv-sonarr\\Serials")]
+
+    text = Formatters.format_user_preferences(
+        prefs, radarr_profiles, radarr_folders, sonarr_profiles, sonarr_folders,
+    )
+
+    assert "4K/1080p Remux" in text
+    assert "HD-1080p" in text
+    # The two services' chosen folders must not be conflated — each path
+    # appears against its own service, proving independent id spaces.
+    assert "radarr" in text.lower() or "Radarr" in text
+    assert "Films" in text
+    assert "Serials" in text
+
+
+def test_format_user_preferences_unset_profile_shows_not_selected():
+    from bot.models import UserPreferences
+
+    prefs = UserPreferences()
+    text = Formatters.format_user_preferences(prefs, [], [], [], [])
+
+    assert "Не выбран" in text or "не выбран" in text.lower()
+
+
 def test_formatters_format_warning_is_still_a_class_method():
     """Fix round 1 (review finding, Critical): inserting the module-level
     `format_release` function without closing the `_SearchFormatters` class
@@ -509,3 +552,38 @@ def test_every_formatters_attribute_referenced_under_bot_resolves():
 
     missing = sorted(n for n in names if not hasattr(Formatters, n))
     assert not missing, f"Formatters is missing referenced attribute(s): {missing}"
+
+
+def test_every_prefs_attribute_referenced_under_bot_resolves():
+    """Same idea as the Formatters guard above, for `UserPreferences`.
+
+    Task 12 split `scryer_quality_profile_id`/`scryer_root_folder_id` into
+    per-service `radarr_*`/`sonarr_*` fields. Three call sites kept reading
+    the removed names (`bot/handlers/settings.py`, `bot/handlers/trending.py`,
+    `bot/ui/formatters/search.py`) — each one an `AttributeError` waiting for
+    a real request. This statically collects every `prefs.<name>` /
+    `....preferences.<name>` read anywhere under `bot/` and asserts it
+    resolves on `UserPreferences`, so a future field rename/removal that
+    misses a call site fails the suite instead of production.
+    """
+    import re
+    from pathlib import Path
+
+    from bot.models import UserPreferences
+
+    # Two shapes cover how a UserPreferences instance is conventionally named
+    # in this codebase: a local `prefs = db_user.preferences` (trending.py,
+    # formatters/search.py), or the chained `db_user.preferences.<name>`
+    # (settings.py and elsewhere) with no intermediate local variable.
+    pattern = re.compile(r"\b(?:prefs|preferences)\.([A-Za-z_][A-Za-z0-9_]*)")
+    bot_dir = Path(__file__).resolve().parent.parent / "bot"
+    names: set[str] = set()
+    for path in bot_dir.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        names.update(pattern.findall(text))
+
+    assert len(names) > 3, f"suspiciously few prefs.<name>/preferences.<name> references found: {names}"
+
+    instance = UserPreferences()
+    missing = sorted(n for n in names if not hasattr(instance, n))
+    assert not missing, f"UserPreferences is missing referenced attribute(s): {missing}"

@@ -1,10 +1,12 @@
 """Tests for database operations."""
 
 import asyncio
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import aiosqlite
 import pytest
 import pytest_asyncio
 
@@ -939,3 +941,132 @@ class TestSessionCache:
         assert from_cache.current_page == from_db.current_page
         assert from_cache.monitor_type == from_db.monitor_type
         assert from_cache.query == from_db.query
+
+
+# ---------------------------------------------------------------------------
+# Task 13, carried-forward item 2: real rows written during the ~2 weeks the
+# bot ran on Scryer may still hold `scryer_quality_profile_id`/
+# `scryer_root_folder_id` — keys `UserPreferences` no longer has (Task 12
+# split them into `radarr_*`/`sonarr_*`). pydantic's `extra="ignore"` would
+# otherwise drop them silently: no crash, but the user's chosen profile
+# reverts to "first available" (Radarr's first profile is id 1, "Any" — the
+# profile whose custom-format scores had to be repaired because it rewarded
+# exactly the releases the language policy rejects). `_migrate_to_v4` copies
+# the legacy value into BOTH `radarr_*` and `sonarr_*` on first connect.
+#
+# These tests write the pre-migration row with raw aiosqlite (not through
+# `Database`, which only ever writes the current field names) to reproduce
+# an actual Scryer-era row, then let a real `Database.connect()` run the
+# migration end to end — a mocked writer could not prove the migration
+# reads/writes real SQLite JSON1 correctly.
+# ---------------------------------------------------------------------------
+class TestLegacyPreferenceMigration:
+    """`_migrate_to_v4`: scryer_* preference keys -> radarr_*/sonarr_*."""
+
+    @staticmethod
+    async def _write_legacy_row(db_path: str, tg_id: int, preferences: dict, *, schema_version: int = 3) -> None:
+        """Seed a schema-v3 database with one user row, bypassing `Database`
+        entirely so the row is byte-for-byte what a Scryer-era build wrote.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        raw = await aiosqlite.connect(db_path)
+        try:
+            await raw.execute(
+                """
+                CREATE TABLE users (
+                    tg_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    first_name TEXT,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    preferences TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            await raw.execute(
+                "INSERT INTO users (tg_id, preferences, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (tg_id, json.dumps(preferences), now, now),
+            )
+            await raw.commit()
+            await raw.execute(f"PRAGMA user_version = {schema_version}")
+            await raw.commit()
+        finally:
+            await raw.close()
+
+    @pytest.mark.asyncio
+    async def test_legacy_scryer_keys_copy_into_both_arr_services(self, tmp_path):
+        db_path = str(tmp_path / "legacy.db")
+        await self._write_legacy_row(db_path, 999, {
+            "scryer_quality_profile_id": 4,
+            "scryer_root_folder_id": 2,
+            "preferred_resolution": "1080p",
+            "auto_grab_enabled": True,
+        })
+
+        database = Database(db_path)
+        await database.connect()
+        try:
+            user = await database.get_user(999)
+        finally:
+            await database.close()
+
+        assert user is not None
+        assert user.preferences.radarr_quality_profile_id == 4
+        assert user.preferences.sonarr_quality_profile_id == 4
+        assert user.preferences.radarr_root_folder_id == 2
+        assert user.preferences.sonarr_root_folder_id == 2
+        # Unrelated preferences already on the row must survive untouched.
+        assert user.preferences.preferred_resolution == "1080p"
+        assert user.preferences.auto_grab_enabled is True
+
+    @pytest.mark.asyncio
+    async def test_migration_does_not_clobber_an_already_set_arr_field(self, tmp_path):
+        """Defensive: if a `radarr_*` field is somehow already populated, the
+        migration must not overwrite it with the legacy value — only fill in
+        what is still unset."""
+        db_path = str(tmp_path / "legacy.db")
+        await self._write_legacy_row(db_path, 111, {
+            "scryer_quality_profile_id": 4,
+            "radarr_quality_profile_id": 9,
+        })
+
+        database = Database(db_path)
+        await database.connect()
+        try:
+            user = await database.get_user(111)
+        finally:
+            await database.close()
+
+        assert user.preferences.radarr_quality_profile_id == 9
+        assert user.preferences.sonarr_quality_profile_id == 4
+
+    @pytest.mark.asyncio
+    async def test_row_without_legacy_keys_is_left_alone(self, tmp_path):
+        db_path = str(tmp_path / "legacy.db")
+        await self._write_legacy_row(db_path, 222, {"preferred_resolution": "2160p"})
+
+        database = Database(db_path)
+        await database.connect()
+        try:
+            user = await database.get_user(222)
+        finally:
+            await database.close()
+
+        assert user.preferences.radarr_quality_profile_id is None
+        assert user.preferences.sonarr_quality_profile_id is None
+        assert user.preferences.preferred_resolution == "2160p"
+
+    @pytest.mark.asyncio
+    async def test_migration_runs_once_schema_version_reaches_4(self, tmp_path):
+        db_path = str(tmp_path / "legacy.db")
+        await self._write_legacy_row(db_path, 333, {"scryer_quality_profile_id": 1})
+
+        database = Database(db_path)
+        await database.connect()
+        try:
+            version = await database._get_schema_version()
+        finally:
+            await database.close()
+
+        assert version == 4

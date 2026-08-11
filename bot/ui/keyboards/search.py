@@ -11,7 +11,7 @@ class via normal attribute lookup either way.
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from bot.models import ContentType, SearchResult, SeriesInfo
+from bot.models import ContentType, MovieInfo, SearchResult, SeriesInfo
 from bot.ui.callbacks import PageCB, ReleaseCB, SeasonPresetCB
 from bot.ui.keyboards._constants import CallbackData
 
@@ -213,39 +213,50 @@ class _SearchKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
+    def _title_action_ref(title) -> tuple[str, str]:
+        """(kind, resource_id) for `TitleActionCB` — "movie"/"series" and the
+        Radarr/Sonarr id as a string. Two separate fields, not one
+        colon-joined "movie:15" — see `TitleActionCB`'s docstring for why
+        (aiogram's CallbackData uses ':' as its own field separator).
+        """
+        if isinstance(title, MovieInfo):
+            return "movie", str(title.radarr_id)
+        return "series", str(title.sonarr_id)
+
+    @staticmethod
     def title_actions(title) -> InlineKeyboardMarkup:
-        """Manage a catalog title — monitoring and removal (2026-07-29).
+        """Manage a library title — monitoring and removal (2026-07-29).
 
         The monitoring button is a toggle: it shows the action, not the state,
         so the user never has to work out what pressing it will do.
         """
         from bot.ui.callbacks import TitleActionCB
 
-        title_id = getattr(title, "scryer_id", "") or ""
+        kind, title_id = _SearchKeyboards._title_action_ref(title)
         monitored = bool(getattr(title, "monitored", False))
         toggle = (
             InlineKeyboardButton(
                 text="🔕 Снять мониторинг",
-                callback_data=TitleActionCB(action="unmon", title_id=title_id).pack(),
+                callback_data=TitleActionCB(action="unmon", kind=kind, title_id=title_id).pack(),
             )
             if monitored
             else InlineKeyboardButton(
                 text="🔔 Включить мониторинг",
-                callback_data=TitleActionCB(action="mon", title_id=title_id).pack(),
+                callback_data=TitleActionCB(action="mon", kind=kind, title_id=title_id).pack(),
             )
         )
         return InlineKeyboardMarkup(inline_keyboard=[
             [toggle],
             [InlineKeyboardButton(
                 text="🗑 Удалить из каталога",
-                callback_data=TitleActionCB(action="delete", title_id=title_id).pack(),
+                callback_data=TitleActionCB(action="delete", kind=kind, title_id=title_id).pack(),
             )],
             [InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.CANCEL)],
         ])
 
     @staticmethod
     def title_choices(titles: list, limit: int = 5) -> InlineKeyboardMarkup:
-        """Ask which catalog entry was meant (audit 2026-07-30, BUG-05).
+        """Ask which library entry was meant (audit 2026-07-30, BUG-05).
 
         `/title Frozen` matches Frozen, Frozen Fever and Frozen II. Picking the
         first silently is how "Холодное сердце" once became "Heart of Stone" —
@@ -258,24 +269,23 @@ class _SearchKeyboards:
         for title in titles[:limit]:
             year = getattr(title, "year", None)
             label = f"{getattr(title, 'title', '?')}{f' ({year})' if year else ''}"
+            kind, title_id = _SearchKeyboards._title_action_ref(title)
             rows.append([InlineKeyboardButton(
                 text=label[:60],
-                callback_data=TitleActionCB(
-                    action="pick", title_id=getattr(title, "scryer_id", "") or ""
-                ).pack(),
+                callback_data=TitleActionCB(action="pick", kind=kind, title_id=title_id).pack(),
             )])
         rows.append([InlineKeyboardButton(text="◀️ Отмена", callback_data=CallbackData.CANCEL)])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
-    def confirm_title_delete(title_id: str) -> InlineKeyboardMarkup:
+    def confirm_title_delete(kind: str, title_id: str) -> InlineKeyboardMarkup:
         """Second step of a destructive action — never one tap away."""
         from bot.ui.callbacks import TitleActionCB
 
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
                 text="🗑 Да, удалить",
-                callback_data=TitleActionCB(action="delconf", title_id=title_id).pack(),
+                callback_data=TitleActionCB(action="delconf", kind=kind, title_id=title_id).pack(),
             )],
             [InlineKeyboardButton(text="◀️ Отмена", callback_data=CallbackData.CANCEL)],
         ])

@@ -2,7 +2,6 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import date, timedelta
 from typing import Any
 
 import structlog
@@ -10,9 +9,8 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from bot.clients.registry import get_lidarr, get_scryer
+from bot.clients.registry import get_lidarr, get_radarr, get_sonarr
 from bot.handlers.common import accessible_message, swallow_not_modified
-from bot.models import ContentType
 from bot.ui.callbacks import CalCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -30,31 +28,39 @@ _MAX_USER_PERIOD_ENTRIES = 100
 _period_lock = asyncio.Lock()
 
 
-def _split_scryer_calendar(items: list) -> tuple[list[dict], list[dict]]:
-    """Split Scryer's calendar into the (episodes, movies) shape the formatter
-    expects. Scryer has one `calendarEpisodes` query covering every facet, so
-    the movie rows are separated out by their facet here.
+def _calendar_date_key(item: dict[str, Any]) -> str:
+    """The date any calendar entry is sorted by.
+
+    Radarr's movie dicts (`RadarrClient.get_calendar`) carry `release_date`
+    (already resolved from digital/physical/cinema); Sonarr's episode dicts
+    (`SonarrClient.get_calendar`) carry `air_date`. Checking both, in that
+    order, lets one sort key work for a merged list of either shape.
     """
-    episodes: list[dict] = []
-    movies: list[dict] = []
-    for item in items:
-        if item.content_type == ContentType.MOVIE:
-            movies.append({
-                "title": item.title_name,
-                "release_date": item.air_date or "",
-                "has_file": False,
-                "is_available": False,
-            })
-            continue
-        episodes.append({
-            "series_title": item.title_name,
-            "title": item.episode_title or "",
-            "season": item.season_number or 0,
-            "episode": item.episode_number or 0,
-            "air_date": item.air_date or "",
-            "has_file": False,
-        })
-    return episodes, movies
+    return (
+        item.get("release_date")
+        or item.get("air_date")
+        or item.get("digital_release")
+        or item.get("physical_release")
+        or item.get("in_cinemas")
+        or ""
+    )
+
+
+async def _collect_calendar(radarr, sonarr, days: int) -> list[dict[str, Any]]:
+    """Fetch Radarr's and Sonarr's calendars concurrently, merged and sorted
+    by date into one list.
+
+    A small, pure, directly-testable step — no per-source error tolerance
+    here (a failing client's exception propagates to the caller); that
+    tolerance lives in `_fetch_and_send_calendar`, which needs to know WHICH
+    source failed so it can report it by name.
+    """
+    movies, episodes = await asyncio.gather(
+        radarr.get_calendar(days=days),
+        sonarr.get_calendar(days=days),
+    )
+    combined = list(movies) + list(episodes)
+    return sorted(combined, key=_calendar_date_key)
 
 
 async def _fetch_and_send_calendar(
@@ -62,27 +68,23 @@ async def _fetch_and_send_calendar(
     *,
     answer_func: Callable[..., Awaitable[Any]],
 ) -> None:
-    """Fetch calendar data from Scryer (+ Lidarr for music) and send/edit."""
-    scryer = await get_scryer()
+    """Fetch calendar data from Radarr/Sonarr (+ Lidarr for music) and send/edit."""
+    radarr = await get_radarr()
+    sonarr = await get_sonarr()
     lidarr = await get_lidarr()
 
-    episodes: list[dict] = []
-    movies: list[dict] = []
-    albums: list[dict] = []
     errors: list[str] = []
 
     # SEC-21: text is sent with parse_mode=HTML — escape exception strings.
     import html as _html
 
-    today = date.today()
-    end = today + timedelta(days=days)
-
-    # PERF-03/LOGIC-05: fetch the Scryer/Lidarr calendars concurrently.
+    # PERF-03/LOGIC-05: fetch the Radarr/Sonarr/Lidarr calendars concurrently.
     # return_exceptions=True keeps the per-source error tolerance: a failing
     # source contributes an empty list + a warning entry while the other
     # still renders.
     fetchers: list[tuple[str, Any]] = [
-        ("Scryer", scryer.get_calendar(today.isoformat(), end.isoformat())),
+        ("Radarr", radarr.get_calendar(days=days)),
+        ("Sonarr", sonarr.get_calendar(days=days)),
     ]
     if lidarr is not None:
         fetchers.append(("Lidarr", lidarr.get_calendar(days=days)))
@@ -100,7 +102,12 @@ async def _fetch_and_send_calendar(
         else:
             payloads[source] = list(result)
 
-    episodes, movies = _split_scryer_calendar(payloads.get("Scryer", []))
+    # Radarr's calendar rows are already movie-shaped, Sonarr's already
+    # episode-shaped — no split step needed (that was Scryer's single
+    # calendarEpisodes query covering every facet; each *arr client answers
+    # its own facet directly).
+    movies = payloads.get("Radarr", [])
+    episodes = payloads.get("Sonarr", [])
     albums = payloads.get("Lidarr", [])
 
     text = Formatters.format_calendar(episodes, movies, days=days, albums=albums)

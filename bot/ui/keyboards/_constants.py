@@ -14,7 +14,8 @@ class CallbackData:
     # Content type selection
     TYPE_MOVIE = "type:movie"
     TYPE_SERIES = "type:series"
-    # Anime is a separate Scryer facet with its own library and quality profile.
+    # Anime maps onto Sonarr's own seriesType ("anime" vs "standard") rather
+    # than a separate library — see ContentType.sonarr_series_type.
     TYPE_ANIME = "type:anime"
     TYPE_MUSIC = "type:music"
 

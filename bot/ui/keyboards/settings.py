@@ -60,11 +60,22 @@ class _SettingsKeyboards:
 
     @staticmethod
     def settings_menu(lidarr_enabled: bool = False) -> InlineKeyboardMarkup:
-        """Create main settings menu keyboard."""
+        """Create main settings menu keyboard.
+
+        Rollback 2026-08-10 (Task 13): one Radarr row and one Sonarr row
+        instead of a shared "Scryer" pair — Radarr's and Sonarr's profile/
+        folder ids are independent sequences (live measurement: both start
+        at 1/2 but point at different paths), so a single shared preference
+        could silently apply a movie's folder/profile choice to a series.
+        """
         rows = [
             [
-                InlineKeyboardButton(text="🗂 Профиль Scryer", callback_data="settings:scryer_profile"),
-                InlineKeyboardButton(text="📁 Папка Scryer", callback_data="settings:scryer_folder"),
+                InlineKeyboardButton(text="🎬 Профиль Radarr", callback_data="settings:radarr_profile"),
+                InlineKeyboardButton(text="📁 Папка Radarr", callback_data="settings:radarr_folder"),
+            ],
+            [
+                InlineKeyboardButton(text="📺 Профиль Sonarr", callback_data="settings:sonarr_profile"),
+                InlineKeyboardButton(text="📁 Папка Sonarr", callback_data="settings:sonarr_folder"),
             ],
         ]
         if lidarr_enabled:

@@ -314,10 +314,12 @@ class MetadataProfile(BaseModel):
 
 
 class QualityProfile(BaseModel):
-    """Quality profile from Scryer or Lidarr.
+    """Quality profile from Radarr, Sonarr or Lidarr.
 
-    Scryer profile ids are slugs ("4k", "1080p"); Lidarr's are integers — hence
-    the union type. Compare with `str(...)` when matching a stored preference.
+    All three *arr services use plain integer ids; the union type is a
+    leftover from the Scryer migration (its profile ids were slugs like
+    "4k"/"1080p"). Compare with `str(...)` when matching a stored preference
+    — cheap and robust either way.
     """
 
     id: Union[int, str]
@@ -325,10 +327,11 @@ class QualityProfile(BaseModel):
 
 
 class RootFolder(BaseModel):
-    """Root folder from Scryer or Lidarr.
+    """Root folder from Radarr, Sonarr or Lidarr.
 
-    Scryer's `RootFolderPayload` has no id of its own — the path *is* the
-    identity, so the client mirrors the path into `id`.
+    All three *arr services carry their own integer id. The union type is a
+    leftover from the Scryer migration, whose `RootFolderPayload` had no id
+    of its own (the client mirrored the path into `id` instead).
     """
 
     id: Union[int, str]

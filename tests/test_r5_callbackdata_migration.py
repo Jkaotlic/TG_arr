@@ -176,7 +176,7 @@ async def test_handle_add_movie_from_trending_reads_callback_data():
     db.log_action = AsyncMock()
     db_user = MagicMock()
     db_user.tg_id = 1
-    db_user.preferences = MagicMock(scryer_quality_profile_id=None, scryer_root_folder_id=None)
+    db_user.preferences = MagicMock(radarr_quality_profile_id=None, radarr_root_folder_id=None)
 
     cb = MagicMock()
     cb.data = None
@@ -186,21 +186,23 @@ async def test_handle_add_movie_from_trending_reads_callback_data():
     status_msg.edit_text = AsyncMock()
     cb.message.answer = AsyncMock(return_value=status_msg)
 
-    add_service = MagicMock()
-    add_service.get_quality_profiles = AsyncMock(return_value=[MagicMock(id=1)])
-    add_service.get_root_folders = AsyncMock(return_value=[MagicMock(path="/movies")])
+    added = MovieInfo(title="The Matrix", tmdb_id=603, year=1999, radarr_id=42)
     action = MagicMock(success=True, error_message=None)
-    add_service.add_and_queue_best = AsyncMock(return_value=(True, action, "Добавлено"))
+    add_service = MagicMock()
+    add_service.get_radarr_profiles = AsyncMock(return_value=[MagicMock(id=1)])
+    add_service.get_radarr_root_folders = AsyncMock(return_value=[MagicMock(path="/movies")])
+    add_service.add_movie = AsyncMock(return_value=(added, action))
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(trending, "AddService", MagicMock(return_value=add_service))
-        mp.setattr(trending, "get_scryer", AsyncMock(return_value=None))
+        mp.setattr(trending, "get_radarr", AsyncMock(return_value=None))
+        mp.setattr(trending, "get_sonarr", AsyncMock(return_value=None))
         mp.setattr(trending, "get_qbittorrent", AsyncMock(return_value=None))
 
         await trending.handle_add_movie_from_trending(cb, AddContentCB(kind="movie", tmdb_id=603), db_user, db)
 
     status_msg.edit_text.assert_awaited()
-    assert "Матрица" in status_msg.edit_text.call_args.args[0] or "Matrix" in status_msg.edit_text.call_args.args[0]
+    assert "Matrix" in status_msg.edit_text.call_args.args[0]
     trending._trending_movies_cache.pop(603, None)
     trending._trending_movies_inserted_at.pop(603, None)
 
@@ -236,13 +238,18 @@ def test_quality_profiles_keyboard_uses_typed_cb():
 
 @pytest.mark.asyncio
 async def test_handle_settings_set_reads_callback_data():
+    """Radarr and Sonarr keep independent id spaces (measured live: both have
+    root folders 1/2 pointing at different paths), so this exercises a real
+    per-service field -- ``sonarr_quality_profile_id`` -- not a rename of the
+    old shared Scryer key."""
     from bot.handlers import settings as settings_mod
     from bot.ui.callbacks import SettingCB
 
     db = AsyncMock()
     db.update_user_preference = AsyncMock()
     db_user = MagicMock()
-    db_user.preferences = MagicMock(scryer_quality_profile_id=None)
+    db_user.tg_id = 1
+    db_user.preferences = MagicMock(sonarr_quality_profile_id=None)
 
     cb = MagicMock()
     cb.data = None
@@ -256,12 +263,13 @@ async def test_handle_settings_set_reads_callback_data():
             AsyncMock(return_value=("text", MagicMock())),
         )
         await settings_mod.handle_settings_set(
-            cb, SettingCB(key="scryer_quality_profile_id", value="9"), db_user, db
+            cb, SettingCB(key="sonarr_quality_profile_id", value="9"), db_user, db
         )
 
-    # Scryer profile ids are slugs, so the value stays a string end-to-end.
-    db.update_user_preference.assert_awaited_with(db_user.tg_id, "scryer_quality_profile_id", "9")
-    assert db_user.preferences.scryer_quality_profile_id == "9"
+    # Radarr/Sonarr/Lidarr profile and folder ids are plain integers (unlike
+    # Scryer's slug-based ids), so handle_settings_set casts value -> int.
+    db.update_user_preference.assert_awaited_with(db_user.tg_id, "sonarr_quality_profile_id", 9)
+    assert db_user.preferences.sonarr_quality_profile_id == 9
 
 
 def test_resolution_and_auto_grab_keyboards_use_typed_setting_cb():

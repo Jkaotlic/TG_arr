@@ -27,13 +27,13 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from bot.clients.registry import (
     get_lidarr,
     get_qbittorrent,
-    get_scryer,
-    get_slskd,
+    get_radarr,
+    get_sonarr,
 )
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import accessible_message
-from bot.models import ContentType, User
+from bot.models import User
 from bot.services.add_service import AddService
 from bot.ui.callbacks import SettingCB
 from bot.ui.formatters import Formatters
@@ -47,32 +47,38 @@ router = Router()
 async def _get_add_service() -> AddService:
     """Get add service instance using singleton clients from registry."""
     return AddService(
-        await get_scryer(),
+        await get_radarr(),
+        await get_sonarr(),
         qbittorrent=await get_qbittorrent(),
         lidarr=await get_lidarr(),
-        slskd=await get_slskd(),
     )
 
 
 async def _render_settings_menu(db_user: User) -> tuple[str, InlineKeyboardMarkup]:
     """Build the settings-menu text + keyboard.
 
-    Migration 2026-07-28: one Scryer profile/folder pair replaces the former
-    Radarr+Sonarr quartet — Scryer applies a per-library profile itself, so the
-    bot only carries an optional override.
+    Rollback 2026-08-10 (Task 13): Radarr and Sonarr have independent id
+    spaces (live measurement: both have root folders 1/2 pointing at
+    different paths) — back to a profile+folder pair PER service, replacing
+    the interim single Scryer-shaped pair.
 
-    PERF-07c: the two lookups are independent calls — fire them concurrently.
+    PERF-07c: the four lookups (Radarr profiles/folders, Sonarr
+    profiles/folders) are independent calls — fire them concurrently.
     """
     import asyncio
 
     add_service = await _get_add_service()
 
-    profiles, folders = await asyncio.gather(
-        add_service.get_quality_profiles(),
-        add_service.get_root_folders(ContentType.MOVIE),
+    radarr_profiles, radarr_folders, sonarr_profiles, sonarr_folders = await asyncio.gather(
+        add_service.get_radarr_profiles(),
+        add_service.get_radarr_root_folders(),
+        add_service.get_sonarr_profiles(),
+        add_service.get_sonarr_root_folders(),
     )
 
-    text = Formatters.format_user_preferences(db_user.preferences, profiles, folders)
+    text = Formatters.format_user_preferences(
+        db_user.preferences, radarr_profiles, radarr_folders, sonarr_profiles, sonarr_folders,
+    )
     keyboard = Keyboards.settings_menu(lidarr_enabled=get_settings().lidarr_enabled)
     return text, keyboard
 
@@ -137,26 +143,40 @@ _SETTINGS_MAP: dict[str, _SettingsEntry] = {
     entry.menu_callback: entry
     for entry in (
         _SettingsEntry(
-            menu_callback="settings:scryer_profile",
-            getter=lambda svc: svc.get_quality_profiles(),
+            menu_callback="settings:radarr_profile",
+            getter=lambda svc: svc.get_radarr_profiles(),
             keyboard_builder=Keyboards.quality_profiles,
-            pref_key="scryer_quality_profile_id",
-            not_found_msg="Профили качества в Scryer не найдены",
-            picker_title=(
-                "<b>Выберите профиль качества Scryer:</b>\n\n"
-                "<i>По умолчанию используется профиль библиотеки "
-                "(4K Remux + 1080P Fallback для кино и сериалов, 1080p для аниме).</i>"
-            ),
-            success_msg="Профиль Scryer обновлён!",
+            pref_key="radarr_quality_profile_id",
+            not_found_msg="Профили качества в Radarr не найдены",
+            picker_title="<b>Выберите профиль качества Radarr:</b>",
+            success_msg="Профиль Radarr обновлён!",
         ),
         _SettingsEntry(
-            menu_callback="settings:scryer_folder",
-            getter=lambda svc: svc.get_root_folders(ContentType.MOVIE),
+            menu_callback="settings:radarr_folder",
+            getter=lambda svc: svc.get_radarr_root_folders(),
             keyboard_builder=Keyboards.root_folders,
-            pref_key="scryer_root_folder_id",
-            not_found_msg="Корневые папки в Scryer не найдены",
-            picker_title="<b>Выберите корневую папку Scryer:</b>",
-            success_msg="Папка Scryer обновлена!",
+            pref_key="radarr_root_folder_id",
+            not_found_msg="Корневые папки в Radarr не найдены",
+            picker_title="<b>Выберите корневую папку Radarr:</b>",
+            success_msg="Папка Radarr обновлена!",
+        ),
+        _SettingsEntry(
+            menu_callback="settings:sonarr_profile",
+            getter=lambda svc: svc.get_sonarr_profiles(),
+            keyboard_builder=Keyboards.quality_profiles,
+            pref_key="sonarr_quality_profile_id",
+            not_found_msg="Профили качества в Sonarr не найдены",
+            picker_title="<b>Выберите профиль качества Sonarr:</b>",
+            success_msg="Профиль Sonarr обновлён!",
+        ),
+        _SettingsEntry(
+            menu_callback="settings:sonarr_folder",
+            getter=lambda svc: svc.get_sonarr_root_folders(),
+            keyboard_builder=Keyboards.root_folders,
+            pref_key="sonarr_root_folder_id",
+            not_found_msg="Корневые папки в Sonarr не найдены",
+            picker_title="<b>Выберите корневую папку Sonarr:</b>",
+            success_msg="Папка Sonarr обновлена!",
         ),
         _SettingsEntry(
             menu_callback="settings:lidarr_profile",
@@ -253,18 +273,16 @@ async def handle_settings_set(
 
     entry = _SETTINGS_SET_MAP[callback_data.key]
 
-    # Migration 2026-07-28: Scryer ids are slugs ("4k") and root-folder paths,
-    # not integers — coercing everything to int rejected every Scryer pick.
-    # Lidarr ids are still numeric and must stay numeric (its API rejects
-    # strings), so the expected type follows the preference key.
-    if entry.pref_key.startswith("lidarr_"):
-        try:
-            value: object = int(callback_data.value)
-        except ValueError:
-            await callback.answer("Неверное значение", show_alert=True)
-            return
-    else:
-        value = callback_data.value
+    # Rollback 2026-08-10: every entry in _SETTINGS_MAP now picks a
+    # Radarr/Sonarr/Lidarr profile or root-folder id — all plain integers
+    # (unlike Scryer's slug/path-based ids, which needed a mixed-type path
+    # here). Resolution/auto-grab have their own dedicated handlers below and
+    # never reach this one.
+    try:
+        value: object = int(callback_data.value)
+    except ValueError:
+        await callback.answer("Неверное значение", show_alert=True)
+        return
 
     try:
         await db.update_user_preference(db_user.tg_id, entry.pref_key, value)

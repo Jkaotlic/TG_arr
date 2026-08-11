@@ -749,3 +749,57 @@ def test_resolve_root_folder_prefers_the_default_when_unset():
 def test_resolve_root_folder_raises_without_folders():
     with pytest.raises(ValueError):
         AddService.resolve_root_folder([], None)
+
+
+# ---------------------------------------------------------------------------
+# Task 13: Radarr/Sonarr profile/folder convenience getters, mirroring the
+# get_lidarr_* shape settings.py's table-driven picker already relies on —
+# so /settings can drive Radarr and Sonarr through the same _SettingsEntry
+# mechanism instead of a one-off direct-client path for just these two.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_get_radarr_profiles_delegates_to_the_radarr_client():
+    radarr = AsyncMock()
+    radarr.get_quality_profiles.return_value = ["p1"]
+    service = _service(radarr=radarr)
+
+    profiles = await service.get_radarr_profiles()
+
+    assert profiles == ["p1"]
+    radarr.get_quality_profiles.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_radarr_root_folders_delegates_to_the_radarr_client():
+    radarr = AsyncMock()
+    radarr.get_root_folders.return_value = ["f1"]
+    service = _service(radarr=radarr)
+
+    folders = await service.get_radarr_root_folders()
+
+    assert folders == ["f1"]
+    radarr.get_root_folders.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_sonarr_profiles_delegates_to_the_sonarr_client():
+    sonarr = AsyncMock()
+    sonarr.get_quality_profiles.return_value = ["p2"]
+    service = _service(sonarr=sonarr)
+
+    profiles = await service.get_sonarr_profiles()
+
+    assert profiles == ["p2"]
+    sonarr.get_quality_profiles.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_sonarr_root_folders_delegates_to_the_sonarr_client():
+    sonarr = AsyncMock()
+    sonarr.get_root_folders.return_value = ["f2"]
+    service = _service(sonarr=sonarr)
+
+    folders = await service.get_sonarr_root_folders()
+
+    assert folders == ["f2"]
+    sonarr.get_root_folders.assert_awaited_once()

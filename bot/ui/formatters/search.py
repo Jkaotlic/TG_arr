@@ -427,31 +427,42 @@ class _SearchFormatters:
     @staticmethod
     def format_user_preferences(
         prefs: UserPreferences,
-        profiles: list[QualityProfile],
-        folders: list[RootFolder],
+        radarr_profiles: list[QualityProfile],
+        radarr_folders: list[RootFolder],
+        sonarr_profiles: list[QualityProfile],
+        sonarr_folders: list[RootFolder],
     ) -> str:
         """Format user preferences for settings display.
 
-        Migration 2026-07-28: one Scryer profile/folder pair instead of the
-        Radarr+Sonarr quartet. Both are *overrides* — left unset, Scryer applies
-        each library's own profile, which is the recommended setup.
+        Rollback 2026-08-10 (Task 13): Radarr and Sonarr have independent id
+        spaces — live measurement, both have root folders 1/2 pointing at
+        different paths (`G:\\radarr\\Films` vs `G:\\tv-sonarr\\Serials`) —
+        so each service's profile/folder is resolved and shown separately,
+        replacing the interim single Scryer-shaped pair.
         """
         lines = ["<b>⚙️ Ваши настройки</b>\n"]
 
-        lines.append("<b>🗂 Scryer (кино / сериалы / аниме):</b>")
-        profile = next(
-            (p for p in profiles if str(p.id) == str(prefs.scryer_quality_profile_id)),
+        lines.append("<b>🎬 Radarr (фильмы):</b>")
+        rp = next(
+            (p for p in radarr_profiles if str(p.id) == str(prefs.radarr_quality_profile_id)),
             None,
         )
-        lines.append(
-            f"  Профиль: {_e(profile.name) if profile else 'По умолчанию (профиль библиотеки)'}"
+        lines.append(f"  Профиль: {_e(rp.name) if rp else 'Не выбран'}")
+        rf = next(
+            (f for f in radarr_folders if str(f.id) == str(prefs.radarr_root_folder_id)), None
         )
-        folder = next(
-            (f for f in folders if str(f.id) == str(prefs.scryer_root_folder_id)), None
+        lines.append(f"  Папка: {_e(rf.path) if rf else 'Не выбрана'}")
+
+        lines.append("\n<b>📺 Sonarr (сериалы / аниме):</b>")
+        sp = next(
+            (p for p in sonarr_profiles if str(p.id) == str(prefs.sonarr_quality_profile_id)),
+            None,
         )
-        lines.append(
-            f"  Папка: {_e(folder.path) if folder else 'По умолчанию (папка библиотеки)'}"
+        lines.append(f"  Профиль: {_e(sp.name) if sp else 'Не выбран'}")
+        sf = next(
+            (f for f in sonarr_folders if str(f.id) == str(prefs.sonarr_root_folder_id)), None
         )
+        lines.append(f"  Папка: {_e(sf.path) if sf else 'Не выбрана'}")
 
         # General preferences
         lines.append("\n<b>🎯 Общие:</b>")

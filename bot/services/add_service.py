@@ -312,6 +312,29 @@ class AddService:
         self.qbittorrent = qbittorrent
         self.lidarr = lidarr
 
+    # ------------------------------------------------------ radarr / sonarr
+    async def get_radarr_profiles(self) -> list[QualityProfile]:
+        """Radarr quality profiles, via `ArrBaseClient.get_quality_profiles`.
+
+        Task 13: mirrors the `get_lidarr_*` shape below so settings.py's
+        table-driven picker (`_SettingsEntry.getter`) can drive Radarr and
+        Sonarr the same way it already drives Lidarr, instead of a one-off
+        direct-client path for just these two.
+        """
+        return await self.radarr.get_quality_profiles()
+
+    async def get_radarr_root_folders(self) -> list[RootFolder]:
+        """Radarr root folders, via `ArrBaseClient.get_root_folders`."""
+        return await self.radarr.get_root_folders()
+
+    async def get_sonarr_profiles(self) -> list[QualityProfile]:
+        """Sonarr quality profiles, via `ArrBaseClient.get_quality_profiles`."""
+        return await self.sonarr.get_quality_profiles()
+
+    async def get_sonarr_root_folders(self) -> list[RootFolder]:
+        """Sonarr root folders, via `ArrBaseClient.get_root_folders`."""
+        return await self.sonarr.get_root_folders()
+
     # ------------------------------------------------------------- lidarr
     async def get_lidarr_profiles(self) -> list[QualityProfile]:
         """Get Lidarr quality profiles (empty list if Lidarr is not configured)."""

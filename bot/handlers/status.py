@@ -13,33 +13,20 @@ from bot.clients.registry import (
     get_deezer,
     get_emby,
     get_lidarr,
-    get_navidrome,
+    get_prowlarr,
     get_qbittorrent,
-    get_scryer,
-    get_slskd,
+    get_radarr,
+    get_sonarr,
     get_torrserver,
 )
 from bot.models import (
-    ContentType,
     QBittorrentStatus,
     SystemStatus,
-    VIDEO_CONTENT_TYPES,
     format_bytes,
     format_speed,
 )
 from bot.ui.formatters import Formatters
 from bot.ui.menu import MENU_STATUS
-
-# Rollback 2026-08-10 (Task 12, collection-unblock only): `ScryerHealth` was
-# deleted from bot.models in Task 2. This whole file is still Scryer-shaped
-# (get_scryer(), scryer.get_root_folders(content_type), scryer.get_wanted())
-# and belongs to Task 13 to repoint properly — every path through it already
-# raises at runtime via the get_scryer() bridge. This module-level name was
-# the one thing actually blocking collection: `bot/handlers/__init__.py`
-# imports every handler module unconditionally, so an ImportError here failed
-# `import bot.handlers.search` too, not just /status. Fixed here ONLY so the
-# package imports; the Scryer-shaped body below is untouched.
-ScryerHealth = Any
 
 logger = structlog.get_logger()
 router = Router()
@@ -49,7 +36,6 @@ def _format_health(
     statuses: list[SystemStatus],
     disks: list[tuple[str, int | None]],
     qbit: QBittorrentStatus | None,
-    scryer_health: "ScryerHealth | None" = None,
 ) -> str:
     """Feature #7: render the /health dashboard from already-gathered data.
 
@@ -60,25 +46,6 @@ def _format_health(
         icon = "✅" if s.available else "❌"
         ver = f" <code>{html.escape(s.version)}</code>" if s.version else ""
         lines.append(f"{icon} {html.escape(s.service)}{ver}")
-
-    if scryer_health is not None:
-        lines.append("")
-        lines.append("🗂 <b>Каталог Scryer</b>")
-        lines.append(
-            f"  🎬 {scryer_health.titles_movie} · 📺 {scryer_health.titles_series} · "
-            f"🎌 {scryer_health.titles_anime} (следим за {scryer_health.monitored_titles})"
-        )
-        if scryer_health.indexers:
-            lines.append("")
-            lines.append("🔎 <b>Индексеры (24ч)</b>")
-            for stat in scryer_health.indexers:
-                # A tracker that fails most queries is the usual root cause of
-                # "почему ничего не находится" — surface it rather than hide it.
-                icon = "⚠️" if stat.failure_rate > 0.5 else "✅"
-                lines.append(
-                    f"  {icon} {html.escape(stat.name)}: "
-                    f"{stat.successful_24h}/{stat.queries_24h} ок, {stat.failed_24h} ошибок"
-                )
 
     if disks:
         lines.append("")
@@ -101,29 +68,40 @@ def _format_health(
 async def _collect_statuses(include_deezer: bool) -> list[SystemStatus]:
     """LOGIC-17: shared service-check fan-out for cmd_status/cmd_health.
 
+    Radarr, Sonarr and Prowlarr are non-optional (registry.get_radarr/
+    get_sonarr/get_prowlarr always return a client) and are always checked;
+    Lidarr/qBittorrent/Emby/TorrServer are checked only when configured.
+
+    Rollback 2026-08-10: Lidarr and Prowlarr both answer on `/api/v1`
+    (`LidarrClient._api_prefix`), Radarr/Sonarr on `/api/v3` — a v3 probe
+    against a healthy Lidarr reports "API DOWN" on a perfectly reachable
+    service. `check_service` below just calls each client's own
+    `check_connection()`, so it never has to know this itself; the client
+    picks its own prefix.
+
     Note: `include_deezer` is only ever True from cmd_status — /health
     deliberately omits Deezer (it doesn't affect grab/download health and
     keeps the dashboard focused on infra the user acts on).
     """
-    scryer = await get_scryer()
+    radarr = await get_radarr()
+    sonarr = await get_sonarr()
+    prowlarr = await get_prowlarr()
     lidarr = await get_lidarr()
-    slskd = await get_slskd()
-    navidrome = await get_navidrome()
     qbittorrent = await get_qbittorrent()
     emby = await get_emby()
+    torrserver = await get_torrserver()
 
-    checks = [check_service(scryer, "Scryer")]
+    checks = [
+        check_service(radarr, "Radarr"),
+        check_service(sonarr, "Sonarr"),
+        check_service(prowlarr, "Prowlarr"),
+    ]
     if lidarr:
         checks.append(check_service(lidarr, "Lidarr"))
-    if slskd:
-        checks.append(check_service(slskd, "slskd"))
-    if navidrome:
-        checks.append(check_service(navidrome, "Navidrome"))
     if qbittorrent:
         checks.append(check_service(qbittorrent, "qBittorrent"))
     if emby:
         checks.append(check_service(emby, "Emby"))
-    torrserver = await get_torrserver()
     if torrserver:
         checks.append(check_service(torrserver, "TorrServer"))
     if include_deezer:
@@ -156,36 +134,22 @@ async def cmd_status(message: Message) -> None:
         await status_msg.edit_text(Formatters.format_error("Проверка статуса не удалась"))
 
 
-async def _gather_disks(scryer, lidarr) -> list[tuple[str, int | None]]:
-    """Collect (root_folder_path, free_space), de-duped by path.
-
-    Scryer exposes root folders per facet (movie/series/anime libraries live on
-    different roots), so all three are queried; Lidarr adds the music root.
-    Scryer's `RootFolderPayload` carries no free-space figure, so those entries
-    render as "N/A" — the number is still available from qBittorrent below.
+async def _gather_disks(*clients) -> list[tuple[str, int | None]]:
+    """Collect (root_folder_path, free_space) across *arr clients, de-duped
+    by path. `None` clients (e.g. Lidarr not configured) are skipped.
     """
     seen: dict[str, int | None] = {}
 
-    async def add_scryer(content_type: ContentType) -> None:
-        try:
-            for folder in await scryer.get_root_folders(content_type):
-                seen.setdefault(folder.path, folder.free_space)
-        except Exception as e:
-            logger.warning("root_folders_fetch_failed", service="scryer", error=str(e))
-
-    async def add_lidarr() -> None:
-        if lidarr is None:
+    async def add(client) -> None:
+        if client is None:
             return
         try:
-            for folder in await lidarr.get_root_folders():
+            for folder in await client.get_root_folders():
                 seen.setdefault(folder.path, folder.free_space)
         except Exception as e:
-            logger.warning("root_folders_fetch_failed", service="lidarr", error=str(e))
+            logger.warning("root_folders_fetch_failed", error=str(e))
 
-    await asyncio.gather(
-        *(add_scryer(ct) for ct in VIDEO_CONTENT_TYPES),
-        add_lidarr(),
-    )
+    await asyncio.gather(*(add(c) for c in clients))
     return list(seen.items())
 
 
@@ -198,20 +162,15 @@ async def cmd_health(message: Message) -> None:
     """
     status_msg = await message.answer("🩺 Собираю состояние...")
 
-    scryer = await get_scryer()
+    radarr = await get_radarr()
+    sonarr = await get_sonarr()
     lidarr = await get_lidarr()
     qbittorrent = await get_qbittorrent()
 
     try:
         statuses = await _collect_statuses(include_deezer=False)
 
-        disks = await _gather_disks(scryer, lidarr)
-
-        scryer_health: ScryerHealth | None = None
-        try:
-            scryer_health = await scryer.system_health()
-        except Exception as e:
-            logger.warning("scryer_health_failed", error=str(e))
+        disks = await _gather_disks(radarr, sonarr, lidarr)
 
         qbit: QBittorrentStatus | None = None
         if qbittorrent:
@@ -220,9 +179,7 @@ async def cmd_health(message: Message) -> None:
             except Exception as e:
                 logger.warning("qbit_status_failed_for_health", error=str(e))
 
-        await status_msg.edit_text(
-            _format_health(statuses, disks, qbit, scryer_health), parse_mode="HTML"
-        )
+        await status_msg.edit_text(_format_health(statuses, disks, qbit), parse_mode="HTML")
 
     except Exception as e:
         logger.error("Health check failed", error=str(e), exc_info=True)
@@ -248,52 +205,83 @@ async def check_service(client, name: str) -> SystemStatus:
         )
 
 
+def _group_wanted_episodes(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group Sonarr's flat wanted/missing episode records by series title.
+
+    Sonarr's `/wanted/missing` embeds a `series` object only when the caller
+    asks for it; `ArrBaseClient._get_wanted` doesn't (it's the same endpoint
+    Radarr uses, where there is no series to embed) — fall back to whatever
+    the response happens to carry rather than assuming a shape that may not
+    be there.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for rec in records:
+        series = rec.get("series") if isinstance(rec.get("series"), dict) else {}
+        title = series.get("title") or rec.get("seriesTitle") or "Неизвестный сериал"
+        grouped.setdefault(title, []).append(rec)
+    return grouped
 
 
 @router.message(Command("wanted"))
 async def cmd_wanted(message: Message) -> None:
-    """Show what Scryer is still hunting for.
+    """Show what Radarr/Sonarr are still hunting for.
 
     Added after the 2026-07-29 incident: 102 Paw Patrol episodes had been in
-    the wanted queue for months, burning the indexers' whole daily quota every
-    pass, and the only way to see that was raw GraphQL.
+    the wanted queue for months, burning the indexers' whole daily quota
+    every pass, and the only way to see that was raw GraphQL. Rollback
+    2026-08-10: there is no single shared catalog query any more — Radarr
+    and Sonarr each paginate their own `/wanted/missing`.
     """
     status_msg = await message.answer("📋 Собираю очередь поиска...")
 
     try:
-        scryer = await get_scryer()
-        items, total, _has_more = await scryer.get_wanted("MISSING", limit=200)
+        radarr = await get_radarr()
+        sonarr = await get_sonarr()
+        movies, episodes = await asyncio.gather(
+            radarr.get_wanted_movies(page_size=200),
+            sonarr.get_wanted_episodes(page_size=200),
+        )
     except Exception as e:
         logger.error("wanted_fetch_failed", error=str(e), exc_info=True)
         await status_msg.edit_text(Formatters.format_error("Не удалось получить очередь поиска"))
         return
 
-    if not items:
+    total = len(movies) + len(episodes)
+    if total == 0:
         await status_msg.edit_text("✅ Очередь поиска пуста — всё найдено.")
         return
 
-    # Group by title: 102 separate Paw Patrol lines would be unreadable, and
-    # the per-title count is exactly the number that matters.
-    grouped: dict[str, list] = {}
-    for item in items:
-        grouped.setdefault(item.title_name, []).append(item)
-
     lines = [f"📋 <b>Ищется: {total} позиций</b>\n"]
-    for title, entries in sorted(grouped.items(), key=lambda kv: -len(kv[1]))[:15]:
-        seasons = sorted(
-            {str(e.season_number) for e in entries if e.season_number is not None},
-            key=lambda s: int(s) if s.isdigit() else 0,
-        )
-        season_str = f" · сезоны {', '.join(seasons)}" if seasons else ""
-        lines.append(f"• <b>{html.escape(title)}</b> — {len(entries)} эп.{season_str}")
 
-    if len(grouped) > 15:
-        lines.append(f"\n<i>…и ещё {len(grouped) - 15} тайтлов</i>")
+    if movies:
+        lines.append(f"🎬 <b>Фильмы ({len(movies)})</b>")
+        for rec in movies[:15]:
+            title = rec.get("title") or "Unknown"
+            year = rec.get("year")
+            year_str = f" ({year})" if year else ""
+            lines.append(f"• <b>{html.escape(str(title))}</b>{year_str}")
+        if len(movies) > 15:
+            lines.append(f"<i>…и ещё {len(movies) - 15} фильмов</i>")
+
+    if episodes:
+        grouped = _group_wanted_episodes(episodes)
+        if movies:
+            lines.append("")
+        lines.append(f"📺 <b>Сериалы ({len(grouped)} тайтлов, {len(episodes)} эп.)</b>")
+        for title, entries in sorted(grouped.items(), key=lambda kv: -len(kv[1]))[:15]:
+            seasons = sorted(
+                {str(e.get("seasonNumber")) for e in entries if e.get("seasonNumber") is not None},
+                key=lambda s: int(s) if s.isdigit() else 0,
+            )
+            season_str = f" · сезоны {', '.join(seasons)}" if seasons else ""
+            lines.append(f"• <b>{html.escape(str(title))}</b> — {len(entries)} эп.{season_str}")
+        if len(grouped) > 15:
+            lines.append(f"<i>…и ещё {len(grouped) - 15} тайтлов</i>")
 
     if total > 60:
         lines.append(
-            "\n⚠️ Очередь большая: Scryer не успеет обойти её за сутки и выжжет "
-            "лимиты трекеров. Стоит снять мониторинг с того, чего всё равно нет."
+            "\n⚠️ Очередь большая: Radarr/Sonarr не успеют обойти её за сутки и "
+            "выжгут лимиты трекеров. Стоит снять мониторинг с того, чего всё равно нет."
         )
 
     await status_msg.edit_text("\n".join(lines), parse_mode="HTML")

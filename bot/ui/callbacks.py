@@ -144,9 +144,19 @@ class TitleActionCB(CallbackData, prefix="tm"):
 
     `action`: pick (chose among several matches) | mon | unmon |
     delete (asks to confirm) | delconf (does it).
+
+    Rollback 2026-08-10: `kind` ("movie"/"series") is its own field, not
+    folded into `title_id` as e.g. "movie:15" — aiogram's CallbackData uses
+    ':' as its OWN field separator, so a colon-joined value can never
+    survive a pack()/unpack() round trip (`ValueError: separator symbol
+    ':' can not be used in value`; `RootFolderCB` hit the same wall with
+    Windows paths). Radarr and Sonarr have independent id spaces, so `kind`
+    is what tells `handle_title_action` which *arr client `title_id`
+    belongs to.
     """
 
     action: str
+    kind: str
     title_id: str
 
 
