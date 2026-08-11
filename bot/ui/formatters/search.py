@@ -78,7 +78,11 @@ def _format_arr_verdict(result: SearchResult, *, compact: bool = False) -> str:
             return f"✅ *arr {sign}{result.custom_format_score}"
         return f"✅ <b>Одобрено *arr</b> (доп. очки: {sign}{result.custom_format_score})"
 
-    return "✅ одобрено *arr" if compact else "✅ <b>Одобрено *arr</b>"
+    # Same underlying state as above (accepted by *arr), just with nothing to
+    # report a number for — kept the same "✅ *arr[voice]" shape rather than
+    # a differently-worded sentence, so the compact card doesn't switch voice
+    # between an accepted release that happens to score 0 and one that doesn't.
+    return "✅ *arr" if compact else "✅ <b>Одобрено *arr</b>"
 
 
 class _SearchFormatters:
@@ -507,6 +511,11 @@ class _SearchFormatters:
         """Format success message."""
         return f"✅ {message}"
 
+    @staticmethod
+    def format_warning(message: str) -> str:
+        """Format warning message."""
+        return f"⚠️ {message}"
+
 
 def format_release(result: SearchResult) -> str:
     """Public, module-level entry point for a single release card (Task 11).
@@ -519,8 +528,3 @@ def format_release(result: SearchResult) -> str:
     rather than sitting behind an interface nothing calls yet.
     """
     return _SearchFormatters.format_release_details(result)
-
-    @staticmethod
-    def format_warning(message: str) -> str:
-        """Format warning message."""
-        return f"⚠️ {message}"

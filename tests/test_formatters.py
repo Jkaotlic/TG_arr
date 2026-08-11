@@ -431,3 +431,51 @@ def test_search_result_list_item_shows_rejection_from_arr():
     )
     out = Formatters.format_search_result(result, 1)
     assert "English is wanted, but found Russian" in out
+
+
+def test_search_result_list_item_shows_accepted_nonzero_score_from_arr():
+    """Fix round 1 (review finding, Important): the compact list card's
+    "accepted, non-zero score" branch had no covering test — the only
+    rendering path of the three verdict states left unverified. An accepted
+    release with a real customFormatScore (e.g. +250 for English audio) must
+    show that number in the compact card, same as it does in the detail card.
+    """
+    result = SearchResult(
+        guid="g7", title="Dune 2021 2160p BluRay ENG", origin="arr",
+        rejected=False, custom_format_score=250, calculated_score=10,
+    )
+    out = Formatters.format_search_result(result, 1)
+    assert "250" in out
+    assert "отклон" not in out.lower()
+
+
+def test_search_result_list_item_shows_accepted_zero_score_from_arr():
+    """The fourth state, for completeness: an *arr-accepted release with a
+    neutral (zero) customFormatScore must still show SOME acceptance marker
+    in the compact card — it is a real evaluated verdict, not an absence of
+    one (see test_formatter_distinguishes_no_verdict_from_accepted for the
+    same point on the detail card).
+    """
+    result = SearchResult(
+        guid="g8", title="Some.Movie.2021.2160p", origin="arr",
+        rejected=False, custom_format_score=0, calculated_score=10,
+    )
+    out = Formatters.format_search_result(result, 1)
+    assert "arr" in out.lower()
+    assert "отклон" not in out.lower()
+
+
+def test_formatters_format_warning_is_still_a_class_method():
+    """Fix round 1 (review finding, Critical): inserting the module-level
+    `format_release` function without closing the `_SearchFormatters` class
+    body first left `format_warning` as dead code nested inside
+    `format_release`, after its `return` — `Formatters.format_warning`
+    silently stopped existing, breaking all 8 production call sites
+    (bot/handlers/music.py, torrserver.py, titles.py,
+    bot/handlers/search/commands.py). Pins the class's public surface so a
+    future structural edit to this file can't do the same thing unnoticed —
+    neither ruff nor the rest of the suite caught it, since nothing called
+    format_warning directly.
+    """
+    assert hasattr(Formatters, "format_warning")
+    assert Formatters.format_warning("test message") == "⚠️ test message"
