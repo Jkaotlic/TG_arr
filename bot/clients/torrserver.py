@@ -21,7 +21,7 @@ import re
 import time
 from pathlib import PurePosixPath
 from typing import Any, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 import structlog
@@ -250,6 +250,43 @@ class TorrServerClient(BaseAPIClient):
             return names
 
         return await self._ttl_cached("torznab_sources", 600.0, fetch)
+
+    async def get_source_hosts(self) -> set[tuple[str, int]]:
+        """(hostname, port) pairs of the operator's own torznab sources.
+
+        Release links from `search()` point at exactly these hosts — usually
+        Prowlarr's download proxy on the same private LAN. The SSRF guard
+        blocks private addresses by default, so without this the streaming
+        contour would reject its own legitimate links whenever TorrServer
+        names Prowlarr differently from the bot's own PROWLARR_URL.
+
+        Cached for 10 minutes on the same TTL as `get_source_names`, and
+        derived from the same settings payload — sources change only when the
+        operator edits them.
+        """
+        async def fetch() -> set[tuple[str, int]]:
+            settings = await self.get_server_settings()
+            hosts: set[tuple[str, int]] = set()
+            for source in settings.get("TorznabUrls") or []:
+                if not isinstance(source, dict):
+                    continue
+                try:
+                    parsed = urlparse(str(source.get("Host", "")))
+                    host = parsed.hostname
+                    port = parsed.port
+                except ValueError:
+                    # A malformed Host must cost only its own entry — same
+                    # policy as _files_from_payload and _as_int.
+                    logger.debug("torrserver_unparseable_source", source=source.get("Name"))
+                    continue
+                if not host:
+                    continue
+                if port is None:
+                    port = 443 if parsed.scheme == "https" else 80
+                hosts.add((host.lower(), port))
+            return hosts
+
+        return await self._ttl_cached("torznab_source_hosts", 600.0, fetch)
 
     async def search(self, query: str, limit: int = 30) -> list[TorrServerRelease]:
         """Search releases through TorrServer's torznab bridge.
