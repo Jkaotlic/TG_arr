@@ -27,9 +27,13 @@ def test_decide_monitor_type_override_wins():
     from bot.handlers.search import _decide_monitor_type
 
     result = SearchResult(guid="g", title="t", detected_season=2, is_season_pack=False)
-    # auto would be "none"; the user preset must win
-    assert _decide_monitor_type(result, force_download=False, override="future") == "future"
-    assert _decide_monitor_type(result, force_download=False, override=None) == "none"
+    # Пресет пользователя должен побеждать автоматический выбор. Берём
+    # заведомо отличный от авто-значения пресет, иначе тест проходил бы и с
+    # проигнорированным override.
+    assert _decide_monitor_type(result, force_download=False, override="firstSeason") == "firstSeason"
+    # 2026-08-12: авто-значение для одиночной серии — "future" вместо "none"
+    # (см. test_decide_monitor_type_single_season_not_all).
+    assert _decide_monitor_type(result, force_download=False, override=None) == "future"
 
 
 def test_season_presets_keyboard_offers_all_presets():

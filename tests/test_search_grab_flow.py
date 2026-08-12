@@ -927,3 +927,165 @@ async def test_browsing_releases_does_not_enlist_the_title_in_arr_rss():
     kwargs = add_service.add_series.await_args.kwargs
     assert kwargs["monitored"] is False
     assert kwargs["monitor"] == "none", "monitor='all' would enlist every season"
+
+
+# ---------------------------------------------------------------------------
+# Пресет мониторинга сезонов доезжает до Sonarr (2026-08-12).
+#
+# Откат 2026-08-10 добавляет сериал с monitor="none", а грабе включал
+# мониторинг только на уровне сериала — сезоны оставались немониторимыми, и
+# новые серии не подхватывались. _decide_monitor_type при этом был написан,
+# принимал override и не вызывался ниоткуда: пользователь выбирал пресет,
+# получал подтверждение «Мониторинг: all», и выбор умирал в сессии.
+# ---------------------------------------------------------------------------
+
+
+def _series_release(*, season=None, pack=False) -> SearchResult:
+    return SearchResult(
+        guid="guid-1",
+        origin="arr",
+        indexer="idx",
+        indexer_id=1,
+        title="Show S03E05 1080p",
+        size=1,
+        detected_season=season,
+        is_season_pack=pack,
+    )
+
+
+def _series_session(*, monitor_type=None, release=None) -> SearchSession:
+    return SearchSession(
+        user_id=5,
+        query="show",
+        content_type=ContentType.SERIES,
+        selected_result=release or _series_release(season=3),
+        selected_content=SeriesInfo(tvdb_id=1, title="Show", sonarr_id=77),
+        monitor_type=monitor_type,
+    )
+
+
+def _monitoring_add_service(*, season_monitoring=None) -> MagicMock:
+    add_service = MagicMock()
+    add_service.grab_release = AsyncMock(return_value=(
+        True,
+        ActionLog(user_id=0, action_type=ActionType.GRAB, content_type=ContentType.SERIES),
+    ))
+    add_service.sonarr = MagicMock()
+    add_service.sonarr.set_series_monitored = AsyncMock(return_value=True)
+    add_service.sonarr.set_season_monitoring = season_monitoring or AsyncMock(return_value=True)
+    return add_service
+
+
+def _grab_message() -> MagicMock:
+    message = MagicMock()
+    message.edit_text = AsyncMock()
+    return message
+
+
+def _grab_db() -> MagicMock:
+    db = MagicMock()
+    db.log_action = AsyncMock()
+    db.delete_session = AsyncMock()
+    return db
+
+
+def test_single_episode_defaults_to_future_not_none():
+    """Без выбора пользователя одиночная серия должна оставлять сериал
+    способным подхватить НОВЫЕ серии. `none` этого не даёт."""
+    from bot.handlers.search.grab import _decide_monitor_type
+
+    assert _decide_monitor_type(_series_release(season=3), False) == "future"
+
+
+def test_season_pack_still_monitors_everything():
+    from bot.handlers.search.grab import _decide_monitor_type
+
+    assert _decide_monitor_type(_series_release(season=3, pack=True), False) == "all"
+
+
+def test_user_override_wins_over_everything():
+    from bot.handlers.search.grab import _decide_monitor_type
+
+    assert _decide_monitor_type(
+        _series_release(season=3), True, override="firstSeason",
+    ) == "firstSeason"
+
+
+@pytest.mark.asyncio
+async def test_grab_applies_user_preset_to_sonarr():
+    """Выбор пользователя из handle_season_preset должен доехать до Sonarr."""
+    from bot.handlers.search import grab as grab_mod
+
+    add_service = _monitoring_add_service()
+    await grab_mod._execute_grab(
+        _grab_message(), _series_session(monitor_type="firstSeason"),
+        User(tg_id=5), _grab_db(), MagicMock(), add_service,
+    )
+
+    add_service.sonarr.set_season_monitoring.assert_awaited_once_with(77, "firstSeason")
+
+
+@pytest.mark.asyncio
+async def test_grab_without_preset_uses_the_decided_type():
+    from bot.handlers.search import grab as grab_mod
+
+    add_service = _monitoring_add_service()
+    await grab_mod._execute_grab(
+        _grab_message(), _series_session(), User(tg_id=5), _grab_db(), MagicMock(), add_service,
+    )
+
+    add_service.sonarr.set_season_monitoring.assert_awaited_once_with(77, "future")
+
+
+@pytest.mark.asyncio
+async def test_season_pack_grab_applies_all():
+    from bot.handlers.search import grab as grab_mod
+
+    add_service = _monitoring_add_service()
+    await grab_mod._execute_grab(
+        _grab_message(), _series_session(release=_series_release(season=3, pack=True)),
+        User(tg_id=5), _grab_db(), MagicMock(), add_service,
+    )
+
+    add_service.sonarr.set_season_monitoring.assert_awaited_once_with(77, "all")
+
+
+@pytest.mark.asyncio
+async def test_movie_grab_does_not_touch_season_monitoring():
+    from bot.handlers.search import grab as grab_mod
+
+    add_service = _monitoring_add_service()
+    add_service.radarr = MagicMock()
+    add_service.radarr.set_movie_monitored = AsyncMock(return_value=True)
+    session = SearchSession(
+        user_id=5,
+        query="film",
+        content_type=ContentType.MOVIE,
+        selected_result=_series_release(),
+        selected_content=MovieInfo(tmdb_id=1, title="Film", year=2021, radarr_id=99),
+    )
+
+    await grab_mod._execute_grab(
+        _grab_message(), session, User(tg_id=5), _grab_db(), MagicMock(), add_service,
+    )
+
+    add_service.sonarr.set_season_monitoring.assert_not_awaited()
+    add_service.radarr.set_movie_monitored.assert_awaited_once_with(99, True)
+
+
+@pytest.mark.asyncio
+async def test_monitoring_failure_does_not_undo_a_successful_grab():
+    from bot.handlers.search import grab as grab_mod
+
+    add_service = _monitoring_add_service(
+        season_monitoring=AsyncMock(side_effect=RuntimeError("boom")),
+    )
+    message = _grab_message()
+
+    await grab_mod._execute_grab(
+        message, _series_session(), User(tg_id=5), _grab_db(), MagicMock(), add_service,
+    )
+
+    # Пользователь всё равно видит успех — раздача уже взята.
+    final_text = message.edit_text.await_args_list[-1].args[0]
+    assert "Show" in final_text

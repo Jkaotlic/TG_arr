@@ -139,7 +139,8 @@ def _decide_monitor_type(result, force_download: bool, override: str | None = No
 
     BUG-04: otherwise, a single targeted season (non-pack) must NOT be added
     with a type that monitors every season — that would silently pull the whole
-    show. Use "none" so only the explicitly grabbed release is fetched.
+    show. "future" keeps the back catalogue untouched while letting Sonarr pick
+    up episodes that have not aired yet.
     """
     if override:
         return override
@@ -148,7 +149,12 @@ def _decide_monitor_type(result, force_download: bool, override: str | None = No
     if result.is_season_pack:
         return "all"
     if result.detected_season is not None:
-        return "none"
+        # BUG-04 держится: старые сезоны не тянем. Но "none" оставляет сериал
+        # неспособным подхватить и НОВЫЕ серии — а пользователь, взявший серию
+        # идущего шоу, хочет продолжение. Живой замер 2026-08-12
+        # (analysis/2026-08-12-seasonpass-probe.md): "future" промониторил
+        # ровно 4 невышедшие серии из 34 и снял все вышедшие.
+        return "future"
     return "all"
 
 
@@ -235,7 +241,23 @@ async def _execute_grab(
                 if isinstance(title, MovieInfo):
                     await add_service.radarr.set_movie_monitored(arr_id, True)
                 else:
+                    # Сериал добавлен с monitor="none", поэтому поднять один
+                    # флаг сериала мало: все сезоны остаются немониторимыми, и
+                    # новые серии не подхватываются. Область, которую
+                    # пользователь выбрал в `handle_season_preset`, лежит в
+                    # `session.monitor_type`; если меню не открывали, её
+                    # решает `_decide_monitor_type`.
+                    monitor = _decide_monitor_type(
+                        result, force_download, override=session.monitor_type,
+                    )
                     await add_service.sonarr.set_series_monitored(arr_id, True)
+                    await add_service.sonarr.set_season_monitoring(arr_id, monitor)
+                    logger.info(
+                        "monitor_scope_applied",
+                        arr_id=arr_id,
+                        monitor=monitor,
+                        from_user=session.monitor_type is not None,
+                    )
             except Exception as e:
                 logger.warning("monitor_enable_failed", arr_id=arr_id, error=str(e))
 
