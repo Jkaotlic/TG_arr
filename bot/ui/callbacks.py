@@ -209,25 +209,6 @@ class TsTorrentCB(CallbackData, prefix="tst"):
         return v[:40]
 
 
-class RootFolderCB(CallbackData, prefix="rf"):
-    """Pick a root folder when adding a title to Radarr/Sonarr (rollback
-    2026-08-10).
-
-    *arr root folders carry their own integer id — unlike the previous
-    backend's root-folder payload, which had none, forcing a sha1 digest of
-    the path to stand in for one (a Windows path contains ':', aiogram's
-    CallbackData field separator, so the raw path could not be packed
-    either). Live
-    measurement 2026-08-10: Radarr's folders are ids 1/2, Sonarr's are also
-    1/2 — a plain int is both simpler and stable across restarts, unlike a
-    list index. ``content_type`` says which *arr client the id belongs to,
-    since Radarr's and Sonarr's folder ids are independent sequences.
-    """
-
-    folder_id: int
-    content_type: str
-
-
 class TsAddCB(CallbackData, prefix="tsa"):
     """Add the selected hit to TorrServer and publish it to Emby.
 
@@ -237,3 +218,32 @@ class TsAddCB(CallbackData, prefix="tsa"):
     """
 
     idx: int = Field(ge=0)
+
+
+class FindPageCB(CallbackData, prefix="fp"):
+    """Free-search pagination (2026-08-12).
+
+    Deliberately separate from ``PageCB(scope="search")``: the free flow keeps
+    a different session shape (no library entry, no *arr verdict) and its
+    handlers must not route into the catalogue flow's, which would walk
+    straight into a missing arr_id.
+    """
+
+    page: int
+
+
+class FindReleaseCB(CallbackData, prefix="fr"):
+    """Open one free-search hit — index into ``SearchSession.results``."""
+
+    idx: int
+
+
+class FindGrabCB(CallbackData, prefix="fg"):
+    """Grab one free-search hit.
+
+    Carries the index rather than relying on ``selected_result``, so a stale
+    card left open in an old message cannot grab whatever the session happens
+    to point at now.
+    """
+
+    idx: int

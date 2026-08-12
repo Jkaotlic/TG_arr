@@ -36,19 +36,18 @@ collection errors mid-rollback. Replaced with the two *arr grab paths:
                    (SEC-16-gated, see `_validate_download_url`) ->
                    qBittorrent by downloadUrl -> *arr auto-search command.
 
-⚠️ KNOWN GAP (whole-branch review, 2026-08-10): the push chain is currently
-UNREACHABLE in normal operation. Every release the user can select comes from
-`SearchService.search_releases_for_title`, i.e. *arr's interactive search, and
-is therefore tagged `origin="arr"`. `ProwlarrClient.search()` — the free-text
-mode that would produce `origin="prowlarr"` releases — is constructed and
-health-checked but has no caller: the method that used to serve it belonged to
-the removed backend and nothing replaced it. The chain only fires today if
-*arr returns a release row with `indexerId` absent or 0.
+The push chain was UNREACHABLE from the rollback until 2026-08-12: every
+selectable release came from `SearchService.search_releases_for_title` — *arr's
+interactive search — and was therefore tagged `origin="arr"`, while
+`ProwlarrClient.search()`, the free-text mode that produces
+`origin="prowlarr"` releases, had no caller at all. It has one now:
+`SearchService.search_free_text`, behind the `/find` command and the "искать по
+названию" button on a dead-end search screen.
 
-The chain is kept rather than deleted because free-text search for titles NOT
-yet in the catalog is a real gap in the current UX, and this is the grab path
-it needs. It is covered by unit tests, but it has not run against the live
-stack — treat it as unproven until it does.
+Such a hit usually has no library entry behind it, which is why `arr_id` is
+optional: with no id, the chain's final auto-search step is skipped rather than
+faked — that command takes an id there is none of, and reporting success for a
+queue nothing entered would be a lie.
 
 `arr_id` is the movie/series id already in Radarr/Sonarr. `grab_release`'s
 caller is expected to have ensured the title exists in the library before
@@ -70,22 +69,16 @@ fails loudly beats both silently guessing a shape and a bare
 `AttributeError` on a name nobody bothered to keep.
 """
 
-import asyncio
-import ipaddress
 import json
-import re
-import socket
-import urllib.parse
 from typing import Optional
 
 import structlog
 
-from bot.clients.base import APIError
+from bot.clients.base import APIError, ArrBaseClient
 from bot.clients.lidarr import LidarrClient
 from bot.clients.qbittorrent import QBittorrentClient
 from bot.clients.radarr import RadarrClient
 from bot.clients.sonarr import SonarrClient
-from bot.config import get_settings
 from bot.models import (
     ActionLog,
     ActionType,
@@ -99,25 +92,25 @@ from bot.models import (
     SeriesInfo,
 )
 
+# SEC-16 и вся маскировка секретов живут в bot/services/url_guard.py начиная с
+# 2026-08-12 — TorrServer'у нужна та же гайка, а тащить ради одной функции весь
+# AddService (Radarr + Sonarr + qBittorrent + Lidarr) в стриминговый контур —
+# плохой обмен. Реэкспорт держит `bot.services.add_service.<name>` рабочим: и
+# для импортов в tests/, и для
+# `patch("bot.services.add_service._validate_download_url", ...)`.
+from bot.services.url_guard import (  # noqa: F401,E402
+    _ALLOWED_SCHEMES,
+    _DEFAULT_SCHEME_PORTS,
+    _is_internal_ip,
+    _mask_path,
+    _mask_url,
+    _SECRET_PATH_SEGMENT_RE,
+    _SENSITIVE_QUERY_PARAMS,
+    _trusted_service_hosts,
+    _validate_download_url,
+)
+
 logger = structlog.get_logger()
-
-_ALLOWED_SCHEMES = {"http", "https", "magnet"}
-
-# SEC-04/SEC-03: parameters in indexer download URLs commonly contain private
-# trackers' credentials. `link`/`file`/`r`/`rss` are how Prowlarr's own
-# download proxy embeds the ORIGINAL tracker URL (which itself carries a
-# passkey/apikey) as a nested, url-encoded query value — masking only
-# `apikey` leaves that nested secret in the clear.
-_SENSITIVE_QUERY_PARAMS = {
-    "apikey", "api_key", "token", "passkey", "auth", "authkey",
-    "link", "file", "r", "rss",
-}
-
-# SEC-03: many private trackers embed the passkey directly as a path segment
-# instead of (or in addition to) a query param, e.g.
-# https://tracker/download/123/<32-char-hex-passkey>/name.torrent. Any long
-# hex/base64-ish path segment is treated as a credential and masked.
-_SECRET_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_-]{16,}$")
 
 # qBittorrent categories used by both the force-download escape hatch and the
 # push chain's own qBittorrent fallback step. They mirror the folder layout
@@ -130,35 +123,18 @@ _QBIT_CATEGORIES = {
 }
 
 
-def _mask_path(path: str) -> str:
-    """Mask path segments that look like a passkey/token (long hex/base64-ish)."""
-    segments = path.split("/")
-    masked = [
-        "***" if _SECRET_PATH_SEGMENT_RE.match(seg) else seg
-        for seg in segments
-    ]
-    return "/".join(masked)
+def _qbit_category(content_type: ContentType, release: SearchResult) -> str:
+    """qBittorrent category for a release.
 
-
-def _mask_url(url: str, max_len: int = 100) -> str:
-    """Return a safe representation of a download URL for logs (strips secrets)."""
-    if not url:
-        return ""
-    if url.startswith("magnet:"):
-        return url[:max_len]
-    parsed = urllib.parse.urlparse(url)
-    masked_path = _mask_path(parsed.path)
-    if not parsed.query:
-        base = f"{parsed.scheme}://{parsed.netloc}{masked_path}"
-        return base[:max_len]
-    parts = []
-    for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
-        if k.lower() in _SENSITIVE_QUERY_PARAMS:
-            parts.append(f"{k}=***")
-        else:
-            parts.append(f"{k}={v}")
-    base = f"{parsed.scheme}://{parsed.netloc}{masked_path}?{'&'.join(parts)}"
-    return base[:max_len]
+    Free-text search does not know the facet up front — its `content_type` is
+    `UNKNOWN` — but Prowlarr's own category ids usually do, and
+    `ProwlarrClient._normalize_result` puts that in `detected_type`. Falls back
+    to the movie category, which is what these call sites used unconditionally
+    before.
+    """
+    if content_type in _QBIT_CATEGORIES:
+        return _QBIT_CATEGORIES[content_type]
+    return _QBIT_CATEGORIES.get(release.detected_type, "radarr")
 
 
 def _safe_push_result(result: Optional[dict]) -> dict:
@@ -199,115 +175,6 @@ def _log_grab_completed(
         content_type=content_type.value,
         detail=detail,
     )
-
-
-def _is_internal_ip(addr: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
-    """Classify any non-public IP (private/loopback/link-local/reserved/multicast)."""
-    return (
-        addr.is_private
-        or addr.is_loopback
-        or addr.is_link_local
-        or addr.is_reserved
-        or addr.is_multicast
-        or addr.is_unspecified
-    )
-
-
-_DEFAULT_SCHEME_PORTS = {"http": 80, "https": 443}
-
-
-def _trusted_service_hosts() -> set[tuple[str, int]]:
-    """(hostname, port) pairs of the user's OWN configured services.
-
-    A self-hosted single-household stack runs Prowlarr/*arr/qBit on a private
-    LAN, and a grab URL legitimately points at Prowlarr's download proxy on
-    that LAN. Trust download URLs aimed at a configured service host; other
-    internal addresses stay blocked.
-
-    SEC-01: the pair MUST include the port. Trusting a hostname alone would
-    trust ANY port on that host — in a typical stack the services share one
-    LAN IP on different ports, so hostname-only trust degrades to "trust
-    every port on this IP".
-    """
-    s = get_settings()
-    hosts: set[tuple[str, int]] = set()
-    for url in (
-        s.prowlarr_url,
-        s.radarr_url,
-        s.sonarr_url,
-        s.lidarr_url,
-        s.qbittorrent_url,
-        s.emby_url,
-    ):
-        if url:
-            parsed = urllib.parse.urlparse(url)
-            host = parsed.hostname
-            if host:
-                port = parsed.port or _DEFAULT_SCHEME_PORTS.get(parsed.scheme, 0)
-                hosts.add((host.lower(), port))
-    return hosts
-
-
-async def _validate_download_url(url: str) -> bool:
-    """
-    Validate URL is safe for download (not SSRF).
-
-    SEC-16 (fix round 1, restored — this docstring previously argued the
-    opposite of the recovered pre-migration rationale, which re-justified a
-    real regression): gates every URL the bot hands to a downstream fetcher
-    that will act on it — *arr's `release/push` call AND the bot's own direct
-    qBittorrent handoff (the force-download escape hatch and the push
-    chain's own qBittorrent fallback step). *arr fetches whatever URL it is
-    given, from inside the LAN — handing it a private/loopback URL would
-    turn *arr itself into an SSRF proxy, exactly like handing that URL to
-    qBittorrent directly would. Only the **native** grab path is exempt: it
-    hands *arr a guid it already resolved itself via its own interactive
-    search, never a URL this process constructed.
-
-    Async to avoid blocking the event loop on DNS (SEC-11) and to inspect every
-    A/AAAA record returned by getaddrinfo so a hostname with both public and
-    private addresses is rejected (SEC-01).
-
-    Exception: a URL pointing at one of the user's OWN configured services is
-    trusted even on a private LAN.
-
-    SEC-08: accepted risk — this is a check-then-use validation (TOCTOU). We
-    resolve the hostname here, but the actual download happens later inside
-    qBittorrent, which performs its OWN resolution. Closing this fully would
-    require qBittorrent to accept a pre-resolved IP, which it doesn't support
-    — out of scope for a self-hosted single-household deployment.
-    """
-    if not url:
-        return False
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in _ALLOWED_SCHEMES:
-        return False
-    if parsed.scheme == "magnet":
-        return url.startswith("magnet:?xt=urn:btih:")
-    if not parsed.hostname:
-        return False
-    url_port = parsed.port or _DEFAULT_SCHEME_PORTS.get(parsed.scheme, 0)
-    if (parsed.hostname.lower(), url_port) in _trusted_service_hosts():
-        return True
-    try:
-        addr = ipaddress.ip_address(parsed.hostname)
-        return not _is_internal_ip(addr)
-    except ValueError:
-        pass  # hostname, resolve below
-    try:
-        infos = await asyncio.to_thread(socket.getaddrinfo, parsed.hostname, None)
-    except socket.gaierror:
-        return False
-    for family, _t, _p, _c, sockaddr in infos:
-        if family not in (socket.AF_INET, socket.AF_INET6):
-            continue
-        try:
-            addr = ipaddress.ip_address(sockaddr[0])
-        except ValueError:
-            continue
-        if _is_internal_ip(addr):
-            return False
-    return True
 
 
 class AddService:
@@ -563,7 +430,7 @@ class AddService:
         release: SearchResult,
         content_type: ContentType,
         *,
-        arr_id: int,
+        arr_id: Optional[int] = None,
         force_download: bool = False,
     ) -> tuple[bool, ActionLog]:
         """Turn one release candidate into a download.
@@ -572,13 +439,19 @@ class AddService:
         docstring. `force_download=True` bypasses both paths entirely and
         goes straight to qBittorrent: the escape hatch for a release *arr's
         profile would refuse but the user wants anyway.
+
+        `arr_id=None` is the free-text case (`SearchService.search_free_text`):
+        no library entry stands behind the release. The native path is
+        unreachable there by construction (`origin="prowlarr"`), and the push
+        chain's final auto-search step is skipped — that command takes an id
+        there is none of.
         """
         arr_client = self.radarr if content_type is ContentType.MOVIE else self.sonarr
         action = ActionLog(
             user_id=0,  # set by the caller before logging
             action_type=ActionType.GRAB,
             content_type=content_type,
-            content_id=str(arr_id),
+            content_id=str(arr_id) if arr_id is not None else "",
             release_title=release.title,
         )
         log = logger.bind(
@@ -608,7 +481,7 @@ class AddService:
         self,
         log,
         action: ActionLog,
-        arr_client,
+        arr_client: ArrBaseClient,
         release: SearchResult,
         content_type: ContentType,
     ) -> tuple[bool, ActionLog]:
@@ -634,10 +507,10 @@ class AddService:
         self,
         log,
         action: ActionLog,
-        arr_client,
+        arr_client: ArrBaseClient,
         release: SearchResult,
         content_type: ContentType,
-        arr_id: int,
+        arr_id: Optional[int],
     ) -> tuple[bool, ActionLog]:
         """Restored pre-migration fallback for a release with no *arr indexer id.
 
@@ -694,7 +567,7 @@ class AddService:
                 if download_url and await _validate_download_url(download_url):
                     try:
                         success = await self.qbittorrent.add_torrent_url(
-                            download_url, category=_QBIT_CATEGORIES.get(content_type, "radarr"),
+                            download_url, category=_qbit_category(content_type, release),
                         )
                     except Exception as e:
                         log.error("qbittorrent_fallback_failed", error=str(e), exc_info=True)
@@ -734,13 +607,32 @@ class AddService:
 
             # Push never ran (no download_url) or transport-failed: fall back
             # to *arr's own auto-search rather than giving up outright.
+            if arr_id is None:
+                # Free-text grab: no library entry for *arr to search against.
+                # Reporting success here would be a lie — nothing was queued.
+                action.success = False
+                action.error_message = (
+                    "Тайтла нет в библиотеке — Radarr/Sonarr не может искать сам"
+                )
+                _log_grab_completed(
+                    log, success=False, path="failed", force_download=False,
+                    content_type=content_type, detail="no_arr_id_for_auto_search",
+                )
+                return False, action
+
             try:
+                # `self.radarr`/`self.sonarr` rather than the pre-resolved
+                # `arr_client`: these three commands are defined on the
+                # concrete clients, not on ArrBaseClient (which carries only
+                # what Radarr, Sonarr and Lidarr genuinely share). Going
+                # through the base would mean typing `arr_client` loosely
+                # enough to hide a typo in any of these names.
                 if content_type is ContentType.MOVIE:
-                    await arr_client.search_movie(arr_id)
+                    await self.radarr.search_movie(arr_id)
                 elif release.is_season_pack and release.detected_season is not None:
-                    await arr_client.search_season(arr_id, release.detected_season)
+                    await self.sonarr.search_season(arr_id, release.detected_season)
                 else:
-                    await arr_client.search_series(arr_id)
+                    await self.sonarr.search_series(arr_id)
             except APIError as e:
                 log.warning("auto_search_failed", error=str(e))
                 action.success = False
@@ -796,7 +688,7 @@ class AddService:
         try:
             ok = await self.qbittorrent.add_torrent_url(
                 download_url,
-                category=_QBIT_CATEGORIES.get(content_type, "radarr"),
+                category=_qbit_category(content_type, release),
             )
         except Exception as e:
             log.error("qbittorrent_force_download_failed", error=str(e), exc_info=True)

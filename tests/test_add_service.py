@@ -803,3 +803,134 @@ async def test_get_sonarr_root_folders_delegates_to_the_sonarr_client():
 
     assert folders == ["f2"]
     sonarr.get_root_folders.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Грабе релиза, за которым нет записи в библиотеке (свободный поиск, 2026-08-12).
+#
+# `SearchService.search_free_text` отдаёт хиты с origin="prowlarr" и БЕЗ
+# movie/series id: тайтла в каталоге нет вовсе. Нативный путь тут недостижим по
+# построению, а последний шаг push-цепочки — команда auto-search — требует id,
+# которого нет.
+# ---------------------------------------------------------------------------
+
+
+def _free_release(**overrides) -> SearchResult:
+    # Тот же доверенный хост, что и у `_release`: гайка SEC-16 гейтит push, и
+    # тесты не должны зависеть от DNS этой машины.
+    data = dict(
+        guid="guid-free",
+        title="Концерт 2019 1080p",
+        indexer="RuTracker",
+        origin="prowlarr",
+        indexer_id=2,
+        download_url="http://localhost:9696/2/download?apikey=SECRET",
+        protocol="torrent",
+        size=4 * 1024**3,
+    )
+    data.update(overrides)
+    return SearchResult(**data)
+
+
+@pytest.mark.asyncio
+async def test_free_grab_succeeds_when_arr_approves_the_push():
+    radarr = AsyncMock()
+    radarr.push_release = AsyncMock(return_value={"approved": True})
+    service = _service(radarr=radarr)
+
+    ok, action = await service.grab_release(_free_release(), ContentType.MOVIE)
+
+    assert ok is True
+    assert action.success is True
+
+
+@pytest.mark.asyncio
+async def test_free_grab_falls_back_to_qbittorrent_on_rejection():
+    radarr = AsyncMock()
+    radarr.push_release = AsyncMock(return_value={"approved": False, "rejections": ["Unknown movie"]})
+    qbt = AsyncMock()
+    qbt.add_torrent_url = AsyncMock(return_value=True)
+    service = _service(radarr=radarr, qbt=qbt)
+
+    ok, _action = await service.grab_release(_free_release(), ContentType.MOVIE)
+
+    assert ok is True
+    qbt.add_torrent_url.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_free_grab_never_calls_auto_search_without_an_arr_id():
+    """Без arr_id команду auto-search нечем звать. Отчитаться неудачей честнее,
+    чем сделать вид, будто что-то поставлено в очередь."""
+    from bot.clients.base import APIError
+
+    radarr = AsyncMock()
+    radarr.push_release = AsyncMock(side_effect=APIError("boom", status_code=500))
+    radarr.search_movie = AsyncMock()
+    service = _service(radarr=radarr)
+
+    ok, action = await service.grab_release(_free_release(), ContentType.MOVIE)
+
+    assert ok is False
+    radarr.search_movie.assert_not_awaited()
+    assert action.error_message
+
+
+@pytest.mark.asyncio
+async def test_free_grab_still_honours_the_ssrf_guard():
+    radarr = AsyncMock()
+    radarr.push_release = AsyncMock()
+    service = _service(radarr=radarr)
+
+    ok, _action = await service.grab_release(
+        _free_release(download_url="http://192.168.1.1/evil"), ContentType.MOVIE,
+    )
+
+    assert ok is False
+    radarr.push_release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_free_grab_writes_an_empty_content_id():
+    """content_id — это arr_id в виде строки; без него не должно появиться
+    строки "None" в истории действий."""
+    radarr = AsyncMock()
+    radarr.push_release = AsyncMock(return_value={"approved": True})
+    service = _service(radarr=radarr)
+
+    _ok, action = await service.grab_release(_free_release(), ContentType.MOVIE)
+
+    assert action.content_id == ""
+
+
+@pytest.mark.asyncio
+async def test_qbit_category_falls_back_to_the_detected_type():
+    """Свободный поиск не знает фасет заранее (ContentType.UNKNOWN), но
+    категории Prowlarr обычно знают — detected_type это несёт."""
+    radarr = AsyncMock()
+    radarr.push_release = AsyncMock(return_value={"approved": False, "rejections": ["nope"]})
+    qbt = AsyncMock()
+    qbt.add_torrent_url = AsyncMock(return_value=True)
+    service = _service(radarr=radarr, qbt=qbt)
+
+    await service.grab_release(
+        _free_release(detected_type=ContentType.SERIES), ContentType.UNKNOWN,
+    )
+
+    assert qbt.add_torrent_url.await_args.kwargs["category"] == "tv-sonarr"
+
+
+@pytest.mark.asyncio
+async def test_arr_id_grab_still_reaches_auto_search():
+    """Регрессия: путь с arr_id не изменился."""
+    from bot.clients.base import APIError
+
+    radarr = AsyncMock()
+    radarr.push_release = AsyncMock(side_effect=APIError("boom", status_code=500))
+    radarr.search_movie = AsyncMock(return_value={})
+    service = _service(radarr=radarr)
+
+    ok, _action = await service.grab_release(_free_release(), ContentType.MOVIE, arr_id=42)
+
+    assert ok is True
+    radarr.search_movie.assert_awaited_once_with(42)

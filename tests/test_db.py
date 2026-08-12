@@ -70,30 +70,6 @@ class TestUserOperations:
         retrieved = await db.get_user(999999999)
         assert retrieved is None
 
-    async def test_update_user_preferences(self, db):
-        """Test updating user preferences."""
-        user = User(tg_id=123456789)
-        await db.create_user(user)
-
-        # Fix round 1 (Task 12 review): scryer_quality_profile_id/
-        # scryer_root_folder_id were split into per-*arr fields (Radarr's
-        # and Sonarr's id spaces are independent) — this test's own purpose
-        # (preferences round-trip through DB storage) doesn't care which
-        # field, so it moves to the new names rather than the removed ones.
-        new_prefs = UserPreferences(
-            radarr_quality_profile_id=4,
-            radarr_root_folder_id=2,
-            preferred_resolution="1080p",
-            auto_grab_enabled=True,
-        )
-        await db.update_user_preferences(123456789, new_prefs)
-
-        retrieved = await db.get_user(123456789)
-        assert retrieved.preferences.radarr_quality_profile_id == 4
-        assert retrieved.preferences.radarr_root_folder_id == 2
-        assert retrieved.preferences.preferred_resolution == "1080p"
-        assert retrieved.preferences.auto_grab_enabled is True
-
 
 @pytest.mark.asyncio
 class TestSearchOperations:

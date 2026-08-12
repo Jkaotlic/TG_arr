@@ -63,10 +63,18 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
 
-# DEP-03: mypy is declared as a dev dependency but was never configured or
-# wired into a make target (see `make typecheck` in Makefile). Config kept
-# minimal — bot/ isn't owned by this cluster, so no strict-mode ratchet here.
+# DEP-03: mypy runs as part of `make lint` and must stay green. bot/ is clean
+# at this level, measured 2026-08-12: 0 errors across 73 source files.
+#
+# Two ratchets are deliberately NOT enabled yet, with their measured cost:
+#   disallow_untyped_defs — 61 more errors in 22 files (missing annotations);
+#   strict_optional (dropping no_strict_optional) — 44 errors in 17 files,
+#     among them a plausibly real one at bot/handlers/search/commands.py:321
+#     (`sorted()` over a `set[Any | None]` in `_known_seasons`).
+# Each is its own piece of work. Turning one on means fixing its errors in the
+# same commit, not adding a per-file ignore.
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
 no_strict_optional = true
+check_untyped_defs = true

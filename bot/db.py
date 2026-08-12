@@ -477,17 +477,6 @@ class Database:
         user.updated_at = datetime.fromisoformat(now)
         return user
 
-    async def update_user_preferences(self, tg_id: int, preferences: UserPreferences) -> None:
-        """Update user preferences."""
-        now = datetime.now(timezone.utc).isoformat()
-        prefs_json = preferences.model_dump_json()
-
-        async with self._write_lock:
-            await self.conn.execute(
-                "UPDATE users SET preferences = ?, updated_at = ? WHERE tg_id = ?",
-                (prefs_json, now, tg_id),
-            )
-            await self.conn.commit()
 
     async def update_user_preference(self, user_id: int, key: str, value: Any) -> bool:
         """DB-05: point-update a single preference key without a read-modify-write.

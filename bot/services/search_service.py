@@ -44,6 +44,7 @@ from bot.clients.base import AuthenticationError, ServiceConnectionError
 from bot.clients.lidarr import LidarrClient
 from bot.clients.prowlarr import ProwlarrClient
 from bot.clients.radarr import RadarrClient
+from bot.clients.slskd import SlskdClient
 from bot.clients.sonarr import SonarrClient
 from bot.models import ArtistInfo, ContentType, MovieInfo, SearchResult, SeriesInfo, VIDEO_CONTENT_TYPES
 from bot.services.scoring import ScoringService
@@ -216,7 +217,7 @@ class SearchService:
         lidarr: Optional[LidarrClient] = None,
         prowlarr: Optional[ProwlarrClient] = None,
         scoring: Optional[ScoringService] = None,
-        slskd=None,
+        slskd: Optional[SlskdClient] = None,
     ):
         self.radarr = radarr
         self.sonarr = sonarr
@@ -277,7 +278,8 @@ class SearchService:
         `bot/handlers/search/commands.py` needed this same split for an
         explicit `/series`/`/anime` search, not just auto-detection.
         """
-        series, anime = [], []
+        series: list = []
+        anime: list = []
         for item in series_list:
             genres = {g.lower() for g in (getattr(item, "genres", None) or [])}
             (anime if "animation" in genres else series).append(item)
@@ -634,6 +636,63 @@ class SearchService:
                     "seeders": r.seeders,
                     "custom_format_score": r.custom_format_score,
                     "rejected": r.rejected,
+                }
+                for r in ordered[:3]
+            ],
+        )
+        return ordered
+
+    async def search_free_text(
+        self,
+        query: str,
+        content_type: ContentType = ContentType.UNKNOWN,
+        preferred_resolution: Optional[str] = None,
+    ) -> list[SearchResult]:
+        """Releases for a title Radarr/Sonarr's catalogue does not know.
+
+        `search_releases_for_title` above needs a movie/series id already in the
+        library — that is *arr's interactive search, and the only way to get
+        *arr's own verdict on a release. This is the other mode: a raw Prowlarr
+        query with no catalogue entry behind it, for what the library cannot
+        express (a title TMDb/TVDB never heard of, a concert, a rip under a name
+        no metadata provider carries).
+
+        Results carry `origin="prowlarr"`, which is what routes them down
+        `AddService.grab_release`'s push chain instead of the native path —
+        Prowlarr numbers indexers differently from *arr, so its `indexer_id` is
+        meaningless to *arr's native grab endpoint.
+
+        No *arr verdict exists here, so `ScoringService` is the sole ranking
+        (see `sort_results`, case 3) — and it writes `calculated_score` as well
+        as ordering by it, which the release card renders.
+
+        No category filter when the facet is UNKNOWN: the point of this mode is
+        that the type is not known up front. `_normalize_result` still fills
+        `detected_type` from Prowlarr's own category ids.
+        """
+        if self.prowlarr is None:
+            raise ServiceConnectionError(
+                "Prowlarr не настроен — свободный поиск недоступен"
+            )
+
+        results = await self.prowlarr.search(query, content_type)
+        if not results:
+            logger.info("free_search_completed", query=query, result_count=0)
+            return []
+
+        ordered = self.scoring.sort_results(results, content_type, preferred_resolution)
+        logger.info(
+            "free_search_completed",
+            query=query,
+            content_type=content_type.value,
+            result_count=len(ordered),
+            top=[
+                {
+                    "title": r.title[:120],
+                    "indexer": r.indexer,
+                    "size_gb": round(r.get_size_gb(), 2),
+                    "seeders": r.seeders,
+                    "score": r.calculated_score,
                 }
                 for r in ordered[:3]
             ],

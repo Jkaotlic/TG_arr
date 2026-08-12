@@ -9,6 +9,8 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from bot.clients.radarr import RadarrClient
+from bot.clients.sonarr import SonarrClient
 from bot.clients.registry import get_lidarr, get_radarr, get_sonarr
 from bot.handlers.common import accessible_message, swallow_not_modified
 from bot.ui.callbacks import CalCB
@@ -59,7 +61,8 @@ def _is_movie_calendar_item(item: dict[str, Any]) -> bool:
 
 
 async def _collect_calendar(
-    radarr, sonarr, days: int, *, errors: Optional[list[str]] = None,
+    radarr: RadarrClient, sonarr: SonarrClient, days: int, *,
+    errors: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     """Fetch Radarr's and Sonarr's calendars concurrently, merged and sorted
     by date into one list.
@@ -130,6 +133,11 @@ async def _fetch_and_send_calendar(
     # return_exceptions=True covers Lidarr's slot (_collect_calendar's own
     # slot never raises once `errors=` is set — it swallows its own
     # per-source failures internally, see its docstring).
+    # Объявлены до ветвления: `combined` присваивается в обеих ветках, но с
+    # разной формой (распаковка gather против прямого await), и без явного
+    # объявления mypy не может определить тип `lidarr_result` вовсе.
+    combined: Any
+    lidarr_result: Any
     if lidarr is not None:
         combined, lidarr_result = await asyncio.gather(
             _collect_calendar(radarr, sonarr, days, errors=errors),

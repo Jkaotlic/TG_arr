@@ -10,7 +10,7 @@ help:
 	@echo "  make test-cov     - Run tests with coverage"
 	@echo "  make lint         - Run linter (ruff)"
 	@echo "  make format       - Format code (ruff)"
-	@echo "  make typecheck    - Run mypy on bot/ (not wired into lint)"
+	@echo "  make typecheck    - Run mypy on bot/ (also part of make lint)"
 	@echo "  make run          - Run bot locally"
 	@echo "  make docker-build - Build Docker image"
 	@echo "  make docker-up    - Start with Docker Compose"
@@ -42,18 +42,19 @@ test:
 test-cov:
 	pytest tests/ -v --cov=bot --cov-report=html --cov-report=term-missing
 
-# Run linter
+# Run linter — ruff AND mypy. DEP-03: mypy is part of the gate, not an
+# optional extra; `make typecheck` below stays for running it alone.
 lint:
 	ruff check bot/ tests/
+	mypy bot/
 
 # Format code
 format:
 	ruff format bot/ tests/
 	ruff check --fix bot/ tests/
 
-# DEP-03: mypy is a declared dev dependency but was never wired into any
-# make target. Deliberately NOT part of `make lint` — bot/ isn't fully
-# clean under mypy yet and fixing that is out of scope here.
+# DEP-03: same check `make lint` runs, split out so it can be run alone
+# during a typing-heavy edit without waiting on ruff.
 typecheck:
 	mypy bot/
 

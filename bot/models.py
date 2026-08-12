@@ -521,6 +521,12 @@ class SearchSession(BaseModel):
     # Feature #2: user-chosen season-monitoring preset (all/future/
     # latestSeason/firstSeason/none); None → auto-decide from the release.
     monitor_type: Optional[str] = None
+    # 2026-08-12: сессия свободного поиска (bot/handlers/search/free.py). За её
+    # релизами не стоит записи в Radarr/Sonarr, поэтому у неё свои коллбэки и
+    # свой обработчик граба — каталожный поток упёрся бы в отсутствие arr_id.
+    # Поле с дефолтом: старые сохранённые сессии читаются как есть, миграция
+    # не нужна.
+    free_search: bool = False
     created_at: datetime = Field(default_factory=_utcnow)
 
 

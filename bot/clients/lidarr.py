@@ -106,11 +106,6 @@ class LidarrClient(ArrBaseClient):
 
         raise APIError("Не удалось добавить артиста в Lidarr")
 
-    async def search_artist(self, artist_id: int) -> dict[str, Any]:
-        """Trigger a search for all albums of an artist."""
-        payload = {"name": "ArtistSearch", "artistId": artist_id}
-        result = await self.post("/api/v1/command", json_data=payload)
-        return result if isinstance(result, dict) else {}
 
     async def get_calendar(self, days: int = 7) -> list[dict[str, Any]]:
         """Get upcoming album releases from Lidarr calendar."""

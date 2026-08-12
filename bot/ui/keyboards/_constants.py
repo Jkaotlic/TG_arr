@@ -32,6 +32,11 @@ class CallbackData:
     RELEASE = "rel:"  # rel:0 (index in results)
     GRAB_BEST = "grab_best"
 
+    # Free-text search (2026-08-12): offered when the catalogue-backed search
+    # has nothing to show for the query. The catalogue only knows what
+    # TMDb/TVDB carry; a dead end there is not a dead end for the indexers.
+    FREE_SEARCH = "free_search"
+
     # Content selection (for add)
     ARTIST = "artist:"  # artist:idx (session results index)
     ADD_MOVIE = "add_movie:"  # add_movie:tmdb_id

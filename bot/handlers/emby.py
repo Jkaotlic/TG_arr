@@ -76,24 +76,6 @@ async def _edit_status(callback: CallbackQuery) -> None:
     await safe_edit(message, text, reply_markup=keyboard, parse_mode="HTML")
 
 
-async def show_emby_status(message_or_callback, edit: bool = False) -> None:
-    """Show Emby server status.
-
-    Kept as a thin wrapper around `_render_status_text` for callers that
-    don't need fine control over `callback.answer()` (e.g. handle_restart_confirm's
-    error-path re-render). New call sites should prefer calling
-    `_render_status_text()` directly to keep exactly one `answer()` per callback
-    (BUG-04c).
-    """
-    is_callback = isinstance(message_or_callback, CallbackQuery)
-    text, keyboard = await _render_status_text()
-
-    if edit and is_callback:
-        await safe_edit(message_or_callback.message, text, reply_markup=keyboard, parse_mode="HTML")
-    else:
-        await message_or_callback.answer(text, reply_markup=keyboard, parse_mode="HTML")
-
-
 @router.message(F.text == MENU_EMBY)
 @router.message(Command("emby"))
 async def cmd_emby(message: Message) -> None:

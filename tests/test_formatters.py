@@ -340,7 +340,9 @@ def test_format_search_result_handles_unicode_and_long_titles(title):
 def test_formatter_shows_why_arr_refuses_a_release():
     """"Rejected" alone is useless — the reason is the actionable part."""
     from bot.models import QualityInfo, SearchResult
-    from bot.ui.formatters.search import format_release
+    from bot.ui.formatters import Formatters
+
+    format_release = Formatters.format_release_details
 
     release = SearchResult(
         guid="g1",
@@ -360,7 +362,9 @@ def test_formatter_shows_arr_accepted_score_when_nonzero():
     (e.g. +250 for an English-audio release) — it explains why *arr ranked
     it where it did."""
     from bot.models import QualityInfo, SearchResult
-    from bot.ui.formatters.search import format_release
+    from bot.ui.formatters import Formatters
+
+    format_release = Formatters.format_release_details
 
     release = SearchResult(
         guid="g2",
@@ -383,7 +387,9 @@ def test_formatter_distinguishes_no_verdict_from_accepted():
     zero score looks like.
     """
     from bot.models import QualityInfo, SearchResult
-    from bot.ui.formatters.search import format_release
+    from bot.ui.formatters import Formatters
+
+    format_release = Formatters.format_release_details
 
     no_verdict = SearchResult(
         guid="g3", title="Some.Movie.2021.2160p", download_url="u", indexer="Prowlarr free-text",

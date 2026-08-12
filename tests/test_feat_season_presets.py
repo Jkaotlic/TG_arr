@@ -8,18 +8,12 @@ import pytest
 from bot.models import ContentType, SearchResult, SearchSession
 
 
-@pytest.mark.asyncio
-async def test_season_pick_searches_only_that_season():
-    """Picking season 2 must not re-search the whole show."""
-    from bot.handlers.search.grab import _search_picked_season
-
-    sonarr = AsyncMock()
-    sonarr.search_season.return_value = {"id": 1}
-
-    await _search_picked_season(sonarr, series_id=3, season_number=2)
-
-    sonarr.search_season.assert_awaited_once_with(3, 2)
-    sonarr.search_series.assert_not_awaited()
+# 2026-08-12: здесь был test_season_pick_searches_only_that_season, проверявший
+# `_search_picked_season` — однострочную обёртку вокруг `sonarr.search_season`,
+# у которой не было ни одного производственного вызова. Обёртка удалена. Сам
+# инвариант («выбрали сезон 2 — не перекачиваем всё шоу») живёт в
+# `AddService._grab_via_push_chain` и проверяется в
+# tests/test_add_service.py:369 и tests/test_sonarr_client.py:69.
 
 
 def test_decide_monitor_type_override_wins():
@@ -27,9 +21,13 @@ def test_decide_monitor_type_override_wins():
     from bot.handlers.search import _decide_monitor_type
 
     result = SearchResult(guid="g", title="t", detected_season=2, is_season_pack=False)
-    # auto would be "none"; the user preset must win
-    assert _decide_monitor_type(result, force_download=False, override="future") == "future"
-    assert _decide_monitor_type(result, force_download=False, override=None) == "none"
+    # Пресет пользователя должен побеждать автоматический выбор. Берём
+    # заведомо отличный от авто-значения пресет, иначе тест проходил бы и с
+    # проигнорированным override.
+    assert _decide_monitor_type(result, force_download=False, override="firstSeason") == "firstSeason"
+    # 2026-08-12: авто-значение для одиночной серии — "future" вместо "none"
+    # (см. test_decide_monitor_type_single_season_not_all).
+    assert _decide_monitor_type(result, force_download=False, override=None) == "future"
 
 
 def test_season_presets_keyboard_offers_all_presets():

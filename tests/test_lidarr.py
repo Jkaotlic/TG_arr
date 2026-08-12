@@ -308,7 +308,11 @@ class TestDownloadUrlValidation:
         def fake_getaddrinfo(host, port, *args, **kwargs):
             return [(socket.AF_INET, 0, 0, "", ("10.0.0.1", 0))]
 
-        with patch("bot.services.add_service.socket.getaddrinfo", side_effect=fake_getaddrinfo):
+        # Патчится модуль, где живёт сама гайка: с 2026-08-12 это
+        # bot/services/url_guard.py, а add_service лишь реэкспортирует имена
+        # (`_validate_download_url` выше импортируется по-прежнему оттуда и
+        # продолжает работать).
+        with patch("bot.services.url_guard.socket.getaddrinfo", side_effect=fake_getaddrinfo):
             assert await _validate_download_url("http://evil.example/") is False
 
 

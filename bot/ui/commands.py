@@ -16,6 +16,7 @@ from aiogram.types import BotCommand
 COMMAND_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ("🔍 Поиск", [
         ("search", "Найти фильм, сериал или аниме"),
+        ("find", "Искать раздачи напрямую, мимо каталога"),
         ("movie", "Найти фильм"),
         ("series", "Найти сериал"),
         ("anime", "Найти аниме"),

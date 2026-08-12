@@ -75,6 +75,14 @@ def test_decide_monitor_type_single_season_not_all():
     full = SearchResult(guid="g", title="t")
 
     assert _decide_monitor_type(pack, force_download=False) == "all"
-    assert _decide_monitor_type(single, force_download=False) == "none"
     assert _decide_monitor_type(full, force_download=False) == "all"
     assert _decide_monitor_type(single, force_download=True) == "all"
+
+    # 2026-08-12: одиночная серия даёт "future", а не "none". Инвариант BUG-04
+    # («не всё подряд») тот же и проверяется первой строкой; менялось то, что
+    # "none" оставлял сериал неспособным подхватить и НОВЫЕ серии. Живой замер
+    # на Sonarr 4.0.19 (analysis/2026-08-12-seasonpass-probe.md): "future"
+    # промониторил 4 невышедшие серии из 34 и снял все вышедшие — задний
+    # каталог не тянется.
+    assert _decide_monitor_type(single, force_download=False) != "all"
+    assert _decide_monitor_type(single, force_download=False) == "future"

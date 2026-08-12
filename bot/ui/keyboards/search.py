@@ -12,7 +12,7 @@ class via normal attribute lookup either way.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import ContentType, MovieInfo, SearchResult, SeriesInfo
-from bot.ui.callbacks import PageCB, ReleaseCB, SeasonPresetCB
+from bot.ui.callbacks import FindGrabCB, FindPageCB, FindReleaseCB, PageCB, ReleaseCB, SeasonPresetCB
 from bot.ui.keyboards._constants import CallbackData
 
 
@@ -153,6 +153,66 @@ class _SearchKeyboards:
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def free_search_offer() -> InlineKeyboardMarkup:
+        """Offered when the catalogue-backed search has nothing to show.
+
+        The catalogue can only answer for titles TMDb/TVDB carry; a dead end
+        there is not a dead end for the indexers, and this button is the only
+        place the user learns that.
+        """
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔎 Искать по названию", callback_data=CallbackData.FREE_SEARCH)],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)],
+        ])
+
+    @staticmethod
+    def free_results(
+        results: list[SearchResult], page: int, total_pages: int, offset: int = 0,
+    ) -> InlineKeyboardMarkup:
+        """Free-search result list — same shape as `search_results`, different
+        callbacks.
+
+        No "⚡ Лучший": that button auto-grabs on a score gated against
+        `auto_grab_score_threshold`, and a free-text hit never went through
+        *arr's profile at all, so there is no verdict to auto-act on.
+        """
+        keyboard = []
+        for i, result in enumerate(results):
+            idx = offset + i
+            quality = result.quality.resolution or "?"
+            seeders = f"S:{result.seeders}" if result.seeders else ""
+            size = result.size_formatted[:6] if result.size > 0 else ""
+            label = f"{idx + 1}. {quality} {seeders} {size}".strip()
+            if len(label) > 40:
+                label = label[:37] + "..."
+            keyboard.append([
+                InlineKeyboardButton(text=label, callback_data=FindReleaseCB(idx=idx).pack()),
+            ])
+
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀️", callback_data=FindPageCB(page=page - 1).pack()))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(text="▶️", callback_data=FindPageCB(page=page + 1).pack()))
+        keyboard.append(nav)
+
+        keyboard.append([InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def free_release(idx: int) -> InlineKeyboardMarkup:
+        """One free-search hit. No season-monitoring button: there is no series
+        in Sonarr to monitor."""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Скачать", callback_data=FindGrabCB(idx=idx).pack())],
+            [
+                InlineKeyboardButton(text="◀️ Назад", callback_data=FindPageCB(page=0).pack()),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
+            ],
+        ])
 
     @staticmethod
     def season_presets() -> InlineKeyboardMarkup:

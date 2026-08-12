@@ -292,18 +292,22 @@ def test_extract_season_episode_1x05_form():
     assert client._extract_season_episode("Show.Name.1x05.480p.HDTV") == (1, 5)
 
 
-def test_extract_season_episode_does_not_recognize_cyrillic_season_episode_words():
-    """Characterization + discrepancy flag (see fix report): the review
-    finding assumed this parser handles the Russian "Сезон"/"Серия" forms.
-    It does not — every pattern here is Latin-only (s\\d+e\\d+, season...
-    episode..., \\d+x\\d+), and Cyrillic "с"/"е"/"х" are different Unicode
-    codepoints from Latin "s"/"e"/"x", so they never match. Production code
-    is NOT changed by this test."""
+def test_extract_season_episode_recognizes_cyrillic_season_episode_words():
+    """Раньше здесь стоял характеризационный тест, фиксировавший обратное: что
+    парсер русских форм «Сезон»/«Серия» НЕ понимает, потому что кириллические
+    «с»/«е»/«х» — другие кодпоинты, чем латинские "s"/"e"/"x". Он был честен:
+    дырка существовала. Безвредной она была ровно потому, что недостижима —
+    единственный код, заполняющий эти поля, `ProwlarrClient.search()`, не имел
+    производственного вызова.
+
+    Свободный поиск (2026-08-12) вызов ему даёт, а русскоязычные индексеры —
+    основной источник таких заголовков, так что дырку закрыли.
+    """
     from bot.clients.prowlarr import ProwlarrClient
 
     client = ProwlarrClient("http://prowlarr", "key")
 
-    assert client._extract_season_episode("Сериал.Сезон 1.Серия 5.1080p.WEB-DL") == (None, None)
+    assert client._extract_season_episode("Сериал.Сезон 1.Серия 5.1080p.WEB-DL") == (1, 5)
 
 
 def test_is_season_pack_true_for_a_season_without_episode_marker():
@@ -375,3 +379,66 @@ async def test_empty_categories_list_falls_through_to_content_type_routing():
 
     params = do_search.call_args.args[0]
     assert params["categories"] == MOVIE_CATEGORIES
+
+
+# ---------------------------------------------------------------------------
+# Кириллица в разборе сезонов (2026-08-12).
+#
+# Этот код был безвреден ровно потому, что недостижим: ProwlarrClient.search()
+# не имел производственного вызова. Свободный поиск его оживляет, а
+# русскоязычные индексеры — основной источник таких заголовков.
+# ---------------------------------------------------------------------------
+
+
+def _prowlarr():
+    from bot.clients.prowlarr import ProwlarrClient
+
+    return ProwlarrClient("http://prowlarr", "key")
+
+
+@pytest.mark.parametrize("title,season", [
+    ("Друзья / Friends (Сезон 3) 1080p", 3),
+    ("Ведьмак 2 сезон WEB-DL", 2),
+    ("Тайны следствия 12-й сезон", 12),
+    ("Сериал Сезон: 4", 4),
+])
+def test_cyrillic_season_is_extracted(title, season):
+    assert _prowlarr()._extract_season_episode(title)[0] == season
+
+
+def test_cyrillic_episode_is_extracted():
+    assert _prowlarr()._extract_season_episode("Шоу Серия 5")[1] == 5
+
+
+def test_cyrillic_season_and_episode_together():
+    assert _prowlarr()._extract_season_episode("Шоу Сезон 2 Серия 7") == (2, 7)
+
+
+@pytest.mark.parametrize("title", [
+    "Сериал (01-12 из 12) 1080p",
+    "Сериал 3 сезон целиком",
+    "Сериал 2 сезон, все серии",
+])
+def test_cyrillic_season_pack_markers(title):
+    assert _prowlarr()._is_season_pack(title) is True
+
+
+def test_single_cyrillic_episode_is_not_a_pack():
+    assert _prowlarr()._is_season_pack("Сериал 2 сезон Серия 5") is False
+
+
+@pytest.mark.parametrize("title,expected", [
+    ("Show S03E05 1080p", (3, 5)),
+    ("Show S03 1080p", (3, None)),
+    ("Show Season 2 Episode 4", (2, 4)),
+    ("Show 1x01", (1, 1)),
+])
+def test_latin_parsing_is_unchanged(title, expected):
+    """Страховка от регрессии: латинские паттерны имеют приоритет и не тронуты."""
+    assert _prowlarr()._extract_season_episode(title) == expected
+
+
+def test_latin_pack_detection_is_unchanged():
+    client = _prowlarr()
+    assert client._is_season_pack("Show S03 Complete Season") is True
+    assert client._is_season_pack("Show S03E05") is False
