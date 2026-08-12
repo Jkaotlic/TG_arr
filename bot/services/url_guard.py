@@ -107,6 +107,9 @@ def _trusted_service_hosts() -> set[tuple[str, int]]:
         s.lidarr_url,
         s.qbittorrent_url,
         s.emby_url,
+        # 2026-08-12: the streaming contour hands links to TorrServer, and
+        # TorrServer itself is a legitimate destination on the same LAN.
+        s.torrserver_url,
     ):
         if url:
             parsed = urllib.parse.urlparse(url)
@@ -117,7 +120,9 @@ def _trusted_service_hosts() -> set[tuple[str, int]]:
     return hosts
 
 
-async def _validate_download_url(url: str) -> bool:
+async def _validate_download_url(
+    url: str, extra_trusted: frozenset[tuple[str, int]] = frozenset(),
+) -> bool:
     """
     Validate URL is safe for download (not SSRF).
 
@@ -140,6 +145,11 @@ async def _validate_download_url(url: str) -> bool:
     Exception: a URL pointing at one of the user's OWN configured services is
     trusted even on a private LAN.
 
+    `extra_trusted` carries (host, port) pairs a caller knows to be legitimate
+    beyond the configured services — today TorrServer's own torznab sources
+    (`TorrServerClient.get_source_hosts`), which are where its release links
+    come from. Empty by default, so every existing call site is unchanged.
+
     SEC-08: accepted risk — this is a check-then-use validation (TOCTOU). We
     resolve the hostname here, but the actual download happens later inside
     qBittorrent, which performs its OWN resolution. Closing this fully would
@@ -156,7 +166,7 @@ async def _validate_download_url(url: str) -> bool:
     if not parsed.hostname:
         return False
     url_port = parsed.port or _DEFAULT_SCHEME_PORTS.get(parsed.scheme, 0)
-    if (parsed.hostname.lower(), url_port) in _trusted_service_hosts():
+    if (parsed.hostname.lower(), url_port) in (_trusted_service_hosts() | set(extra_trusted)):
         return True
     try:
         addr = ipaddress.ip_address(parsed.hostname)

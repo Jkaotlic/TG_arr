@@ -20,6 +20,7 @@ import structlog
 from bot.clients.emby_sync_hook import EmbySyncHookClient
 from bot.clients.torrserver import TorrServerClient, TorrServerError
 from bot.models import SyncHookResult, TorrServerTorrent
+from bot.services.url_guard import _mask_url, _validate_download_url
 
 logger = structlog.get_logger()
 
@@ -71,8 +72,29 @@ class TorrServerService:
                 return None
             await asyncio.sleep(self.poll_interval)
 
+    async def _extra_trusted_hosts(self) -> frozenset[tuple[str, int]]:
+        """Torznab source hosts, or nothing if the server won't say.
+
+        Degrades to "trust only what the bot's own config names", never to
+        "trust everything" — a server that cannot answer must not widen the
+        guard.
+        """
+        try:
+            return frozenset(await self.client.get_source_hosts())
+        except Exception as e:
+            logger.warning("torrserver_source_hosts_unavailable", error=str(e))
+            return frozenset()
+
     async def add_and_publish(self, link: str, title: str, poster: str = "") -> AddResult:
         """Add a release and make it visible in Emby as soon as possible."""
+        # SEC-16: the link comes from an indexer and TorrServer sits on the
+        # same private LAN, so it will fetch whatever it is handed. Same guard
+        # every *arr/qBittorrent handoff already goes through — this was the
+        # one place that skipped it.
+        if not await _validate_download_url(link, extra_trusted=await self._extra_trusted_hosts()):
+            logger.warning("torrserver_add_blocked_unsafe_url", link=_mask_url(link))
+            raise TorrServerError("Ссылка раздачи отклонена проверкой безопасности")
+
         added = await self.client.add_torrent(link, title, poster)
         logger.info("torrserver_add", torrent_hash=added.hash, title=added.title)
 

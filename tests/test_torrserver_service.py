@@ -25,9 +25,17 @@ READY = TorrServerTorrent(
 )
 
 
+#: Ссылка, которую пропускает SSRF-гайка (SEC-16, врезана в add_and_publish
+#: 2026-08-12). Публичный IP-литерал, а не имя: путь резолвинга не
+#: задействован, и тесты этого файла — про оркестрацию метаданных и синка, а
+#: не про валидацию URL. Отказ гайки покрыт отдельно в tests/test_torrserver_ssrf.py.
+LINK = "http://1.2.3.4/download/abc.torrent"
+
+
 def _client(get_results):
     client = MagicMock()
     client.add_torrent = AsyncMock(return_value=ADDED)
+    client.get_source_hosts = AsyncMock(return_value=set())
     client.get_torrent = AsyncMock(side_effect=get_results)
     client.stream_url = MagicMock(return_value="http://ts:8090/stream/Dune.2021.mkv?link=abc&index=1&play")
     return client
@@ -45,7 +53,7 @@ async def test_waits_for_metadata_then_triggers_sync():
     hook = _hook()
     service = TorrServerService(client, hook, metadata_timeout=10.0, poll_interval=0)
 
-    result = await service.add_and_publish("http://link", "Dune 2021")
+    result = await service.add_and_publish(LINK, "Dune 2021")
 
     assert result.metadata_ready is True
     assert result.sync.status == "ok"
@@ -77,7 +85,7 @@ async def test_metadata_timeout_still_counts_as_added_and_skips_sync():
     service = TorrServerService(client, hook, metadata_timeout=0.05, poll_interval=0.01)
 
     result = await asyncio.wait_for(
-        service.add_and_publish("http://link", "Dune 2021"), timeout=5
+        service.add_and_publish(LINK, "Dune 2021"), timeout=5
     )
 
     assert result.torrent.hash == "abc"
@@ -93,7 +101,7 @@ async def test_hook_failure_does_not_break_the_add():
     hook = _hook(status="failed")
     service = TorrServerService(client, hook, metadata_timeout=10.0, poll_interval=0)
 
-    result = await service.add_and_publish("http://link", "Dune 2021")
+    result = await service.add_and_publish(LINK, "Dune 2021")
 
     assert result.metadata_ready is True
     assert result.sync.status == "failed"
@@ -105,7 +113,7 @@ async def test_missing_hook_is_allowed():
     client = _client([READY])
     service = TorrServerService(client, None, metadata_timeout=10.0, poll_interval=0)
 
-    result = await service.add_and_publish("http://link", "Dune 2021")
+    result = await service.add_and_publish(LINK, "Dune 2021")
 
     assert result.sync is None
     assert result.metadata_ready is True
@@ -120,7 +128,7 @@ async def test_transient_poll_error_does_not_fail_the_add():
     hook = _hook()
     service = TorrServerService(client, hook, metadata_timeout=10.0, poll_interval=0)
 
-    result = await service.add_and_publish("http://link", "Dune 2021")
+    result = await service.add_and_publish(LINK, "Dune 2021")
 
     assert result.metadata_ready is True
     assert result.torrent.hash == "abc"
@@ -136,7 +144,7 @@ async def test_release_without_video_files_has_no_stream_link():
     client = _client([audio_only])
     service = TorrServerService(client, _hook(), metadata_timeout=10.0, poll_interval=0)
 
-    result = await service.add_and_publish("http://link", "OST")
+    result = await service.add_and_publish(LINK, "OST")
 
     assert result.metadata_ready is True
     assert result.stream_url is None
