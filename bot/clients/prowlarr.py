@@ -437,6 +437,23 @@ class ProwlarrClient(BaseAPIClient):
         if match:
             return int(match.group(1)), int(match.group(2))
 
+        # Кириллица. Проверяется ПОСЛЕ латинских форм намеренно: русскоязычная
+        # раздача обычно несёт и оригинальное название, а "S03E05" в нём
+        # разбирается точнее, чем словесная форма. Кириллические «с»/«е»/«х» —
+        # другие кодпоинты, чем латинские s/e/x, поэтому паттерны выше их не
+        # видят вовсе.
+        season_ru = re.search(r"сезон[\s.:]*(\d{1,2})", title_lower) or re.search(
+            r"(\d{1,2})\s*-?\s*(?:й|ый|ой)?\s*сезон", title_lower
+        )
+        episode_ru = re.search(r"серия[\s.:]*(\d{1,3})", title_lower) or re.search(
+            r"(\d{1,3})\s*-?\s*(?:я|ая)?\s*серия", title_lower
+        )
+        if season_ru or episode_ru:
+            return (
+                int(season_ru.group(1)) if season_ru else None,
+                int(episode_ru.group(1)) if episode_ru else None,
+            )
+
         return None, None
 
     def _is_season_pack(self, title: str) -> bool:
@@ -444,11 +461,18 @@ class ProwlarrClient(BaseAPIClient):
         title_lower = title.lower()
 
         # Explicit season pack markers (check first — most reliable)
-        if any(x in title_lower for x in ["complete season", "season pack", "full season"]):
+        if any(x in title_lower for x in [
+            "complete season", "season pack", "full season",
+            "сезон целиком", "все серии", "полный сезон",
+        ]):
+            return True
+
+        # "(01-12 из 12)" — русскоязычная форма «все N серий сезона».
+        if re.search(r"\d{1,3}\s*-\s*\d{1,3}\s*из\s*\d{1,3}", title_lower):
             return True
 
         # Has any episode reference at all? If so, not a season pack.
-        if re.search(r"s\d{1,2}e\d|(\d{1,2})x(\d{1,3})|episode[\s.]*\d", title_lower):
+        if re.search(r"s\d{1,2}e\d|(\d{1,2})x(\d{1,3})|episode[\s.]*\d|серия[\s.:]*\d", title_lower):
             return False
 
         # S01 format without any episode reference
@@ -457,6 +481,10 @@ class ProwlarrClient(BaseAPIClient):
 
         # "Season X" without episode
         if re.search(r"season[\s.]*\d{1,2}(?![\s.]*episode)", title_lower):
+            return True
+
+        # «3 сезон» / «Сезон 3» без указания серии
+        if re.search(r"сезон[\s.:]*\d{1,2}|\d{1,2}\s*-?\s*(?:й|ый|ой)?\s*сезон", title_lower):
             return True
 
         return False
