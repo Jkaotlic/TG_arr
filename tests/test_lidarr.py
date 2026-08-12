@@ -544,3 +544,105 @@ async def test_get_albums_returns_empty_on_non_list_payload():
     client = _lidarr()
     with patch.object(client, "get", new=AsyncMock(return_value={"error": "nope"})):
         assert await client.get_albums(1) == []
+
+
+@pytest.mark.asyncio
+async def test_get_releases_asks_lidarr_for_one_album():
+    client = _lidarr()
+    with patch.object(client, "get", new=AsyncMock(return_value=[])) as get:
+        await client.get_releases(3)
+
+    assert get.call_args.args[0] == "/api/v1/release"
+    assert get.call_args.kwargs["params"] == {"albumId": 3}
+
+
+@pytest.mark.asyncio
+async def test_get_releases_parses_the_live_row():
+    """Форма снята с живого Lidarr (GET /release?albumId=3): те же поля, что у
+    Radarr/Sonarr, поэтому разбор — общий `_get_releases`, а не второй парсер."""
+    client = _lidarr()
+    payload = [{
+        "guid": "rutracker-1",
+        "title": "(Trancecore) Enter Shikari - The Mindsweep - 2015, ALAC (tracks), loss",
+        "indexerId": 4,
+        "indexer": "RuTracker",
+        "size": 330097421,
+        "seeders": 5,
+        "leechers": 0,
+        "protocol": "torrent",
+        "downloadUrl": "http://prowlarr/dl/1",
+        "quality": {"quality": {"name": "ALAC"}},
+        "rejected": False,
+        "rejections": [],
+        "customFormatScore": 0,
+        "discography": False,
+    }]
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)):
+        releases = await client.get_releases(3)
+
+    assert len(releases) == 1
+    assert releases[0].guid == "rutracker-1"
+    assert releases[0].indexer_id == 4
+    assert releases[0].origin == "arr"
+    assert releases[0].seeders == 5
+    assert releases[0].is_season_pack is False
+
+
+@pytest.mark.asyncio
+async def test_discography_release_is_flagged_as_a_pack():
+    """`discography` у Lidarr — прямой аналог `fullSeason` у Sonarr. Без флага
+    пользователь, выбравший один альбом, тапнет по 20-гигабайтной дискографии
+    и не поймёт этого."""
+    client = _lidarr()
+    payload = [{"guid": "g", "title": "Enter Shikari - Discography 2007-2023", "discography": True}]
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)):
+        releases = await client.get_releases(3)
+
+    assert releases[0].is_season_pack is True
+
+
+@pytest.mark.asyncio
+async def test_set_album_monitored_touches_only_that_album():
+    client = _lidarr()
+    current = {"id": 3, "title": "The Mindsweep", "monitored": False, "profileId": 1}
+    with patch.object(client, "get", new=AsyncMock(return_value=current)), \
+            patch.object(client, "_safe_request", new=AsyncMock(return_value={})) as req:
+        assert await client.set_album_monitored(3, True) is True
+
+    assert req.await_args.args[:2] == ("PUT", "/api/v1/album/3")
+    # PUT у *arr заменяет ресурс целиком: profileId должен уцелеть.
+    assert req.await_args.kwargs["json_data"]["monitored"] is True
+    assert req.await_args.kwargs["json_data"]["profileId"] == 1
+
+
+@pytest.mark.asyncio
+async def test_set_artist_monitored_uses_the_artist_resource():
+    client = _lidarr()
+    with patch.object(client, "get", new=AsyncMock(return_value={"id": 1, "monitored": False})), \
+            patch.object(client, "_safe_request", new=AsyncMock(return_value={})) as req:
+        assert await client.set_artist_monitored(1, True) is True
+
+    assert req.await_args.args[:2] == ("PUT", "/api/v1/artist/1")
+
+
+@pytest.mark.asyncio
+async def test_search_album_sends_the_album_search_command():
+    """Контракт снят с живого Lidarr 2026-08-12: POST /command с этим телом
+    отвечает 201, а неизвестное имя команды — 500."""
+    client = _lidarr()
+    with patch.object(client, "post", new=AsyncMock(return_value={"id": 99})) as post:
+        result = await client.search_album(3)
+
+    assert post.call_args.args[0] == "/api/v1/command"
+    assert post.call_args.kwargs["json_data"] == {"name": "AlbumSearch", "albumIds": [3]}
+    assert result == {"id": 99}
+
+
+@pytest.mark.asyncio
+async def test_search_artist_sends_the_artist_search_command():
+    client = _lidarr()
+    with patch.object(client, "post", new=AsyncMock(return_value={"id": 100})) as post:
+        result = await client.search_artist(7)
+
+    assert post.call_args.kwargs["json_data"] == {"name": "ArtistSearch", "artistId": 7}
+    assert result == {"id": 100}

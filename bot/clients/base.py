@@ -708,8 +708,13 @@ class ArrBaseClient(BaseAPIClient):
         # (GET /api/v3/parse): «S2E1-8 of 8» он отдаёт как fullSeason=false с
         # восемью episodeNumbers — он не знает, что восемь и есть весь сезон.
         # Для бота такая раздача — пак, тем же порогом, что и на пути Prowlarr.
+        # `discography` — музыкальный двойник `fullSeason` у Lidarr (живой
+        # замер 2026-08-12): и то и другое значит «в раздаче больше, чем один
+        # запрошенный элемент», и оба ведут к одному решению в UI и мониторинге.
         is_season_pack = (
-            bool(item.get("fullSeason")) or len(episode_numbers) >= MIN_PACK_EPISODES
+            bool(item.get("fullSeason"))
+            or bool(item.get("discography"))
+            or len(episode_numbers) >= MIN_PACK_EPISODES
         )
 
         return SearchResult(

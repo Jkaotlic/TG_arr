@@ -6,7 +6,7 @@ from typing import Any, Optional
 import structlog
 
 from bot.clients.base import APIError, ArrBaseClient
-from bot.models import AlbumInfo, ArtistInfo, MetadataProfile
+from bot.models import AlbumInfo, ArtistInfo, MetadataProfile, SearchResult
 
 logger = structlog.get_logger()
 
@@ -150,6 +150,40 @@ class LidarrClient(ArrBaseClient):
 
         raise APIError("Не удалось добавить артиста в Lidarr")
 
+
+    async def get_releases(self, album_id: int) -> list[SearchResult]:
+        """Interactive search for one album — Lidarr's own verdict included.
+
+        Живой замер 2026-08-12 (`GET /api/v1/release?albumId=3`): строка несёт
+        те же поля, что у Radarr/Sonarr (`guid`, `rejected`, `rejections`,
+        `customFormatScore`, `quality`, `seeders`, `downloadUrl`), поэтому
+        разбор — общий `_get_releases`, а не второй парсер.
+        """
+        return await self._get_releases({"albumId": album_id})
+
+    async def set_album_monitored(self, album_id: int, monitored: bool) -> bool:
+        """Флаг мониторинга ОДНОГО альбома — не артиста целиком."""
+        return await self._set_monitored("album", album_id, monitored)
+
+    async def set_artist_monitored(self, artist_id: int, monitored: bool) -> bool:
+        return await self._set_monitored("artist", artist_id, monitored)
+
+    async def search_album(self, album_id: int) -> dict[str, Any]:
+        """Trigger a search for one album.
+
+        Контракт снят с живого Lidarr 3.1.2 2026-08-12: этот POST отвечает 201,
+        а неизвестное имя команды — 500 «Sequence contains no matching element»,
+        так что 201 действительно означает «команда принята».
+        """
+        payload = {"name": "AlbumSearch", "albumIds": [album_id]}
+        result = await self.post("/api/v1/command", json_data=payload)
+        return result if isinstance(result, dict) else {}
+
+    async def search_artist(self, artist_id: int) -> dict[str, Any]:
+        """Trigger a search for every monitored album of an artist (201, как выше)."""
+        payload = {"name": "ArtistSearch", "artistId": artist_id}
+        result = await self.post("/api/v1/command", json_data=payload)
+        return result if isinstance(result, dict) else {}
 
     async def get_calendar(self, days: int = 7) -> list[dict[str, Any]]:
         """Get upcoming album releases from Lidarr calendar."""
