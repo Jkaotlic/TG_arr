@@ -132,9 +132,13 @@ class TestLidarrClient:
             )
         assert result == {}
 
-    def test_parse_album_removed(self, lidarr):
-        """DEAD-09: _parse_album had no production callers — removed."""
-        assert not hasattr(lidarr, "_parse_album")
+    def test_parse_album_has_a_production_caller(self, lidarr):
+        """DEAD-09 сняли 2026-08-12: `_parse_album` вернулся вместе с флоу,
+        которого тогда не было — его вызывает `get_albums`, а тот пикер
+        альбомов (`bot/handlers/music.py`). Инвариант DEAD-09 держится в силе,
+        просто в другую сторону: у метода должен быть живой потребитель."""
+        assert hasattr(lidarr, "_parse_album")
+        assert hasattr(lidarr, "get_albums")
 
     def test_grab_release_is_inherited_but_gated_by_provenance(self, lidarr):
         """BUG-05 is still enforced — by provenance, not by absence.
@@ -154,14 +158,33 @@ class TestLidarrClient:
         assert hasattr(lidarr, "grab_release")
 
 
-class TestAlbumInfoRemoved:
-    """DEAD-09: AlbumInfo (and its ContentInfo union slot) had no producer
-    left after _parse_album's removal — no album-grab flow exists yet."""
+class TestAlbumInfoHasAProducer:
+    """DEAD-09 требовал, чтобы модели без продюсера не жили в `bot/models.py`.
+    2026-08-12 продюсер появился — `LidarrClient.get_albums` — и вместе с ним
+    вернулась `AlbumInfo`. Тест держит тот же инвариант: модель существует
+    ровно потому, что её кто-то производит.
 
-    def test_album_info_not_importable(self):
+    В union `ContentInfo` альбом при этом НЕ возвращён: он живёт в per-user
+    кэше хендлера, а не в сохраняемой сессии, поэтому дискриминатор ему не
+    нужен и старые сессии читаются без миграции.
+    """
+
+    def test_album_info_is_importable_and_produced(self):
         import bot.models as models_module
+        from bot.clients.lidarr import LidarrClient
 
-        assert not hasattr(models_module, "AlbumInfo")
+        assert hasattr(models_module, "AlbumInfo")
+        album = LidarrClient("http://lidarr", "key")._parse_album(
+            {"id": 3, "title": "The Mindsweep"},
+        )
+        assert isinstance(album, models_module.AlbumInfo)
+
+    def test_album_is_not_in_the_content_info_union(self):
+        """Сессии сохраняются в SQLite: добавление варианта в union потребовало
+        бы миграции, а альбому там не место — он не «выбранный тайтл»."""
+        from bot.models import SearchSession
+
+        assert "AlbumInfo" not in str(SearchSession.model_fields["selected_content"].annotation)
 
 
 class TestDeezerClient:
@@ -451,3 +474,73 @@ class TestAddServiceMusic:
         assert added is existing
         assert action.success is True
         lidarr.add_artist.assert_not_called()
+
+
+# ===========================================================================
+# Выбор альбома (спека docs/superpowers/specs/2026-08-12-album-scope-design.md).
+# Формы ответов сняты с живого Lidarr 3.1.2.4938 2026-08-12, а не выдуманы.
+# ===========================================================================
+
+
+def _lidarr() -> LidarrClient:
+    return LidarrClient("http://lidarr", "key")
+
+
+@pytest.mark.asyncio
+async def test_get_albums_parses_the_live_shape():
+    """Форма снята с живого Lidarr (GET /api/v1/album?artistId=1)."""
+    client = _lidarr()
+    payload = [{
+        "id": 3,
+        "foreignAlbumId": "6c2e2cbf-1b1c-4e46-9d3d-2a1c0f2a3b4c",
+        "title": "The Mindsweep",
+        "artistId": 1,
+        "albumType": "Album",
+        "releaseDate": "2015-01-14T00:00:00Z",
+        "monitored": True,
+        "artist": {"artistName": "Enter Shikari"},
+        "statistics": {"percentOfTracks": 0},
+    }]
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)) as get:
+        albums = await client.get_albums(1)
+
+    assert get.call_args.args[0] == "/api/v1/album"
+    assert get.call_args.kwargs["params"] == {"artistId": 1}
+    assert len(albums) == 1
+    album = albums[0]
+    assert album.lidarr_id == 3
+    assert album.title == "The Mindsweep"
+    assert album.album_type == "Album"
+    assert album.release_date == "2015-01-14"   # дата обрезается до дня
+    assert album.year == "2015"
+    assert album.artist_name == "Enter Shikari"
+    assert album.monitored is True
+    assert album.has_files is False             # percentOfTracks == 0
+
+
+@pytest.mark.asyncio
+async def test_get_albums_marks_albums_that_have_files():
+    client = _lidarr()
+    payload = [{"id": 1, "title": "Take to the Skies", "statistics": {"percentOfTracks": 100}}]
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)):
+        albums = await client.get_albums(1)
+
+    assert albums[0].has_files is True
+
+
+@pytest.mark.asyncio
+async def test_get_albums_skips_rows_without_id_or_title():
+    """Одна битая строка не должна обнулять всю дискографию."""
+    client = _lidarr()
+    payload = [{"title": "нет id"}, {"id": 5}, {"id": 7, "title": "ok"}]
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)):
+        albums = await client.get_albums(1)
+
+    assert [a.lidarr_id for a in albums] == [7]
+
+
+@pytest.mark.asyncio
+async def test_get_albums_returns_empty_on_non_list_payload():
+    client = _lidarr()
+    with patch.object(client, "get", new=AsyncMock(return_value={"error": "nope"})):
+        assert await client.get_albums(1) == []

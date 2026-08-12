@@ -6,7 +6,7 @@ from typing import Any, Optional
 import structlog
 
 from bot.clients.base import APIError, ArrBaseClient
-from bot.models import ArtistInfo, MetadataProfile
+from bot.models import AlbumInfo, ArtistInfo, MetadataProfile
 
 logger = structlog.get_logger()
 
@@ -46,6 +46,50 @@ class LidarrClient(ArrBaseClient):
         if isinstance(results, list) and results:
             return self._parse_artist(results[0])
         return None
+
+    async def get_albums(self, artist_id: int) -> list[AlbumInfo]:
+        """Discography of one artist, as Lidarr's metadata knows it.
+
+        Никакого `album/lookup` по свободному тексту: измерено 2026-08-12 — на
+        «metallica master of puppets» он возвращает каверы и ремиксы, а самого
+        альбома в первых трёх ответах нет. Альбомы берутся только у конкретного
+        артиста.
+        """
+        results = await self.get("/api/v1/album", params={"artistId": artist_id})
+        if not isinstance(results, list):
+            return []
+
+        albums = []
+        for item in results:
+            try:
+                album = self._parse_album(item)
+                if album:
+                    albums.append(album)
+            except Exception as e:
+                logger.warning("Skipping malformed album", error=str(e))
+        return albums
+
+    def _parse_album(self, item: dict[str, Any]) -> Optional[AlbumInfo]:
+        """Map one Lidarr album row onto AlbumInfo."""
+        album_id = item.get("id")
+        title = item.get("title")
+        if not isinstance(album_id, int) or not title:
+            return None
+
+        stats = item.get("statistics") or {}
+        artist = item.get("artist") or {}
+        return AlbumInfo(
+            lidarr_id=album_id,
+            title=title,
+            foreign_album_id=item.get("foreignAlbumId") or "",
+            artist_id=item.get("artistId"),
+            artist_name=artist.get("artistName"),
+            album_type=item.get("albumType"),
+            # Lidarr отдаёт «2015-01-14T00:00:00Z» — до дня и хватит.
+            release_date=(item.get("releaseDate") or "")[:10] or None,
+            monitored=bool(item.get("monitored")),
+            has_files=bool(stats.get("percentOfTracks") or 0),
+        )
 
     async def add_artist(
         self,

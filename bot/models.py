@@ -290,6 +290,31 @@ class ArtistInfo(BaseModel):
     root_folder_path: Optional[str] = Field(default=None)
 
 
+class AlbumInfo(BaseModel):
+    """One album of an artist, as Lidarr's own metadata sees it.
+
+    `has_files` сворачивает `statistics.percentOfTracks` в один флаг: пикеру
+    нужно лишь показать «это уже на диске», а не процент. В union `ContentInfo`
+    альбом не входит — он живёт в per-user кэше хендлера, а не в сессии,
+    поэтому дискриминатор `content_model_type` ему не нужен.
+    """
+
+    lidarr_id: int = Field(..., description="ID in Lidarr (album.id)")
+    title: str = Field(..., description="Album title")
+    foreign_album_id: str = Field(default="", description="MusicBrainz release-group ID")
+    artist_id: Optional[int] = Field(default=None, description="Lidarr artist id")
+    artist_name: Optional[str] = Field(default=None)
+    album_type: Optional[str] = Field(default=None, description="Album, EP, Single, ...")
+    release_date: Optional[str] = Field(default=None, description="YYYY-MM-DD")
+    monitored: bool = Field(default=False)
+    has_files: bool = Field(default=False, description="Хотя бы один трек на диске")
+
+    @property
+    def year(self) -> str:
+        """Год для подписи кнопки; пустая строка, когда даты нет."""
+        return (self.release_date or "")[:4]
+
+
 class MetadataProfile(BaseModel):
     """Lidarr metadata profile (controls what album types are grabbed)."""
 
