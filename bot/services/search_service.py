@@ -277,7 +277,8 @@ class SearchService:
         `bot/handlers/search/commands.py` needed this same split for an
         explicit `/series`/`/anime` search, not just auto-detection.
         """
-        series, anime = [], []
+        series: list = []
+        anime: list = []
         for item in series_list:
             genres = {g.lower() for g in (getattr(item, "genres", None) or [])}
             (anime if "animation" in genres else series).append(item)

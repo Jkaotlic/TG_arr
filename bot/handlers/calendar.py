@@ -130,6 +130,11 @@ async def _fetch_and_send_calendar(
     # return_exceptions=True covers Lidarr's slot (_collect_calendar's own
     # slot never raises once `errors=` is set — it swallows its own
     # per-source failures internally, see its docstring).
+    # Объявлены до ветвления: `combined` присваивается в обеих ветках, но с
+    # разной формой (распаковка gather против прямого await), и без явного
+    # объявления mypy не может определить тип `lidarr_result` вовсе.
+    combined: Any
+    lidarr_result: Any
     if lidarr is not None:
         combined, lidarr_result = await asyncio.gather(
             _collect_calendar(radarr, sonarr, days, errors=errors),
