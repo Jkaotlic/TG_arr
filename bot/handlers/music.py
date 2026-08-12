@@ -24,6 +24,7 @@ from bot.handlers.common import accessible_message, safe_edit, strip_command
 from bot.models import (
     ActionLog,
     ActionType,
+    AlbumInfo,
     ArtistInfo,
     ContentType,
     SearchSession,
@@ -63,6 +64,11 @@ def _remember(cache: dict, key, value) -> None:
 # Per-user in-memory artist lookup cache (for select-by-index callbacks)
 _artist_candidates: dict[int, list[ArtistInfo]] = {}
 _trending_artists_cache: dict[int, list[dict]] = {}
+# Дискография выбранного артиста. В сессию (и в SQLite) не кладётся: альбом —
+# не «выбранный тайтл», а добавление варианта в union `ContentInfo` потребовало
+# бы миграции сохранённых сессий. Цена — «список истёк» после рестарта бота,
+# ровно как у артистов выше.
+_album_candidates: dict[int, list[AlbumInfo]] = {}
 
 
 def _artist_list_text(artists: list[ArtistInfo], page_artists: list[ArtistInfo], start_idx: int) -> str:
@@ -94,6 +100,30 @@ async def _render_artist_list(message: Message, artists: list[ArtistInfo], page:
         message,
         text,
         reply_markup=Keyboards.artist_list(artists, current_page=page, per_page=per_page),
+        parse_mode="HTML",
+    )
+
+
+async def _show_album_scope(message: Message, artist: ArtistInfo, albums: list[AlbumInfo]) -> None:
+    """Пикер «Что искать?» — прямой аналог `Keyboards.season_scope` у сериалов."""
+    if albums:
+        body = f"🎵 <b>{html.escape(artist.name)}</b>\n\nЧто искать?"
+    else:
+        # Метаданные могли ещё не подтянуться после добавления артиста — пустой
+        # экран был бы тупиком, поэтому «вся дискография» остаётся доступной.
+        body = (
+            f"🎵 <b>{html.escape(artist.name)}</b>\n\n"
+            "Дискография пока не известна Lidarr — попробуйте позже "
+            "или возьмите артиста целиком."
+        )
+    await safe_edit(
+        message,
+        body,
+        reply_markup=Keyboards.album_scope(
+            albums,
+            artist_id=artist.lidarr_id or 0,
+            per_page=get_settings().results_per_page,
+        ),
         parse_mode="HTML",
     )
 
@@ -513,61 +543,74 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
         artist: ArtistInfo = session.selected_content
         prefs = db_user.preferences
 
-        await callback.answer("Добавляю...")
-        if (message := accessible_message(callback)) is not None:
-            await message.edit_text(f"⏳ Добавляю <b>{html.escape(artist.name)}</b> в Lidarr...", parse_mode="HTML")
+        await callback.answer()
+        message = accessible_message(callback)
 
         try:
-            # PERF-07a: 3 independent RTTs → 1 wall-clock RTT.
-            profiles, metadata_profiles, folders = await asyncio.gather(
-                add_service.get_lidarr_profiles(),
-                add_service.get_lidarr_metadata_profiles(),
-                add_service.get_lidarr_root_folders(),
-            )
-
-            if not profiles or not folders or not metadata_profiles:
-                if (message := accessible_message(callback)) is not None:
+            lidarr_id = artist.lidarr_id
+            if lidarr_id is None:
+                if message is not None:
                     await message.edit_text(
-                        Formatters.format_error("Нет профилей качества / папок / metadata-профилей в Lidarr"),
-                    )
-                return
-
-            profile_id = AddService.resolve_profile(profiles, prefs.lidarr_quality_profile_id).id
-            metadata_profile_id = AddService.resolve_profile(
-                metadata_profiles, prefs.lidarr_metadata_profile_id
-            ).id
-            folder_path = AddService.resolve_root_folder(folders, prefs.lidarr_root_folder_id)
-
-            added, action = await add_service.add_artist(
-                artist=artist,
-                quality_profile_id=profile_id,
-                metadata_profile_id=metadata_profile_id,
-                root_folder_path=folder_path,
-                monitor="all",
-                search_for_missing=True,
-            )
-            action.user_id = user_id
-            await db.log_action(action)
-
-            if (message := accessible_message(callback)) is not None:
-                if added:
-                    await message.edit_text(
-                        Formatters.format_success(
-                            f"<b>{html.escape(added.name)}</b>\n\n"
-                            f"Добавлен в Lidarr. Запущен автопоиск по всем альбомам."
-                        ),
+                        f"⏳ Смотрю дискографию <b>{html.escape(artist.name)}</b>...",
                         parse_mode="HTML",
                     )
-                else:
-                    await message.edit_text(
-                        Formatters.format_error(action.error_message or "Не удалось добавить артиста"),
-                    )
+                # PERF-07a: 3 independent RTTs → 1 wall-clock RTT.
+                profiles, metadata_profiles, folders = await asyncio.gather(
+                    add_service.get_lidarr_profiles(),
+                    add_service.get_lidarr_metadata_profiles(),
+                    add_service.get_lidarr_root_folders(),
+                )
 
-            await db.delete_session(user_id)
-            _artist_candidates.pop(user_id, None)
+                if not profiles or not folders or not metadata_profiles:
+                    if message is not None:
+                        await message.edit_text(
+                            Formatters.format_error(
+                                "Нет профилей качества / папок / metadata-профилей в Lidarr",
+                            ),
+                        )
+                    return
+
+                added, action = await add_service.add_artist(
+                    artist=artist,
+                    quality_profile_id=AddService.resolve_profile(
+                        profiles, prefs.lidarr_quality_profile_id).id,
+                    metadata_profile_id=AddService.resolve_profile(
+                        metadata_profiles, prefs.lidarr_metadata_profile_id).id,
+                    root_folder_path=AddService.resolve_root_folder(
+                        folders, prefs.lidarr_root_folder_id),
+                    # Артист добавляется НЕМОНИТОРИМЫМ — ровно как сериал в
+                    # `_resolve_arr_entry`: id нужен, чтобы спросить дискографию
+                    # и релизы, но простой просмотр не должен втягивать все
+                    # альбомы в RSS-петлю Lidarr. Живой замер 2026-08-12: при
+                    # старом `monitor="all"` у одного артиста промониторено 22
+                    # альбома, скачано 2. Монитор включается в момент взятия
+                    # раздачи — см. `grab_album_release`.
+                    monitored=False,
+                    monitor="none",
+                    search_for_missing=False,
+                )
+                action.user_id = user_id
+                await db.log_action(action)
+                if added is None or not added.lidarr_id:
+                    if message is not None:
+                        await message.edit_text(Formatters.format_error(
+                            action.error_message or "Не удалось добавить артиста",
+                        ))
+                    return
+                artist = added
+                lidarr_id = added.lidarr_id
+                # DB-02: тот же lock, что при выборе артиста.
+                async with db.session_lock(user_id):
+                    session.selected_content = artist
+                    await db.save_session(user_id, session)
+
+            albums = await add_service.lidarr.get_albums(lidarr_id)
+            _remember(_album_candidates, user_id, albums)
+            if message is not None:
+                await _show_album_scope(message, artist, albums)
         except Exception as e:
-            logger.error("Add artist failed", error=str(e), exc_info=True)
-            if (message := accessible_message(callback)) is not None:
+            logger.error("Album scope failed", error=str(e), exc_info=True)
+            if message is not None:
                 await message.edit_text(Formatters.format_error("Операция временно недоступна"))
     finally:
         _release_grab(user_id)

@@ -67,11 +67,16 @@ class _MusicKeyboards:
         keyboard = []
         if already_in_library:
             keyboard.append([
-                InlineKeyboardButton(text="🔍 Запустить поиск", callback_data=CallbackData.CONFIRM_GRAB),
+                InlineKeyboardButton(text="🔍 Искать", callback_data=CallbackData.CONFIRM_GRAB),
             ])
         else:
+            # Кнопка больше не «добавить всю дискографию»: она резолвит артиста
+            # в Lidarr (немониторимым) и спрашивает, что именно искать.
             keyboard.append([
-                InlineKeyboardButton(text="➕ Добавить и искать", callback_data=CallbackData.CONFIRM_GRAB),
+                InlineKeyboardButton(
+                    text="🔍 Искать (добавит в Lidarr)",
+                    callback_data=CallbackData.CONFIRM_GRAB,
+                ),
             ])
         keyboard.append([
             # LOGIC-24: dedicated music-back so search.handle_back doesn't reply
