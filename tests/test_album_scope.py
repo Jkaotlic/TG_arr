@@ -500,3 +500,100 @@ async def test_rejected_releases_sink_to_the_bottom():
 
     saved = db.save_session.await_args.args[1]
     assert [r.guid for r in saved.results] == ["ok-high", "ok-low", "bad"]
+
+
+# ---------------------------------------------------------------------------
+# Живой пробник 2026-08-12 (добавление Gojira в Lidarr и возврат): сразу после
+# add_artist `GET /album?artistId=` вернул НОЛЬ альбомов — Lidarr тянет
+# дискографию фоновой командой RefreshArtist. Через несколько минут альбомы
+# появились. То есть главный сценарий («добавь нового артиста и возьми альбом»)
+# без ретрая упирается в пустой пикер.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_empty_discography_is_retried_before_giving_up():
+    """Первый ответ пустой (RefreshArtist ещё идёт) — второй уже с альбомами."""
+    from bot.handlers import music
+
+    lidarr = AsyncMock()
+    lidarr.get_albums = AsyncMock(side_effect=[[], [], [_album()]])
+
+    with patch.object(music.asyncio, "sleep", AsyncMock()):
+        albums = await music._albums_with_retry(lidarr, artist_id=1)
+
+    assert [a.lidarr_id for a in albums] == [3]
+    assert lidarr.get_albums.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_gives_up_and_returns_empty():
+    """Ждать минуты нельзя — окно колбэка Telegram ~15 с. Сдаёмся и показываем
+    пикер с кнопкой обновления."""
+    from bot.handlers import music
+
+    lidarr = AsyncMock()
+    lidarr.get_albums = AsyncMock(return_value=[])
+
+    with patch.object(music.asyncio, "sleep", AsyncMock()):
+        albums = await music._albums_with_retry(lidarr, artist_id=1)
+
+    assert albums == []
+    assert lidarr.get_albums.await_count == music._ALBUM_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_a_found_discography_is_not_retried():
+    from bot.handlers import music
+
+    lidarr = AsyncMock()
+    lidarr.get_albums = AsyncMock(return_value=[_album()])
+
+    albums = await music._albums_with_retry(lidarr, artist_id=1)
+
+    assert lidarr.get_albums.await_count == 1
+    assert len(albums) == 1
+
+
+def test_empty_picker_offers_a_refresh_button():
+    """Иначе пользователю остаётся только начать поиск заново."""
+    from bot.ui.callbacks import AlbumRefreshCB
+    from bot.ui.keyboards import Keyboards
+
+    kb = Keyboards.album_scope([], artist_id=7)
+    refresh = [
+        b for row in kb.inline_keyboard for b in row
+        if b.callback_data and b.callback_data.startswith("alrf:")
+    ]
+
+    assert refresh, "пустой пикер без кнопки обновления — тупик"
+    assert AlbumRefreshCB.unpack(refresh[0].callback_data).artist_id == 7
+
+
+def test_non_empty_picker_has_no_refresh_button():
+    from bot.ui.keyboards import Keyboards
+
+    kb = Keyboards.album_scope([_album()], artist_id=7)
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row if b.callback_data]
+
+    assert not any(c.startswith("alrf:") for c in cbs)
+
+
+@pytest.mark.asyncio
+async def test_refresh_reasks_lidarr_for_the_discography():
+    from bot.handlers import music
+    from bot.ui.callbacks import AlbumRefreshCB
+
+    add_service = MagicMock()
+    add_service.lidarr = AsyncMock()
+    add_service.lidarr.get_albums = AsyncMock(return_value=[_album()])
+    callback = _callback()
+    db = _db(session=_session(_artist(lidarr_id=7)))
+
+    with patch.object(music, "_get_music_services", AsyncMock(return_value=(MagicMock(), add_service))),             patch.object(music, "accessible_message", return_value=callback.message):
+        await music.handle_album_refresh(
+            callback, AlbumRefreshCB(artist_id=7), _user(), db,
+        )
+
+    add_service.lidarr.get_albums.assert_awaited_with(7)
+    assert music._album_candidates[USER_ID][0].lidarr_id == 3

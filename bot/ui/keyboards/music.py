@@ -6,6 +6,7 @@ from bot.models import AlbumInfo, ArtistInfo
 from bot.ui.callbacks import (
     AlbumGrabCB,
     AlbumPageCB,
+    AlbumRefreshCB,
     AlbumScopeCB,
     AlbumSourceCB,
     ArtistCB,
@@ -134,6 +135,16 @@ class _MusicKeyboards:
                     callback_data=AlbumPageCB(page=current_page + 1, artist_id=artist_id).pack(),
                 ))
             rows.append(nav)
+
+        if not albums:
+            # Дискографии ещё нет: Lidarr тянет её фоновым RefreshArtist уже
+            # после ответа на add_artist (живой пробник 2026-08-12 — ноль
+            # альбомов сразу после добавления). Без этой кнопки единственный
+            # выход — начинать поиск заново.
+            rows.append([InlineKeyboardButton(
+                text="🔄 Обновить дискографию",
+                callback_data=AlbumRefreshCB(artist_id=artist_id).pack(),
+            )])
 
         rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)])
         return InlineKeyboardMarkup(inline_keyboard=rows)

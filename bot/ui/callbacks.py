@@ -300,3 +300,15 @@ class AlbumGrabCB(CallbackData, prefix="alg"):
 
     idx: int = Field(ge=0)
     album_id: int
+
+
+class AlbumRefreshCB(CallbackData, prefix="alrf"):
+    """Re-ask Lidarr for an artist's discography.
+
+    Живой пробник 2026-08-12: сразу после `add_artist` дискография пуста —
+    Lidarr тянет её фоновой командой RefreshArtist, и это занимает больше, чем
+    отпущено окном колбэка Telegram (~15 с). Кнопка превращает «пока не знаю» в
+    «спроси ещё раз» вместо «начни поиск заново».
+    """
+
+    artist_id: int

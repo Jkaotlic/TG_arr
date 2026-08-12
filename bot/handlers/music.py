@@ -36,6 +36,7 @@ from bot.services.search_service import SearchService
 from bot.ui.callbacks import (
     AlbumGrabCB,
     AlbumPageCB,
+    AlbumRefreshCB,
     AlbumScopeCB,
     AlbumSourceCB,
     ArtistCB,
@@ -111,6 +112,27 @@ async def _render_artist_list(message: Message, artists: list[ArtistInfo], page:
         reply_markup=Keyboards.artist_list(artists, current_page=page, per_page=per_page),
         parse_mode="HTML",
     )
+
+
+# Дискография у только что добавленного артиста приходит не сразу: Lidarr тянет
+# её фоновой командой RefreshArtist. Живой пробник 2026-08-12 — сразу после
+# add_artist ноль альбомов, спустя минуты они есть. Ждать минуты в колбэке
+# нельзя (окно Telegram ~15 с), поэтому несколько коротких попыток, а дальше —
+# кнопка «Обновить дискографию».
+_ALBUM_RETRIES = 3
+_ALBUM_RETRY_DELAY = 1.5
+
+
+async def _albums_with_retry(lidarr, artist_id: int) -> list[AlbumInfo]:
+    """Дискография артиста; повторяет запрос, пока Lidarr отвечает пустотой."""
+    albums: list[AlbumInfo] = []
+    for attempt in range(_ALBUM_RETRIES):
+        albums = await lidarr.get_albums(artist_id)
+        if albums:
+            return albums
+        if attempt < _ALBUM_RETRIES - 1:
+            await asyncio.sleep(_ALBUM_RETRY_DELAY)
+    return albums
 
 
 def _find_album(user_id: int, album_id: int) -> Optional[AlbumInfo]:
@@ -755,6 +777,33 @@ async def handle_album_grab(
     _album_candidates.pop(user_id, None)
 
 
+@router.callback_query(AlbumRefreshCB.filter())
+async def handle_album_refresh(
+    callback: CallbackQuery, callback_data: AlbumRefreshCB, db_user: User, db: Database
+) -> None:
+    """Re-ask Lidarr for the discography after RefreshArtist has had time."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    if not session or not isinstance(session.selected_content, ArtistInfo):
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+
+    services = await _get_music_services()
+    if services is None:
+        await callback.answer("Lidarr не настроен", show_alert=True)
+        return
+    _search_service, add_service = services
+
+    await callback.answer("Спрашиваю Lidarr...")
+    albums = await add_service.lidarr.get_albums(callback_data.artist_id)
+    _remember(_album_candidates, user_id, albums)
+    await _show_album_scope(message, session.selected_content, albums)
+
+
 @router.callback_query(F.data.startswith(CallbackData.ARTIST))
 async def handle_legacy_artist(callback: CallbackQuery) -> None:
     """r5: legacy ``artist:N`` string buttons from messages sent before the
@@ -850,7 +899,7 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
                     session.selected_content = artist
                     await db.save_session(user_id, session)
 
-            albums = await add_service.lidarr.get_albums(lidarr_id)
+            albums = await _albums_with_retry(add_service.lidarr, lidarr_id)
             _remember(_album_candidates, user_id, albums)
             if message is not None:
                 await _show_album_scope(message, artist, albums)
