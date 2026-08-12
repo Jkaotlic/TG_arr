@@ -166,9 +166,14 @@ class _MusicKeyboards:
         rows = []
         for idx, release in enumerate(releases[:per_page]):
             pack = " 📚" if release.is_season_pack else ""
-            quality = release.quality.resolution or release.quality.source or ""
-            quality = f" · {quality}" if quality else ""
-            label = f"{idx + 1}. {release.size_formatted}{quality}{pack}"
+            # Живой замер 2026-08-12: у музыки формат (FLAC/MP3-320/WAV) — это
+            # главный различитель, и он лежит в `codec`; resolution/source —
+            # видео-поля и для аудио пусты. ⛔ значит «Lidarr сам бы не взял»
+            # (24 раздачи из 127 живьём) — взять всё равно можно, но осознанно.
+            fmt = release.quality.codec or release.quality.source or ""
+            fmt = f" · {fmt}" if fmt else ""
+            verdict = " ⛔" if release.rejected else ""
+            label = f"{idx + 1}. {release.size_formatted}{fmt}{pack}{verdict}"
             rows.append([InlineKeyboardButton(
                 text=label, callback_data=AlbumGrabCB(idx=idx, album_id=album_id).pack(),
             )])

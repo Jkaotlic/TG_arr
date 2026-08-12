@@ -408,3 +408,95 @@ def test_callback_prefixes_are_unique_across_all_families():
 
     # Новые семейства на месте и различимы.
     assert {"al", "alsrc", "alpg", "alg"} <= set(prefixes)
+
+
+# ---------------------------------------------------------------------------
+# Живой прогон 2026-08-12 внутри контейнера (127 раздач альбома «Reload»)
+# показал две дырки, которых на моках не видно:
+#   1. `parse_quality_name` не знает аудио-форматов — codec/source/resolution
+#      выходили пустыми, и подпись кнопки была «1. 767.9 MB» без FLAC/MP3.
+#      Реальные имена от Lidarr: FLAC 24bit, FLAC, MP3-320, AAC-VBR, MP3-256,
+#      MP3-192, MP3-160, MP3-128, WMA, WavPack, Unknown.
+#   2. 24 раздачи из 127 Lidarr отверг («Album wasn't requested», «Wrong
+#      album»), но на кнопке они выглядели как остальные.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name,codec", [
+    ("FLAC 24bit", "FLAC 24bit"),
+    ("FLAC", "FLAC"),
+    ("MP3-320", "MP3-320"),
+    ("AAC-VBR", "AAC-VBR"),
+    ("WavPack", "WavPack"),
+    ("WMA", "WMA"),
+])
+def test_audio_quality_names_survive_parsing(name, codec):
+    """Для музыки формат — главный различитель раздач, а resolution/source —
+    видео-поля и для FLAC пусты. Имя кладётся в codec: FLAC/MP3/AAC и есть
+    кодеки."""
+    from bot.services.release_parser import parse_quality_name
+
+    assert parse_quality_name(name).codec == codec
+
+
+def test_unknown_quality_name_stays_empty():
+    from bot.services.release_parser import parse_quality_name
+
+    assert parse_quality_name("Unknown").codec is None
+
+
+def test_video_quality_names_are_unaffected():
+    """Страховка: видео-имена по-прежнему разбираются в resolution/source."""
+    from bot.services.release_parser import parse_quality_name
+
+    q = parse_quality_name("Bluray-2160p")
+    assert (q.resolution, q.source) == ("2160p", "BluRay")
+    assert q.codec is None
+
+
+def test_album_release_buttons_show_format_and_rejection():
+    from bot.models import QualityInfo
+    from bot.ui.keyboards import Keyboards
+
+    releases = [
+        SearchResult(
+            guid="g1", title="Metallica - Reload FLAC", size=784_000_000,
+            quality=QualityInfo(codec="FLAC"), seeders=12,
+        ),
+        SearchResult(
+            guid="g2", title="Metallica - Reload WAV", size=767_900_000,
+            quality=QualityInfo(codec="WAV"), rejected=True,
+            rejections=["Album wasn't requested"],
+        ),
+    ]
+    labels = [b.text for row in Keyboards.album_releases(releases, album_id=3).inline_keyboard for b in row]
+
+    assert any("FLAC" in t for t in labels)
+    assert any("⛔" in t for t in labels), "отвергнутую Lidarr раздачу надо помечать на кнопке"
+
+
+@pytest.mark.asyncio
+async def test_rejected_releases_sink_to_the_bottom():
+    """24 из 127 живых раздач отвергнуты — они не должны занимать первые кнопки.
+    Внутри групп порядок по сидам: у музыки размер и формат — вкус, а сиды это
+    «скачается ли вообще»."""
+    from bot.handlers import music
+
+    music._album_candidates[USER_ID] = [_album()]
+    add_service = MagicMock()
+    add_service.lidarr = AsyncMock()
+    add_service.lidarr.get_releases = AsyncMock(return_value=[
+        SearchResult(guid="bad", title="rejected", rejected=True, seeders=99),
+        SearchResult(guid="ok-low", title="ok few seeders", seeders=2),
+        SearchResult(guid="ok-high", title="ok many seeders", seeders=40),
+    ])
+    callback = _callback()
+    db = _db(session=_session(_artist()))
+
+    with patch.object(music, "_get_music_services", AsyncMock(return_value=(MagicMock(), add_service))),             patch.object(music, "accessible_message", return_value=callback.message):
+        await music.handle_album_source(
+            callback, AlbumSourceCB(album_id=3, source="tor"), _user(), db,
+        )
+
+    saved = db.save_session.await_args.args[1]
+    assert [r.guid for r in saved.results] == ["ok-high", "ok-low", "bad"]

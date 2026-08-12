@@ -14,6 +14,14 @@ at all, so `parse_quality` (title-heuristic parsing, unchanged since the
 
 from bot.models import QualityInfo
 
+#: Первый токен имени качества у Lidarr, если это аудио. Не «все возможные
+#: форматы», а те, что реально приходят от Lidarr'овских профилей — плюс ALAC,
+#: APE, OGG и Opus, которые он тоже умеет отдавать.
+_AUDIO_FORMATS = frozenset({
+    "flac", "mp3", "aac", "wav", "wma", "wavpack", "alac", "ape", "ogg",
+    "opus", "vorbis",
+})
+
 
 def parse_quality_name(name: str) -> QualityInfo:
     """Map *arr's own parsed quality name (e.g. "Bluray-2160p") onto QualityInfo.
@@ -28,6 +36,15 @@ def parse_quality_name(name: str) -> QualityInfo:
         return QualityInfo()
 
     name_lower = name.lower()
+
+    # Аудио. Живой замер 2026-08-12 (127 раздач одного альбома в Lidarr 3.1.2):
+    # имена приходят как «FLAC», «FLAC 24bit», «MP3-320», «AAC-VBR», «WavPack»,
+    # «WMA», «Unknown». Ни одно из них не описывается видео-полями ниже, поэтому
+    # без этой ветки у музыкальной раздачи качество терялось целиком — а формат
+    # у музыки и есть главный различитель. Имя сохраняется как есть: «MP3-320»
+    # и «MP3-128» — разные вещи, и обрезать битрейт нельзя.
+    if name_lower.split("-")[0].split()[0] in _AUDIO_FORMATS:
+        return QualityInfo(codec=name)
 
     resolution = None
     for token in ("2160p", "1080p", "720p", "480p", "576p"):

@@ -675,6 +675,14 @@ async def handle_album_source(
         )
         return
 
+    # Живой замер 2026-08-12: 127 раздач на альбом, 24 из них Lidarr отверг
+    # («Album wasn't requested», «Wrong album»). Показываются первые пять, так
+    # что отвергнутые не должны занимать эти пять мест. Внутри групп — по
+    # сидам: размер и формат у музыки дело вкуса, а сиды отвечают на вопрос
+    # «скачается ли вообще». Свой ключ, а не ScoringService: тот считает
+    # видео-качество, которого у аудио-раздач нет.
+    releases.sort(key=lambda r: (r.rejected, -(r.seeders or 0)))
+
     async with db.session_lock(user_id):
         session.results = releases
         session.current_page = 0
