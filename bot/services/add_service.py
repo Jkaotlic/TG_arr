@@ -36,19 +36,18 @@ collection errors mid-rollback. Replaced with the two *arr grab paths:
                    (SEC-16-gated, see `_validate_download_url`) ->
                    qBittorrent by downloadUrl -> *arr auto-search command.
 
-⚠️ KNOWN GAP (whole-branch review, 2026-08-10): the push chain is currently
-UNREACHABLE in normal operation. Every release the user can select comes from
-`SearchService.search_releases_for_title`, i.e. *arr's interactive search, and
-is therefore tagged `origin="arr"`. `ProwlarrClient.search()` — the free-text
-mode that would produce `origin="prowlarr"` releases — is constructed and
-health-checked but has no caller: the method that used to serve it belonged to
-the removed backend and nothing replaced it. The chain only fires today if
-*arr returns a release row with `indexerId` absent or 0.
+The push chain was UNREACHABLE from the rollback until 2026-08-12: every
+selectable release came from `SearchService.search_releases_for_title` — *arr's
+interactive search — and was therefore tagged `origin="arr"`, while
+`ProwlarrClient.search()`, the free-text mode that produces
+`origin="prowlarr"` releases, had no caller at all. It has one now:
+`SearchService.search_free_text`, behind the `/find` command and the "искать по
+названию" button on a dead-end search screen.
 
-The chain is kept rather than deleted because free-text search for titles NOT
-yet in the catalog is a real gap in the current UX, and this is the grab path
-it needs. It is covered by unit tests, but it has not run against the live
-stack — treat it as unproven until it does.
+Such a hit usually has no library entry behind it, which is why `arr_id` is
+optional: with no id, the chain's final auto-search step is skipped rather than
+faked — that command takes an id there is none of, and reporting success for a
+queue nothing entered would be a lie.
 
 `arr_id` is the movie/series id already in Radarr/Sonarr. `grab_release`'s
 caller is expected to have ensured the title exists in the library before
@@ -122,6 +121,20 @@ _QBIT_CATEGORIES = {
     ContentType.SERIES: "tv-sonarr",
     ContentType.ANIME: "anime",
 }
+
+
+def _qbit_category(content_type: ContentType, release: SearchResult) -> str:
+    """qBittorrent category for a release.
+
+    Free-text search does not know the facet up front — its `content_type` is
+    `UNKNOWN` — but Prowlarr's own category ids usually do, and
+    `ProwlarrClient._normalize_result` puts that in `detected_type`. Falls back
+    to the movie category, which is what these call sites used unconditionally
+    before.
+    """
+    if content_type in _QBIT_CATEGORIES:
+        return _QBIT_CATEGORIES[content_type]
+    return _QBIT_CATEGORIES.get(release.detected_type, "radarr")
 
 
 def _safe_push_result(result: Optional[dict]) -> dict:
@@ -417,7 +430,7 @@ class AddService:
         release: SearchResult,
         content_type: ContentType,
         *,
-        arr_id: int,
+        arr_id: Optional[int] = None,
         force_download: bool = False,
     ) -> tuple[bool, ActionLog]:
         """Turn one release candidate into a download.
@@ -426,13 +439,19 @@ class AddService:
         docstring. `force_download=True` bypasses both paths entirely and
         goes straight to qBittorrent: the escape hatch for a release *arr's
         profile would refuse but the user wants anyway.
+
+        `arr_id=None` is the free-text case (`SearchService.search_free_text`):
+        no library entry stands behind the release. The native path is
+        unreachable there by construction (`origin="prowlarr"`), and the push
+        chain's final auto-search step is skipped — that command takes an id
+        there is none of.
         """
         arr_client = self.radarr if content_type is ContentType.MOVIE else self.sonarr
         action = ActionLog(
             user_id=0,  # set by the caller before logging
             action_type=ActionType.GRAB,
             content_type=content_type,
-            content_id=str(arr_id),
+            content_id=str(arr_id) if arr_id is not None else "",
             release_title=release.title,
         )
         log = logger.bind(
@@ -491,7 +510,7 @@ class AddService:
         arr_client,
         release: SearchResult,
         content_type: ContentType,
-        arr_id: int,
+        arr_id: Optional[int],
     ) -> tuple[bool, ActionLog]:
         """Restored pre-migration fallback for a release with no *arr indexer id.
 
@@ -548,7 +567,7 @@ class AddService:
                 if download_url and await _validate_download_url(download_url):
                     try:
                         success = await self.qbittorrent.add_torrent_url(
-                            download_url, category=_QBIT_CATEGORIES.get(content_type, "radarr"),
+                            download_url, category=_qbit_category(content_type, release),
                         )
                     except Exception as e:
                         log.error("qbittorrent_fallback_failed", error=str(e), exc_info=True)
@@ -588,6 +607,19 @@ class AddService:
 
             # Push never ran (no download_url) or transport-failed: fall back
             # to *arr's own auto-search rather than giving up outright.
+            if arr_id is None:
+                # Free-text grab: no library entry for *arr to search against.
+                # Reporting success here would be a lie — nothing was queued.
+                action.success = False
+                action.error_message = (
+                    "Тайтла нет в библиотеке — Radarr/Sonarr не может искать сам"
+                )
+                _log_grab_completed(
+                    log, success=False, path="failed", force_download=False,
+                    content_type=content_type, detail="no_arr_id_for_auto_search",
+                )
+                return False, action
+
             try:
                 if content_type is ContentType.MOVIE:
                     await arr_client.search_movie(arr_id)
@@ -650,7 +682,7 @@ class AddService:
         try:
             ok = await self.qbittorrent.add_torrent_url(
                 download_url,
-                category=_QBIT_CATEGORIES.get(content_type, "radarr"),
+                category=_qbit_category(content_type, release),
             )
         except Exception as e:
             log.error("qbittorrent_force_download_failed", error=str(e), exc_info=True)
