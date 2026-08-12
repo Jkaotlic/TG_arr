@@ -641,6 +641,63 @@ class SearchService:
         )
         return ordered
 
+    async def search_free_text(
+        self,
+        query: str,
+        content_type: ContentType = ContentType.UNKNOWN,
+        preferred_resolution: Optional[str] = None,
+    ) -> list[SearchResult]:
+        """Releases for a title Radarr/Sonarr's catalogue does not know.
+
+        `search_releases_for_title` above needs a movie/series id already in the
+        library — that is *arr's interactive search, and the only way to get
+        *arr's own verdict on a release. This is the other mode: a raw Prowlarr
+        query with no catalogue entry behind it, for what the library cannot
+        express (a title TMDb/TVDB never heard of, a concert, a rip under a name
+        no metadata provider carries).
+
+        Results carry `origin="prowlarr"`, which is what routes them down
+        `AddService.grab_release`'s push chain instead of the native path —
+        Prowlarr numbers indexers differently from *arr, so its `indexer_id` is
+        meaningless to *arr's native grab endpoint.
+
+        No *arr verdict exists here, so `ScoringService` is the sole ranking
+        (see `sort_results`, case 3) — and it writes `calculated_score` as well
+        as ordering by it, which the release card renders.
+
+        No category filter when the facet is UNKNOWN: the point of this mode is
+        that the type is not known up front. `_normalize_result` still fills
+        `detected_type` from Prowlarr's own category ids.
+        """
+        if self.prowlarr is None:
+            raise ServiceConnectionError(
+                "Prowlarr не настроен — свободный поиск недоступен"
+            )
+
+        results = await self.prowlarr.search(query, content_type)
+        if not results:
+            logger.info("free_search_completed", query=query, result_count=0)
+            return []
+
+        ordered = self.scoring.sort_results(results, content_type, preferred_resolution)
+        logger.info(
+            "free_search_completed",
+            query=query,
+            content_type=content_type.value,
+            result_count=len(ordered),
+            top=[
+                {
+                    "title": r.title[:120],
+                    "indexer": r.indexer,
+                    "size_gb": round(r.get_size_gb(), 2),
+                    "seeders": r.seeders,
+                    "score": r.calculated_score,
+                }
+                for r in ordered[:3]
+            ],
+        )
+        return ordered
+
     async def lookup_artist(self, query: str) -> list[ArtistInfo]:
         """Look up artists (Lidarr, falling back to slskd)."""
         return await self._lookup_artists(query)
