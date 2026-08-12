@@ -498,8 +498,16 @@ async def process_search(
             log.warning("search_branch", branch="add_config_error", error=str(ve))
             return
         if title is None or arr_id is None:
+            # Каталог знает только то, что несут TMDb/TVDB. Тупик здесь — не
+            # тупик для индексеров, и кнопка ниже единственное место, где
+            # пользователь об этом узнаёт. Сессия сохраняется, чтобы она взяла
+            # запрос, а не просила набрать его заново.
+            await db.save_session(user_id, SearchSession(
+                user_id=user_id, query=query, content_type=content_type,
+            ))
             await status_msg.edit_text(
                 Formatters.format_warning(f"Ничего не найдено для <b>{html.escape(query)}</b>"),
+                reply_markup=Keyboards.free_search_offer(),
                 parse_mode="HTML",
             )
             log.info("search_branch", branch="no_metadata")
@@ -563,12 +571,20 @@ async def process_search(
         )
 
         if not results:
+            # Тот же довод, что и в ветке no_metadata: *arr спрашивает
+            # индексеры по своим правилам и мог отсеять всё до показа. Прямой
+            # запрос в Prowlarr — следующий разумный шаг, а не «приходите
+            # завтра».
+            await db.save_session(user_id, SearchSession(
+                user_id=user_id, query=query, content_type=content_type,
+            ))
             await status_msg.edit_text(
                 Formatters.format_warning(
                     f"Релизы для <b>{html.escape(title.title)}</b> не найдены.\n\n"
                     f"Тайтл в библиотеке {arr_name} и будет доступен для "
                     "автоматического поиска по расписанию."
                 ),
+                reply_markup=Keyboards.free_search_offer(),
                 parse_mode="HTML",
             )
             log.info("search_branch", branch="no_results")

@@ -237,3 +237,32 @@ class TsAddCB(CallbackData, prefix="tsa"):
     """
 
     idx: int = Field(ge=0)
+
+
+class FindPageCB(CallbackData, prefix="fp"):
+    """Free-search pagination (2026-08-12).
+
+    Deliberately separate from ``PageCB(scope="search")``: the free flow keeps
+    a different session shape (no library entry, no *arr verdict) and its
+    handlers must not route into the catalogue flow's, which would walk
+    straight into a missing arr_id.
+    """
+
+    page: int
+
+
+class FindReleaseCB(CallbackData, prefix="fr"):
+    """Open one free-search hit — index into ``SearchSession.results``."""
+
+    idx: int
+
+
+class FindGrabCB(CallbackData, prefix="fg"):
+    """Grab one free-search hit.
+
+    Carries the index rather than relying on ``selected_result``, so a stale
+    card left open in an old message cannot grab whatever the session happens
+    to point at now.
+    """
+
+    idx: int

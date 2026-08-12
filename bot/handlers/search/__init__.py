@@ -43,6 +43,7 @@ from .services import (  # noqa: F401
 from . import grab  # noqa: E402,F401
 from . import results  # noqa: E402,F401
 from . import commands  # noqa: E402,F401
+from . import free  # noqa: E402,F401
 
 # grab.py and results.py hold the real implementations of these; re-export
 # them here too (in addition to on their own submodules) since callers/tests
