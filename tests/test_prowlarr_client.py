@@ -442,3 +442,54 @@ def test_latin_pack_detection_is_unchanged():
     client = _prowlarr()
     assert client._is_season_pack("Show S03 Complete Season") is True
     assert client._is_season_pack("Show S03E05") is False
+
+
+# ---------------------------------------------------------------------------
+# Диапазон серий как форма сезонного пака. Находка живого прогона 2026-08-12:
+# «S2E1-8 of 8» разбиралось как ОДИНОЧНАЯ серия — паттерн `s\d+e\d` в
+# _is_season_pack срабатывал раньше маркеров пака и сразу отвечал «нет».
+# Следствие: _decide_monitor_type давал "future" вместо "all", а
+# AddService.grab_release шёл в search_series вместо search_season.
+# На русских трекерах эта форма массовая.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("title", [
+    "Vice Principals - S2E1-8 of 8 [2017, WEB-DL 1080p]",   # ровно то, что было в прогоне
+    "Show Name S02E01-08 of 08 1080p WEB-DL",
+    "Сериал / Show S01E01-24 из 24 WEB-DLRip",
+    "Show S01E01-E08 1080p BluRay",
+    "Сериал S01E13-24 of 24 (второй сезон-половина)",
+    "Show S02 E01-10 720p HDTV",
+])
+def test_episode_range_is_a_season_pack(title):
+    assert _prowlarr()._is_season_pack(title) is True
+
+
+def test_episode_range_does_not_report_a_single_episode_number():
+    """Пак не «Серия 1»: иначе карточка релиза печатает
+    «Сезон 2 Серия 1 (сезон целиком)», а это взаимоисключающие вещи."""
+    assert _prowlarr()._extract_season_episode(
+        "Vice Principals - S2E1-8 of 8 [2017, WEB-DL 1080p]"
+    ) == (2, None)
+
+
+@pytest.mark.parametrize("title", [
+    "Show.S01E05-720p.WEB-DL.x264",      # разрешение после дефиса — не диапазон
+    "Show.S01E05-1080p.BluRay",
+    "Show.S01E05-NTb",                   # релиз-группа
+    "Show.S01E05-4HD",                   # релиз-группа, начинающаяся с цифры
+    "Show.S01E01-02.1080p.WEB-DL",       # сдвоенный эпизод, а не пак
+])
+def test_dash_after_a_single_episode_is_not_a_range(title):
+    assert _prowlarr()._is_season_pack(title) is False
+
+
+def test_resolution_after_a_dash_still_parses_as_a_single_episode():
+    assert _prowlarr()._extract_season_episode("Show.S01E05-720p.WEB-DL") == (1, 5)
+
+
+def test_english_of_n_range_without_season_prefix_is_a_pack():
+    """Зеркало уже работающего «(01-12 из 12)» — тот же RuTracker,
+    английское написание."""
+    assert _prowlarr()._is_season_pack("Show Name [01-08 of 08] 1080p") is True

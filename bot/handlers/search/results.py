@@ -427,5 +427,8 @@ async def handle_season_scope(
         db_user,
         db,
         chosen_title=session.selected_content,
-        season_override=callback_data.season or None,
+        # Ноль («📺 Весь сериал») передаётся как есть: `or None` терял ответ, а
+        # None в `process_search` значит «пользователя ещё не спрашивали» — и
+        # тот снова показывал этот же выбор сезона (живой дефект 2026-08-12).
+        season_override=callback_data.season,
     )

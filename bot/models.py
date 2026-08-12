@@ -99,6 +99,13 @@ class QualityInfo(BaseModel):
     is_proper: bool = False
 
 
+# Порог для `SearchResult.is_season_pack`: раздача из 3+ серий — пак. Двойной
+# эпизод («S01E01-E02») ведёт себя как одиночная серия и по размеру, и по
+# мониторингу. Один порог на оба пути разбора: *arr отдаёт готовый
+# `episodeNumbers`, Prowlarr — только заголовок, но поле в модели одно и то же.
+MIN_PACK_EPISODES = 3
+
+
 class SearchResult(BaseModel):
     """Normalized release candidate (from *arr's or Prowlarr's indexer search)."""
 

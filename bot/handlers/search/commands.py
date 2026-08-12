@@ -536,8 +536,19 @@ async def process_search(
         # A multi-season show searched whole returns packs the user may not
         # want and spends indexer quota on episodes already on disk — offer the
         # choice while it's still cheap to make.
+        #
+        # Живой дефект 2026-08-12 (логи rpie4): вопрос задавался по одному
+        # parsed["season"], а ответ пользователя приезжает в `season_override`,
+        # так что выбор сезона возвращал тот же самый выбор сезона — цикл, из
+        # которого нельзя выйти. `season_override is not None` и есть «уже
+        # спросили и получили ответ»; ноль в нём — «весь сериал», ответ не менее
+        # полноценный, чем номер сезона (и поэтому именно `is not None`).
         seasons = _known_seasons(title, content_type)
-        if should_ask_for_season(content_type, seasons, parsed.get("season")):
+        season_answered = season_override is not None
+        # Сезон 0 в Sonarr — спецвыпуски, а не «всё шоу»: «весь сериал» должен
+        # доехать до поиска как отсутствие сезонного фильтра.
+        season_wanted = parsed.get("season") or season_override or None
+        if not season_answered and should_ask_for_season(content_type, seasons, parsed.get("season")):
             session = SearchSession(
                 user_id=user_id,
                 query=query,
@@ -557,7 +568,7 @@ async def process_search(
         results = await search_service.search_releases_for_title(
             content_type,
             arr_id,
-            season=parsed.get("season") or season_override,
+            season=season_wanted,
             # DEAD-06: the user's resolution preference must reach the scorer,
             # or "Качество" in /settings silently stops affecting the ranking.
             preferred_resolution=db_user.preferences.preferred_resolution,

@@ -16,7 +16,7 @@ from tenacity import (
 )
 
 from bot.config import Settings, get_settings
-from bot.models import QualityProfile, RootFolder, SearchResult
+from bot.models import MIN_PACK_EPISODES, QualityProfile, RootFolder, SearchResult
 from bot.services.release_parser import parse_quality_name
 
 logger = structlog.get_logger()
@@ -697,6 +697,21 @@ class ArrBaseClient(BaseAPIClient):
             if isinstance(lang, dict) and lang.get("name")
         ]
 
+        # Sonarr уже разобрал заголовок сам — это его вердикт, а не вторая копия
+        # эвристики бота (Radarr этих полей не отдаёт вовсе, там останется None).
+        # 2026-08-12: раньше поля не читались, и на ЭТОМ пути — основном для
+        # /series — сезон и признак пака всегда были пустыми, из-за чего пресет
+        # мониторинга выбирался по пустоте, а автопоиск не сужался до сезона.
+        season_number = item.get("seasonNumber")
+        episode_numbers = [n for n in (item.get("episodeNumbers") or []) if isinstance(n, int)]
+        # `fullSeason` — вердикт Sonarr о «целом сезоне». Живой замер 2026-08-12
+        # (GET /api/v3/parse): «S2E1-8 of 8» он отдаёт как fullSeason=false с
+        # восемью episodeNumbers — он не знает, что восемь и есть весь сезон.
+        # Для бота такая раздача — пак, тем же порогом, что и на пути Prowlarr.
+        is_season_pack = (
+            bool(item.get("fullSeason")) or len(episode_numbers) >= MIN_PACK_EPISODES
+        )
+
         return SearchResult(
             guid=guid,
             origin="arr",  # fix round 2: renamed from `source` (collided with QualityInfo.source)
@@ -716,4 +731,7 @@ class ArrBaseClient(BaseAPIClient):
             rejected=bool(item.get("rejected")) or bool(item.get("temporarilyRejected")),
             rejections=[str(r) for r in (item.get("rejections") or [])],
             languages=languages,
+            detected_season=season_number if isinstance(season_number, int) else None,
+            detected_episode=episode_numbers[0] if len(episode_numbers) == 1 else None,
+            is_season_pack=is_season_pack,
         )
