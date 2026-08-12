@@ -934,3 +934,55 @@ async def test_arr_id_grab_still_reaches_auto_search():
 
     assert ok is True
     radarr.search_movie.assert_awaited_once_with(42)
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-12: музыка — третий клиент, а не «всё, что не фильм». До этой правки
+# `grab_release` выбирала клиента как `radarr if MOVIE else sonarr`, поэтому
+# музыкальный релиз уехал бы в SONARR. Спека:
+# docs/superpowers/specs/2026-08-12-album-scope-design.md
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_music_grab_goes_to_lidarr_not_sonarr():
+    """MUSIC-релиз с вердиктом Lidarr грабится нативно через Lidarr."""
+    lidarr = AsyncMock()
+    sonarr = AsyncMock()
+    service = AddService(AsyncMock(), sonarr, lidarr=lidarr)
+    release = SearchResult(
+        guid="g1", title="Enter Shikari - The Mindsweep", origin="arr",
+        indexer_id=4, download_url="http://prowlarr/dl/1",
+    )
+
+    ok, action = await service.grab_release(release, ContentType.MUSIC, arr_id=3)
+
+    assert ok is True
+    lidarr.grab_release.assert_awaited_once_with("g1", 4)
+    sonarr.grab_release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_music_push_chain_falls_back_to_album_search():
+    """Без indexer_id нативный путь недоступен: последний шаг цепочки —
+    автопоиск ЭТОГО альбома (arr_id для музыки и есть album_id), а не всей
+    библиотеки."""
+    lidarr = AsyncMock()
+    lidarr.push_release = AsyncMock(side_effect=Exception("push failed"))
+    service = AddService(AsyncMock(), AsyncMock(), lidarr=lidarr)
+    release = SearchResult(guid="g2", title="Album", origin="prowlarr", indexer_id=0)
+
+    ok, action = await service.grab_release(release, ContentType.MUSIC, arr_id=3)
+
+    lidarr.search_album.assert_awaited_once_with(3)
+
+
+@pytest.mark.asyncio
+async def test_music_grab_without_lidarr_configured_fails_honestly():
+    service = AddService(AsyncMock(), AsyncMock(), lidarr=None)
+    release = SearchResult(guid="g3", title="Album", origin="arr", indexer_id=4)
+
+    ok, action = await service.grab_release(release, ContentType.MUSIC, arr_id=3)
+
+    assert ok is False
+    assert "Lidarr" in (action.error_message or "")

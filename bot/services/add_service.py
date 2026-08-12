@@ -446,7 +446,14 @@ class AddService:
         chain's final auto-search step is skipped — that command takes an id
         there is none of.
         """
-        arr_client = self.radarr if content_type is ContentType.MOVIE else self.sonarr
+        # Музыка — третий клиент, а не «всё, что не фильм». Без этой ветки
+        # музыкальный релиз уезжал в Sonarr и «успешно» грабился там.
+        if content_type is ContentType.MOVIE:
+            arr_client = self.radarr
+        elif content_type is ContentType.MUSIC:
+            arr_client = self.lidarr
+        else:
+            arr_client = self.sonarr
         action = ActionLog(
             user_id=0,  # set by the caller before logging
             action_type=ActionType.GRAB,
@@ -462,6 +469,18 @@ class AddService:
 
         if force_download:
             return await self._force_download(log, action, release, content_type)
+
+        # Музыка — единственный опциональный клиент из трёх (`get_lidarr()`
+        # возвращает None без конфига). Без этой проверки граб уходил в мок
+        # отсутствующего клиента и отчитывался успехом.
+        if arr_client is None:
+            action.success = False
+            action.error_message = "Lidarr не настроен"
+            _log_grab_completed(
+                log, success=False, path="failed", force_download=False,
+                content_type=content_type, detail="lidarr_not_configured",
+            )
+            return False, action
 
         # Fix round 1 (2026-08-10 review): `indexer_id` alone is not a safe
         # signal — ProwlarrClient's free-text parser also fills it, with
@@ -629,6 +648,10 @@ class AddService:
                 # enough to hide a typo in any of these names.
                 if content_type is ContentType.MOVIE:
                     await self.radarr.search_movie(arr_id)
+                elif content_type is ContentType.MUSIC:
+                    # `arr_id` для музыки — это album_id: ищем ровно тот альбом,
+                    # который выбрал пользователь, а не всю библиотеку.
+                    await self.lidarr.search_album(arr_id)
                 elif release.is_season_pack and release.detected_season is not None:
                     await self.sonarr.search_season(arr_id, release.detected_season)
                 else:
