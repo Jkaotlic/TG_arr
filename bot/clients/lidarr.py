@@ -6,7 +6,7 @@ from typing import Any, Optional
 import structlog
 
 from bot.clients.base import APIError, ArrBaseClient
-from bot.models import ArtistInfo, MetadataProfile
+from bot.models import AlbumInfo, ArtistInfo, MetadataProfile, SearchResult
 
 logger = structlog.get_logger()
 
@@ -46,6 +46,50 @@ class LidarrClient(ArrBaseClient):
         if isinstance(results, list) and results:
             return self._parse_artist(results[0])
         return None
+
+    async def get_albums(self, artist_id: int) -> list[AlbumInfo]:
+        """Discography of one artist, as Lidarr's metadata knows it.
+
+        Никакого `album/lookup` по свободному тексту: измерено 2026-08-12 — на
+        «metallica master of puppets» он возвращает каверы и ремиксы, а самого
+        альбома в первых трёх ответах нет. Альбомы берутся только у конкретного
+        артиста.
+        """
+        results = await self.get("/api/v1/album", params={"artistId": artist_id})
+        if not isinstance(results, list):
+            return []
+
+        albums = []
+        for item in results:
+            try:
+                album = self._parse_album(item)
+                if album:
+                    albums.append(album)
+            except Exception as e:
+                logger.warning("Skipping malformed album", error=str(e))
+        return albums
+
+    def _parse_album(self, item: dict[str, Any]) -> Optional[AlbumInfo]:
+        """Map one Lidarr album row onto AlbumInfo."""
+        album_id = item.get("id")
+        title = item.get("title")
+        if not isinstance(album_id, int) or not title:
+            return None
+
+        stats = item.get("statistics") or {}
+        artist = item.get("artist") or {}
+        return AlbumInfo(
+            lidarr_id=album_id,
+            title=title,
+            foreign_album_id=item.get("foreignAlbumId") or "",
+            artist_id=item.get("artistId"),
+            artist_name=artist.get("artistName"),
+            album_type=item.get("albumType"),
+            # Lidarr отдаёт «2015-01-14T00:00:00Z» — до дня и хватит.
+            release_date=(item.get("releaseDate") or "")[:10] or None,
+            monitored=bool(item.get("monitored")),
+            has_files=bool(stats.get("percentOfTracks") or 0),
+        )
 
     async def add_artist(
         self,
@@ -106,6 +150,40 @@ class LidarrClient(ArrBaseClient):
 
         raise APIError("Не удалось добавить артиста в Lidarr")
 
+
+    async def get_releases(self, album_id: int) -> list[SearchResult]:
+        """Interactive search for one album — Lidarr's own verdict included.
+
+        Живой замер 2026-08-12 (`GET /api/v1/release?albumId=3`): строка несёт
+        те же поля, что у Radarr/Sonarr (`guid`, `rejected`, `rejections`,
+        `customFormatScore`, `quality`, `seeders`, `downloadUrl`), поэтому
+        разбор — общий `_get_releases`, а не второй парсер.
+        """
+        return await self._get_releases({"albumId": album_id})
+
+    async def set_album_monitored(self, album_id: int, monitored: bool) -> bool:
+        """Флаг мониторинга ОДНОГО альбома — не артиста целиком."""
+        return await self._set_monitored("album", album_id, monitored)
+
+    async def set_artist_monitored(self, artist_id: int, monitored: bool) -> bool:
+        return await self._set_monitored("artist", artist_id, monitored)
+
+    async def search_album(self, album_id: int) -> dict[str, Any]:
+        """Trigger a search for one album.
+
+        Контракт снят с живого Lidarr 3.1.2 2026-08-12: этот POST отвечает 201,
+        а неизвестное имя команды — 500 «Sequence contains no matching element»,
+        так что 201 действительно означает «команда принята».
+        """
+        payload = {"name": "AlbumSearch", "albumIds": [album_id]}
+        result = await self.post("/api/v1/command", json_data=payload)
+        return result if isinstance(result, dict) else {}
+
+    async def search_artist(self, artist_id: int) -> dict[str, Any]:
+        """Trigger a search for every monitored album of an artist (201, как выше)."""
+        payload = {"name": "ArtistSearch", "artistId": artist_id}
+        result = await self.post("/api/v1/command", json_data=payload)
+        return result if isinstance(result, dict) else {}
 
     async def get_calendar(self, days: int = 7) -> list[dict[str, Any]]:
         """Get upcoming album releases from Lidarr calendar."""

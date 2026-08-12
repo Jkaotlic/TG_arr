@@ -102,6 +102,13 @@ class _SearchFormatters:
             title = title[: _SearchFormatters._MAX_RESULT_TITLE_LEN - 1] + "…"
         lines = [f"<b>{index}. {_e(title)}</b>"]
 
+        # Сезонный пак называет свой сезон отдельной строкой ниже; здесь
+        # остаётся музыкальный случай — `discography=True` у Lidarr, то есть
+        # десятки гигабайт вместо одного альбома. Молчание об этом дороже
+        # строки: пользователь выбрал ОДИН альбом.
+        if result.is_season_pack and result.detected_season is None:
+            lines.append("📚 дискография целиком")
+
         # Quality info
         quality_parts = []
         if result.quality.resolution:
@@ -154,7 +161,12 @@ class _SearchFormatters:
         per_page: int = 5,
     ) -> str:
         """Format a page of search results."""
-        type_emoji = "🎬" if content_type == ContentType.MOVIE else "📺"
+        if content_type == ContentType.MOVIE:
+            type_emoji = "🎬"
+        elif content_type == ContentType.MUSIC:
+            type_emoji = "🎵"
+        else:
+            type_emoji = "📺"
         header = f"{type_emoji} <b>Результаты поиска:</b> <code>{_e(query)}</code>\n"
         header += f"Стр. {page + 1}/{total_pages} | Показано: {len(results)}\n\n"
 

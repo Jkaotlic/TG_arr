@@ -576,3 +576,145 @@ async def test_add_series_from_trending_reports_when_sonarr_has_no_match():
 # ---------------------------------------------------------------------------
 
 
+
+
+# ===========================================================================
+# Выбор альбома (2026-08-12). Спека:
+# docs/superpowers/specs/2026-08-12-album-scope-design.md
+#
+# До этой правки тап по артисту делал add_artist(monitor="all",
+# search_for_missing=True) — вся дискография под мониторингом и в автопоиске.
+# Живой замер: у Enter Shikari 4 альбома из 8 с файлами, у Free Flow Flava
+# 2 из 22. Теперь артист добавляется НЕМОНИТОРИМЫМ, а монитор включается на
+# том, что реально взяли.
+# ===========================================================================
+
+
+def _music_db(session=None) -> MagicMock:
+    db = MagicMock()
+    db.get_session = AsyncMock(return_value=session)
+    db.save_session = AsyncMock()
+    db.delete_session = AsyncMock()
+    db.log_action = AsyncMock()
+
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def _lock(_user_id):
+        yield
+
+    db.session_lock = _lock
+    return db
+
+
+def _music_user():
+    from bot.models import User, UserPreferences
+
+    return User(tg_id=111, preferences=UserPreferences())
+
+
+def _music_session(artist):
+    from bot.models import ContentType, SearchSession
+
+    return SearchSession(
+        user_id=111, query=artist.name, content_type=ContentType.MUSIC,
+        selected_content=artist,
+    )
+
+
+def _add_action():
+    from bot.models import ActionLog, ActionType, ContentType
+
+    return ActionLog(user_id=0, action_type=ActionType.ADD, content_type=ContentType.MUSIC)
+
+
+def _album(album_id=3, title="The Mindsweep", **kw):
+    from bot.models import AlbumInfo
+
+    return AlbumInfo(lidarr_id=album_id, title=title, **kw)
+
+
+@pytest.fixture(autouse=True)
+def _clear_music_state():
+    from bot.handlers import music, search
+
+    search._grab_in_progress.clear()
+    music._album_candidates.clear() if hasattr(music, "_album_candidates") else None
+    yield
+
+
+@pytest.mark.asyncio
+async def test_search_resolves_the_artist_unmonitored_and_asks_which_album():
+    """Простой просмотр дискографии не должен втягивать артиста в RSS-петлю
+    Lidarr: артист добавляется немониторимым, монитор включится при взятии."""
+    from bot.handlers import music
+
+    artist = _make_artist(1)                                    # ещё не в Lidarr
+    added = ArtistInfo(mb_id="mb-1", name="Artist 1", lidarr_id=1)
+
+    add_service = MagicMock()
+    add_service.get_lidarr_profiles = AsyncMock(return_value=[MagicMock(id=1)])
+    add_service.get_lidarr_metadata_profiles = AsyncMock(return_value=[MagicMock(id=1)])
+    add_service.get_lidarr_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="/music")])
+    add_service.add_artist = AsyncMock(return_value=(added, _add_action()))
+    add_service.lidarr = AsyncMock()
+    add_service.lidarr.get_albums = AsyncMock(return_value=[_album()])
+
+    callback = _make_callback("confirm_grab")
+    db = _music_db(session=_music_session(artist))
+
+    with patch.object(music, "_get_music_services", AsyncMock(return_value=(MagicMock(), add_service))), \
+            patch.object(music, "accessible_message", return_value=callback.message):
+        await music.handle_confirm_music_add(callback, _music_user(), db)
+
+    kwargs = add_service.add_artist.await_args.kwargs
+    assert kwargs["monitor"] == "none"
+    assert kwargs["monitored"] is False
+    assert kwargs["search_for_missing"] is False
+    add_service.lidarr.get_albums.assert_awaited_once_with(1)
+    rendered = " ".join(str(c.args) for c in callback.message.edit_text.await_args_list)
+    assert "Что искать" in rendered
+
+
+@pytest.mark.asyncio
+async def test_artist_already_in_library_is_not_added_again():
+    from bot.handlers import music
+
+    artist = ArtistInfo(mb_id="mb-7", name="Artist 7", lidarr_id=7)
+    add_service = MagicMock()
+    add_service.add_artist = AsyncMock()
+    add_service.lidarr = AsyncMock()
+    add_service.lidarr.get_albums = AsyncMock(return_value=[_album()])
+
+    callback = _make_callback("confirm_grab")
+    db = _music_db(session=_music_session(artist))
+
+    with patch.object(music, "_get_music_services", AsyncMock(return_value=(MagicMock(), add_service))), \
+            patch.object(music, "accessible_message", return_value=callback.message):
+        await music.handle_confirm_music_add(callback, _music_user(), db)
+
+    add_service.add_artist.assert_not_awaited()
+    add_service.lidarr.get_albums.assert_awaited_once_with(7)
+
+
+@pytest.mark.asyncio
+async def test_empty_discography_still_offers_the_whole_artist():
+    """Метаданные могли не подтянуться — пустой экран был бы тупиком."""
+    from bot.handlers import music
+
+    add_service = MagicMock()
+    add_service.add_artist = AsyncMock()
+    add_service.lidarr = AsyncMock()
+    add_service.lidarr.get_albums = AsyncMock(return_value=[])
+
+    callback = _make_callback("confirm_grab")
+    db = _music_db(session=_music_session(ArtistInfo(mb_id="mb-9", name="X", lidarr_id=9)))
+
+    with patch.object(music, "_get_music_services", AsyncMock(return_value=(MagicMock(), add_service))), \
+            patch.object(music, "accessible_message", return_value=callback.message):
+        await music.handle_confirm_music_add(callback, _music_user(), db)
+
+    last = callback.message.edit_text.await_args
+    assert "дискограф" in last.args[0].lower()
+    kb = last.kwargs["reply_markup"]
+    assert any("дискография" in b.text.lower() for row in kb.inline_keyboard for b in row)
