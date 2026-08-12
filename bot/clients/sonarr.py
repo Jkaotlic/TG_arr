@@ -209,6 +209,37 @@ class SonarrClient(ArrBaseClient):
     async def set_series_monitored(self, series_id: int, monitored: bool) -> bool:
         return await self._set_monitored("series", series_id, monitored)
 
+    async def set_season_monitoring(self, series_id: int, monitor: str) -> bool:
+        """Apply a season-monitoring preset to a series already in the library.
+
+        Delegates the *meaning* of the preset to Sonarr — the same mechanism
+        behind "Season Pass" in the web UI and behind `addOptions.monitor` in
+        `add_series`. Rewriting per-season flags here would mean reimplementing
+        that meaning in the bot, and `_should_monitor_season` shows why that
+        goes wrong: for `monitor="future"` it returns False for EVERY season,
+        which is only correct at add time, when Sonarr itself derives the
+        episode flags from `addOptions`. Writing those same flags onto an
+        existing series would leave every season unmonitored — exactly the
+        defect this method exists to fix.
+
+        Live contract (Sonarr 4.0.19.2979, 2026-08-12 — full protocol in
+        analysis/2026-08-12-seasonpass-probe.md): POST answers 202 with an
+        empty `{}` body, PUT on the same path answers 405. Success therefore
+        cannot be read off the response body; the criterion is that no HTTP
+        error was raised. Measured on a live series: `monitor="future"`
+        rewrites EPISODE flags (it left exactly the unaired episodes
+        monitored), and it lifts a series out of `monitor="none"` — the state
+        the search flow leaves a freshly added title in.
+        """
+        await self.post(
+            "/api/v3/seasonpass",
+            json_data={
+                "series": [{"id": series_id}],
+                "monitoringOptions": {"monitor": monitor},
+            },
+        )
+        return True
+
     async def delete_series(self, series_id: int, delete_files: bool = False) -> bool:
         return await self._delete_resource("series", series_id, delete_files)
 
