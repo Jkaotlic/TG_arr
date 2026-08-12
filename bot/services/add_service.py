@@ -74,7 +74,7 @@ from typing import Optional
 
 import structlog
 
-from bot.clients.base import APIError
+from bot.clients.base import APIError, ArrBaseClient
 from bot.clients.lidarr import LidarrClient
 from bot.clients.qbittorrent import QBittorrentClient
 from bot.clients.radarr import RadarrClient
@@ -481,7 +481,7 @@ class AddService:
         self,
         log,
         action: ActionLog,
-        arr_client,
+        arr_client: ArrBaseClient,
         release: SearchResult,
         content_type: ContentType,
     ) -> tuple[bool, ActionLog]:
@@ -507,7 +507,7 @@ class AddService:
         self,
         log,
         action: ActionLog,
-        arr_client,
+        arr_client: ArrBaseClient,
         release: SearchResult,
         content_type: ContentType,
         arr_id: Optional[int],
@@ -621,12 +621,18 @@ class AddService:
                 return False, action
 
             try:
+                # `self.radarr`/`self.sonarr` rather than the pre-resolved
+                # `arr_client`: these three commands are defined on the
+                # concrete clients, not on ArrBaseClient (which carries only
+                # what Radarr, Sonarr and Lidarr genuinely share). Going
+                # through the base would mean typing `arr_client` loosely
+                # enough to hide a typo in any of these names.
                 if content_type is ContentType.MOVIE:
-                    await arr_client.search_movie(arr_id)
+                    await self.radarr.search_movie(arr_id)
                 elif release.is_season_pack and release.detected_season is not None:
-                    await arr_client.search_season(arr_id, release.detected_season)
+                    await self.sonarr.search_season(arr_id, release.detected_season)
                 else:
-                    await arr_client.search_series(arr_id)
+                    await self.sonarr.search_series(arr_id)
             except APIError as e:
                 log.warning("auto_search_failed", error=str(e))
                 action.success = False

@@ -59,21 +59,6 @@ async def test_handle_pagination_reads_callback_data():
     cb.message.edit_text.assert_awaited()
 
 
-def test_root_folder_callback_carries_an_integer_id():
-    """*arr root folders have ids, so the sha1 digest of the path can go.
-
-    The digest existed only because Scryer's root folders had no id and their
-    Windows paths contain ':', which is aiogram's CallbackData separator.
-    """
-    from bot.ui.callbacks import RootFolderCB
-
-    cb = RootFolderCB(folder_id=1, content_type="movie")
-    packed = cb.pack()
-    assert ":" in packed
-    restored = RootFolderCB.unpack(packed)
-    assert restored.folder_id == 1
-
-
 def test_torrent_page_cb_roundtrip():
     """LOGIC-01: TorrentPageCB field is named `flt` (not `filter`, which
     shadows aiogram's CallbackData.filter() classmethod and triggers a

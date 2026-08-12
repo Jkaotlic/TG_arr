@@ -50,16 +50,6 @@ class RadarrClient(ArrBaseClient):
         log.info("Lookup completed", movie_count=len(movies))
         return movies
 
-    async def lookup_movie_by_tmdb(self, tmdb_id: int) -> Optional[MovieInfo]:
-        """Look up a movie by TMDB ID."""
-        params = {"tmdbId": tmdb_id}
-        results = await self.get("/api/v3/movie/lookup/tmdb", params=params)
-
-        if isinstance(results, dict):
-            return self._parse_movie(results)
-        elif isinstance(results, list) and results:
-            return self._parse_movie(results[0])
-        return None
 
     async def get_movie_by_tmdb(self, tmdb_id: int) -> Optional[MovieInfo]:
         """Get movie from library by TMDB ID."""

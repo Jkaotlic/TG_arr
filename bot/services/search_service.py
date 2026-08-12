@@ -44,6 +44,7 @@ from bot.clients.base import AuthenticationError, ServiceConnectionError
 from bot.clients.lidarr import LidarrClient
 from bot.clients.prowlarr import ProwlarrClient
 from bot.clients.radarr import RadarrClient
+from bot.clients.slskd import SlskdClient
 from bot.clients.sonarr import SonarrClient
 from bot.models import ArtistInfo, ContentType, MovieInfo, SearchResult, SeriesInfo, VIDEO_CONTENT_TYPES
 from bot.services.scoring import ScoringService
@@ -216,7 +217,7 @@ class SearchService:
         lidarr: Optional[LidarrClient] = None,
         prowlarr: Optional[ProwlarrClient] = None,
         scoring: Optional[ScoringService] = None,
-        slskd=None,
+        slskd: Optional[SlskdClient] = None,
     ):
         self.radarr = radarr
         self.sonarr = sonarr

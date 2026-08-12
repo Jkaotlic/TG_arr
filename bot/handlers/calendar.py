@@ -9,6 +9,8 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
+from bot.clients.radarr import RadarrClient
+from bot.clients.sonarr import SonarrClient
 from bot.clients.registry import get_lidarr, get_radarr, get_sonarr
 from bot.handlers.common import accessible_message, swallow_not_modified
 from bot.ui.callbacks import CalCB
@@ -59,7 +61,8 @@ def _is_movie_calendar_item(item: dict[str, Any]) -> bool:
 
 
 async def _collect_calendar(
-    radarr, sonarr, days: int, *, errors: Optional[list[str]] = None,
+    radarr: RadarrClient, sonarr: SonarrClient, days: int, *,
+    errors: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     """Fetch Radarr's and Sonarr's calendars concurrently, merged and sorted
     by date into one list.

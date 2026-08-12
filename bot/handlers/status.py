@@ -2,7 +2,7 @@
 
 import asyncio
 import html
-from typing import Any
+from typing import Any, Optional, Protocol
 
 import structlog
 from aiogram import F, Router
@@ -186,7 +186,22 @@ async def cmd_health(message: Message) -> None:
         await status_msg.edit_text(Formatters.format_error("Не удалось собрать состояние"))
 
 
-async def check_service(client, name: str) -> SystemStatus:
+class HealthCheckable(Protocol):
+    """Anything this dashboard can probe.
+
+    Radarr/Sonarr/Prowlarr/Lidarr share `BaseAPIClient`, but Emby and
+    qBittorrent are standalone classes — a common base would be a fiction. A
+    Protocol says the only thing that actually matters here, and it keeps the
+    call below typed: with a bare `client` parameter mypy sees `Any` and stops
+    checking `check_connection` entirely, which is how a client can lose the
+    method without anything noticing until /status is opened.
+    """
+
+    async def check_connection(self) -> tuple[bool, Optional[str], Optional[float]]:
+        ...
+
+
+async def check_service(client: HealthCheckable, name: str) -> SystemStatus:
     """Check a single service status."""
     try:
         available, version, response_time = await client.check_connection()

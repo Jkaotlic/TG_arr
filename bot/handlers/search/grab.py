@@ -21,15 +21,6 @@ from .services import router
 logger = structlog.get_logger()
 
 
-async def _search_picked_season(sonarr, series_id: int, season_number: int) -> dict:
-    """Search exactly the season the user picked.
-
-    Sonarr has a dedicated SeasonSearch command; falling back to a full
-    SeriesSearch would re-grab every other season the user did not ask for.
-    """
-    return await sonarr.search_season(series_id, season_number)
-
-
 # Feature #2: season-monitoring presets exposed on the series release card.
 # These strings match Sonarr's own `monitor` addOptions values verbatim (see
 # SonarrClient.add_series) — rollback 2026-08-10 removed the previous

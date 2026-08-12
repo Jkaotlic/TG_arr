@@ -528,14 +528,3 @@ class _SearchFormatters:
         return f"⚠️ {message}"
 
 
-def format_release(result: SearchResult) -> str:
-    """Public, module-level entry point for a single release card (Task 11).
-
-    Delegates to `_SearchFormatters.format_release_details`, which is already
-    the function wired into the grab-confirmation and release-detail handlers
-    (`bot/handlers/search/grab.py`, `bot/handlers/search/results.py`) — this
-    task does not touch handlers, so routing the new verdict text through the
-    existing production entry point is what makes it actually reach a user,
-    rather than sitting behind an interface nothing calls yet.
-    """
-    return _SearchFormatters.format_release_details(result)

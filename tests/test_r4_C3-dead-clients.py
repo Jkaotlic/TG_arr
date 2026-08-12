@@ -46,4 +46,3 @@ class TestSurvivingSymbolsIntact:
 
     def test_lidarr_lookup_artist_still_present(self):
         assert hasattr(LidarrClient, "lookup_artist")
-        assert hasattr(LidarrClient, "search_artist")

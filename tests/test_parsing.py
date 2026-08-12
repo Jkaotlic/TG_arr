@@ -1,13 +1,23 @@
-"""Tests for parsing functionality."""
+"""Разбор названий раздач.
+
+2026-08-12: тесты нацелены на живую реализацию — методы `ProwlarrClient`. До
+этого они проверяли `bot/services/release_parser.py`, где лежала вторая,
+параллельная копия того же разбора; производственный вызов был только у
+`parse_quality_name`, а остальные четыре функции держались одними этими
+тестами. Расхождение уже наступило: кириллические формы сезонов добавились
+только в prowlarr-копию. Копия удалена, проверки остались.
+"""
 
 import pytest
 
-from bot.services.release_parser import (
-    extract_season_episode,
-    extract_year,
-    is_season_pack,
-    parse_quality,
-)
+from bot.clients.prowlarr import ProwlarrClient
+
+_CLIENT = ProwlarrClient("http://prowlarr", "key")
+
+parse_quality = _CLIENT._parse_quality
+extract_year = _CLIENT._extract_year
+extract_season_episode = _CLIENT._extract_season_episode
+is_season_pack = _CLIENT._is_season_pack
 
 
 class TestQualityParsing:

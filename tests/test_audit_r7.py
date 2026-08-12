@@ -186,14 +186,18 @@ async def test_adduser_notes_a_user_who_already_has_env_access():
     ],
 )
 def test_bluray_remux_is_recognised_as_a_source(name):
-    from bot.services.release_parser import parse_quality
+    from bot.clients.prowlarr import ProwlarrClient
+
+    parse_quality = ProwlarrClient("http://prowlarr", "key")._parse_quality
 
     assert parse_quality(name).source == "BluRay", name
 
 
 def test_a_web_dl_is_still_a_web_dl():
     """The BDRemux clause must not swallow other sources."""
-    from bot.services.release_parser import parse_quality
+    from bot.clients.prowlarr import ProwlarrClient
+
+    parse_quality = ProwlarrClient("http://prowlarr", "key")._parse_quality
 
     q = parse_quality("Michael.2026.2160p.iT.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-BYNDR")
 
