@@ -646,3 +646,35 @@ async def test_search_artist_sends_the_artist_search_command():
 
     assert post.call_args.kwargs["json_data"] == {"name": "ArtistSearch", "artistId": 7}
     assert result == {"id": 100}
+
+
+@pytest.mark.asyncio
+async def test_add_service_passes_monitored_through_to_lidarr():
+    """mypy-находка 2026-08-12: `AddService.add_artist` не принимала `monitored`,
+    поэтому `monitored=False` из пикера альбомов уезжал в никуда, а артист
+    добавлялся МОНИТОРИМЫМ (дефолт клиента) — то есть вся дискография всё равно
+    попадала в RSS-петлю Lidarr. Хендлерные тесты этого не видели: там
+    `add_service` — мок, а мок принимает любые kwargs.
+    """
+    from bot.models import ArtistInfo
+    from bot.services.add_service import AddService
+
+    lidarr = AsyncMock()
+    lidarr.get_artist_by_mbid = AsyncMock(return_value=None)
+    lidarr.add_artist = AsyncMock(return_value=ArtistInfo(mb_id="mb-1", name="X", lidarr_id=5))
+    service = AddService(AsyncMock(), AsyncMock(), lidarr=lidarr)
+
+    await service.add_artist(
+        artist=ArtistInfo(mb_id="mb-1", name="X"),
+        quality_profile_id=1,
+        metadata_profile_id=1,
+        root_folder_path="/music",
+        monitor="none",
+        search_for_missing=False,
+        monitored=False,
+    )
+
+    kwargs = lidarr.add_artist.await_args.kwargs
+    assert kwargs["monitored"] is False
+    assert kwargs["monitor"] == "none"
+    assert kwargs["search_for_missing"] is False

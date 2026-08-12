@@ -2,6 +2,7 @@
 
 import asyncio
 import html
+from typing import Optional
 
 import structlog
 from aiogram import F, Router
@@ -32,7 +33,15 @@ from bot.models import (
 )
 from bot.services.add_service import AddService
 from bot.services.search_service import SearchService
-from bot.ui.callbacks import ArtistCB, SlskdCB, TrendingItemCB
+from bot.ui.callbacks import (
+    AlbumGrabCB,
+    AlbumPageCB,
+    AlbumScopeCB,
+    AlbumSourceCB,
+    ArtistCB,
+    SlskdCB,
+    TrendingItemCB,
+)
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.menu import MENU_MUSIC
@@ -101,6 +110,14 @@ async def _render_artist_list(message: Message, artists: list[ArtistInfo], page:
         text,
         reply_markup=Keyboards.artist_list(artists, current_page=page, per_page=per_page),
         parse_mode="HTML",
+    )
+
+
+def _find_album(user_id: int, album_id: int) -> Optional[AlbumInfo]:
+    """Альбом из per-user кэша дискографии; None, если кэш истёк (рестарт бота)."""
+    return next(
+        (a for a in _album_candidates.get(user_id) or [] if a.lidarr_id == album_id),
+        None,
     )
 
 
@@ -507,6 +524,227 @@ async def handle_artist_selection(
         reply_markup=Keyboards.artist_details(artist, already_in_library=bool(artist.lidarr_id)),
         parse_mode="HTML",
     )
+
+
+@router.callback_query(AlbumScopeCB.filter())
+async def handle_album_scope(
+    callback: CallbackQuery, callback_data: AlbumScopeCB, db_user: User, db: Database
+) -> None:
+    """Continue after the discography picker.
+
+    `album_id == 0` — «вся дискография»: полноценный ответ, а не «не выбрано».
+    Сравнение именно с нулём, а не проверка на ложность: живой дефект
+    2026-08-12 у сезонов замкнулся в цикл ровно на этом
+    (analysis/2026-08-12-season-loop-and-packs.md).
+    """
+    message = accessible_message(callback)
+    if message is None:
+        return
+
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    if not session or not isinstance(session.selected_content, ArtistInfo):
+        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        return
+    artist: ArtistInfo = session.selected_content
+
+    if callback_data.album_id == 0:
+        services = await _get_music_services()
+        if services is None:
+            await callback.answer("Lidarr не настроен", show_alert=True)
+            return
+        _search_service, add_service = services
+
+        await callback.answer("Беру всю дискографию...")
+        artist_id = artist.lidarr_id or callback_data.artist_id
+        # Монитор и поиск делегируются Lidarr: он сам решает, что «все альбомы»
+        # значит для этого артиста по его metadata-профилю.
+        await add_service.lidarr.set_artist_monitored(artist_id, True)
+        await add_service.lidarr.search_artist(artist_id)
+        await message.edit_text(
+            Formatters.format_success(
+                f"<b>{html.escape(artist.name)}</b>\n\n"
+                "Вся дискография под мониторингом, запущен автопоиск."
+            ),
+            parse_mode="HTML",
+        )
+        await db.delete_session(user_id)
+        _album_candidates.pop(user_id, None)
+        return
+
+    album = _find_album(user_id, callback_data.album_id)
+    if album is None:
+        await callback.answer("Список альбомов истёк. Начните новый поиск.", show_alert=True)
+        return
+
+    await callback.answer()
+    year = f" · {album.year}" if album.year else ""
+    await message.edit_text(
+        f"💿 <b>{html.escape(album.title)}</b>{year}\n\nГде искать?",
+        reply_markup=Keyboards.album_sources(album.lidarr_id),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AlbumPageCB.filter())
+async def handle_album_page(
+    callback: CallbackQuery, callback_data: AlbumPageCB, db_user: User, db: Database
+) -> None:
+    """Page through a long discography (22 альбома живьём — это 5 страниц)."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    albums = _album_candidates.get(user_id) or []
+    if not albums or not session or not isinstance(session.selected_content, ArtistInfo):
+        await callback.answer("Список альбомов истёк. Начните новый поиск.", show_alert=True)
+        return
+
+    await callback.answer()
+    await safe_edit(
+        message,
+        f"🎵 <b>{html.escape(session.selected_content.name)}</b>\n\nЧто искать?",
+        reply_markup=Keyboards.album_scope(
+            albums,
+            artist_id=callback_data.artist_id,
+            current_page=callback_data.page,
+            per_page=get_settings().results_per_page,
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AlbumSourceCB.filter())
+async def handle_album_source(
+    callback: CallbackQuery, callback_data: AlbumSourceCB, db_user: User, db: Database
+) -> None:
+    """Look for the chosen album: torrents via Lidarr, or Soulseek via slskd."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    album = _find_album(user_id, callback_data.album_id)
+    if album is None or not session or not isinstance(session.selected_content, ArtistInfo):
+        await callback.answer("Список альбомов истёк. Начните новый поиск.", show_alert=True)
+        return
+    artist: ArtistInfo = session.selected_content
+
+    if callback_data.source == "sk":
+        # Soulseek индексирует ФАЙЛЫ, а не тайтлы: «артист альбом» — ровно тот
+        # запрос, который уже умеет /album.
+        await callback.answer()
+        await process_soulseek_search(
+            message, f"{artist.name} {album.title}", db_user, db, kind="album",
+        )
+        return
+
+    services = await _get_music_services()
+    if services is None:
+        await callback.answer("Lidarr не настроен", show_alert=True)
+        return
+    _search_service, add_service = services
+
+    await callback.answer("Ищу раздачи...")
+    await message.edit_text(
+        f"🔍 Ищу раздачи: <b>{html.escape(album.title)}</b>...", parse_mode="HTML",
+    )
+    try:
+        releases = await add_service.lidarr.get_releases(album.lidarr_id)
+    except Exception as e:
+        logger.error("album_release_search_failed", error=str(e), exc_info=True)
+        await message.edit_text(
+            Formatters.format_error("Индексеры не ответили"),
+            reply_markup=Keyboards.album_sources(album.lidarr_id),
+        )
+        return
+
+    if not releases:
+        # Живой замер: по одному альбому индексеры дали ОДНУ раздачу, так что
+        # пусто — обычный случай. Soulseek остаётся кнопкой, а не тупиком.
+        await message.edit_text(
+            Formatters.format_warning(
+                f"Торренты для <b>{html.escape(album.title)}</b> не найдены.\n\n"
+                "Soulseek ищет по файлам и на таких запросах обычно удачливее."
+            ),
+            reply_markup=Keyboards.album_sources(album.lidarr_id),
+            parse_mode="HTML",
+        )
+        return
+
+    async with db.session_lock(user_id):
+        session.results = releases
+        session.current_page = 0
+        await db.save_session(user_id, session)
+
+    per_page = get_settings().results_per_page
+    await message.edit_text(
+        Formatters.format_search_results_page(
+            releases[:per_page], 0,
+            max(1, (len(releases) + per_page - 1) // per_page),
+            f"{artist.name} — {album.title}", ContentType.MUSIC, per_page=per_page,
+        ),
+        reply_markup=Keyboards.album_releases(releases[:per_page], album.lidarr_id, per_page=per_page),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(AlbumGrabCB.filter())
+async def handle_album_grab(
+    callback: CallbackQuery, callback_data: AlbumGrabCB, db_user: User, db: Database
+) -> None:
+    """Take one torrent release for the chosen album.
+
+    Монитор включается ЗДЕСЬ, а не при добавлении артиста: паритет с
+    `_execute_grab` у сериалов. Порядок — альбом, затем артист.
+    """
+    message = accessible_message(callback)
+    if message is None:
+        return
+
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    if not session or callback_data.idx >= len(session.results):
+        await callback.answer("Список раздач истёк. Начните новый поиск.", show_alert=True)
+        return
+
+    services = await _get_music_services()
+    if services is None:
+        await callback.answer("Lidarr не настроен", show_alert=True)
+        return
+    _search_service, add_service = services
+
+    release = session.results[callback_data.idx]
+    await callback.answer("Беру...")
+    ok, action = await add_service.grab_release(
+        release, ContentType.MUSIC, arr_id=callback_data.album_id,
+    )
+    action.user_id = user_id
+    await db.log_action(action)
+
+    if not ok:
+        await message.edit_text(
+            Formatters.format_error(action.error_message or "Не удалось взять раздачу"),
+        )
+        return
+
+    # Монитор — следствие успешного взятия, а не попытки.
+    await add_service.lidarr.set_album_monitored(callback_data.album_id, True)
+    artist = session.selected_content
+    if isinstance(artist, ArtistInfo) and artist.lidarr_id:
+        await add_service.lidarr.set_artist_monitored(artist.lidarr_id, True)
+
+    await message.edit_text(
+        Formatters.format_success(
+            f"<b>{html.escape(release.title)}</b>\n\nВзято, альбом под мониторингом."
+        ),
+        parse_mode="HTML",
+    )
+    await db.delete_session(user_id)
+    _album_candidates.pop(user_id, None)
 
 
 @router.callback_query(F.data.startswith(CallbackData.ARTIST))

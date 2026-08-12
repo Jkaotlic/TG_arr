@@ -448,6 +448,9 @@ class AddService:
         """
         # Музыка — третий клиент, а не «всё, что не фильм». Без этой ветки
         # музыкальный релиз уезжал в Sonarr и «успешно» грабился там.
+        # Аннотация обязательна: без неё mypy выводит тип по первой ветке
+        # (RadarrClient) и ругается на две остальные.
+        arr_client: Optional[ArrBaseClient]
         if content_type is ContentType.MOVIE:
             arr_client = self.radarr
         elif content_type is ContentType.MUSIC:
@@ -747,9 +750,16 @@ class AddService:
         root_folder_path: str,
         monitor: str = "all",
         search_for_missing: bool = True,
+        monitored: bool = True,
         tags: Optional[list[int]] = None,
     ) -> tuple[Optional[ArtistInfo], ActionLog]:
-        """Add an artist to Lidarr."""
+        """Add an artist to Lidarr.
+
+        `monitored=False` — путь пикера альбомов: артист нужен только затем,
+        чтобы узнать его дискографию и спросить релизы, и не должен попадать в
+        RSS-петлю Lidarr до того, как что-то реально взяли. Ровно так же
+        `_resolve_arr_entry` добавляет фильм/сериал.
+        """
         log = logger.bind(name=artist.name, mb_id=artist.mb_id)
         log.info("Adding artist to Lidarr")
 
@@ -780,6 +790,7 @@ class AddService:
                 root_folder_path=root_folder_path,
                 monitor=monitor,
                 search_for_missing=search_for_missing,
+                monitored=monitored,
                 tags=tags,
             )
 

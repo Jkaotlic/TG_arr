@@ -11,6 +11,12 @@ alive here as "surviving siblings" of the r4 album-flow removal — were
 themselves removed in round 5: no album-grab flow ever materialized, so
 _parse_album had zero production callers (only these now-deleted pinning
 tests). See analysis/r5/03-dead-code.md DEAD-09.
+
+2026-08-12: флоу материализовался (выбор альбома, спека
+docs/superpowers/specs/2026-08-12-album-scope-design.md), поэтому `search_album`
+и `_parse_album` вернулись — уже с производственными вызовами, см.
+`TestAlbumFlowRevived`. `lookup_album` и `format_album_info` остались мёртвыми
+и по-прежнему под охраной.
 """
 
 from bot.clients.deezer import DeezerClient
@@ -27,15 +33,31 @@ class TestDeadSymbolsRemoved:
     def test_lidarr_lookup_album_removed(self):
         assert not hasattr(LidarrClient, "lookup_album")
 
-    def test_lidarr_search_album_removed(self):
-        assert not hasattr(LidarrClient, "search_album")
-
     def test_formatters_format_album_info_removed(self):
         assert not hasattr(Formatters, "format_album_info")
 
-    def test_lidarr_parse_album_removed(self):
-        """DEAD-09 (r5): _parse_album had no production callers — removed."""
-        assert not hasattr(LidarrClient, "_parse_album")
+
+class TestAlbumFlowRevived:
+    """2026-08-12: флоу выбора альбома появился, и вместе с ним вернулись ровно
+    два символа из удалённых в р4/р5 — `search_album` и `_parse_album`. Оба
+    теперь с живыми вызовами из `bot/handlers/music.py`, то есть инвариант
+    DEAD-09 («мёртвых символов не держим») не нарушен, а исполнен.
+
+    `lookup_album` и `format_album_info` НЕ возвращены и остаются под охраной
+    выше: поиск альбома свободным текстом измерен как непригодный (Lidarr отдаёт
+    каверы вместо альбома — см. спеку), а отдельный форматтер альбома не
+    понадобился, карточку рисует `album_sources` + общий список релизов.
+    """
+
+    def test_search_album_is_back_with_a_caller(self):
+        from bot.handlers import music
+
+        assert hasattr(LidarrClient, "search_album")
+        assert hasattr(music, "handle_album_source")
+
+    def test_parse_album_is_back_with_a_caller(self):
+        assert hasattr(LidarrClient, "_parse_album")
+        assert hasattr(LidarrClient, "get_albums")
 
 
 class TestSurvivingSymbolsIntact:
