@@ -247,3 +247,56 @@ class FindGrabCB(CallbackData, prefix="fg"):
     """
 
     idx: int
+
+
+class AlbumScopeCB(CallbackData, prefix="al"):
+    """Which album to search for; ``album_id=0`` = the whole discography.
+
+    Ноль — полноценный ответ, а не «не выбрано». Живой дефект 2026-08-12
+    (`analysis/2026-08-12-season-loop-and-packs.md`): у сезонов `season or None`
+    превращал 0 в None, то есть в «пользователя ещё не спрашивали», и выбор
+    возвращал сам себя бесконечно. Здесь ``album_id`` передаётся как есть, а
+    обработчик сравнивает именно с нулём, а не проверяет на ложность.
+    """
+
+    album_id: int
+    artist_id: int
+
+
+class AlbumSourceCB(CallbackData, prefix="alsrc"):
+    """Where to look for the chosen album.
+
+    ``source``: "tor" — торренты через Lidarr (его собственный вердикт по
+    профилю качества), "sk" — Soulseek через slskd. Живой замер 2026-08-12: по
+    альбому «The Mindsweep» индексеры дали ОДНУ раздачу, поэтому второй
+    источник — не украшение.
+    """
+
+    album_id: int
+    source: str  # "tor" | "sk"
+
+
+class AlbumPageCB(CallbackData, prefix="alpg"):
+    """Pagination inside a discography picker.
+
+    Своё семейство, а не ``PageCB(scope=...)``: у пикера альбомов свой источник
+    данных (per-user кэш дискографии), и он не должен попадать в обработчик
+    каталожной пагинации.
+    """
+
+    page: int
+    artist_id: int
+
+
+class AlbumGrabCB(CallbackData, prefix="alg"):
+    """Grab one torrent release of a chosen album.
+
+    ``album_id`` едет в колбэке, а не берётся из сессии: устаревшая карточка в
+    старом сообщении не должна грабить тот альбом, на который сессия показывает
+    сейчас (тот же довод, что у ``FindGrabCB``). ``ge=0`` — та же защита, что у
+    ``TsReleaseCB``: отрицательный индекс обошёл бы проверку устаревшего кэша и
+    разрешился бы через питоновскую отрицательную индексацию в чужой элемент.
+    """
+
+    idx: int = Field(ge=0)
+    album_id: int
