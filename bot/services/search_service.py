@@ -65,7 +65,12 @@ _SERIES_PATTERNS = [
 
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2}|21\d{2})\b")
 _SE_RE = re.compile(r"s(\d{1,2})(?:e(\d{1,3}))?", re.IGNORECASE)
-_SEASON_WORD_RE = re.compile(r"(?:season|сезон)\s*(\d+)", re.IGNORECASE)
+# `\d{1,2}(?!\d)` вместо `\d+`: «Ведьмак 2 сезон 1080p» иначе даёт season=1080.
+_SEASON_WORD_RE = re.compile(r"(?:season|сезон)\s*(\d{1,2})(?!\d)", re.IGNORECASE)
+# Обратный порядок — обычный для русского: «4 сезон», «3-й сезон». Живой прогон
+# 2026-08-12: «Тед Лассо 4 сезон» давал season=None, и бот спрашивал сезон,
+# который пользователь уже назвал.
+_SEASON_BEFORE_WORD_RE = re.compile(r"(\d{1,2})\s*-?\s*(?:й|ый|ой)?\s*сезон", re.IGNORECASE)
 _QUALITY_TOKENS = ("2160p", "4k", "4к", "uhd", "1080p", "720p", "480p")
 # Each lookup fans out to TMDb/TVDB/MusicBrainz directly now (no more single
 # round-trip to the previous backend). Live measurement 2026-08-10: Radarr
@@ -742,6 +747,12 @@ class SearchService:
         if season_match and result["season"] is None:
             result["season"] = int(season_match.group(1))
             result["title"] = _SEASON_WORD_RE.sub("", result["title"]).strip()
+
+        # "N сезон" / "N-й сезон" — обратный порядок, обычный для русского
+        season_ru_match = _SEASON_BEFORE_WORD_RE.search(query_lower)
+        if season_ru_match and result["season"] is None:
+            result["season"] = int(season_ru_match.group(1))
+            result["title"] = _SEASON_BEFORE_WORD_RE.sub("", result["title"]).strip()
 
         # Quality — strip ALL recognised tokens (BUG-29) including Cyrillic "4К" (BUG-30).
         first_quality: Optional[str] = None

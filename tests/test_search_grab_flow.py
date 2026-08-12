@@ -1089,3 +1089,101 @@ async def test_monitoring_failure_does_not_undo_a_successful_grab():
     # Пользователь всё равно видит успех — раздача уже взята.
     final_text = message.edit_text.await_args_list[-1].args[0]
     assert "Show" in final_text
+
+
+# ---------------------------------------------------------------------------
+# Живой дефект 2026-08-12 (логи rpie4, request_id ss:4:33): после «/series Тед
+# Лассо 4 сезон» → выбор тайтла → выбор сезона бот снова показывал тот же
+# выбор сезона. Ветка ask_season решалась ТОЛЬКО по parsed["season"], а ответ
+# пользователя приезжает в season_override — то есть цикл был бесконечным, до
+# релизов дело не доходило ни разу. Сериал при этом уже добавлен в Sonarr,
+# поэтому со стороны это выглядело как «добавился, но объяснения нет».
+# ---------------------------------------------------------------------------
+def _series_with_four_seasons() -> SeriesInfo:
+    return SeriesInfo(
+        tvdb_id=383203,
+        title="Ted Lasso",
+        sonarr_id=33,
+        seasons=[{"seasonNumber": n} for n in range(0, 5)],
+    )
+
+
+def _season_flow_mocks():
+    search_service = MagicMock()
+    search_service.parse_query = MagicMock(return_value={
+        "original": "Тед Лассо 4 сезон", "title": "Тед Лассо",
+        "year": None, "season": None, "episode": None, "quality": None,
+    })
+    search_service.search_releases_for_title = AsyncMock(return_value=[])
+
+    status_msg = MagicMock()
+    status_msg.edit_text = AsyncMock()
+    status_msg.delete = AsyncMock()
+    message = MagicMock()
+    message.answer = AsyncMock(return_value=status_msg)
+    return search_service, message, status_msg
+
+
+@pytest.mark.asyncio
+async def test_chosen_season_searches_instead_of_asking_again():
+    from bot.handlers import search
+
+    search_service, message, status_msg = _season_flow_mocks()
+
+    with patch.object(search, "get_services", AsyncMock(return_value=(search_service, MagicMock()))):
+        await search.process_search(
+            message, "Тед Лассо 4 сезон", ContentType.SERIES, _make_db_user(), _make_db(),
+            chosen_title=_series_with_four_seasons(), season_override=4,
+        )
+
+    search_service.search_releases_for_title.assert_awaited_once_with(
+        ContentType.SERIES, 33, season=4, preferred_resolution=None,
+    )
+    rendered = " ".join(str(c.args) + str(c.kwargs) for c in status_msg.edit_text.await_args_list)
+    assert "Что искать?" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_whole_series_choice_searches_everything_instead_of_asking_again():
+    """«📺 Весь сериал» — это season=0 в колбэке: ответ дан, спрашивать нечего,
+    а искать надо весь сериал (season=None), а не нулевой сезон (спецвыпуски)."""
+    from bot.handlers import search
+
+    search_service, message, status_msg = _season_flow_mocks()
+
+    with patch.object(search, "get_services", AsyncMock(return_value=(search_service, MagicMock()))):
+        await search.process_search(
+            message, "Тед Лассо 4 сезон", ContentType.SERIES, _make_db_user(), _make_db(),
+            chosen_title=_series_with_four_seasons(), season_override=0,
+        )
+
+    search_service.search_releases_for_title.assert_awaited_once_with(
+        ContentType.SERIES, 33, season=None, preferred_resolution=None,
+    )
+    rendered = " ".join(str(c.args) + str(c.kwargs) for c in status_msg.edit_text.await_args_list)
+    assert "Что искать?" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_season_picker_answer_reaches_process_search_unchanged():
+    """Колбэк-обработчик не должен терять «весь сериал» по пути: `season or None`
+    превращал 0 в None, а None означает «пользователь ещё не отвечал»."""
+    from bot.handlers import search as search_mod
+    from bot.handlers.search import results as results_mod
+    from bot.ui.callbacks import SeasonScopeCB
+
+    callback = _make_callback("ss:0:33")
+    callback.message.edit_reply_markup = AsyncMock()
+    session = SearchSession(
+        user_id=42, query="Тед Лассо 4 сезон", content_type=ContentType.SERIES,
+        selected_content=_series_with_four_seasons(),
+    )
+    db = _make_db(session=session)
+
+    with patch.object(results_mod, "accessible_message", return_value=callback.message), \
+            patch.object(search_mod, "process_search", AsyncMock()) as spied:
+        await results_mod.handle_season_scope(
+            callback, SeasonScopeCB(season=0, title_id="33"), _make_db_user(), db,
+        )
+
+    assert spied.await_args.kwargs["season_override"] == 0

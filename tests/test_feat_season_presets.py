@@ -30,6 +30,25 @@ def test_decide_monitor_type_override_wins():
     assert _decide_monitor_type(result, force_download=False, override=None) == "future"
 
 
+def test_episode_range_pack_from_prowlarr_monitors_everything():
+    """Сквозная проверка находки живого прогона 2026-08-12: «S2E1-8 of 8»
+    должен доехать от заголовка Prowlarr до пресета мониторинга как ПАК
+    ("all"), а не как одиночная серия ("future")."""
+    from bot.clients.prowlarr import ProwlarrClient
+    from bot.handlers.search import _decide_monitor_type
+
+    result = ProwlarrClient("http://prowlarr", "key")._normalize_result({
+        "guid": "g",
+        "title": "Vice Principals - S2E1-8 of 8 [2017, WEB-DL 1080p]",
+        "categories": [5000],
+    })
+
+    assert result is not None
+    assert result.is_season_pack is True
+    assert result.detected_season == 2
+    assert _decide_monitor_type(result, force_download=False) == "all"
+
+
 def test_season_presets_keyboard_offers_all_presets():
     from bot.ui.keyboards import Keyboards
 

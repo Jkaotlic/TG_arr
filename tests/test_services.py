@@ -108,6 +108,23 @@ class TestSearchService:
 
         assert result["season"] == 3
 
+    @pytest.mark.parametrize("query,season,title", [
+        ("Тед Лассо 4 сезон", 4, "Тед Лассо"),
+        ("Пацаны 3-й сезон", 3, "Пацаны"),
+        ("Ведьмак 2 сезон 1080p", 2, "Ведьмак"),
+    ])
+    def test_parse_query_russian_season_before_the_word(self, search_service, query, season, title):
+        """Живой прогон 2026-08-12: «Тед Лассо 4 сезон» давал season=None —
+        шаблон ловил только порядок «сезон N», а по-русски обычный порядок
+        обратный. Цена промаха: бот спрашивал сезон, который уже назвали.
+
+        Третий случай ловит заодно и «сезон 1080p» → season=1080: шаблон
+        «сезон N» не был ограничен по числу цифр."""
+        result = search_service.parse_query(query)
+
+        assert result["season"] == season
+        assert result["title"] == title
+
     @pytest.mark.asyncio
     async def test_detect_content_type_with_season(self, search_service):
         """A season marker in the query means SERIES even with no metadata hit."""

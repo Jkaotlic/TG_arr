@@ -10,7 +10,7 @@ import structlog
 
 from bot.clients.base import APIError, BaseAPIClient, ServiceConnectionError
 from bot.config import get_settings
-from bot.models import ContentType, QualityInfo, SearchResult
+from bot.models import MIN_PACK_EPISODES, ContentType, QualityInfo, SearchResult
 
 logger = structlog.get_logger()
 
@@ -19,6 +19,15 @@ MOVIE_CATEGORIES = [2000, 2010, 2020, 2030, 2040, 2045, 2050, 2060, 2070, 2080]
 TV_CATEGORIES = [5000, 5010, 5020, 5030, 5040, 5045, 5050, 5060, 5070, 5080]
 # Audio: 3000 root, 3010 MP3, 3020 Video, 3030 Audiobook, 3040 Lossless, 3050 Other, 3060 Foreign
 MUSIC_CATEGORIES = [3000, 3010, 3020, 3030, 3040, 3050, 3060]
+
+# Диапазон серий: «S02E01-08 of 08», «S2E1-8», «S01E01-E24 из 24». Находка
+# живого прогона 2026-08-12 — на русских трекерах это массовая форма записи
+# сезонного пака, но одиночный паттерн `s\d+e\d` в ней тоже находится, поэтому
+# и сезон, и признак пака определялись неверно.
+# Замыкающий lookahead отсекает то, что диапазоном лишь выглядит: «S01E05-720p»
+# (разрешение), «S01E05-4HD» (релиз-группа с цифры) — за числом диапазона может
+# стоять только разделитель, не буква и не ещё одна цифра.
+_EPISODE_RANGE_RE = re.compile(r"s(\d{1,2})\s*e(\d{1,3})\s*-\s*e?(\d{1,3})(?![0-9a-zа-яё])")
 
 
 class ProwlarrClient(BaseAPIClient):
@@ -423,9 +432,29 @@ class ProwlarrClient(BaseAPIClient):
                     return year
         return None
 
+    def _episode_range(self, title: str) -> Optional[tuple[int, int, int]]:
+        """(сезон, первая серия, последняя) для «S02E01-08», иначе None."""
+        match = _EPISODE_RANGE_RE.search(title.lower())
+        if not match:
+            return None
+        season = int(match.group(1))
+        first = int(match.group(2))
+        last = int(match.group(3))
+        if last - first + 1 < MIN_PACK_EPISODES:
+            return None
+        return season, first, last
+
     def _extract_season_episode(self, title: str) -> tuple[Optional[int], Optional[int]]:
         """Extract season and episode numbers from title."""
         title_lower = title.lower()
+
+        # Диапазон серий («S02E01-08 of 08») — это пак: сезон у него есть,
+        # а «серия» не определена. Проверяется ДО одиночного s\d+e\d, который
+        # иначе выдал бы первую серию диапазона за единственную — и карточка
+        # релиза печатала бы «Сезон 2 Серия 1 (сезон целиком)».
+        episode_range = self._episode_range(title_lower)
+        if episode_range is not None:
+            return episode_range[0], None
 
         # S01E01 format
         match = re.search(r"s(\d{1,2})e(\d{1,3})", title_lower)
@@ -479,8 +508,14 @@ class ProwlarrClient(BaseAPIClient):
         ]):
             return True
 
-        # "(01-12 из 12)" — русскоязычная форма «все N серий сезона».
-        if re.search(r"\d{1,3}\s*-\s*\d{1,3}\s*из\s*\d{1,3}", title_lower):
+        # "(01-12 из 12)" / "[01-08 of 08]" — форма «все N серий сезона».
+        # Английское `of` — то же самое написание на тех же трекерах.
+        if re.search(r"\d{1,3}\s*-\s*\d{1,3}\s*(?:из|of)\s*\d{1,3}", title_lower):
+            return True
+
+        # Диапазон серий («S02E01-08») — пак, хотя одиночный паттерн s\d+e\d
+        # ниже нашёлся бы в нём первым и ответил бы «нет».
+        if self._episode_range(title_lower) is not None:
             return True
 
         # Has any episode reference at all? If so, not a season pack.

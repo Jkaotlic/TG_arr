@@ -369,3 +369,85 @@ async def test_get_releases_without_season_asks_for_the_whole_series():
         await client.get_releases(3)
 
     assert get.call_args.kwargs["params"] == {"seriesId": 3}
+
+
+# ============================================================================
+# 2026-08-12: Sonarr сам разбирает сезон/серии в строке релиза, а бот их не
+# читал — `is_season_pack`/`detected_season` оставались пустыми на ЭТОМ пути
+# (а он и есть основной: /series идёт через интерактивный поиск *arr, не через
+# Prowlarr). Следствия: `_decide_monitor_type` выбирал пресет по пустым полям,
+# а `AddService._grab_via_push_chain` не мог сузить авто-поиск до одного
+# сезона. Форма полей снята с живого Sonarr 4.0.19 (GET /api/v3/release,
+# seriesId=33) — `fullSeason`, `seasonNumber`, `episodeNumbers` приходят в
+# каждой строке.
+# ============================================================================
+
+
+def _sonarr():
+    from bot.clients.sonarr import SonarrClient
+
+    return SonarrClient("http://sonarr", "key")
+
+
+def test_release_row_carries_sonarrs_own_season_and_episode():
+    release = _sonarr()._parse_release({
+        "guid": "g1", "title": "Ted.Lasso.S04E01.REPACK.1080p.x265-ELiTE",
+        "seasonNumber": 4, "episodeNumbers": [1], "fullSeason": False,
+    })
+
+    assert release is not None
+    assert release.detected_season == 4
+    assert release.detected_episode == 1
+    assert release.is_season_pack is False
+
+
+def test_full_season_flag_from_sonarr_marks_a_pack():
+    release = _sonarr()._parse_release({
+        "guid": "g2", "title": "Ted.Lasso.S04.1080p.WEB-DL",
+        "seasonNumber": 4, "episodeNumbers": [], "fullSeason": True,
+    })
+
+    assert release is not None
+    assert release.is_season_pack is True
+    assert release.detected_episode is None
+
+
+def test_multi_episode_release_is_a_pack_even_when_sonarr_says_not_full_season():
+    """Живой замер (GET /api/v3/parse): «S2E1-8 of 8» Sonarr отдаёт как
+    `fullSeason=false, episodeNumbers=[1..8]` — он не знает, что 8 серий это
+    весь сезон. Для бота 8 серий одной раздачей — пак: и по размеру, и по
+    мониторингу, и по тому, что автопоиск надо сужать до сезона."""
+    release = _sonarr()._parse_release({
+        "guid": "g3", "title": "Vice Principals - S2E1-8 of 8 [2017, WEB-DL 1080p]",
+        "seasonNumber": 2, "episodeNumbers": [1, 2, 3, 4, 5, 6, 7, 8], "fullSeason": False,
+    })
+
+    assert release is not None
+    assert release.is_season_pack is True
+    assert release.detected_season == 2
+    assert release.detected_episode is None
+
+
+def test_double_episode_release_is_not_a_pack():
+    release = _sonarr()._parse_release({
+        "guid": "g4", "title": "Show.S01E01-E02.1080p.WEB-DL",
+        "seasonNumber": 1, "episodeNumbers": [1, 2], "fullSeason": False,
+    })
+
+    assert release is not None
+    assert release.is_season_pack is False
+
+
+def test_movie_release_row_has_no_season_fields():
+    """Radarr отдаёт те же строки без сезонных полей — они должны остаться
+    пустыми, а не превратиться в нули."""
+    from bot.clients.radarr import RadarrClient
+
+    release = RadarrClient("http://radarr", "key")._parse_release({
+        "guid": "m1", "title": "Dune.2021.2160p.BluRay",
+    })
+
+    assert release is not None
+    assert release.detected_season is None
+    assert release.detected_episode is None
+    assert release.is_season_pack is False

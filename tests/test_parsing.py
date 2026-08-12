@@ -200,7 +200,11 @@ class TestSeasonPackDetection:
         ("Show.Season.Pack.S01.1080p", True),
         ("Show.Full.Season.1.1080p", True),
         ("Show.S01E01.1080p.WEB-DL", False),  # Single episode
-        ("Show.S01E01-E10.1080p.WEB-DL", False),  # Episode range, not detected as pack
+        # 2026-08-12: было False с пометкой «Episode range, not detected as
+        # pack» — тест фиксировал сам дефект. Диапазон из 10 серий и есть пак;
+        # живой прогон поймал его на «S2E1-8 of 8» (мониторинг вышел "future"
+        # вместо "all"). См. tests/test_prowlarr_client.py, секцию про диапазон.
+        ("Show.S01E01-E10.1080p.WEB-DL", True),
         ("Movie.2024.1080p.BluRay", False),  # Not a series
     ])
     def test_season_pack_detection(self, title, is_pack):
