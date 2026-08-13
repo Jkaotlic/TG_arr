@@ -17,6 +17,7 @@ import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import ErrorEvent
 
 from bot.clients.registry import close_all as close_all_clients
 from bot.clients.registry import get_qbittorrent
@@ -228,7 +229,15 @@ async def publish_bot_commands(bot) -> None:
 
 
 #: Display names for the warm-up probe keys, in the order they're shown.
+#: Обязательные сервисы идут первыми: по ним судят «жив ли стек вообще».
+#: Аудит 2026-08-13 — после отката на *arr (11.08) `_warm_up_clients` снова
+#: щупает Radarr/Sonarr/Prowlarr, но этот список остался от эпохи музыки, и
+#: карточка писала «✅ Бот готов к работе!» при лежащем Radarr. Probe и
+#: отображение обязаны меняться вместе.
 _BACKEND_LABELS = (
+    ("radarr", "🎬 Radarr"),
+    ("sonarr", "📺 Sonarr"),
+    ("prowlarr", "🔍 Prowlarr"),
     ("lidarr", "🎵 Lidarr"),
     ("slskd", "🎧 slskd"),
 )
@@ -487,10 +496,17 @@ async def _periodic_cleanup(db: Database, logger, notification_service: Optional
     """DB-15: drop stale sessions/searches every 6h instead of only at startup.
 
     Task F Interface: uses ``Database.run_maintenance(backup=...)`` instead of
-    the three separate cleanup_* calls; every 4th cycle (~daily) also takes a
-    VACUUM INTO backup.
+    the three separate cleanup_* calls; a VACUUM INTO backup is attempted on
+    every cycle.
     OBS-09: also logs a periodic notification_stats summary so the otherwise
     dead get_stats() has an observability payoff.
+
+    Аудит 2026-08-13: флаг был `backup=(cycle % 4 == 0)`, то есть первый бэкап
+    случался только после 24 часов НЕПРЕРЫВНОГО аптайма, а каждый `make deploy`
+    сбрасывал счётчик — при деплоях чаще раза в сутки бэкапов не было вообще, и
+    молча. Теперь бэкап пробуется каждый цикл, а «не чаще раза в сутки»
+    обеспечивает сам ``Database._backup``: он идемпотентен по дате и пропускает
+    день, для которого файл уже есть.
     """
     interval = 6 * 3600
     structlog.contextvars.bind_contextvars(component="periodic_cleanup")
@@ -501,7 +517,7 @@ async def _periodic_cleanup(db: Database, logger, notification_service: Optional
             try:
                 await asyncio.sleep(interval)
                 cycle += 1
-                stats = await db.run_maintenance(backup=(cycle % 4 == 0))
+                stats = await db.run_maintenance(backup=True)
                 if any(stats.values()):
                     logger.info("periodic_cleanup", **stats)
 
@@ -528,6 +544,59 @@ async def _periodic_cleanup(db: Database, logger, notification_service: Optional
                     logger.debug("periodic_cleanup_failed", error=str(e), consecutive_failures=consecutive_failures)
     finally:
         structlog.contextvars.unbind_contextvars("component")
+
+
+#: Что видит пользователь, когда хендлер упал. Без деталей: текст исключения
+#: может нести URL с креденшелами (маскировка в логах есть, но пользователю
+#: внутренности сервисов не нужны вовсе).
+_UNEXPECTED_ERROR_TEXT = (
+    "⚠️ Внутренняя ошибка — запрос не выполнен. Попробуйте ещё раз; "
+    "если повторяется, загляните в логи бота."
+)
+
+
+async def handle_unexpected_error(event: ErrorEvent) -> None:
+    """Ответить пользователю на необработанное исключение в хендлере.
+
+    Аудит 2026-08-13: у диспетчера не было ни одного обработчика ошибок.
+    `LoggingMiddleware` исключение логировал с `exc_info`, так что в логах всё
+    было — а пользователь не получал ничего: сообщение молча не приходило, а у
+    инлайн-кнопки «часики» крутились до таймаута Telegram. «Бот завис» и «бот
+    упал на этом запросе» выглядели одинаково.
+
+    Best-effort и максимально осторожно: это последний рубеж, дальше только
+    полёт наружу из `dp.feed_update`, поэтому здесь не имеет права упасть
+    ничего — ни разбор апдейта, ни доставка ответа.
+    """
+    logger = structlog.get_logger()
+    update = event.update
+    logger.error(
+        "unhandled_handler_error",
+        update_id=getattr(update, "update_id", None),
+        error=str(event.exception),
+        exc_info=event.exception,
+    )
+
+    try:
+        callback = getattr(update, "callback_query", None)
+        if callback is not None:
+            # Сначала снять «часики» — это то, что видно пользователю сразу.
+            await callback.answer(_UNEXPECTED_ERROR_TEXT, show_alert=True)
+            return
+
+        message = getattr(update, "message", None)
+        if message is not None:
+            await message.answer(_UNEXPECTED_ERROR_TEXT)
+    except Exception as e:
+        # Пользователь мог заблокировать бота, колбэк — протухнуть. Логируем и
+        # выходим: обработчик ошибок, роняющий диспетчер, хуже отсутствующего.
+        logger.warning("error_reply_failed", error=str(e))
+
+
+def register_error_handler(dp: Dispatcher) -> None:
+    """Проводка обработчика ошибок. Отдельной функцией — чтобы регистрацию
+    можно было проверить тестом, а не полагаться на глаз в `main()`."""
+    dp.errors.register(handle_unexpected_error)
 
 
 async def _cancel_background_tasks(tasks) -> None:
@@ -651,6 +720,10 @@ async def main() -> None:
     # Setup routers
     main_router = setup_routers()
     dp.include_router(main_router)
+
+    # Последний рубеж: упавший хендлер не должен оставлять пользователя без
+    # ответа (аудит 2026-08-13).
+    register_error_handler(dp)
 
     # Register startup/shutdown handlers
     async def _on_startup(*_: object, **__: object) -> None:

@@ -792,6 +792,14 @@ async def handle_album_refresh(
         await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
         return
 
+    # Аудит 2026-08-13: артиста задаёт сессия, а не callback_data. Иначе
+    # подменённый колбэк показывал дискографию чужого артиста под заголовком
+    # выбранного — заголовок и содержимое расходились.
+    artist = session.selected_content
+    if callback_data.artist_id != artist.lidarr_id:
+        await callback.answer("Кнопка от другого артиста. Начните новый поиск.", show_alert=True)
+        return
+
     services = await _get_music_services()
     if services is None:
         await callback.answer("Lidarr не настроен", show_alert=True)
@@ -799,9 +807,9 @@ async def handle_album_refresh(
     _search_service, add_service = services
 
     await callback.answer("Спрашиваю Lidarr...")
-    albums = await add_service.lidarr.get_albums(callback_data.artist_id)
+    albums = await add_service.lidarr.get_albums(artist.lidarr_id)
     _remember(_album_candidates, user_id, albums)
-    await _show_album_scope(message, session.selected_content, albums)
+    await _show_album_scope(message, artist, albums)
 
 
 @router.callback_query(F.data.startswith(CallbackData.ARTIST))

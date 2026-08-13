@@ -79,16 +79,26 @@ docker-restart:
 	docker compose restart tg-arr-bot
 
 # DEPLOY-02: codified deploy path for the Pi (previously done by hand:
-# ssh -> git pull -> build -> up). Build happens BEFORE tagging :prev and
-# before up -d, so a broken build fails fast without touching the running
-# container; the previous :latest is preserved as :prev for `make rollback`.
-# IMAGE must match the `image:` set in docker-compose.yml.
+# ssh -> git pull -> build -> up). IMAGE must match the `image:` set in
+# docker-compose.yml.
+#
+# Аудит 2026-08-13: порядок шагов был `build` -> `tag latest prev` -> `up`, и
+# откат из-за этого НЕ РАБОТАЛ. `docker compose build` перезаписывает тег
+# :latest новым образом, поэтому следующий `docker tag :latest :prev` копировал
+# в :prev уже НОВЫЙ образ, а прежний оставался dangling. На живом стеке было
+# видно прямо: :latest и :prev указывали на один sha256 (016bc71a…), созданный
+# в момент последнего деплоя, — `make rollback` вернул бы ровно то, от чего
+# откатываются. Теперь :prev снимается ДО сборки.
+#
+# Сломанная сборка по-прежнему не трогает работающий контейнер: `docker tag`
+# ничего не запускает, а `up -d` идёт после успешного build. Если build упал,
+# :prev просто равен текущему :latest — то есть откатываться и правда некуда.
 IMAGE := tg-arr-bot:latest
 IMAGE_PREV := tg-arr-bot:prev
 
 deploy:
-	docker compose build
 	-docker tag $(IMAGE) $(IMAGE_PREV)
+	docker compose build
 	docker compose up -d --wait --wait-timeout 180 || { docker compose logs --tail 100 tg-arr-bot; exit 1; }
 	docker compose ps
 

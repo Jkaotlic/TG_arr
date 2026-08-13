@@ -8,7 +8,11 @@
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-cov==7.1.0
-ruff==0.15.20
+ruff==0.16.2
+# mypy остаётся на 1.x намеренно: tests/test_no_orphan_symbols.py читает
+# внутренний формат mypy `*.deps.json`, а pyproject держит пин `mypy>=1.18,<2`
+# именно поэтому. Переход на 2.x — отдельная работа с проверкой этого теста,
+# а не строчка в апгрейде зависимостей (аудит 2026-08-13).
 mypy==1.18.2
 # DEP-07/DEAD-16: needed by the compose-config guard tests in
 # tests/test_r4_C1-deploy-docs.py (yaml.safe_load); without it those tests

@@ -314,8 +314,8 @@ pytest --cov=bot --cov-report=html
 
 ```bash
 make dev          # pip install -e . -r requirements-dev.txt
-make lint         # ruff check
-make typecheck    # mypy bot/ (не входит в make lint — ошибки известны, чинятся отдельно)
+make lint         # ruff check + mypy bot/ — оба обязаны быть зелёными
+make typecheck    # только mypy bot/ (та же проверка, без ожидания ruff)
 ```
 
 ### Деплой и откат на Pi
@@ -393,7 +393,7 @@ make check-base-image   # docker buildx imagetools inspect python:3.12-slim
 | Компонент | Технология |
 |-----------|------------|
 | Язык | Python 3.12 |
-| Telegram | aiogram 3.29.1 |
+| Telegram | aiogram 3.30.0 |
 | HTTP | httpx + tenacity (retry) |
 | Конфигурация | pydantic-settings v2 |
 | БД | SQLite (aiosqlite) |

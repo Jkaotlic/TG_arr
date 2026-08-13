@@ -16,8 +16,13 @@ dependencies = [
     "aiogram>=3.20,<4",
     "httpx>=0.28,<1",
     "tenacity>=9.0,<10",
-    # DEP-01: explicit floor for the webhook server transport (bot/webhook.py),
-    # otherwise unreproducibly pulled in transitively via aiogram.
+    # DEP-01: aiogram's own network transport. The original reason for pinning
+    # it directly — `bot/webhook.py` — is gone (the bot polls, there is no
+    # webhook server any more, audit 2026-08-13), and nothing under bot/ imports
+    # aiohttp. Kept as an explicit floor rather than dropped: it still ships in
+    # every image transitively via aiogram, and pinning it here is what keeps
+    # `requirements.lock` regeneration from silently resolving a version aiogram
+    # merely tolerates. Do not read this line as "the bot serves HTTP".
     "aiohttp>=3.9,<4",
     # DEP-05: aiogram 3.29.1 relaxed its cap to pydantic<2.14. Keep our own cap
     # one minor ahead of the current pin so `pip install -e .` without

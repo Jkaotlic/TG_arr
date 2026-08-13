@@ -597,3 +597,28 @@ async def test_refresh_reasks_lidarr_for_the_discography():
 
     add_service.lidarr.get_albums.assert_awaited_with(7)
     assert music._album_candidates[USER_ID][0].lidarr_id == 3
+
+
+@pytest.mark.asyncio
+async def test_refresh_ignores_an_artist_id_the_session_did_not_choose():
+    """Аудит 2026-08-13: `artist_id` брался из callback_data без сверки с
+    сессией. Подменённый колбэк показывал дискографию ЧУЖОГО артиста под
+    заголовком выбранного — заголовок и содержимое расходились. Источник
+    истины — артист в сессии; callback_data лишь адресует кнопку."""
+    from bot.handlers import music
+    from bot.ui.callbacks import AlbumRefreshCB
+
+    add_service = MagicMock()
+    add_service.lidarr = AsyncMock()
+    add_service.lidarr.get_albums = AsyncMock(return_value=[_album()])
+    callback = _callback()
+    db = _db(session=_session(_artist(lidarr_id=7)))
+
+    with patch.object(music, "_get_music_services", AsyncMock(return_value=(MagicMock(), add_service))), \
+         patch.object(music, "accessible_message", return_value=callback.message):
+        await music.handle_album_refresh(
+            callback, AlbumRefreshCB(artist_id=999), _user(), db,
+        )
+
+    add_service.lidarr.get_albums.assert_not_awaited()
+    callback.answer.assert_awaited()

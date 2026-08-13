@@ -423,10 +423,21 @@ async def test_on_startup_subscribes_db_allowed_users():
 
 
 @pytest.mark.asyncio
-async def test_periodic_cleanup_calls_run_maintenance_with_backup_every_4th_cycle():
-    """Task F interface: Database.run_maintenance(backup: bool) -> dict[str,int].
-    _periodic_cleanup must call it instead of the three separate cleanup_*
-    methods, and pass backup=True only on the 4th cycle."""
+async def test_periodic_cleanup_attempts_backup_every_cycle():
+    """Аудит 2026-08-13: бэкап был привязан к аптайму, а не к календарю.
+
+    Раньше флаг стоял `backup=(cycle % 4 == 0)`, а `cycle` обнуляется при старте
+    процесса: первый бэкап случался только после 24 часов НЕПРЕРЫВНОЙ работы, и
+    каждый `make deploy` сбрасывал счётчик. При деплоях чаще раза в сутки бэкап
+    не делался никогда — и молча, без единой строки в логах. Наблюдалось на
+    живом стеке: последний файл `bot-20260811.db` при контейнере, поднятом
+    12.08.
+
+    Пробовать надо каждый цикл: `Database._backup` уже идемпотентен по дате
+    (`bot-YYYYMMDD.db` пропускается, если файл за сегодня есть — это закреплено
+    в `test_run_maintenance_backup_same_day_is_noop`), так что «раз в сутки»
+    обеспечивает сам бэкап, а не счётчик циклов.
+    """
     from bot.main import _periodic_cleanup
 
     db = AsyncMock()
@@ -452,4 +463,7 @@ async def test_periodic_cleanup_calls_run_maintenance_with_backup_every_4th_cycl
 
     assert db.run_maintenance.call_count == 4
     backup_flags = [c.kwargs.get("backup") for c in db.run_maintenance.call_args_list]
-    assert backup_flags == [False, False, False, True]
+    assert backup_flags == [True, True, True, True], (
+        "первый же цикл после старта обязан пробовать бэкап — иначе частые "
+        "деплои означают отсутствие бэкапов вообще"
+    )

@@ -14,6 +14,9 @@ from bot.main import build_startup_message, notify_admins_on_start
 
 def _warmup(**overrides):
     summary = {
+        "radarr": (True, 31.4, "5.28.0"),
+        "sonarr": (True, 28.9, "4.0.16"),
+        "prowlarr": (True, 44.1, "2.1.4"),
         "lidarr": (True, 407.2, "3.1.2.4938"),
         "slskd": (True, 268.7, "0.24.5.0"),
     }
@@ -26,8 +29,30 @@ def test_message_lists_every_probed_backend():
         warmup=_warmup(), admin_ids=[1], allowed_ids=[1, 2], version="3.1.2.4938"
     )
     assert "запущен" in text
-    for name in ("Lidarr", "slskd"):
+    for name in ("Radarr", "Sonarr", "Prowlarr", "Lidarr", "slskd"):
         assert name in text
+
+
+def test_required_arr_services_are_reported():
+    """Аудит 2026-08-13: откат на *arr (11.08) вернул Radarr/Sonarr/Prowlarr в
+    warm-up именно затем, чтобы неверный URL или отозванный ключ были видны
+    сразу, а не при первом поиске пользователя. Но список ярлыков остался от
+    эпохи музыки, и мёртвый Radarr в карточке не показывался вовсе — админ
+    читал «✅ Бот готов к работе!» при лежащем каталоге. Обязательные сервисы
+    обязаны быть в карточке в первую очередь."""
+    text = build_startup_message(
+        warmup=_warmup(radarr=("error", "connection refused")),
+        admin_ids=[1], allowed_ids=[1], version=None,
+    )
+    radarr_line = next(line for line in text.splitlines() if "Radarr" in line)
+    assert "❌" in radarr_line
+    assert "connection refused" in radarr_line
+    # Порядок: обязательные раньше опциональных — по ним и судят «жив ли стек».
+    names = [line for line in text.splitlines() if any(
+        n in line for n in ("Radarr", "Sonarr", "Prowlarr", "Lidarr", "slskd")
+    )]
+    assert names[0].find("Radarr") >= 0
+    assert any("Prowlarr" in n for n in names[:3])
 
 
 def test_healthy_and_failed_backends_are_visually_distinct():
