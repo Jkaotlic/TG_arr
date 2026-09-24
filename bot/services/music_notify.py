@@ -53,6 +53,7 @@ _FORMAT_WORD = (
 )
 _FORMAT_GROUP = rf"[(\{{]\s*{_FORMAT_WORD}(?:[\s,/+-]+{_FORMAT_WORD})*\s*[)\}}]"
 _TRAILING_TAGS = re.compile(rf"(?:\s*(?:\[[^\]]*\]|{_FORMAT_GROUP}))+\s*$", re.IGNORECASE)
+_YEAR_HEAD = re.compile(r"^\s*[\[(]?((?:19|20)\d{2})[\])]?\s*$")
 _EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,5}$")
 #: ``1-01 ...`` (disc-track) or ``01 ...`` / ``01. ...`` / ``01 - ...``.
 _TRACK_NO = re.compile(r"^\s*(?:(\d)[-.](\d{2,3})|(\d{1,3}))(?=[\s._-]|$)")
@@ -139,11 +140,19 @@ def album_label(directory: str) -> Optional[str]:
     does not carry its artist (no `` - ``: "Greatest Hits", "Live") takes the
     parent folder as the artist, so generic names of different artists stay
     apart. A share root (or no folder at all) is not an album.
+
+    A year before the separator (``2012 - Album``, ``[2012] - Album``) is not
+    an artist: it moves to the end (``Album (2012)``) and the parent folder
+    supplies the artist as for any artist-less name.
     """
     parts, _disc = _album_parts(directory)
     if not parts or _is_root_dir(parts[-1]):
         return None
     name = _clean_name(parts[-1])
+    head, sep, rest = name.partition(_ARTIST_SEP)
+    year = _YEAR_HEAD.match(head)
+    if sep and year and rest.strip():
+        name = f"{rest.strip()} ({year.group(1)})"
     if _ARTIST_SEP not in name and len(parts) > 1 and not _is_root_dir(parts[-2]):
         name = f"{_clean_name(parts[-2])}{_ARTIST_SEP}{name}"
     return name
@@ -175,8 +184,11 @@ def album_track_key(directory: str, filename: str) -> str:
 
     The identity survives what differs between peers: extension and format
     (``.flac``/``.mp3``), punctuation (``01 -``/``01.``), layout (``CD1\\01``
-    vs flat ``1-01``). With a leading track number it is disc + number
-    (disc 1 when the layout is flat); otherwise the normalised file stem.
+    vs flat ``1-01``). With a leading track number it is disc + number +
+    normalised title (disc 1 when the layout is flat), so two different
+    tracks sharing a number stay apart; a bare ``01.flac`` is disc + number.
+    Without a number it is disc + normalised stem. Normalised = case-folded,
+    letters and digits only (dashes, punctuation and spaces dropped).
     """
     _parts, disc = _album_parts(directory)
     stem = _EXTENSION.sub("", filename)
@@ -184,11 +196,15 @@ def album_track_key(directory: str, filename: str) -> str:
     if match:
         prefix_disc, number = match.group(1), match.group(2) or match.group(3)
         disc_no = disc or (int(prefix_disc) if prefix_disc else 1)
-        identity = f"d{disc_no}t{int(number):03d}"
+        title = _letters_digits(stem[match.end():])
+        identity = f"d{disc_no}t{int(number):03d}" + (f":{title}" if title else "")
     else:
-        words = re.sub(r"[\W_]+", " ", stem.casefold()).strip()
-        identity = f"d{disc or 1}:{words}"
+        identity = f"d{disc or 1}:{_letters_digits(stem)}"
     return f"{identity}\\{filename}"
+
+
+def _letters_digits(text: str) -> str:
+    return re.sub(r"[\W_]+", "", text.casefold())
 
 
 def batch_key(t: SlskdTransfer) -> str:
