@@ -53,7 +53,13 @@ _FORMAT_WORD = (
 )
 _FORMAT_GROUP = rf"[(\{{]\s*{_FORMAT_WORD}(?:[\s,/+-]+{_FORMAT_WORD})*\s*[)\}}]"
 _TRAILING_TAGS = re.compile(rf"(?:\s*(?:\[[^\]]*\]|{_FORMAT_GROUP}))+\s*$", re.IGNORECASE)
-_YEAR_HEAD = re.compile(r"^\s*[\[(]?((?:19|20)\d{2})[\])]?\s*$")
+#: Leading year/date of an album folder (after `_clean_name`):
+#: ``[2010] X`` / ``(2011) - X`` (dash optional) or ``2012 - X`` /
+#: ``2012-06-12 - X`` (dash required).
+_LEADING_YEAR = re.compile(
+    r"^\s*(?:[\[(](?P<y1>(?:19|20)\d{2})(?:[-.]\d{2}){0,2}[\])]\s*(?:-\s*)?"
+    r"|(?P<y2>(?:19|20)\d{2})(?:[-.]\d{2}){0,2}\s+-\s+)(?P<rest>\S.*)$"
+)
 _EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,5}$")
 #: ``1-01 ...`` (disc-track) or ``01 ...`` / ``01. ...`` / ``01 - ...``.
 _TRACK_NO = re.compile(r"^\s*(?:(\d)[-.](\d{2,3})|(\d{1,3}))(?=[\s._-]|$)")
@@ -118,7 +124,14 @@ _CONTAINER_DIRS = frozenset({
     "compilations", "lossless", "flac", "mp3", "320", "music", "studio albums",
     "live albums",
 })
-_ARTIST_LOOKUP_LEVELS = 2
+#: Tracker / source folders some peers keep between artist and album
+#: (live: ``Celldweller\RuTracker\Albums\2012 - …``).
+_SOURCE_DIRS = frozenset({
+    "rutracker", "rutor", "kinozal", "nnmclub", "torrents", "soulseek", "slsk", "downloads",
+})
+#: Wholly bracketed (``[no-mb_albumid]``) or decorated (``~ Electronica ~``) names.
+_DECORATED_DIR = re.compile(r"^\s*(?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\}|~.*~)\s*$")
+_ARTIST_LOOKUP_LEVELS = 3
 
 
 def _is_root_dir(part: str) -> bool:
@@ -151,18 +164,19 @@ def album_label(directory: str) -> Optional[str]:
     parent folder as the artist, so generic names of different artists stay
     apart. A share root (or no folder at all) is not an album.
 
-    A year before the separator (``2012 - Album``, ``[2012] - Album``) is not
-    an artist: it moves to the end (``Album (2012)``) and the parent folder
-    supplies the artist as for any artist-less name.
+    A leading year or date is not an artist (``2012 - Album``,
+    ``2012-06-12 - Album``, ``[2010] Album``, ``(2011) Album``): it moves to
+    the end (``Album (2012)``) and a parent folder supplies the artist as for
+    any artist-less name. A bare year needs the dash (``1999 Remastered`` is a
+    title). A folder already reading ``Artist - Album`` never climbs.
     """
     parts, _disc = _album_parts(directory)
     if not parts or _is_root_dir(parts[-1]):
         return None
     name = _clean_name(parts[-1])
-    head, sep, rest = name.partition(_ARTIST_SEP)
-    year = _YEAR_HEAD.match(head)
-    if sep and year and rest.strip():
-        name = f"{rest.strip()} ({year.group(1)})"
+    year = _LEADING_YEAR.match(name)
+    if year:
+        name = f"{year.group('rest').strip()} ({year.group('y1') or year.group('y2')})"
     if _ARTIST_SEP not in name:
         artist = _artist_folder(parts[:-1])
         if artist:
@@ -170,17 +184,29 @@ def album_label(directory: str) -> Optional[str]:
     return name
 
 
-def _artist_folder(parents: list[str]) -> Optional[str]:
-    """The nearest parent that names an artist, looking at most two levels up.
+def _is_skippable_parent(part: str, cleaned: str) -> bool:
+    """A folder between artist and album that is not the artist."""
+    folded = cleaned.casefold()
+    return (
+        folded in _CONTAINER_DIRS
+        or folded in _SOURCE_DIRS
+        or _DECORATED_DIR.match(part) is not None
+    )
 
-    Container folders (``Albums``, ``Discography``, ``FLAC``…) are skipped;
-    a share root ends the search. Nothing suitable -> no artist.
+
+def _artist_folder(parents: list[str]) -> Optional[str]:
+    """The nearest parent that names an artist, looking at most three levels up.
+
+    Skipped: container folders (``Albums``, ``Discography``, ``FLAC``…),
+    tracker/source folders (``RuTracker``, ``torrents``…) and decorated names
+    (``[no-mb_albumid]``, ``~ Electronica ~``). A share root (incl. ``@@alias``)
+    ends the search. Nothing suitable -> no artist.
     """
     for part in reversed(parents[-_ARTIST_LOOKUP_LEVELS:]):
         if _is_root_dir(part):
             return None
         cleaned = _clean_name(part)
-        if cleaned.casefold() not in _CONTAINER_DIRS:
+        if not _is_skippable_parent(part, cleaned):
             return cleaned
     return None
 

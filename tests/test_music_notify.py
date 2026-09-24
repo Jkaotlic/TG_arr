@@ -953,15 +953,17 @@ def test_container_folders_are_not_the_artist():
     assert title("x\\Artist\\Studio Albums\\Album") == "Artist — Album"
     assert title("music_readonly\\Albums\\2012 - X") == "X (2012)"
     assert title("@@share\\Discography\\Album") == "Album"
-    # at most two levels up: two containers in a row leave no artist
-    assert title("x\\Artist\\FLAC\\Albums\\Album") == "Album"
+    # at most three levels up: three skippable folders in a row leave no artist
+    assert title("x\\Artist\\FLAC\\Discography\\Albums\\Album") == "Album"
     assert music_notify.album_key("music\\Celldweller\\Albums\\2012 - X") == music_notify.album_key(
         "@@peer\\Celldweller\\X (2012) [FLAC]")
 
 
 @pytest.mark.asyncio
 async def test_v6_rekey_of_the_live_layout_with_a_container_folder_gives_one_row(tmp_path):
-    live = "music_readonly\\Artist\\Albums\\2012 - Wish Upon A Blackstar (Deluxe Edition)"
+    # the real path of the live 16-row album (fix round 4)
+    live = ("Share\\~ Electronica ~\\Celldweller\\RuTracker\\Albums\\"
+            "2012 - Wish Upon A Blackstar (Deluxe Edition)\\CD1")
     seeded = (T0 - timedelta(hours=2)).isoformat()
     rows = [(f"t-{n}", f"b-{n}", f"{live}\\{n:02d} - Song {n}.flac", "Queued, Remotely", seeded)
             for n in range(1, 17)]
@@ -971,9 +973,61 @@ async def test_v6_rekey_of_the_live_layout_with_a_container_folder_gives_one_row
                 "SELECT batch_key, title, notified_at FROM music_batch") as cur:
             batches = [tuple(r) for r in await cur.fetchall()]
         assert batches == [(music_notify.album_key(live),
-                            "Artist — Wish Upon A Blackstar (Deluxe Edition) (2012)", seeded)]
+                            "Celldweller — Wish Upon A Blackstar (Deluxe Edition) (2012)", seeded)]
         async with database.conn.execute(
                 "SELECT COUNT(DISTINCT batch_key), COUNT(*) FROM music_transfer") as cur:
             assert tuple(await cur.fetchone()) == (1, 16)
     finally:
         await database.close()
+
+
+# ------------------------------------------------ review fix round 4 (live paths)
+# Directories read verbatim from the live slskd transfer list (public artist and
+# album names; no peer names).
+LIVE_DIRS = [
+    ("music_readonly\\Free Flow Flava - ACTION MOVIES (2023) [FLAC]",
+     "Free Flow Flava — ACTION MOVIES (2023)"),
+    ("music\\[no-mb_albumid]\\Free Flow Flava\\2018 - Ninjah 404 [flac]",
+     "Free Flow Flava — Ninjah 404 (2018)"),
+    ("Music\\Celldweller\\2012-06-12 - Wish Upon A Blackstar (Deluxe Edition)\\CD1",
+     "Celldweller — Wish Upon A Blackstar (Deluxe Edition) (2012)"),
+    ("Shared\\navidromeMusic\\Placebo\\2000 - Black Market Music",
+     "Placebo — Black Market Music (2000)"),
+    ("Share\\~ Electronica ~\\Celldweller\\RuTracker\\Albums\\"
+     "2012 - Wish Upon A Blackstar (Deluxe Edition)\\CD1",
+     "Celldweller — Wish Upon A Blackstar (Deluxe Edition) (2012)"),
+    ("Trump_Best_FLACS\\Apollo Brown - No Pressure, No Diamond. (2026) [WEB 24bit FLAC]",
+     "Apollo Brown — No Pressure, No Diamond. (2026)"),
+    ("music\\Jane Air\\ALBUM\\[2010] Weekend Warriors\\CD1",
+     "Jane Air — Weekend Warriors (2010)"),
+    ("music\\Apollo Brown\\No Pressure, No Diamond. (2026) [Album] [Digital Media] [FLAC]",
+     "Apollo Brown — No Pressure, No Diamond. (2026)"),
+    ("music\\Anix, The\\Album\\(2011) Sleepwalker",
+     "Anix, The — Sleepwalker (2011)"),
+    ("@@sypuj\\Music\\Metallica\\(2016) Hardwired... to Self-Destruct",
+     "Metallica — Hardwired... to Self-Destruct (2016)"),
+]
+
+
+@pytest.mark.parametrize(("directory", "title"), LIVE_DIRS)
+def test_live_directories_read_as_artist_and_album(directory, title):
+    assert music_notify.album_title(directory) == title
+
+
+def test_live_directories_of_one_album_from_two_peers_share_a_key():
+    key = music_notify.album_key
+    assert key(LIVE_DIRS[2][0]) == key(LIVE_DIRS[4][0])
+    assert key(LIVE_DIRS[5][0]) == key(LIVE_DIRS[7][0])
+    assert len({key(d) for d, _ in LIVE_DIRS}) == 8
+
+
+def test_decorated_and_tracker_folders_are_not_the_artist():
+    title = music_notify.album_title
+    assert title("x\\Artist\\RuTracker\\Album") == "Artist — Album"
+    assert title("x\\Artist\\[some tag]\\Album") == "Artist — Album"
+    assert title("x\\Artist\\~ Rock ~\\Album") == "Artist — Album"
+    assert title("x\\Artist\\torrents\\Album") == "Artist — Album"
+    # an album folder that names its artist never climbs
+    assert title("x\\RuTracker\\Artist - Album") == "Artist — Album"
+    # a bare leading year needs a dash: "1999 Something" is a title, not a year
+    assert title("x\\Prince\\1999 Remastered") == "Prince — 1999 Remastered"
