@@ -242,13 +242,18 @@ class NotificationService:
             self._torrents_raw = {}
             self._merge_maindata(maindata)
 
+            completed = 0
             for torrent_hash in self._torrents_raw:
                 torrent = self._torrent_view(torrent_hash)
                 if torrent is None:
                     continue
                 is_complete = torrent.progress >= 1.0 or torrent.state == TorrentState.COMPLETED
+                if is_complete:
+                    # Nothing left to watch — not tracked at all (NOTIF-10).
+                    completed += 1
+                    continue
                 self._tracked_torrents[torrent.hash] = {
-                    "completed": is_complete,
+                    "completed": False,
                     "notified": True,  # Don't notify for existing torrents
                     "name": torrent.name,
                     "added_on": torrent.added_on,
@@ -257,7 +262,7 @@ class NotificationService:
             logger.info(
                 "Initial torrent sync completed",
                 total_torrents=len(self._torrents_raw),
-                completed=sum(1 for t in self._tracked_torrents.values() if t["completed"]),
+                completed=completed,
             )
 
         except Exception as e:
@@ -279,69 +284,69 @@ class NotificationService:
         re-evaluated; an idle cycle with an empty delta does no per-torrent
         work at all, which is the whole point of the delta protocol on a Pi.
         """
-        try:
-            maindata = await self.qbittorrent.get_maindata(self._rid)
-            self._merge_maindata(maindata)
+        maindata = await self.qbittorrent.get_maindata(self._rid)
+        self._merge_maindata(maindata)
 
-            for h in maindata.get("torrents_removed", []):
-                self._tracked_torrents.pop(h, None)
+        for h in maindata.get("torrents_removed", []):
+            self._tracked_torrents.pop(h, None)
 
-            if maindata.get("full_update"):
-                changed_hashes = list(self._torrents_raw)
-            else:
-                changed_hashes = list(maindata.get("torrents", {}))
+        if maindata.get("full_update"):
+            changed_hashes = list(self._torrents_raw)
+        else:
+            changed_hashes = list(maindata.get("torrents", {}))
 
-            for torrent_hash in changed_hashes:
-                torrent = self._torrent_view(torrent_hash)
-                if torrent is None:
-                    continue
+        for torrent_hash in changed_hashes:
+            torrent = self._torrent_view(torrent_hash)
+            if torrent is None:
+                continue
 
-                is_complete = torrent.progress >= 1.0 or torrent.state == TorrentState.COMPLETED
-                tracked = self._tracked_torrents.get(torrent_hash)
+            is_complete = torrent.progress >= 1.0 or torrent.state == TorrentState.COMPLETED
+            tracked = self._tracked_torrents.get(torrent_hash)
 
-                if tracked is None:
-                    # New torrent observed mid-run. If it's already complete
-                    # the moment we see it (e.g. instantly-finished magnet),
-                    # treat it like _initial_sync would — suppress the
-                    # notification rather than fire one for a download we
-                    # never actually watched progress on.
+            if tracked is None:
+                # New torrent observed mid-run. If it's already complete
+                # the moment we see it (e.g. instantly-finished magnet),
+                # treat it like _initial_sync would — suppress the
+                # notification rather than fire one for a download we
+                # never actually watched progress on — and do not track it
+                # at all: a seeding torrent shows up in every delta, and
+                # keeping it would grow the dict for nothing (audit
+                # 2026-09-23, NOTIF-10 "prune completed entries").
+                if not is_complete:
                     self._tracked_torrents[torrent_hash] = {
-                        "completed": is_complete,
-                        "notified": is_complete,
+                        "completed": False,
+                        "notified": False,
                         "name": torrent.name,
                         "added_on": torrent.added_on,
                     }
-                    continue
+                continue
 
-                if tracked["completed"]:
-                    # Already resolved (shouldn't normally still be tracked —
-                    # see the drop below — but guard against a stray entry).
-                    continue
+            if tracked["completed"]:
+                # Already resolved (shouldn't normally still be tracked —
+                # see the drop below — but guard against a stray entry).
+                continue
 
-                if is_complete:
-                    if not tracked["notified"]:
-                        if (torrent.category or "") in self.settings.arr_torrent_category_set:
-                            # NOTIF-07 (audit 2026-09-23): Radarr/Sonarr
-                            # import this torrent and library_watch announces
-                            # it once it is in the library — a qBit message
-                            # here would be the second one for one film.
-                            logger.debug(
-                                "qbit_completion_left_to_library_watch",
-                                torrent_name=torrent.name,
-                                category=torrent.category,
-                            )
-                        else:
-                            await self._notify_completion(torrent)
-                        self._completed_count += 1
-                    # Once complete+notified there is no further state to
-                    # track — drop it now instead of keeping a growing dict
-                    # of finished torrents alive for the process lifetime.
-                    del self._tracked_torrents[torrent_hash]
-                # else: still downloading/paused/stalled/errored — leave
-                # tracked, re-check next cycle.
-
-        except Exception as e:
-            logger.error("notification_check_failed", error=str(e), exc_info=True)
+            if is_complete:
+                if not tracked["notified"]:
+                    if (torrent.category or "") in self.settings.arr_torrent_category_set:
+                        # NOTIF-07 (audit 2026-09-23): Radarr/Sonarr
+                        # import this torrent and library_watch announces
+                        # it once it is in the library — a qBit message
+                        # here would be the second one for one film.
+                        logger.debug(
+                            "qbit_completion_left_to_library_watch",
+                            torrent_name=torrent.name,
+                            category=torrent.category,
+                        )
+                    else:
+                        await self._notify_completion(torrent)
+                    self._completed_count += 1
+                # Once complete+notified there is no further state to
+                # track — drop it now instead of keeping a growing dict
+                # of finished torrents alive for the process lifetime.
+                del self._tracked_torrents[torrent_hash]
+            # else: still downloading/paused/stalled/errored — leave
+            # tracked, re-check next cycle.
 
     async def _notify_completion(self, torrent: TorrentInfo) -> None:
         """Send completion notification to all subscribed users.

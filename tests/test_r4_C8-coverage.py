@@ -326,10 +326,9 @@ async def test_notification_new_already_complete_does_not_notify():
     await svc._initial_sync()
 
     sender.assert_not_called()
-    # It is now tracked, recorded as completed + notified (suppressed).
-    tracked = svc._tracked_torrents["zzz"]
-    assert tracked["completed"] is True
-    assert tracked["notified"] is True
+    # Audit 2026-09-23 (NOTIF-10): nothing left to watch, so it is not
+    # tracked at all (it used to be kept forever as completed + notified).
+    assert "zzz" not in svc._tracked_torrents
 
 
 # ---------------------------------------------------------------------------

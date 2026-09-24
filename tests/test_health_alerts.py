@@ -129,6 +129,7 @@ async def test_recovery_is_announced():
     monitor = HealthMonitor(down, notify=AsyncMock(side_effect=lambda text: sent.append(text)))
 
     await monitor.evaluate()
+    await monitor.evaluate()  # NOTIF-09: confirmed on the second failed check
     down["Prowlarr"].check_connection.return_value = (True, "1.0", 12.0)
     await monitor.evaluate()
 
@@ -143,7 +144,9 @@ async def test_a_new_problem_alerts_even_while_another_is_open():
     monitor = HealthMonitor(clients, notify=AsyncMock(side_effect=lambda text: sent.append(text)))
 
     await monitor.evaluate()
+    await monitor.evaluate()  # NOTIF-09: confirmed on the second failed check
     clients["Radarr"].check_connection.return_value = (False, None, None)
+    await monitor.evaluate()
     await monitor.evaluate()
 
     assert len(sent) == 2

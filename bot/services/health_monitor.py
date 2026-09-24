@@ -19,13 +19,20 @@ turns into noise the user learns to ignore.
 
 import asyncio
 import enum
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 
+if TYPE_CHECKING:
+    from bot.db import Database
+
 logger = structlog.get_logger()
+
+#: `notify_kv` key holding the announced-and-still-open problems (JSON).
+_OPEN_PROBLEMS_KEY = "health_open"
 
 
 class HealthState(enum.Enum):
@@ -70,20 +77,40 @@ def diagnose(report: dict[str, dict[str, Any]]) -> list[Problem]:
 
 
 class HealthMonitor:
-    """Polls a set of *arr clients and notifies on every availability change."""
+    """Polls a set of *arr clients and notifies on availability changes.
+
+    Audit 2026-09-23 (NOTIF-09):
+    - hysteresis — a service is announced down only after two consecutive
+      failed checks; after the first one `needs_recheck` asks the caller to
+      look again soon (2 min) instead of waiting the full interval;
+    - one message per cycle, listing every service that changed;
+    - with a database, the open problems are kept in
+      `notify_kv['health_open']`, so a restart during an outage does not
+      announce it again (and still announces the recovery).
+    """
 
     def __init__(
         self,
         clients: dict[str, Any],
         notify: Optional[Callable[[str], Awaitable[None]]] = None,
+        db: Optional["Database"] = None,
     ):
         self.clients = clients
         self.notify = notify
+        self._db = db
         self._open: dict[str, Problem] = {}
+        #: Failed once, not yet confirmed.
+        self._pending: dict[str, Problem] = {}
+        self._loaded = db is None
 
     @property
     def state(self) -> HealthState:
-        return HealthState.DEGRADED if self._open else HealthState.OK
+        return HealthState.DEGRADED if (self._open or self._pending) else HealthState.OK
+
+    @property
+    def needs_recheck(self) -> bool:
+        """A service failed once — check again soon to confirm or clear it."""
+        return bool(self._pending)
 
     async def check_all(self) -> dict[str, dict[str, Any]]:
         """Poll every configured client's own `check_connection()` in parallel.
@@ -119,19 +146,62 @@ class HealthMonitor:
         """Poll every service and announce anything that changed since the
         last call. Returns the raw report, so a caller doesn't have to poll
         twice if it also wants the per-service detail (e.g. /health)."""
+        await self._load()
         report = await self.check_all()
         current = {p.key: p for p in diagnose(report)}
 
+        went_down: list[Problem] = []
         for key, problem in current.items():
-            if key not in self._open:
-                await self._announce(f"⚠️ <b>Проблема</b>\n\n{problem.text}")
+            if key in self._open:
+                continue
+            if key in self._pending:
+                went_down.append(problem)
+                self._open[key] = problem
+                del self._pending[key]
+            else:
+                self._pending[key] = problem
+        for key in [k for k in self._pending if k not in current]:
+            del self._pending[key]  # a single blip: never announced
+        came_back = [p for k, p in self._open.items() if k not in current]
+        for problem in came_back:
+            del self._open[problem.key]
 
-        for key, problem in self._open.items():
-            if key not in current:
-                await self._announce(f"✅ <b>Восстановлено</b>\n\n{problem.resolved_text}")
-
-        self._open = current
+        if went_down or came_back:
+            parts = []
+            if went_down:
+                parts.append("⚠️ <b>Проблема</b>\n\n" + "\n".join(p.text for p in went_down))
+            if came_back:
+                parts.append("✅ <b>Восстановлено</b>\n\n" + "\n".join(p.resolved_text for p in came_back))
+            await self._announce("\n\n".join(parts))
+            await self._save()
         return report
+
+    async def _load(self) -> None:
+        if self._loaded or self._db is None:
+            return
+        self._loaded = True
+        raw = await self._db.kv_get(_OPEN_PROBLEMS_KEY)
+        if not raw:
+            return
+        try:
+            stored = json.loads(raw)
+            self._open = {
+                key: Problem(key=key, text=item["text"], resolved_text=item["resolved_text"])
+                for key, item in stored.items()
+            }
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            logger.warning("health_open_problems_unreadable", error=str(e))
+
+    async def _save(self) -> None:
+        if self._db is None:
+            return
+        payload = {
+            key: {"text": p.text, "resolved_text": p.resolved_text} for key, p in self._open.items()
+        }
+        try:
+            await self._db.kv_set(_OPEN_PROBLEMS_KEY, json.dumps(payload, ensure_ascii=False))
+        except Exception as e:
+            logger.warning("health_open_problems_save_failed", error=str(e))
 
     async def _announce(self, text: str) -> None:
         """Send one alert. A delivery failure must not stop the monitor —

@@ -17,8 +17,10 @@ import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import ErrorEvent
 
+from bot.clients.base import background_calls
 from bot.clients.registry import close_all as close_all_clients
 from bot.clients.registry import get_qbittorrent
 from bot.config import get_settings
@@ -369,7 +371,13 @@ async def _warm_up_clients(logger) -> dict:
         structlog.contextvars.unbind_contextvars("component")
 
 
-async def _health_watch(bot: Bot, admin_ids: list, logger) -> None:
+#: NOTIF-09: first health check after start, and the quick re-check after a
+#: single failed check (seconds).
+_HEALTH_FIRST_CHECK_S = 60
+_HEALTH_RECHECK_S = 120
+
+
+async def _health_watch(bot: Bot, admin_ids: list, logger, db: Optional[Database] = None) -> None:
     """Poll the four *arr services' health and alert admins when the stack
     degrades.
 
@@ -393,7 +401,7 @@ async def _health_watch(bot: Bot, admin_ids: list, logger) -> None:
     async def _notify(text: str) -> None:
         for admin_id in admin_ids:
             try:
-                await bot.send_message(admin_id, text, parse_mode=ParseMode.HTML)
+                await send_telegram(bot, admin_id, text)
             except Exception as e:
                 logger.warning("health_alert_send_failed", user_id=admin_id, error=str(e))
 
@@ -408,13 +416,19 @@ async def _health_watch(bot: Bot, admin_ids: list, logger) -> None:
     # must not be handed a None "client" to poll.
     clients = {name: client for name, client in clients.items() if client is not None}
 
-    monitor = HealthMonitor(clients, notify=_notify)
+    monitor = HealthMonitor(clients, notify=_notify, db=db)
     structlog.contextvars.bind_contextvars(component="health_watch")
+    # NOTIF-09 (audit 2026-09-23): first check a minute after start (not 15),
+    # and a quick re-check 2 minutes after a first failure so an outage is
+    # confirmed (or dismissed as a blip) without waiting a whole interval.
+    delay = _HEALTH_FIRST_CHECK_S
     try:
         while True:
             try:
-                await asyncio.sleep(interval)
-                await monitor.evaluate()
+                await asyncio.sleep(delay)
+                with background_calls():
+                    await monitor.evaluate()
+                delay = _HEALTH_RECHECK_S if monitor.needs_recheck else interval
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -423,6 +437,41 @@ async def _health_watch(bot: Bot, admin_ids: list, logger) -> None:
                 logger.warning("health_watch_failed", error=str(e))
     finally:
         structlog.contextvars.unbind_contextvars("component")
+
+
+#: NOTIF-11: when each chat last got a background message (monotonic time).
+_last_sent_at: dict[int, float] = {}
+
+#: Minimum gap between two background messages to the same chat. Telegram's
+#: per-chat limit is about one message per second; a burst above it earns a
+#: RetryAfter (flood control) instead of delivery.
+_SAME_CHAT_GAP_S = 1.0
+
+
+async def send_telegram(bot: Bot, chat_id: int, text: str) -> None:
+    """Send one background notification (HTML) politely.
+
+    Audit 2026-09-23 (NOTIF-11): keeps ≥1 s between messages to the same
+    chat inside a burst and, on `TelegramRetryAfter`, sleeps the time
+    Telegram asked for and retries once. A second flood error (or any other
+    error) propagates to the caller, which logs it per recipient.
+    """
+    last = _last_sent_at.get(chat_id)
+    if last is not None:
+        wait = _SAME_CHAT_GAP_S - (time.monotonic() - last)
+        if wait > 0:
+            await asyncio.sleep(wait)
+    try:
+        try:
+            await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+        except TelegramRetryAfter as e:
+            structlog.get_logger().warning(
+                "telegram_retry_after", user_id=chat_id, retry_after=e.retry_after
+            )
+            await asyncio.sleep(e.retry_after)
+            await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+    finally:
+        _last_sent_at[chat_id] = time.monotonic()
 
 
 async def send_library_notification(
@@ -441,7 +490,7 @@ async def send_library_notification(
     failed = 0
     for uid in user_ids:
         try:
-            await bot.send_message(uid, text, parse_mode=ParseMode.HTML)
+            await send_telegram(bot, uid, text)
             delivered += 1
         except Exception as e:
             failed += 1
@@ -514,7 +563,8 @@ async def _library_watch(bot: Bot, db: Database, logger) -> None:
         while True:
             try:
                 await asyncio.sleep(interval)
-                await watcher.poll()
+                with background_calls():
+                    await watcher.poll()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -721,7 +771,7 @@ async def main() -> None:
         # failed (blocked bot, flood limit, etc).
         async def send_notification(user_id: int, message: str) -> bool:
             try:
-                await bot.send_message(user_id, message, parse_mode=ParseMode.HTML)
+                await send_telegram(bot, user_id, message)
                 return True
             except Exception as e:
                 logger.warning(
@@ -785,7 +835,7 @@ async def main() -> None:
     cleanup_task = asyncio.create_task(_periodic_cleanup(db, logger, notification_service))
     logger.info("background_task_started", task="cleanup")
     health_task = asyncio.create_task(
-        _health_watch(bot, sorted(set(settings.admin_tg_ids)), logger)
+        _health_watch(bot, sorted(set(settings.admin_tg_ids)), logger, db)
     )
     logger.info("background_task_started", task="health_watch")
     library_task = asyncio.create_task(_library_watch(bot, db, logger))

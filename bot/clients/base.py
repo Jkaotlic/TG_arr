@@ -1,9 +1,12 @@
 """Base HTTP client with retry logic and error handling."""
 
 import asyncio
+import contextvars
 import json
 import time
-from typing import Any, Optional
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from typing import Any, NoReturn, Optional
 
 import httpx
 import structlog
@@ -74,6 +77,97 @@ class RetryableAPIError(APIError):
     pass
 
 
+class ServiceUnavailable(ServiceConnectionError):
+    """Raised to *background* callers, without touching the network, while a
+    client's circuit breaker is open (audit 2026-09-23, NOTIF-08)."""
+
+    pass
+
+
+#: True inside `background_calls()`. Background pollers (library_watch, the
+#: health monitor) set it at their call site; user-triggered handlers never do.
+_BACKGROUND: contextvars.ContextVar[bool] = contextvars.ContextVar("tg_arr_background_calls", default=False)
+
+
+@contextmanager
+def background_calls() -> Iterator[None]:
+    """Mark every client call made inside this block as a background call.
+
+    Background calls make a single attempt (no tenacity retries), fail fast
+    with `ServiceUnavailable` while the client's breaker is open, and do not
+    log per-request warnings — the breaker logs the `service_down` /
+    `service_up` transitions instead. The flag is a contextvar, so it follows
+    the awaited call chain (and tasks spawned from it via `asyncio.gather`).
+    """
+    token = _BACKGROUND.set(True)
+    try:
+        yield
+    finally:
+        _BACKGROUND.reset(token)
+
+
+def is_background_call() -> bool:
+    return _BACKGROUND.get()
+
+
+class CircuitBreaker:
+    """Per-client availability memory (audit 2026-09-23, NOTIF-08).
+
+    Closed until a call fails with a transport error; then open with a
+    growing backoff (30 → 60 → 120 → 300 → 600 s, capped). While open:
+
+    - background callers get `ServiceUnavailable` immediately until the
+      backoff expires, then one probe goes through (half-open);
+    - interactive callers always get one attempt (no retries), so a user
+      pressing a button is never refused on stale information.
+
+    Only transitions are logged: `service_down` on the first failure and
+    `service_up` (with `downtime_s`) on the first success after it.
+    """
+
+    BACKOFF_S: tuple[int, ...] = (30, 60, 120, 300, 600)
+
+    def __init__(self, service: str, clock: Callable[[], float] = time.monotonic):
+        self.service = service
+        self._clock = clock
+        self._failures = 0
+        self._open_until = 0.0
+        self._down_since: Optional[float] = None
+
+    @property
+    def is_open(self) -> bool:
+        """Down and still inside the backoff window."""
+        return self._down_since is not None and self._clock() < self._open_until
+
+    @property
+    def is_down(self) -> bool:
+        """The last call failed (open or half-open)."""
+        return self._down_since is not None
+
+    def allow(self, *, background: bool) -> bool:
+        return not background or not self.is_open
+
+    def record_failure(self, error: str = "") -> None:
+        now = self._clock()
+        self._failures += 1
+        if self._down_since is None:
+            self._down_since = now
+            logger.warning("service_down", service=self.service, error=error)
+        backoff = self.BACKOFF_S[min(self._failures, len(self.BACKOFF_S)) - 1]
+        self._open_until = now + backoff
+
+    def record_success(self) -> None:
+        if self._down_since is not None:
+            logger.info(
+                "service_up",
+                service=self.service,
+                downtime_s=round(self._clock() - self._down_since),
+            )
+        self._failures = 0
+        self._open_until = 0.0
+        self._down_since = None
+
+
 class BaseAPIClient:
     """Base async HTTP client with retry logic."""
 
@@ -93,6 +187,8 @@ class BaseAPIClient:
         self._settings: Optional["Settings"] = None
         self._ttl_cache: dict[str, tuple[float, Any]] = {}
         self._ttl_cache_lock = asyncio.Lock()
+        #: NOTIF-08: shared by every call through `_safe_request`.
+        self.breaker = CircuitBreaker(service_name)
 
     def _get_http_timeout(self) -> float:
         if self._settings is None:
@@ -171,7 +267,21 @@ class BaseAPIClient:
         timeout: Optional[float] = None,
         headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any] | list[Any]:
-        """Make HTTP request with retry logic.
+        """`_request_once` with tenacity retries (interactive calls only)."""
+        return await self._request_once(
+            method, endpoint, params=params, json_data=json_data, timeout=timeout, headers=headers,
+        )
+
+    async def _request_once(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[dict[str, Any]] = None,
+        json_data: Optional[dict[str, Any] | list[Any]] = None,
+        timeout: Optional[float] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any] | list[Any]:
+        """Make one HTTP request (retries, if any, are the caller's business).
 
         ``headers`` are merged on top of the pooled client's defaults for this
         one call — needed by callers whose auth value can change between
@@ -230,7 +340,7 @@ class BaseAPIClient:
             # PERF-09: only 429 is retried (server asks to back off). 5xx fails
             # immediately so the user can react instead of waiting another cycle.
             if response.status_code == 429:
-                log.warning("Rate limited, will retry", status_code=429)
+                log.warning("rate_limited", status_code=429)
                 raise RetryableAPIError(
                     f"{self.service_name} ограничивает запросы (429)",
                     status_code=429,
@@ -268,13 +378,19 @@ class BaseAPIClient:
                 )
                 return {}
 
+        # NOTIF-08: these used to say "will retry if attempts remain" even on
+        # the last attempt. Whether a retry follows is logged by tenacity's
+        # `before_sleep` (request_retry_attempt); exhaustion by `_safe_request`.
+        # Background calls stay quiet here — the breaker logs transitions.
         except httpx.TimeoutException:
-            log.warning("Request timeout, will retry if attempts remain")
-            raise  # Let tenacity handle retries
+            if not is_background_call():
+                log.debug("request_timeout")
+            raise
 
         except httpx.ConnectError:
-            log.warning("Connection error, will retry if attempts remain")
-            raise  # Let tenacity handle retries
+            if not is_background_call():
+                log.debug("request_connect_error")
+            raise
 
     async def _safe_request(
         self,
@@ -285,41 +401,62 @@ class BaseAPIClient:
         timeout: Optional[float] = None,
         headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any] | list[Any]:
-        """Wrap _request to convert transport errors after retries are exhausted."""
+        """Wrap _request to convert transport errors after retries are exhausted.
+
+        NOTIF-08 (audit 2026-09-23): consults the client's circuit breaker.
+        Background calls (inside `background_calls()`) get `ServiceUnavailable`
+        without a network attempt while the breaker is open, and otherwise a
+        single attempt; interactive calls keep tenacity's retries while the
+        service is healthy and fall back to a single attempt while it is down.
+        """
+        background = is_background_call()
+        breaker = self.breaker
+        if not breaker.allow(background=background):
+            raise ServiceUnavailable(f"{self.service_name} временно недоступен")
+        send = self._request_once if (background or breaker.is_down) else self._request
         try:
-            return await self._request(
+            result = await send(
                 method, endpoint, params=params, json_data=json_data, timeout=timeout, headers=headers,
             )
-        except httpx.TimeoutException as e:
-            # OBS-14: tenacity's `before_sleep` already logged each retried
-            # attempt — this WARNING marks that all attempts were exhausted
-            # (vs. "1 timeout out of 3, recovered", which never reaches here).
-            logger.warning(
-                "request_retries_exhausted",
-                service=self.service_name,
-                method=method,
-                endpoint=endpoint,
-                error=str(e),
-            )
-            raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}") from e
-        except httpx.ConnectError as e:
-            logger.warning(
-                "request_retries_exhausted",
-                service=self.service_name,
-                method=method,
-                endpoint=endpoint,
-                error=str(e),
-            )
-            raise ServiceConnectionError(f"Не удалось подключиться к {self.service_name} ({self.base_url})") from e
-        except RetryableAPIError as e:
-            logger.warning(
-                "request_retries_exhausted",
-                service=self.service_name,
-                method=method,
-                endpoint=endpoint,
-                error=str(e),
-            )
+        except (httpx.TimeoutException, httpx.ConnectError, RetryableAPIError) as e:
+            breaker.record_failure(str(e))
+            if background:
+                if isinstance(e, RetryableAPIError):
+                    raise
+                raise ServiceConnectionError(
+                    f"Не удалось подключиться к {self.service_name}"
+                ) from e
+            self._raise_exhausted(e, method, endpoint)
+        except APIError as e:
+            if e.status_code is not None and e.status_code >= 500:
+                breaker.record_failure(str(e))
+            else:
+                breaker.record_success()  # it answered: reachable
             raise
+        breaker.record_success()
+        return result
+
+    def _raise_exhausted(self, error: Exception, method: str, endpoint: str) -> NoReturn:
+        """Log that every attempt failed and convert the transport error.
+
+        OBS-14: tenacity's `before_sleep` already logged each retried attempt —
+        this WARNING marks that all attempts were exhausted (vs. "1 timeout out
+        of 3, recovered", which never reaches here).
+        """
+        logger.warning(
+            "request_retries_exhausted",
+            service=self.service_name,
+            method=method,
+            endpoint=endpoint,
+            error=str(error),
+        )
+        if isinstance(error, httpx.TimeoutException):
+            raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}") from error
+        if isinstance(error, httpx.ConnectError):
+            raise ServiceConnectionError(
+                f"Не удалось подключиться к {self.service_name} ({self.base_url})"
+            ) from error
+        raise error
 
     async def get(
         self,
@@ -412,7 +549,8 @@ class BaseAPIClient:
             return True, version, round(elapsed, 2)
         except Exception as e:
             elapsed = (time.monotonic() - start_time) * 1000
-            logger.warning("health_check_failed", service=self.service_name, error=str(e))
+            log_fn = logger.debug if is_background_call() else logger.warning
+            log_fn("health_check_failed", service=self.service_name, error=str(e))
             return False, None, round(elapsed, 2)
 
 
@@ -440,7 +578,8 @@ class ArrBaseClient(BaseAPIClient):
             return True, version, round(elapsed, 2)
         except Exception as e:
             elapsed = (time.monotonic() - start_time) * 1000
-            logger.warning("health_check_failed", service=self.service_name, error=str(e))
+            log_fn = logger.debug if is_background_call() else logger.warning
+            log_fn("health_check_failed", service=self.service_name, error=str(e))
             return False, None, round(elapsed, 2)
 
     async def grab_release(self, guid: str, indexer_id: int) -> bool:

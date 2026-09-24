@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import structlog
 
+from bot.clients.base import CircuitBreaker, ServiceConnectionError
 from bot.services import music_notify
 
 if TYPE_CHECKING:
@@ -72,6 +73,19 @@ def _record_date(record: dict[str, Any]) -> Optional[datetime]:
         return _parse_iso(raw)
     except ValueError:
         return None
+
+
+def _breaker_open(client: Any) -> bool:
+    """NOTIF-08: a client whose circuit breaker is open is skipped silently."""
+    breaker = getattr(client, "breaker", None)
+    return isinstance(breaker, CircuitBreaker) and breaker.is_open
+
+
+def _log_poll_failure(event: str, error: Exception, **fields: Any) -> None:
+    """Connection failures are already logged once by the client's breaker
+    (`service_down`); repeating them every poll was the NOTIF-08 log storm."""
+    log_fn = logger.debug if isinstance(error, ServiceConnectionError) else logger.warning
+    log_fn(event, error=str(error), **fields)
 
 
 def _episodes(count: int) -> str:
@@ -148,12 +162,14 @@ class LibraryWatcher:
         landed: list[tuple[str, dict[str, Any]]] = []
         answered: dict[str, Optional[datetime]] = {}
         for label, client in (("radarr", self.radarr), ("sonarr", self.sonarr)):
+            if _breaker_open(client):
+                continue  # NOTIF-08: known down; the breaker logged it already
             try:
                 records = await client.get_history(
                     event_type="downloadFolderImported", page_size=_HISTORY_PAGE_SIZE,
                 )
             except Exception as e:
-                logger.warning("library_watch_imports_failed", service=label, error=str(e))
+                _log_poll_failure("library_watch_imports_failed", e, service=label)
                 continue
 
             newest: Optional[datetime] = None
@@ -260,11 +276,11 @@ class LibraryWatcher:
         poll_started = self._clock()
         try:
             slskd = await self._get_slskd()
-            if slskd is None:
+            if slskd is None or _breaker_open(slskd):
                 return
             transfers = await slskd.get_transfers(include_completed=True)
         except Exception as e:
-            logger.warning("library_watch_transfers_failed", error=str(e))
+            _log_poll_failure("library_watch_transfers_failed", e)
             return
 
         db = self._db

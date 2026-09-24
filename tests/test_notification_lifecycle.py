@@ -93,8 +93,9 @@ async def test_initial_sync_marks_existing_torrents_notified_without_notifying()
 
     await svc._initial_sync()
 
-    assert svc._tracked_torrents["a" * 40]["notified"] is True
-    assert svc._tracked_torrents["a" * 40]["completed"] is True
+    # Audit 2026-09-23 (NOTIF-10): a finished torrent has nothing left to
+    # watch, so it is not tracked at all (was kept forever as completed).
+    assert "a" * 40 not in svc._tracked_torrents
     sender.assert_not_awaited()
 
 
