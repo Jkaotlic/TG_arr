@@ -110,6 +110,16 @@ _ROOT_DIRS = frozenset({"music", "music_readonly", "share", "downloads", "comple
 
 _ARTIST_SEP = " - "
 
+#: Folders that group albums inside an artist's folder, never an artist
+#: themselves (live layout: ``<Artist>\Albums\2012 - Album``). Compared
+#: case-folded after `_clean_name`.
+_CONTAINER_DIRS = frozenset({
+    "albums", "album", "discography", "дискография", "singles", "eps", "ep",
+    "compilations", "lossless", "flac", "mp3", "320", "music", "studio albums",
+    "live albums",
+})
+_ARTIST_LOOKUP_LEVELS = 2
+
 
 def _is_root_dir(part: str) -> bool:
     folded = part.casefold()
@@ -153,9 +163,26 @@ def album_label(directory: str) -> Optional[str]:
     year = _YEAR_HEAD.match(head)
     if sep and year and rest.strip():
         name = f"{rest.strip()} ({year.group(1)})"
-    if _ARTIST_SEP not in name and len(parts) > 1 and not _is_root_dir(parts[-2]):
-        name = f"{_clean_name(parts[-2])}{_ARTIST_SEP}{name}"
+    if _ARTIST_SEP not in name:
+        artist = _artist_folder(parts[:-1])
+        if artist:
+            name = f"{artist}{_ARTIST_SEP}{name}"
     return name
+
+
+def _artist_folder(parents: list[str]) -> Optional[str]:
+    """The nearest parent that names an artist, looking at most two levels up.
+
+    Container folders (``Albums``, ``Discography``, ``FLAC``…) are skipped;
+    a share root ends the search. Nothing suitable -> no artist.
+    """
+    for part in reversed(parents[-_ARTIST_LOOKUP_LEVELS:]):
+        if _is_root_dir(part):
+            return None
+        cleaned = _clean_name(part)
+        if cleaned.casefold() not in _CONTAINER_DIRS:
+            return cleaned
+    return None
 
 
 def album_key(directory: str, username: str = "") -> str:

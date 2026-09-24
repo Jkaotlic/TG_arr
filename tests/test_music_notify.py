@@ -942,3 +942,38 @@ async def test_v6_rekey_of_the_live_year_first_album_gives_one_row(tmp_path):
             assert tuple(await cur.fetchone()) == (1, 16)
     finally:
         await database.close()
+
+
+# ------------------------------------------------ review fix round 3
+def test_container_folders_are_not_the_artist():
+    title = music_notify.album_title
+    assert title("music\\Celldweller\\Albums\\2012 - X") == "Celldweller — X (2012)"
+    assert title("x\\Artist\\Discography\\Album") == "Artist — Album"
+    assert title("x\\Artist\\Дискография\\Album [FLAC]\\CD1") == "Artist — Album"
+    assert title("x\\Artist\\Studio Albums\\Album") == "Artist — Album"
+    assert title("music_readonly\\Albums\\2012 - X") == "X (2012)"
+    assert title("@@share\\Discography\\Album") == "Album"
+    # at most two levels up: two containers in a row leave no artist
+    assert title("x\\Artist\\FLAC\\Albums\\Album") == "Album"
+    assert music_notify.album_key("music\\Celldweller\\Albums\\2012 - X") == music_notify.album_key(
+        "@@peer\\Celldweller\\X (2012) [FLAC]")
+
+
+@pytest.mark.asyncio
+async def test_v6_rekey_of_the_live_layout_with_a_container_folder_gives_one_row(tmp_path):
+    live = "music_readonly\\Artist\\Albums\\2012 - Wish Upon A Blackstar (Deluxe Edition)"
+    seeded = (T0 - timedelta(hours=2)).isoformat()
+    rows = [(f"t-{n}", f"b-{n}", f"{live}\\{n:02d} - Song {n}.flac", "Queued, Remotely", seeded)
+            for n in range(1, 17)]
+    database = await _reopen_as_v5(tmp_path, rows)
+    try:
+        async with database.conn.execute(
+                "SELECT batch_key, title, notified_at FROM music_batch") as cur:
+            batches = [tuple(r) for r in await cur.fetchall()]
+        assert batches == [(music_notify.album_key(live),
+                            "Artist — Wish Upon A Blackstar (Deluxe Edition) (2012)", seeded)]
+        async with database.conn.execute(
+                "SELECT COUNT(DISTINCT batch_key), COUNT(*) FROM music_transfer") as cur:
+            assert tuple(await cur.fetchone()) == (1, 16)
+    finally:
+        await database.close()
