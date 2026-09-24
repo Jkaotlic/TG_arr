@@ -466,7 +466,7 @@ async def _add_movie_from_trending(callback: CallbackQuery, movie: MovieInfo, db
             # BUG-12b: error text can contain raw markup from the upstream
             # service — escape before interpolating into an HTML message.
             error_text = action.error_message or "Не удалось добавить фильм"
-            await status_msg.edit_text(f"❌ {html.escape(error_text)[:200]}")
+            await status_msg.edit_text(f"❌ {html.escape(error_text[:200])}")
 
     except Exception as e:
         logger.error(
@@ -550,7 +550,7 @@ async def _add_series_from_trending(callback: CallbackQuery, series: SeriesInfo,
             await _drop_keyboard(message)
         else:
             error_text = action.error_message or "Не удалось добавить сериал"
-            await status_msg.edit_text(f"❌ {html.escape(error_text)[:200]}")
+            await status_msg.edit_text(f"❌ {html.escape(error_text[:200])}")
 
     except Exception as e:
         logger.error(

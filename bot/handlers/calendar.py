@@ -103,7 +103,7 @@ async def _collect_calendar(
                 logger.error(
                     "calendar_fetch_failed", service=source, error=str(result), exc_info=result,
                 )
-                errors.append(f"{source}: {_html.escape(str(result))[:100]}")
+                errors.append(f"{source}: {_html.escape(str(result)[:100])}")
             elif source == "Radarr":
                 movies = result
             else:
@@ -150,7 +150,7 @@ async def _fetch_and_send_calendar(
             logger.error(
                 "calendar_fetch_failed", service="Lidarr", error=str(lidarr_result), exc_info=lidarr_result,
             )
-            errors.append(f"Lidarr: {_html.escape(str(lidarr_result))[:100]}")
+            errors.append(f"Lidarr: {_html.escape(str(lidarr_result)[:100])}")
             albums: list = []
         else:
             albums = list(lidarr_result)

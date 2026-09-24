@@ -15,6 +15,10 @@ logger = structlog.get_logger()
 router = Router()
 
 
+# No filter on purpose: besides unknown/legacy data, this also receives every
+# callback an earlier router's filters rejected — e.g. an F.data match whose
+# extra condition failed, or CallbackData that no longer unpacks. For the user
+# that is the same "old button", so the same answer.
 @router.callback_query()
 async def handle_unknown_callback(callback: CallbackQuery) -> None:
     """Answer an unknown/legacy button so its spinner stops."""

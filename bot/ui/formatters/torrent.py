@@ -102,15 +102,21 @@ class _TorrentFormatters:
             header += f" (стр. {page + 1}/{total_pages})"
 
         if status is not None:
-            summary = (
-                f"⬇️ {status.download_speed_formatted} · ⬆️ {status.upload_speed_formatted}"
-                f" · активных: {status.active_downloads}"
-            )
-            if status.free_space > 0:
-                summary += f" · свободно: {status.free_space_formatted}"
+            summary = _TorrentFormatters.format_qbit_summary(status)
             header = header.replace("\n", f"\n{summary}\n", 1)
 
         return header
+
+    @staticmethod
+    def format_qbit_summary(status: QBittorrentStatus) -> str:
+        """One line: qBit speeds, active downloads, free space."""
+        summary = (
+            f"⬇️ {status.download_speed_formatted} · ⬆️ {status.upload_speed_formatted}"
+            f" · активных: {status.active_downloads}"
+        )
+        if status.free_space > 0:
+            summary += f" · свободно: {status.free_space_formatted}"
+        return summary
 
     @staticmethod
     def format_torrent_details(torrent: TorrentInfo) -> str:

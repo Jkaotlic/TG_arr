@@ -303,5 +303,5 @@ async def handle_title_action(
     except Exception as e:
         logger.error("title_action_failed", action=action, title_id=title_id, error=str(e), exc_info=True)
         await message.edit_text(
-            Formatters.format_error(f"Не удалось выполнить действие: {html.escape(str(e))[:150]}")
+            Formatters.format_error(f"Не удалось выполнить действие: {html.escape(str(e)[:150])}")
         )

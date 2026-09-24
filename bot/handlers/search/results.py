@@ -223,7 +223,7 @@ async def handle_release_selection(
         logger.warning("Failed to render release card", error=str(e), exc_info=True)
         # SEC-20: escape exception text — error messages can contain '<' from URLs.
         await message.edit_text(
-            f"{text}\n\n⚠️ Ошибка загрузки информации: {html.escape(str(e))[:200]}",
+            f"{text}\n\n⚠️ Ошибка загрузки информации: {html.escape(str(e)[:200])}",
             reply_markup=Keyboards.release_details(
                 result, session.content_type, show_force_grab=has_qbittorrent,
                 list_token=session.list_token, idx=idx,

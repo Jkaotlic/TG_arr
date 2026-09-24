@@ -87,6 +87,11 @@ async def handle_close(callback: CallbackQuery) -> None:
 
 #: MoreCB key → (module, handler) of the reply button it replaces. Resolved at
 #: call time, so the panel runs exactly the handler the old button ran.
+#: "⋯ Ещё" panels already acted on, keyed (chat_id, message_id). Bounded —
+#: only recent panels can still be double-tapped.
+_handled_more_panels: dict[tuple[object, object], None] = {}
+_MAX_HANDLED_MORE_PANELS = 256
+
 _MORE_TARGETS: dict[str, tuple[str, str]] = {
     "trending": ("bot.handlers.trending", "handle_trending_menu"),
     "calendar": ("bot.handlers.calendar", "handle_calendar_menu"),
@@ -132,6 +137,16 @@ async def handle_more_item(
         await callback.answer("Раздел недоступен — откройте «⋯ Ещё» заново", show_alert=True)
         return
 
+    # Double tap (final review 2026-09-24): the second tap can arrive before
+    # the first one's delete lands — remember the panel synchronously.
+    panel_key = (message.chat.id, message.message_id)
+    if panel_key in _handled_more_panels:
+        await callback.answer()
+        return
+    _handled_more_panels[panel_key] = None
+    while len(_handled_more_panels) > _MAX_HANDLED_MORE_PANELS:
+        _handled_more_panels.pop(next(iter(_handled_more_panels)))
+
     await callback.answer()
     # No leftover panel: the section arrives as its own message below.
     try:
@@ -140,7 +155,10 @@ async def handle_more_item(
         try:
             await message.edit_reply_markup(reply_markup=None)
         except TelegramBadRequest:
-            pass
+            # Neither delete nor edit worked: the panel is already gone or
+            # already stripped — an earlier tap handled it (e.g. before a
+            # restart emptied the set above). Do nothing.
+            return
 
     module_name, func_name = target
     handler = getattr(importlib.import_module(module_name), func_name)

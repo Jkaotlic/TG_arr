@@ -7,7 +7,7 @@ from typing import Optional
 import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, ForceReply, Message
+from aiogram.types import CallbackQuery, ForceReply, InlineKeyboardMarkup, Message
 
 from bot.clients.registry import (
     get_deezer,
@@ -451,15 +451,25 @@ async def handle_slskd_selection(
         if idx >= len(candidates):
             await answer_stale(callback)
             return
-        await _enqueue_slskd_candidate(callback, message, db, user_id, candidates[idx])
+        await _enqueue_slskd_candidate(
+            callback, message, db, user_id, candidates[idx],
+            retry_markup=Keyboards.slskd_card(idx, callback_data.tok, per_page=_per_page()),
+        )
     finally:
         _release_grab(user_id)
 
 
 async def _enqueue_slskd_candidate(
     callback: CallbackQuery, message: Message, db: Database, user_id: int, candidate,
+    retry_markup: Optional[InlineKeyboardMarkup] = None,
 ) -> None:
-    """Queue one Soulseek candidate (the guarded body of the selection)."""
+    """Queue one Soulseek candidate (the guarded body of the selection).
+
+    ``retry_markup`` — the candidate card's keyboard (✅ Скачать / ◀️ Назад),
+    put back under a failure message so the user can retry or go back
+    instead of hitting a dead end (final review 2026-09-24). The list token
+    is only dropped on success, so the retry button stays valid.
+    """
     await callback.answer("Ставлю в очередь...")
 
     slskd = await get_slskd()
@@ -486,7 +496,8 @@ async def _enqueue_slskd_candidate(
         action.error_message = str(e)[:200]
         await db.log_action(action)
         await message.edit_text(
-            Formatters.format_error("Soulseek не ответил — очередь не изменилась, попробуйте ещё раз")
+            Formatters.format_error("Soulseek не ответил — очередь не изменилась, попробуйте ещё раз"),
+            reply_markup=retry_markup,
         )
         return
     action.success = ok
@@ -511,7 +522,8 @@ async def _enqueue_slskd_candidate(
         await message.edit_text(
             Formatters.format_error(
                 "Не удалось поставить в очередь — возможно, пользователь ушёл в офлайн"
-            )
+            ),
+            reply_markup=retry_markup,
         )
 
 
@@ -534,7 +546,9 @@ async def handle_menu_music(message: Message) -> None:
     )
 
 
-@prompt_router.message(F.reply_to_message.text == MUSIC_PROMPT)
+# A command typed as the reply ("/downloads") is a command, not an artist
+# name — let it fall through to its own router (final review 2026-09-24).
+@prompt_router.message(F.reply_to_message.text == MUSIC_PROMPT, ~F.text.startswith("/"))
 async def handle_music_prompt_reply(message: Message, db_user: User, db: Database) -> None:
     """The artist name typed in reply to the "🎵 Музыка" prompt."""
     await process_music_search(message, (message.text or "").strip(), db_user, db)

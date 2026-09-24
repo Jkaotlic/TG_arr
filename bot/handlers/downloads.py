@@ -125,7 +125,7 @@ async def _soulseek_section() -> str:
     lines = ["", "", f"🎵 <b>Soulseek ({len(transfers)})</b>"]
     for transfer in transfers[:5]:
         icon = "❌" if transfer.is_errored else "⬇️"
-        name = html.escape(transfer.filename)[:45]
+        name = html.escape(transfer.filename[:45])
         lines.append(
             f"{icon} {name} — {transfer.progress_percent}% · {transfer.speed_formatted}"
         )
@@ -152,8 +152,11 @@ async def cmd_downloads(message: Message, db_user: User, is_admin: bool = False)
         soulseek = await _soulseek_section()
 
         if not all_torrents:
+            # The qBit summary lives in the list header; an empty list must
+            # not lose it (final review 2026-09-24).
+            summary = f"\n{Formatters.format_qbit_summary(status)}" if status is not None else ""
             await status_msg.edit_text(
-                ("📭 Торренты не найдены." + soulseek) or "📭 Торренты не найдены.",
+                "📭 Торренты не найдены." + summary + soulseek,
                 parse_mode="HTML",
             )
             return
