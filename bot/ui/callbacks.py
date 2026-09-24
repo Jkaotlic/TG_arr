@@ -45,6 +45,13 @@ class TorrentPageCB(CallbackData, prefix="tpg"):
 # ---------------------------------------------------------------------------
 
 
+class MoreCB(CallbackData, prefix="more"):
+    """An item of the "⋯ Ещё" panel (main-menu declutter, 2026-09-24).
+    ``key`` names the section — see ``bot.ui.keyboards.menu.MORE_ROWS``."""
+
+    key: str
+
+
 class ReleaseCB(CallbackData, prefix="rel"):
     """Search-result release selection (was ``rel:N`` string prefix).
 

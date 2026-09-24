@@ -1,5 +1,6 @@
 """Download management handlers for qBittorrent integration."""
 
+import asyncio
 import html
 from collections.abc import Awaitable, Callable
 from typing import Optional
@@ -13,7 +14,7 @@ from bot.clients.qbittorrent import QBittorrentClient, QBittorrentError
 from bot.clients.registry import get_qbittorrent, get_slskd
 from bot.handlers._cache import remember_lru
 from bot.handlers.common import accessible_message, safe_edit, strip_command
-from bot.models import TorrentFilter, TorrentInfo, User, format_speed
+from bot.models import QBittorrentStatus, TorrentFilter, TorrentInfo, User, format_speed
 from bot.ui.callbacks import TorrentActionCB, TorrentPageCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -39,6 +40,27 @@ def _remember_view(user_id: int, filter_type: TorrentFilter, page: int) -> None:
 
 def _view_of(user_id: int) -> tuple[TorrentFilter, int]:
     return _views.get(user_id, (TorrentFilter.ALL, 0))
+
+
+async def _list_status(qbt: QBittorrentClient) -> Optional[QBittorrentStatus]:
+    """qBittorrent's summary for the list header (it replaced the "📊 qBit"
+    menu button, 2026-09-24). Best-effort: the list must not fail with it."""
+    try:
+        status = await qbt.get_status()
+    except Exception as e:
+        logger.warning("qbit_summary_failed", error=str(e))
+        return None
+    return status if isinstance(status, QBittorrentStatus) else None
+
+
+async def _torrents_and_status(
+    qbt: QBittorrentClient, filter_type: TorrentFilter,
+) -> tuple[list[TorrentInfo], Optional[QBittorrentStatus]]:
+    """The (filtered) torrent list and the header summary, fetched together."""
+    torrents, status = await asyncio.gather(
+        qbt.get_torrents(filter_type=filter_type), _list_status(qbt),
+    )
+    return torrents, status
 
 
 def _user_id(event: Message | CallbackQuery) -> int:
@@ -121,8 +143,8 @@ async def cmd_downloads(message: Message, db_user: User, is_admin: bool = False)
     try:
         status_msg = await message.answer("🔄 Загружаю список...")
 
-        # Single API call - get all and slice locally
-        all_torrents = await qbt.get_torrents(filter_type=TorrentFilter.ALL)
+        # One list call (sliced locally) + the qBit summary for the header.
+        all_torrents, status = await _torrents_and_status(qbt, TorrentFilter.ALL)
         total = len(all_torrents)
 
         soulseek = await _soulseek_section()
@@ -138,7 +160,7 @@ async def cmd_downloads(message: Message, db_user: User, is_admin: bool = False)
         torrents = all_torrents[:TORRENTS_PER_PAGE]
         _remember_view(_user_id(message), TorrentFilter.ALL, 0)
 
-        text = Formatters.format_torrent_list(torrents, 0, total_pages, TorrentFilter.ALL, total)
+        text = Formatters.format_torrent_list(torrents, 0, total_pages, TorrentFilter.ALL, total, status=status)
 
         await status_msg.edit_text(
             text + soulseek,
@@ -271,14 +293,14 @@ async def _render_torrent_list(
     which would ack the callback a second time. This helper does NOT call
     ``callback.answer`` — the caller owns the single ack per callback.
     """
-    all_torrents = await qbt.get_torrents(filter_type=filter_type)
+    all_torrents, status = await _torrents_and_status(qbt, filter_type)
     total = len(all_torrents)
     total_pages = max(1, (total + TORRENTS_PER_PAGE - 1) // TORRENTS_PER_PAGE)
     clamped_page = max(0, min(page, total_pages - 1))
     offset = clamped_page * TORRENTS_PER_PAGE
     torrents = all_torrents[offset:offset + TORRENTS_PER_PAGE]
 
-    text = Formatters.format_torrent_list(torrents, clamped_page, total_pages, filter_type, total)
+    text = Formatters.format_torrent_list(torrents, clamped_page, total_pages, filter_type, total, status=status)
     if user_id is not None:
         _remember_view(user_id, filter_type, clamped_page)
     await safe_edit(
@@ -319,7 +341,7 @@ async def handle_torrent_page(
     requested_page = callback_data.page
 
     try:
-        all_torrents = await qbt.get_torrents(filter_type=filter_type)
+        all_torrents, status = await _torrents_and_status(qbt, filter_type)
         total = len(all_torrents)
         total_pages = max(1, (total + TORRENTS_PER_PAGE - 1) // TORRENTS_PER_PAGE)
 
@@ -329,7 +351,9 @@ async def handle_torrent_page(
 
         offset = requested_page * TORRENTS_PER_PAGE
         torrents = all_torrents[offset:offset + TORRENTS_PER_PAGE]
-        text = Formatters.format_torrent_list(torrents, requested_page, total_pages, filter_type, total)
+        text = Formatters.format_torrent_list(
+            torrents, requested_page, total_pages, filter_type, total, status=status,
+        )
         _remember_view(_user_id(callback), filter_type, requested_page)
 
         await safe_edit(

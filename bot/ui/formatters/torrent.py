@@ -74,8 +74,14 @@ class _TorrentFormatters:
         total_pages: int,
         current_filter: TorrentFilter,
         total_count: int,
+        status: QBittorrentStatus | None = None,
     ) -> str:
-        """Format torrent list header."""
+        """Format torrent list header.
+
+        ``status`` — qBittorrent's summary (speeds, active downloads, free
+        space), shown under the title since "📊 qBit" left the main menu
+        (2026-09-24).
+        """
         filter_names = {
             TorrentFilter.ALL: "Все",
             TorrentFilter.DOWNLOADING: "Загружаются",
@@ -94,6 +100,15 @@ class _TorrentFormatters:
 
         if total_pages > 1:
             header += f" (стр. {page + 1}/{total_pages})"
+
+        if status is not None:
+            summary = (
+                f"⬇️ {status.download_speed_formatted} · ⬆️ {status.upload_speed_formatted}"
+                f" · активных: {status.active_downloads}"
+            )
+            if status.free_space > 0:
+                summary += f" · свободно: {status.free_space_formatted}"
+            header = header.replace("\n", f"\n{summary}\n", 1)
 
         return header
 

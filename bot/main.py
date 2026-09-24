@@ -310,12 +310,15 @@ async def notify_admins_on_start(bot, *, admin_ids: list, allowed_ids: list, war
         return
 
     text = build_startup_message(warmup=warmup, admin_ids=admin_ids, allowed_ids=allowed_ids)
+    from bot.ui.keyboards import Keyboards
 
     logger = structlog.get_logger()
 
     async def _send(admin_id: int) -> bool:
         try:
-            await bot.send_message(admin_id, text, parse_mode="HTML")
+            # 2026-09-24 menu declutter: the card also swaps an old
+            # 11-button reply keyboard for the new one.
+            await bot.send_message(admin_id, text, parse_mode="HTML", reply_markup=Keyboards.main_menu())
         except Exception as e:
             logger.warning("startup_notify_failed", user_id=admin_id, error=str(e))
             return False

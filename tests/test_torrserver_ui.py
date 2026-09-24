@@ -38,7 +38,8 @@ def test_torrserver_prompt_is_a_non_empty_string():
 
 
 def test_main_menu_contains_the_button():
-    texts = [b.text for row in Keyboards.main_menu().keyboard for b in row]
+    # 2026-09-24 menu declutter: "▶️ Смотреть" moved under "⋯ Ещё".
+    texts = [b.text for row in Keyboards.more_menu().inline_keyboard for b in row]
     assert MENU_TORRSERVER in texts
 
 
