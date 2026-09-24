@@ -456,6 +456,30 @@ async def send_library_notification(
     return delivered
 
 
+async def notification_recipients(db: Database, category: str) -> list[int]:
+    """Everyone allowed to use the bot who has not muted ``category``.
+
+    Audit 2026-09-23 (NOTIF-06): "music" honours
+    `UserPreferences.notify_music` ("off" mutes), "library" honours
+    `notify_library`. A recipient with no stored user row (allowed but never
+    opened the bot) gets the defaults, i.e. both categories on.
+    """
+    settings = get_settings()
+    db_user_ids = await db.list_allowed_users()
+    candidates = set(settings.allowed_tg_ids) | set(settings.admin_tg_ids) | set(db_user_ids)
+    recipients: list[int] = []
+    for uid in sorted(candidates):
+        user = await db.get_user(uid)
+        if user is not None:
+            prefs = user.preferences
+            if category == "music" and prefs.notify_music == "off":
+                continue
+            if category == "library" and not prefs.notify_library:
+                continue
+        recipients.append(uid)
+    return recipients
+
+
 async def _library_watch(bot: Bot, db: Database, logger) -> None:
     """Announce library imports and finished music downloads.
 
@@ -470,10 +494,9 @@ async def _library_watch(bot: Bot, db: Database, logger) -> None:
     settings = get_settings()
     interval = max(settings.notify_check_interval, 60)
 
-    async def _notify(text: str) -> None:
-        db_user_ids = await db.list_allowed_users()
-        recipients = set(settings.allowed_tg_ids) | set(settings.admin_tg_ids) | set(db_user_ids)
-        await send_library_notification(bot, sorted(recipients), text, logger)
+    async def _notify(text: str, category: str) -> None:
+        recipients = await notification_recipients(db, category)
+        await send_library_notification(bot, recipients, text, logger)
 
     radarr = await get_radarr()
     sonarr = await get_sonarr()

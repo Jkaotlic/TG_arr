@@ -77,7 +77,7 @@ async def db(tmp_path):
 
 
 def _watcher(db: Database, slskd: FakeSlskd, clock: Clock, sent: list[str]) -> LibraryWatcher:
-    async def notify(text: str) -> None:
+    async def notify(text: str, category: str = "library") -> None:
         sent.append(text)
 
     async def get_slskd():

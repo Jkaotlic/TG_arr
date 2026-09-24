@@ -2,9 +2,11 @@
 the settings menu, resolution selection, and the auto-grab toggle.
 """
 
+from typing import Optional
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from bot.models import MetadataProfile, QualityProfile, RootFolder
+from bot.models import MetadataProfile, QualityProfile, RootFolder, UserPreferences
 from bot.ui.callbacks import SettingCB
 from bot.ui.keyboards._constants import CallbackData
 
@@ -59,7 +61,9 @@ class _SettingsKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
-    def settings_menu(lidarr_enabled: bool = False) -> InlineKeyboardMarkup:
+    def settings_menu(
+        lidarr_enabled: bool = False, prefs: Optional[UserPreferences] = None
+    ) -> InlineKeyboardMarkup:
         """Create main settings menu keyboard.
 
         Rollback 2026-08-10 (Task 13): one Radarr row and one Sonarr row
@@ -88,6 +92,18 @@ class _SettingsKeyboards:
             ])
         rows.append([InlineKeyboardButton(text="🎯 Качество", callback_data="settings:resolution")])
         rows.append([InlineKeyboardButton(text="⚡ Авто-граб", callback_data="settings:auto_grab")])
+        # Audit 2026-09-23 (NOTIF-06): one-tap toggles; the label shows the
+        # current state, the button sets the other one.
+        prefs = prefs or UserPreferences()
+        music_on = prefs.notify_music != "off"
+        rows.append([InlineKeyboardButton(
+            text=f"🎵 Уведомления о музыке: {'сводка' if music_on else 'выкл'}",
+            callback_data=SettingCB(key="notify_music", value="off" if music_on else "summary").pack(),
+        )])
+        rows.append([InlineKeyboardButton(
+            text=f"🎬 «В библиотеке»: {'вкл' if prefs.notify_library else 'выкл'}",
+            callback_data=SettingCB(key="notify_library", value="0" if prefs.notify_library else "1").pack(),
+        )])
         rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.CANCEL)])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 

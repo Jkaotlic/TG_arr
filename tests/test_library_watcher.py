@@ -147,7 +147,7 @@ async def test_poll_does_not_replay_pre_existing_history_on_the_first_cycle():
     one layer up, at `poll()` — what the real background task drives."""
     sent: list[str] = []
 
-    async def notify(text: str) -> None:
+    async def notify(text: str, category: str = "library") -> None:
         sent.append(text)
 
     radarr, sonarr = _services(radarr_history=[_imported(id=1, sourceTitle="Old Movie")])
@@ -170,7 +170,7 @@ async def test_poll_does_not_replay_pre_existing_history_on_the_first_cycle():
 async def test_the_title_is_escaped():
     sent: list[str] = []
 
-    async def notify(text: str) -> None:
+    async def notify(text: str, category: str = "library") -> None:
         sent.append(text)
 
     radarr, sonarr = _services()
@@ -204,7 +204,7 @@ async def test_one_backend_failing_does_not_stop_the_other(tmp_path):
 
     sent: list[str] = []
 
-    async def notify(text: str) -> None:
+    async def notify(text: str, category: str = "library") -> None:
         sent.append(text)
 
     now = [datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)]
@@ -239,7 +239,7 @@ async def test_a_failing_notify_does_not_lose_later_events():
     """A Telegram blip must not wedge the watcher's state."""
     calls = []
 
-    async def flaky(text: str) -> None:
+    async def flaky(text: str, category: str = "library") -> None:
         calls.append(text)
         if len(calls) == 1:
             raise Exception("telegram down")

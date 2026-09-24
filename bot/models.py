@@ -520,6 +520,11 @@ class UserPreferences(BaseModel):
     lidarr_root_folder_id: Optional[int] = None
     preferred_resolution: Optional[str] = None  # 1080p, 2160p, etc.
     auto_grab_enabled: bool = False
+    #: Audit 2026-09-23 (NOTIF-06): music download summaries — "summary"
+    #: (one message per album) or "off".
+    notify_music: Literal["summary", "off"] = "summary"
+    #: «✅ … — в библиотеке» messages from Radarr/Sonarr imports.
+    notify_library: bool = True
 
 
 class User(BaseModel):

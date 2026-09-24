@@ -17,7 +17,7 @@ key with no separate prefix to keep in sync.
 """
 
 from dataclasses import dataclass
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 
 import structlog
 from aiogram import F, Router
@@ -79,7 +79,9 @@ async def _render_settings_menu(db_user: User) -> tuple[str, InlineKeyboardMarku
     text = Formatters.format_user_preferences(
         db_user.preferences, radarr_profiles, radarr_folders, sonarr_profiles, sonarr_folders,
     )
-    keyboard = Keyboards.settings_menu(lidarr_enabled=get_settings().lidarr_enabled)
+    keyboard = Keyboards.settings_menu(
+        lidarr_enabled=get_settings().lidarr_enabled, prefs=db_user.preferences
+    )
     return text, keyboard
 
 
@@ -393,6 +395,37 @@ async def handle_set_auto_grab(
         return
 
     await callback.answer(f"Авто-загрузка {'включена' if enabled else 'выключена'}!")
+
+
+@router.callback_query(SettingCB.filter(F.key.in_({"notify_music", "notify_library"})))
+async def handle_set_notify(
+    callback: CallbackQuery, callback_data: SettingCB, db_user: User, db: Database
+) -> None:
+    """Audit 2026-09-23 (NOTIF-06): toggle a notification category."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+
+    try:
+        if callback_data.key == "notify_music":
+            music: Literal["summary", "off"] = "off" if callback_data.value == "off" else "summary"
+            await db.update_user_preference(db_user.tg_id, "notify_music", music)
+            db_user.preferences.notify_music = music
+            answer = "Уведомления о музыке: " + ("сводка" if music == "summary" else "выкл")
+        else:
+            library = callback_data.value == "1"
+            await db.update_user_preference(db_user.tg_id, "notify_library", library)
+            db_user.preferences.notify_library = library
+            answer = "«В библиотеке»: " + ("вкл" if library else "выкл")
+
+        text, keyboard = await _render_settings_menu(db_user)
+        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception as e:
+        logger.error("Failed to update notification preference", error=str(e), exc_info=True)
+        await callback.answer("Ошибка обновления", show_alert=True)
+        return
+
+    await callback.answer(answer)
 
 
 @router.callback_query(F.data.startswith("set:"))

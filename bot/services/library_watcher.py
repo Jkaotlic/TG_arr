@@ -30,7 +30,7 @@ episode burst reads in the order it actually happened.
 import html
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import structlog
 
@@ -40,6 +40,9 @@ if TYPE_CHECKING:
     from bot.db import Database
 
 logger = structlog.get_logger()
+
+#: Notification categories, matched against per-user preferences on delivery.
+NotifyCategory = Literal["music", "library"]
 
 #: `notify_kv` key: start time of the last successful slskd poll (ISO, UTC).
 _SLSKD_WATERMARK_KEY = "slskd_watermark"
@@ -52,6 +55,7 @@ def _utcnow() -> datetime:
 def _parse_iso(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
 
 #: How many history rows to ask each *arr service for per poll. Comfortably
 #: more than a single interval can produce, so nothing is missed between
@@ -72,7 +76,7 @@ class LibraryWatcher:
         radarr: Any,
         sonarr: Any,
         *,
-        notify: Optional[Callable[[str], Awaitable[None]]] = None,
+        notify: Optional[Callable[[str, str], Awaitable[None]]] = None,
         get_slskd: Optional[Callable[[], Awaitable[Any]]] = None,
         db: Optional["Database"] = None,
         clock: Callable[[], datetime] = _utcnow,
@@ -149,7 +153,7 @@ class LibraryWatcher:
         if self._imports_primed:
             for record in landed:
                 title = html.escape(str(record.get("sourceTitle") or "Unknown"))
-                await self._announce(f"✅ <b>{title}</b> — в библиотеке.")
+                await self._announce(f"✅ <b>{title}</b> — в библиотеке.", "library")
         else:
             # First cycle after (re)start: `poll_once()` already recorded
             # every currently-known import in `_seen_imports` above, so this
@@ -237,10 +241,15 @@ class LibraryWatcher:
         await self._db.music_mark_notified(ready, now)
         text = music_notify.format_message(summaries)
         if text:
-            await self._announce(text)
+            await self._announce(text, "music")
 
-    async def _announce(self, text: str) -> None:
+    async def _announce(self, text: str, category: NotifyCategory) -> None:
         """Deliver one notification; a failure is logged, never raised.
+
+        ``category`` ("music" | "library") lets the delivery side honour each
+        user's preferences (`UserPreferences.notify_music` / `notify_library`,
+        audit 2026-09-23 NOTIF-06); ``notify`` is called as
+        ``notify(text, category)``.
 
         State is updated by the caller regardless, so a Telegram blip costs one
         missed message rather than a stuck watcher that repeats forever.
@@ -248,6 +257,6 @@ class LibraryWatcher:
         if self.notify is None:
             return
         try:
-            await self.notify(text)
+            await self.notify(text, category)
         except Exception as e:
             logger.warning("library_notify_failed", error=str(e))
