@@ -30,7 +30,7 @@ class CallbackData:
 
     # Release selection
     RELEASE = "rel:"  # rel:0 (index in results)
-    GRAB_BEST = "grab_best"
+    GRAB_BEST = "grab_best"  # legacy only (→ GrabBestCB); answers "устарел"
 
     # Free-text search (2026-08-12): offered when the catalogue-backed search
     # has nothing to show for the query. The catalogue only knows what
@@ -43,8 +43,10 @@ class CallbackData:
     ADD_SERIES = "add_series:"  # add_series:tmdb_id
 
     # Confirmation
+    # Legacy only since the 2026-09-23 audit: GrabCB / MusicAddCB / ForceGrabCB
+    # carry list tokens; these plain strings now answer "Список устарел".
     CONFIRM_GRAB = "confirm_grab"
-    FORCE_GRAB = "force_grab"  # Force download via qBittorrent
+    FORCE_GRAB = "force_grab"
 
     # Season monitoring (#2)
     SEASON_MENU = "season_menu"     # open the season-monitoring preset picker

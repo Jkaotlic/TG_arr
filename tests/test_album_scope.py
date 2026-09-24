@@ -75,6 +75,7 @@ def _session(artist: ArtistInfo, results: list | None = None) -> SearchSession:
         content_type=ContentType.MUSIC,
         selected_content=artist,
         results=results or [],
+        list_token="tok123",  # audit 2026-09-23: album-release buttons carry it
     )
 
 
@@ -277,7 +278,7 @@ async def test_music_grab_monitors_only_the_taken_album():
     with patch.object(music, "_get_music_services", AsyncMock(return_value=(MagicMock(), add_service))), \
             patch.object(music, "accessible_message", return_value=callback.message):
         await music.handle_album_grab(
-            callback, AlbumGrabCB(idx=0, album_id=3), _user(), _db(session=session),
+            callback, AlbumGrabCB(tok="tok123", idx=0, album_id=3), _user(), _db(session=session),
         )
 
     assert add_service.grab_release.await_args.kwargs["arr_id"] == 3
@@ -306,7 +307,7 @@ async def test_failed_music_grab_does_not_monitor_anything():
     with patch.object(music, "_get_music_services", AsyncMock(return_value=(MagicMock(), add_service))), \
             patch.object(music, "accessible_message", return_value=callback.message):
         await music.handle_album_grab(
-            callback, AlbumGrabCB(idx=0, album_id=3), _user(), _db(session=session),
+            callback, AlbumGrabCB(tok="tok123", idx=0, album_id=3), _user(), _db(session=session),
         )
 
     add_service.lidarr.set_album_monitored.assert_not_awaited()
@@ -321,7 +322,7 @@ async def test_grab_with_a_stale_release_list_says_so():
 
     with patch.object(music, "accessible_message", return_value=callback.message):
         await music.handle_album_grab(
-            callback, AlbumGrabCB(idx=5, album_id=3), _user(), _db(session=_session(_artist())),
+            callback, AlbumGrabCB(tok="tok123", idx=5, album_id=3), _user(), _db(session=_session(_artist())),
         )
 
     assert callback.answer.await_args.kwargs.get("show_alert") is True

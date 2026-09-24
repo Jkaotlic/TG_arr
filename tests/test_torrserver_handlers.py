@@ -160,6 +160,7 @@ async def test_empty_search_result_is_reported():
 @pytest.mark.asyncio
 async def test_add_publishes_and_answers_with_the_stream_link():
     ts_handlers._results[7] = [HIT]
+    tok = ts_handlers._tokens.issue(7)  # audit 2026-09-23: list token
     torrent = TorrServerTorrent(hash="abc", title="Dune 2021", stat=3,
                                 stat_string="Torrent working",
                                 files=[TorrServerFile(id=1, path="Dune/Dune.mkv", length=10)])
@@ -181,7 +182,7 @@ async def test_add_publishes_and_answers_with_the_stream_link():
     with patch.object(ts_handlers, "get_torrserver_service", new_callable=AsyncMock,
                       return_value=service), \
          patch.object(ts_handlers, "accessible_message", return_value=callback.message):
-        await ts_handlers.handle_add(callback, TsAddCB(idx=0))
+        await ts_handlers.handle_add(callback, TsAddCB(tok=tok, idx=0))
 
     service.add_and_publish.assert_awaited_once_with(HIT.link, HIT.title, "")
     assert "Emby" in callback.message.edit_text.await_args.args[0]
@@ -208,7 +209,7 @@ async def test_add_after_cache_expiry_asks_to_search_again():
     from bot.ui.callbacks import TsAddCB
 
     with patch.object(ts_handlers, "accessible_message", return_value=callback.message):
-        await ts_handlers.handle_add(callback, TsAddCB(idx=0))
+        await ts_handlers.handle_add(callback, TsAddCB(tok="old000", idx=0))
 
     assert callback.answer.await_args.kwargs.get("show_alert") is True
 
@@ -318,6 +319,7 @@ async def test_page_two_tap_opens_the_release_actually_tapped():
     the keyboard's offset or the handler's index use would be caught here,
     not just by reading the code."""
     ts_handlers._results[7] = _releases(7)  # page 0: idx 0-4, page 1: idx 5-6
+    ts_handlers._tokens.issue(7)  # the search that built this list issued its token
 
     page_message = MagicMock()
     page_message.edit_text = AsyncMock()
@@ -362,7 +364,7 @@ async def test_release_after_cache_expiry_asks_to_search_again():
     from bot.ui.callbacks import TsReleaseCB
 
     with patch.object(ts_handlers, "accessible_message", return_value=message):
-        await ts_handlers.handle_release(callback, TsReleaseCB(idx=0))
+        await ts_handlers.handle_release(callback, TsReleaseCB(tok="old000", idx=0))
 
     message.edit_text.assert_not_awaited()
     assert callback.answer.await_args.kwargs.get("show_alert") is True

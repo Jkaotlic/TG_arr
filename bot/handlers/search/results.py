@@ -15,6 +15,7 @@ from bot.models import ContentType, MovieInfo, SeriesInfo, User
 from bot.ui.callbacks import PageCB, ReleaseCB, SeasonScopeCB, TitleCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.list_token import answer_stale, token_matches
 
 from bot.handlers import search as _search
 from .services import router
@@ -129,6 +130,7 @@ async def handle_pagination(
         per_page,
         db_user,
         settings,
+        list_token=session.list_token,
     )
 
     await callback.answer()
@@ -155,15 +157,19 @@ async def handle_release_selection(
     async with db.session_lock(user_id):
         session = await db.get_session(user_id)
 
-        if not session or not session.results:
-            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        # Audit GRAB-03: a button from another list (older search, or a
+        # session that no longer has one) must not resolve `idx` here.
+        if (
+            not session
+            or not session.results
+            or session.free_search
+            or not token_matches(session.list_token, callback_data.tok)
+            or callback_data.idx >= len(session.results)
+        ):
+            await answer_stale(callback)
             return
 
         idx = callback_data.idx
-
-        if idx < 0 or idx >= len(session.results):
-            await callback.answer("Неверный выбор", show_alert=True)
-            return
 
         # BUG-07: ack right after validation — the lookup below can take up to
         # HTTP_TIMEOUT × retries (30-95s when *arr is degraded), and Telegram
@@ -191,7 +197,8 @@ async def handle_release_selection(
             await message.edit_text(
                 f"{text}\n\n⚠️ Информация о тайтле недоступна. Продолжить?",
                 reply_markup=Keyboards.release_details(
-                    result, session.content_type, show_force_grab=has_qbittorrent
+                    result, session.content_type, show_force_grab=has_qbittorrent,
+                    list_token=session.list_token, idx=idx,
                 ),
                 parse_mode="HTML",
             )
@@ -208,7 +215,8 @@ async def handle_release_selection(
         await message.edit_text(
             f"{text}\n\n---\n{info_text}{emby_note}",
             reply_markup=Keyboards.release_details(
-                result, session.content_type, show_force_grab=has_qbittorrent, content=content
+                result, session.content_type, show_force_grab=has_qbittorrent, content=content,
+                list_token=session.list_token, idx=idx,
             ),
             parse_mode="HTML",
         )
@@ -218,7 +226,8 @@ async def handle_release_selection(
         await message.edit_text(
             f"{text}\n\n⚠️ Ошибка загрузки информации: {html.escape(str(e))[:200]}",
             reply_markup=Keyboards.release_details(
-                result, session.content_type, show_force_grab=has_qbittorrent
+                result, session.content_type, show_force_grab=has_qbittorrent,
+                list_token=session.list_token, idx=idx,
             ),
             parse_mode="HTML",
         )
@@ -309,6 +318,7 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
         per_page,
         db_user,
         settings,
+        list_token=session.list_token,
     )
 
     await callback.answer()
@@ -349,8 +359,9 @@ async def handle_legacy_release(callback: CallbackQuery) -> None:
     """r5: legacy ``rel:N`` string buttons from messages sent before the
     ReleaseCB migration — surface an explicit alert instead of falling
     through unhandled (see ``handle_legacy_page`` for the same pattern).
+    Audit 2026-09-23: also catches ``rel:N`` without a list token.
     """
-    await callback.answer("Кнопка устарела — повторите поиск", show_alert=True)
+    await answer_stale(callback)
 
 
 @router.callback_query(TitleCB.filter())
@@ -409,8 +420,13 @@ async def handle_season_scope(
 
     user_id = callback.from_user.id
     session = await db.get_session(user_id)
-    if not session:
-        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+    # Audit GRAB-03/UI-02: the season picker belongs to one title; a picker
+    # left in an old message must not search seasons of whatever title the
+    # session holds now.
+    title = session.selected_content if session else None
+    title_id = title.sonarr_id if isinstance(title, SeriesInfo) else None
+    if session is None or title_id is None or str(title_id) != callback_data.title_id:
+        await answer_stale(callback)
         return
 
     await callback.answer()

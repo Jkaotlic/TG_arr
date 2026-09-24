@@ -40,11 +40,13 @@ from bot.ui.callbacks import (
     AlbumScopeCB,
     AlbumSourceCB,
     ArtistCB,
+    MusicAddCB,
     SlskdCB,
     TrendingItemCB,
 )
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.list_token import ListTokenRegistry, answer_stale, new_list_token, token_matches
 from bot.ui.menu import MENU_MUSIC
 
 logger = structlog.get_logger()
@@ -200,6 +202,9 @@ async def _get_music_services() -> tuple[SearchService, AddService] | None:
 
 # Per-user Soulseek candidates, same LRU discipline as _artist_candidates.
 _slskd_candidates: dict[int, list] = {}
+# Audit 2026-09-23 GRAB-03: token of each user's current Soulseek list — a
+# button from an older search must not enqueue the same index of a newer one.
+_slskd_tokens = ListTokenRegistry(max_users=_MAX_ARTIST_CANDIDATES)
 
 
 @router.message(Command("music"))
@@ -315,6 +320,7 @@ async def process_soulseek_search(
         return
 
     _remember(_slskd_candidates, user_id, results)
+    list_token = _slskd_tokens.issue(user_id)
 
     await db.log_action(
         ActionLog(
@@ -328,7 +334,7 @@ async def process_soulseek_search(
     note = await _navidrome_note(results[0].guessed_artist, query if kind == "album" else "")
     await status_msg.edit_text(
         Formatters.format_slskd_results(results, query) + note,
-        reply_markup=Keyboards.slskd_results(results),
+        reply_markup=Keyboards.slskd_results(results, list_token=list_token),
         parse_mode="HTML",
     )
 
@@ -345,12 +351,27 @@ async def handle_slskd_selection(
     user_id = callback.from_user.id
     candidates = _slskd_candidates.get(user_id) or []
     idx = callback_data.idx
-    if idx < 0 or idx >= len(candidates):
-        await callback.answer("Список истёк. Повторите поиск.", show_alert=True)
+    if not _slskd_tokens.check(user_id, callback_data.tok) or idx >= len(candidates):
+        await answer_stale(callback)
         return
 
+    # Double tap (audit GRAB-16 part): the same per-user guard as every grab.
+    from bot.handlers.search import _claim_grab, _release_grab
+
+    if not await _claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
+        return
+    try:
+        await _enqueue_slskd_candidate(callback, message, db, user_id, candidates[idx])
+    finally:
+        _release_grab(user_id)
+
+
+async def _enqueue_slskd_candidate(
+    callback: CallbackQuery, message: Message, db: Database, user_id: int, candidate,
+) -> None:
+    """Queue one Soulseek candidate (the guarded body of the selection)."""
     await callback.answer("Ставлю в очередь...")
-    candidate = candidates[idx]
 
     slskd = await get_slskd()
     if slskd is None:
@@ -369,6 +390,9 @@ async def handle_slskd_selection(
     action.success = ok
     if not ok:
         action.error_message = "slskd rejected the transfer"
+    else:
+        # Taken: the list has done its job, its buttons are stale from now on.
+        _slskd_tokens.drop(user_id)
     await db.log_action(action)
 
     if ok:
@@ -535,15 +559,20 @@ async def handle_artist_selection(
     # DB-02: lock the read-modify-write cycle around storing the selected artist.
     async with db.session_lock(user_id):
         session = await db.get_session(user_id)
-        if session is None:
+        if session is None or session.content_type is not ContentType.MUSIC:
             session = SearchSession(user_id=user_id, query=artist.name, content_type=ContentType.MUSIC)
         session.selected_content = artist
+        # Audit GRAB-03: the artist card is its own "list" — its button must
+        # not add a different artist picked later in another message.
+        session.list_token = new_list_token()
         await db.save_session(user_id, session)
 
     await callback.answer()
     await message.edit_text(
         Formatters.format_artist_info(artist),
-        reply_markup=Keyboards.artist_details(artist, already_in_library=bool(artist.lidarr_id)),
+        reply_markup=Keyboards.artist_details(
+            artist, already_in_library=bool(artist.lidarr_id), list_token=session.list_token,
+        ),
         parse_mode="HTML",
     )
 
@@ -571,27 +600,40 @@ async def handle_album_scope(
     artist: ArtistInfo = session.selected_content
 
     if callback_data.album_id == 0:
+        # Audit GRAB-03: the picker belongs to one artist.
+        if artist.lidarr_id and callback_data.artist_id != artist.lidarr_id:
+            await answer_stale(callback)
+            return
         services = await _get_music_services()
         if services is None:
             await callback.answer("Lidarr не настроен", show_alert=True)
             return
         _search_service, add_service = services
 
-        await callback.answer("Беру всю дискографию...")
-        artist_id = artist.lidarr_id or callback_data.artist_id
-        # Монитор и поиск делегируются Lidarr: он сам решает, что «все альбомы»
-        # значит для этого артиста по его metadata-профилю.
-        await add_service.lidarr.set_artist_monitored(artist_id, True)
-        await add_service.lidarr.search_artist(artist_id)
-        await message.edit_text(
-            Formatters.format_success(
-                f"<b>{html.escape(artist.name)}</b>\n\n"
-                "Вся дискография под мониторингом, запущен автопоиск."
-            ),
-            parse_mode="HTML",
-        )
-        await db.delete_session(user_id)
-        _album_candidates.pop(user_id, None)
+        # Double tap → one discography search (audit GRAB-16 part).
+        from bot.handlers.search import _claim_grab, _release_grab
+
+        if not await _claim_grab(user_id):
+            await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
+            return
+        try:
+            await callback.answer("Беру всю дискографию...")
+            artist_id = artist.lidarr_id or callback_data.artist_id
+            # Монитор и поиск делегируются Lidarr: он сам решает, что «все альбомы»
+            # значит для этого артиста по его metadata-профилю.
+            await add_service.lidarr.set_artist_monitored(artist_id, True)
+            await add_service.lidarr.search_artist(artist_id)
+            await message.edit_text(
+                Formatters.format_success(
+                    f"<b>{html.escape(artist.name)}</b>\n\n"
+                    "Вся дискография под мониторингом, запущен автопоиск."
+                ),
+                parse_mode="HTML",
+            )
+            await db.delete_session(user_id)
+            _album_candidates.pop(user_id, None)
+        finally:
+            _release_grab(user_id)
         return
 
     album = _find_album(user_id, callback_data.album_id)
@@ -708,6 +750,7 @@ async def handle_album_source(
     async with db.session_lock(user_id):
         session.results = releases
         session.current_page = 0
+        session.list_token = new_list_token()  # audit GRAB-03: new list, new token
         await db.save_session(user_id, session)
 
     per_page = get_settings().results_per_page
@@ -717,7 +760,9 @@ async def handle_album_source(
             max(1, (len(releases) + per_page - 1) // per_page),
             f"{artist.name} — {album.title}", ContentType.MUSIC, per_page=per_page,
         ),
-        reply_markup=Keyboards.album_releases(releases[:per_page], album.lidarr_id, per_page=per_page),
+        reply_markup=Keyboards.album_releases(
+            releases[:per_page], album.lidarr_id, per_page=per_page, list_token=session.list_token,
+        ),
         parse_mode="HTML",
     )
 
@@ -737,8 +782,16 @@ async def handle_album_grab(
 
     user_id = callback.from_user.id
     session = await db.get_session(user_id)
-    if not session or callback_data.idx >= len(session.results):
-        await callback.answer("Список раздач истёк. Начните новый поиск.", show_alert=True)
+    # Audit GRAB-03: the button names the album-release list it was drawn for;
+    # a movie/series session (same index space!) or a newer list is stale.
+    if (
+        not session
+        or session.content_type is not ContentType.MUSIC
+        or not isinstance(session.selected_content, ArtistInfo)
+        or not token_matches(session.list_token, callback_data.tok)
+        or callback_data.idx >= len(session.results)
+    ):
+        await answer_stale(callback)
         return
 
     services = await _get_music_services()
@@ -747,6 +800,27 @@ async def handle_album_grab(
         return
     _search_service, add_service = services
 
+    from bot.handlers.search import _claim_grab, _release_grab
+
+    if not await _claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
+        return
+    try:
+        await _grab_album_release(callback, callback_data, message, session, add_service, db, user_id)
+    finally:
+        _release_grab(user_id)
+
+
+async def _grab_album_release(
+    callback: CallbackQuery,
+    callback_data: AlbumGrabCB,
+    message: Message,
+    session: SearchSession,
+    add_service: AddService,
+    db: Database,
+    user_id: int,
+) -> None:
+    """The guarded body of `handle_album_grab`."""
     release = session.results[callback_data.idx]
     await callback.answer("Беру...")
     ok, action = await add_service.grab_release(
@@ -821,6 +895,34 @@ async def handle_legacy_artist(callback: CallbackQuery) -> None:
     await callback.answer("Кнопка устарела — повторите поиск", show_alert=True)
 
 
+@router.callback_query(MusicAddCB.filter())
+async def handle_music_add(
+    callback: CallbackQuery, callback_data: MusicAddCB, db_user: User, db: Database,
+) -> None:
+    """"🔍 Искать" on an artist card (audit 2026-09-23: was the shared
+    ``confirm_grab``, which a movie session routed to a movie grab).
+
+    The token ties the button to the artist card it sits on — a card left in
+    an old message must not add the artist picked later.
+    """
+    session = await db.get_session(callback.from_user.id)
+    if (
+        not session
+        or not isinstance(session.selected_content, ArtistInfo)
+        or not token_matches(session.list_token, callback_data.tok)
+    ):
+        await answer_stale(callback)
+        return
+    await handle_confirm_music_add(callback, db_user, db)
+
+
+@router.callback_query(F.data.startswith("sk:") | F.data.startswith("alg:"))
+async def handle_legacy_music_pick(callback: CallbackQuery) -> None:
+    """Audit 2026-09-23: ``sk:N`` / ``alg:N:ALBUM`` without a list token —
+    buttons from messages sent by the previous version."""
+    await answer_stale(callback)
+
+
 async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: Database) -> None:
     """Confirm add artist to Lidarr."""
     # RACE-01: share the per-user grab guard with the movie/series flow so a
@@ -830,7 +932,7 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
     user_id = db_user.tg_id
     session = await db.get_session(user_id)
     if not session or not isinstance(session.selected_content, ArtistInfo):
-        return  # Not a music flow — fall through to other CONFIRM_GRAB handlers
+        return  # Not a music flow (handle_music_add checks this before calling)
 
     if not await _claim_grab(user_id):
         await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
@@ -919,9 +1021,9 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
         _release_grab(user_id)
 
 
-# BUG-27: CONFIRM_GRAB is now dispatched from handlers/search.py by session type.
-# music.py exposes handle_confirm_music_add; it is NOT registered as a separate
-# callback handler (aiogram does not cascade — would silently swallow movie/series).
+# BUG-27 / audit 2026-09-23: the artist card's button is `MusicAddCB`
+# (`handle_music_add` above), its own prefix — no longer the `confirm_grab`
+# string it once shared with the movie/series release card.
 
 
 # =========================================================================

@@ -98,6 +98,8 @@ async def _render_results_page(
     per_page: int,
     db_user: User,
     settings,
+    *,
+    list_token: str = "",
 ) -> None:
     """LOGIC-04: shared renderer for a page of search results.
 
@@ -149,6 +151,7 @@ async def _render_results_page(
             per_page,
             show_grab_best,
             best_score,
+            list_token=list_token,
         ),
         parse_mode="HTML",
     )

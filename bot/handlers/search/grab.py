@@ -13,9 +13,10 @@ from bot.models import MovieInfo, SearchSession, SeriesInfo, User
 from bot.services.add_service import AddService
 from bot.services.scoring import grab_best_candidate
 from bot.services.search_service import SearchService
-from bot.ui.callbacks import SeasonPresetCB
+from bot.ui.callbacks import ForceGrabCB, GrabBestCB, GrabCB, SeasonPresetCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.list_token import answer_stale, token_matches
 
 from bot.handlers import search as _search
 from .services import router
@@ -31,8 +32,37 @@ logger = structlog.get_logger()
 _SEASON_PRESETS = {"all", "future", "latestSeason", "firstSeason", "none"}
 
 
-@router.callback_query(F.data == CallbackData.GRAB_BEST)
-async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database) -> None:
+def _catalogue_list(session: SearchSession | None, tok: str) -> bool:
+    """Whether ``tok`` names the catalogue result list this session holds now.
+
+    Audit 2026-09-23 GRAB-03: every grab button carries the token of the list
+    it was drawn for; anything else (older search, free search, music, a
+    session from an older bot version without a token) is "устарел".
+    """
+    return bool(
+        session
+        and session.results
+        and not session.free_search
+        and isinstance(session.selected_content, (MovieInfo, SeriesInfo))
+        and token_matches(session.list_token, tok)
+    )
+
+
+def _selected_index(session: SearchSession) -> int:
+    """Index of ``selected_result`` in ``results`` (by guid) for re-rendering
+    the release card's buttons; 0 when it cannot be found."""
+    selected = session.selected_result
+    if selected is not None:
+        for i, r in enumerate(session.results):
+            if r.guid == selected.guid:
+                return i
+    return 0
+
+
+@router.callback_query(GrabBestCB.filter())
+async def handle_grab_best(
+    callback: CallbackQuery, callback_data: GrabBestCB, db_user: User, db: Database,
+) -> None:
     """Handle 'Grab Best' button - grab the highest scored release."""
     message = accessible_message(callback)
     if message is None:
@@ -47,8 +77,8 @@ async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database)
 
         session = await db.get_session(user_id)
 
-        if not session or not session.results:
-            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        if session is None or not _catalogue_list(session, callback_data.tok):
+            await answer_stale(callback)
             return
 
         # Audit 2026-09-23 GRAB-02: the keyboard may predate the list it
@@ -78,15 +108,18 @@ async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database)
         _search._release_grab(user_id)
 
 
-@router.callback_query(F.data == CallbackData.CONFIRM_GRAB)
-async def handle_confirm_grab(callback: CallbackQuery, db_user: User, db: Database) -> None:
-    """
-    Handle grab confirmation — single dispatch point for movie/series/music.
+@router.callback_query(GrabCB.filter())
+async def handle_confirm_grab(
+    callback: CallbackQuery, callback_data: GrabCB, db_user: User, db: Database,
+) -> None:
+    """Grab the release a card shows — movie/series only.
 
-    BUG-27: music handler previously attached its own `F.data == CONFIRM_GRAB`
-    callback and was included before search_router, so it silently swallowed
-    the event for movies/series (aiogram does not cascade handlers after a
-    routed match). Now we dispatch by session.selected_content type here.
+    BUG-27 history: this used to be the single ``confirm_grab`` dispatch point
+    for movies, series AND the music artist card, choosing by
+    ``session.selected_content``. Audit 2026-09-23 GRAB-03 split it: the
+    artist card has its own ``MusicAddCB`` (bot/handlers/music.py), and this
+    button carries the list token and the release index, so a card from an
+    older list — or from another content type — can never grab.
     """
     message = accessible_message(callback)
     if message is None:
@@ -95,22 +128,12 @@ async def handle_confirm_grab(callback: CallbackQuery, db_user: User, db: Databa
     user_id = callback.from_user.id
     session = await db.get_session(user_id)
 
-    if not session:
-        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
-        return
-
-    # Music flow — delegate to music handler's add-artist logic.
-    from bot.models import ArtistInfo
-
-    if isinstance(session.selected_content, ArtistInfo):
-        from bot.handlers.music import handle_confirm_music_add
-
-        await handle_confirm_music_add(callback, db_user, db)
-        return
-
-    # Movie / series flow — requires a selected release.
-    if not session.selected_result:
-        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+    if (
+        session is None
+        or not _catalogue_list(session, callback_data.tok)
+        or callback_data.idx >= len(session.results)
+    ):
+        await answer_stale(callback)
         return
 
     # RACE-01: reject a concurrent second grab for this user.
@@ -118,6 +141,7 @@ async def handle_confirm_grab(callback: CallbackQuery, db_user: User, db: Databa
         await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
     try:
+        session.selected_result = session.results[callback_data.idx]
         search_service, add_service = await _search.get_services()
         await callback.answer("Обработка...")
         await message.edit_text("⏳ Обрабатываю запрос...")
@@ -288,25 +312,32 @@ async def _execute_grab(
         await db.delete_session(user_id)
 
 
-@router.callback_query(F.data == CallbackData.FORCE_GRAB)
-async def handle_force_grab(callback: CallbackQuery, db_user: User, db: Database) -> None:
+@router.callback_query(ForceGrabCB.filter())
+async def handle_force_grab(
+    callback: CallbackQuery, callback_data: ForceGrabCB, db_user: User, db: Database,
+) -> None:
     """Handle force grab button - downloads directly via qBittorrent."""
     message = accessible_message(callback)
     if message is None:
         return
 
     user_id = db_user.tg_id
+    session = await db.get_session(user_id)
+    if (
+        session is None
+        or not _catalogue_list(session, callback_data.tok)
+        or callback_data.idx >= len(session.results)
+    ):
+        await answer_stale(callback)
+        return
+
     # RACE-01: reject a concurrent second grab (e.g. Confirm then Force) for this user.
     if not await _search._claim_grab(user_id):
         await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
     try:
         await callback.answer("Загружаю напрямую...")
-
-        session = await db.get_session(user_id)
-        if not session or not session.selected_result:
-            await message.edit_text(Formatters.format_error("Сессия истекла. Повторите поиск."))
-            return
+        session.selected_result = session.results[callback_data.idx]
 
         search_service, add_service = await _search.get_services()
 
@@ -378,6 +409,8 @@ async def handle_season_preset(
             result, session.content_type,
             show_force_grab=has_qbittorrent,
             content=session.selected_content,
+            list_token=session.list_token,
+            idx=_selected_index(session),
         ),
         parse_mode="HTML",
     )
@@ -412,6 +445,8 @@ async def handle_season_back(callback: CallbackQuery, db_user: User, db: Databas
             result, session.content_type,
             show_force_grab=has_qbittorrent,
             content=session.selected_content,
+            list_token=session.list_token,
+            idx=_selected_index(session),
         ),
         parse_mode="HTML",
     )
@@ -424,3 +459,13 @@ async def handle_legacy_season_preset(callback: CallbackQuery) -> None:
     of falling through unhandled.
     """
     await callback.answer("Кнопка устарела — откройте карточку релиза заново", show_alert=True)
+
+
+@router.callback_query(F.data == CallbackData.GRAB_BEST)
+@router.callback_query(F.data == CallbackData.CONFIRM_GRAB)
+@router.callback_query(F.data == CallbackData.FORCE_GRAB)
+async def handle_legacy_grab(callback: CallbackQuery) -> None:
+    """Audit 2026-09-23: plain ``grab_best``/``confirm_grab``/``force_grab``
+    buttons from messages sent before list tokens — they name no list, so
+    they must not act on whatever the session holds now."""
+    await answer_stale(callback)

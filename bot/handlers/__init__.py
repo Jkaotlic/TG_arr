@@ -21,9 +21,10 @@ def setup_routers() -> Router:
     """Setup and return the main router with all handlers."""
     main_router = Router()
 
-    # search_router owns CONFIRM_GRAB and dispatches to music/movie/series by
-    # session.selected_content type (BUG-27). music_router is only for /music,
-    # artist selection, and TRENDING_MUSIC callbacks.
+    # Grab buttons are typed per flow since the 2026-09-23 audit (GrabCB for a
+    # release card, MusicAddCB for an artist card), each carrying a list token
+    # (bot/ui/list_token.py); the legacy `confirm_grab` string only answers
+    # "Список устарел" (search_router).
     main_router.include_router(start_router)
     # Before search_router: handle_text_search claims any plain text, and
     # aiogram does not cascade handlers after a routed match.

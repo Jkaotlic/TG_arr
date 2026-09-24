@@ -46,9 +46,49 @@ class TorrentPageCB(CallbackData, prefix="tpg"):
 
 
 class ReleaseCB(CallbackData, prefix="rel"):
-    """Search-result release selection (was ``rel:N`` string prefix)."""
+    """Search-result release selection (was ``rel:N`` string prefix).
 
-    idx: int
+    ``tok`` — the list token (``bot/ui/list_token.py``, audit 2026-09-23
+    GRAB-03): a button from an older list must not resolve ``idx`` in the
+    current one. A legacy ``rel:N`` does not unpack and lands in the
+    "устарел" handler.
+    """
+
+    tok: str
+    idx: int = Field(ge=0)
+
+
+class GrabBestCB(CallbackData, prefix="gb"):
+    """"⚡ Лучший" on a results list (was the plain ``grab_best`` string)."""
+
+    tok: str
+
+
+class GrabCB(CallbackData, prefix="gr"):
+    """"✅ Скачать" on a release card (was the shared ``confirm_grab`` string).
+
+    Carries the release index, so the card grabs the release it shows — not
+    whatever ``selected_result`` points at now. ``ok=1`` is the explicit
+    "download anyway" confirmation for a release *arr rejected (Task B3).
+    """
+
+    tok: str
+    idx: int = Field(ge=0)
+    ok: int = 0
+
+
+class ForceGrabCB(CallbackData, prefix="gq"):
+    """"⚡ Принудительно (qBit)" on a release card (was ``force_grab``)."""
+
+    tok: str
+    idx: int = Field(ge=0)
+
+
+class MusicAddCB(CallbackData, prefix="ma"):
+    """"🔍 Искать" on an artist card (was the shared ``confirm_grab`` string,
+    which a movie session would have routed to a movie grab)."""
+
+    tok: str
 
 
 class ArtistCB(CallbackData, prefix="art"):
@@ -123,10 +163,12 @@ class SlskdCB(CallbackData, prefix="sk"):
 
     Only the index is carried: the candidate itself (remote username + the
     whole file list) is far too large for callback_data's 64-byte budget, so
-    the handler resolves it from the per-user in-memory list.
+    the handler resolves it from the per-user in-memory list. ``tok`` ties the
+    button to that list (``music._slskd_tokens``).
     """
 
-    idx: int
+    tok: str
+    idx: int = Field(ge=0)
 
 
 class TitleCB(CallbackData, prefix="ti"):
@@ -177,6 +219,7 @@ class TsReleaseCB(CallbackData, prefix="tsr"):
     negative indexing to the wrong cached item.
     """
 
+    tok: str
     idx: int = Field(ge=0)
 
 
@@ -217,6 +260,7 @@ class TsAddCB(CallbackData, prefix="tsa"):
     ``TsReleaseCB.idx``.
     """
 
+    tok: str
     idx: int = Field(ge=0)
 
 
@@ -235,7 +279,8 @@ class FindPageCB(CallbackData, prefix="fp"):
 class FindReleaseCB(CallbackData, prefix="fr"):
     """Open one free-search hit — index into ``SearchSession.results``."""
 
-    idx: int
+    tok: str
+    idx: int = Field(ge=0)
 
 
 class FindGrabCB(CallbackData, prefix="fg"):
@@ -243,10 +288,11 @@ class FindGrabCB(CallbackData, prefix="fg"):
 
     Carries the index rather than relying on ``selected_result``, so a stale
     card left open in an old message cannot grab whatever the session happens
-    to point at now.
+    to point at now. ``tok`` does the same across searches.
     """
 
-    idx: int
+    tok: str
+    idx: int = Field(ge=0)
 
 
 class AlbumScopeCB(CallbackData, prefix="al"):
@@ -298,6 +344,7 @@ class AlbumGrabCB(CallbackData, prefix="alg"):
     разрешился бы через питоновскую отрицательную индексацию в чужой элемент.
     """
 
+    tok: str
     idx: int = Field(ge=0)
     album_id: int
 

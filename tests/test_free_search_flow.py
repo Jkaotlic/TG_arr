@@ -67,6 +67,7 @@ def _free_session(results=None) -> SearchSession:
         content_type=ContentType.UNKNOWN,
         results=results if results is not None else [_release()],
         free_search=True,
+        list_token="tok123",  # audit 2026-09-23: list token on every button
     )
 
 
@@ -137,7 +138,7 @@ async def test_grab_goes_through_add_service_without_an_arr_id(monkeypatch):
     free_mod = _patched_services(monkeypatch, add_service=add_service)
 
     db = _db(_free_session())
-    await free_mod.handle_find_grab(_callback(), FindGrabCB(idx=0), User(tg_id=5), db)
+    await free_mod.handle_find_grab(_callback(), FindGrabCB(tok="tok123", idx=0), User(tg_id=5), db)
 
     add_service.grab_release.assert_awaited_once()
     assert "arr_id" not in add_service.grab_release.await_args.kwargs
@@ -156,7 +157,7 @@ async def test_success_message_says_the_title_is_not_in_the_library(monkeypatch)
     free_mod = _patched_services(monkeypatch, add_service=add_service)
 
     callback = _callback()
-    await free_mod.handle_find_grab(callback, FindGrabCB(idx=0), User(tg_id=5), _db(_free_session()))
+    await free_mod.handle_find_grab(callback, FindGrabCB(tok="tok123", idx=0), User(tg_id=5), _db(_free_session()))
 
     final = callback.message.edit_text.await_args.args[0]
     assert "библиотек" in final.lower()
@@ -173,7 +174,7 @@ async def test_failed_grab_shows_the_reason(monkeypatch):
     free_mod = _patched_services(monkeypatch, add_service=add_service)
 
     callback = _callback()
-    await free_mod.handle_find_grab(callback, FindGrabCB(idx=0), User(tg_id=5), _db(_free_session()))
+    await free_mod.handle_find_grab(callback, FindGrabCB(tok="tok123", idx=0), User(tg_id=5), _db(_free_session()))
 
     final = callback.message.edit_text.await_args.args[0]
     assert "Radarr/Sonarr" in final
@@ -185,7 +186,7 @@ async def test_stale_results_are_refused():
     from bot.ui.callbacks import FindGrabCB
 
     callback = _callback()
-    await free_mod.handle_find_grab(callback, FindGrabCB(idx=0), User(tg_id=5), _db(None))
+    await free_mod.handle_find_grab(callback, FindGrabCB(tok="tok123", idx=0), User(tg_id=5), _db(None))
 
     callback.answer.assert_awaited_once()
     assert callback.answer.await_args.kwargs.get("show_alert") is True
@@ -202,7 +203,7 @@ async def test_a_catalogue_session_is_not_treated_as_a_free_one():
         user_id=5, query="дюна", content_type=ContentType.MOVIE, results=[_release()],
     )
     callback = _callback()
-    await free_mod.handle_find_grab(callback, FindGrabCB(idx=0), User(tg_id=5), _db(catalogue))
+    await free_mod.handle_find_grab(callback, FindGrabCB(tok="tok123", idx=0), User(tg_id=5), _db(catalogue))
 
     assert callback.answer.await_args.kwargs.get("show_alert") is True
 
@@ -214,7 +215,7 @@ async def test_release_card_warns_the_title_is_not_in_the_library():
 
     callback = _callback()
     await free_mod.handle_find_release(
-        callback, FindReleaseCB(idx=0), User(tg_id=5), _db(_free_session()),
+        callback, FindReleaseCB(tok="tok123", idx=0), User(tg_id=5), _db(_free_session()),
     )
 
     text = callback.message.edit_text.await_args.args[0]

@@ -16,9 +16,9 @@ HANDLERS = Path(__file__).resolve().parent.parent / "bot" / "handlers"
 
 #: Handlers that legitimately never ack, because they hand the event to another
 #: handler that owns the single ack.
-DELEGATES = {
-    "handle_confirm_grab",   # dispatches to handle_confirm_music_add for music
-}
+DELEGATES: set[str] = set()
+# (handle_confirm_grab used to delegate music to handle_confirm_music_add; the
+# artist card has its own MusicAddCB since the 2026-09-23 audit.)
 
 
 def _is_callback_handler(node: ast.AsyncFunctionDef) -> bool:
@@ -36,6 +36,9 @@ def _acks(node: ast.AST) -> bool:
             continue
         func = sub.func
         if isinstance(func, ast.Attribute) and func.attr == "answer":
+            return True
+        # bot/ui/list_token.answer_stale(callback) is callback.answer(..., show_alert=True)
+        if isinstance(func, ast.Name) and func.id == "answer_stale":
             return True
         # `await handle_x(callback, ...)` — the callee owns the ack.
         if isinstance(func, ast.Name) and func.id.startswith("handle_"):

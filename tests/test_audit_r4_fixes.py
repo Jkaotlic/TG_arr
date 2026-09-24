@@ -16,6 +16,7 @@ from bot.models import (
     TorrentState,
     User,
 )
+from bot.ui.callbacks import GrabBestCB
 from tests.conftest import callback_with_status as _callback_with_status
 
 
@@ -282,6 +283,9 @@ async def test_double_tap_grab_best_executes_once():
         # Audit 2026-09-23 B1: "⚡ Лучший" now re-checks *arr's verdict, so the
         # fixture is an accepted *arr release (this test is about the double tap).
         results=[SearchResult(guid="g", title="t", origin="arr", indexer_id=1)],
+        # Audit 2026-09-23 B2: the button names its list by token.
+        selected_content=MovieInfo(tmdb_id=1, title="M", year=2024, radarr_id=5),
+        list_token="tok123",
     )
     db = AsyncMock()
     db.get_session = AsyncMock(return_value=session)
@@ -319,8 +323,8 @@ async def test_double_tap_grab_best_executes_once():
     with patch.object(search, "get_services", AsyncMock(return_value=services)), \
          patch.object(search, "grab_release", AsyncMock(side_effect=gated_grab)) as gr:
         await asyncio.gather(
-            search.handle_grab_best(cb1, db_user, db),
-            search.handle_grab_best(cb2, db_user, db),
+            search.handle_grab_best(cb1, GrabBestCB(tok="tok123"), db_user, db),
+            search.handle_grab_best(cb2, GrabBestCB(tok="tok123"), db_user, db),
             release_after_both_attempted(),
         )
 

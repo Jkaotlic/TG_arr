@@ -254,6 +254,7 @@ async def test_album_search_queues_the_selected_candidate():
         files=[SlskdFile(filename="a.flac", name="a.flac", size=100, extension="flac")],
     )
     music._slskd_candidates[42] = [candidate]
+    tok = music._slskd_tokens.issue(42)  # audit 2026-09-23: list token
 
     slskd = AsyncMock()
     slskd.enqueue = AsyncMock(return_value=True)
@@ -266,7 +267,7 @@ async def test_album_search_queues_the_selected_candidate():
     db = AsyncMock()
 
     with patch.object(music, "get_slskd", AsyncMock(return_value=slskd)):
-        await music.handle_slskd_selection(callback, SlskdCB(idx=0), MagicMock(tg_id=42), db)
+        await music.handle_slskd_selection(callback, SlskdCB(tok=tok, idx=0), MagicMock(tg_id=42), db)
 
     slskd.enqueue.assert_awaited_once_with("peer", candidate.files)
     db.log_action.assert_awaited_once()
@@ -286,7 +287,7 @@ async def test_album_selection_with_a_stale_list_asks_to_search_again():
     callback.message = MagicMock()
     callback.message.edit_text = AsyncMock()
 
-    await music.handle_slskd_selection(callback, SlskdCB(idx=0), MagicMock(tg_id=42), AsyncMock())
+    await music.handle_slskd_selection(callback, SlskdCB(tok="old000", idx=0), MagicMock(tg_id=42), AsyncMock())
 
     callback.message.edit_text.assert_not_awaited()
     assert callback.answer.await_args.kwargs.get("show_alert") is True

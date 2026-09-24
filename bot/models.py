@@ -582,6 +582,11 @@ class SearchSession(BaseModel):
     # Поле с дефолтом: старые сохранённые сессии читаются как есть, миграция
     # не нужна.
     free_search: bool = False
+    # Audit 2026-09-23 GRAB-03: token of the list currently shown for this
+    # session (bot/ui/list_token.py). Every list button carries it; "" (a
+    # session saved by an older version) matches nothing, so old buttons read
+    # as "Список устарел" instead of acting on a different item.
+    list_token: str = ""
     created_at: datetime = Field(default_factory=_utcnow)
 
 

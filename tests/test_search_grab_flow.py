@@ -23,6 +23,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from bot.ui.callbacks import ForceGrabCB, GrabCB
+from bot.ui.list_token import STALE_LIST_TEXT
 from bot.models import (
     ActionLog,
     ActionType,
@@ -35,6 +37,10 @@ from bot.models import (
     User,
     UserPreferences,
 )
+
+
+#: Audit 2026-09-23: every list button carries the token of its list.
+TOK = "tok123"
 
 
 def _make_callback(data: str = "") -> MagicMock:
@@ -95,7 +101,8 @@ async def test_force_grab_reaches_execute_grab_with_force_download_true():
     result = SearchResult(guid="g1", title="Test.Release", calculated_score=50)
     session = SearchSession(
         user_id=42, query="test", content_type=ContentType.MOVIE, results=[result],
-        selected_result=result,
+        selected_result=result, list_token=TOK,
+        selected_content=MovieInfo(tmdb_id=1, title="M", year=2024, radarr_id=5),
     )
     db = _make_db(session)
     db_user = _make_db_user()
@@ -107,7 +114,7 @@ async def test_force_grab_reaches_execute_grab_with_force_download_true():
 
     with patch.object(search, "get_services", AsyncMock(return_value=services)), \
          patch.object(search, "_execute_grab", AsyncMock()) as execute_grab:
-        await search.handle_force_grab(callback, db_user, db)
+        await search.handle_force_grab(callback, ForceGrabCB(tok=TOK, idx=0), db_user, db)
 
     execute_grab.assert_awaited_once()
     assert execute_grab.await_args.kwargs.get("force_download") is True
@@ -122,7 +129,8 @@ async def test_force_grab_without_qbittorrent_shows_not_configured_error():
     result = SearchResult(guid="g1", title="Test.Release", calculated_score=50)
     session = SearchSession(
         user_id=42, query="test", content_type=ContentType.MOVIE, results=[result],
-        selected_result=result,
+        selected_result=result, list_token=TOK,
+        selected_content=MovieInfo(tmdb_id=1, title="M", year=2024, radarr_id=5),
     )
     db = _make_db(session)
     db_user = _make_db_user()
@@ -134,7 +142,7 @@ async def test_force_grab_without_qbittorrent_shows_not_configured_error():
 
     with patch.object(search, "get_services", AsyncMock(return_value=services)), \
          patch.object(search, "_execute_grab", AsyncMock()) as execute_grab:
-        await search.handle_force_grab(callback, db_user, db)
+        await search.handle_force_grab(callback, ForceGrabCB(tok=TOK, idx=0), db_user, db)
 
     execute_grab.assert_not_awaited()
     sent = callback.message.edit_text.await_args_list[-1].args[0]
@@ -151,10 +159,10 @@ async def test_force_grab_no_session_shows_expired_message():
     callback = _make_callback()
 
     with patch.object(search, "get_services", AsyncMock(return_value=(MagicMock(), MagicMock()))):
-        await search.handle_force_grab(callback, db_user, db)
+        await search.handle_force_grab(callback, ForceGrabCB(tok=TOK, idx=0), db_user, db)
 
-    sent = callback.message.edit_text.await_args_list[-1].args[0]
-    assert "истекла" in sent.lower() or "повторите" in sent.lower()
+    # Audit 2026-09-23: no list behind the button → "Список устарел", no action.
+    assert callback.answer.await_args.args[0] == STALE_LIST_TEXT
 
 
 @pytest.mark.asyncio
@@ -166,7 +174,8 @@ async def test_force_grab_double_tap_second_call_rejected():
     result = SearchResult(guid="g1", title="Test.Release", calculated_score=50)
     session = SearchSession(
         user_id=42, query="test", content_type=ContentType.MOVIE, results=[result],
-        selected_result=result,
+        selected_result=result, list_token=TOK,
+        selected_content=MovieInfo(tmdb_id=1, title="M", year=2024, radarr_id=5),
     )
     db = _make_db(session)
     db_user = _make_db_user()
@@ -176,7 +185,7 @@ async def test_force_grab_double_tap_second_call_rejected():
     callback = _make_callback()
     with patch.object(search, "get_services", AsyncMock(return_value=(MagicMock(), MagicMock()))), \
          patch.object(search, "_execute_grab", AsyncMock()) as execute_grab:
-        await search.handle_force_grab(callback, db_user, db)
+        await search.handle_force_grab(callback, ForceGrabCB(tok=TOK, idx=0), db_user, db)
 
     execute_grab.assert_not_awaited()
     answers = [c.args[0] for c in callback.answer.await_args_list if c.args]
@@ -187,14 +196,17 @@ async def test_force_grab_double_tap_second_call_rejected():
 # handle_confirm_grab — dispatch by session.selected_content type (BUG-27)
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_confirm_grab_dispatches_artist_to_music_flow():
-    """An ArtistInfo selected_content must be routed to the music handler,
-    never treated as a movie/series grab."""
+async def test_release_grab_button_never_acts_on_a_music_session():
+    """Audit 2026-09-23: the release card's GrabCB is movie/series only — a
+    music session (even with a matching token) is "устарел", never a grab.
+    The artist card has its own MusicAddCB (see test_music_add_delegates...)."""
     from bot.handlers import search
+    from bot.ui.callbacks import GrabCB
 
     artist = ArtistInfo(mb_id="abc", name="Test Artist")
     session = SearchSession(
         user_id=42, query="test artist", content_type=ContentType.MUSIC,
+        results=[SearchResult(guid="g", title="t")], list_token=TOK,
     )
     session.selected_content = artist
     db = _make_db(session)
@@ -203,10 +215,29 @@ async def test_confirm_grab_dispatches_artist_to_music_flow():
 
     with patch("bot.handlers.music.handle_confirm_music_add", AsyncMock()) as music_confirm, \
          patch.object(search, "_execute_grab", AsyncMock()) as execute_grab:
-        await search.handle_confirm_grab(callback, db_user, db)
+        await search.handle_confirm_grab(callback, GrabCB(tok=TOK, idx=0), db_user, db)
+
+    music_confirm.assert_not_awaited()
+    execute_grab.assert_not_awaited()
+    assert callback.answer.await_args.args[0] == STALE_LIST_TEXT
+
+
+@pytest.mark.asyncio
+async def test_music_add_delegates_to_the_add_artist_flow():
+    from bot.handlers import music
+    from bot.ui.callbacks import MusicAddCB
+
+    session = SearchSession(
+        user_id=42, query="test artist", content_type=ContentType.MUSIC,
+        selected_content=ArtistInfo(mb_id="abc", name="Test Artist"), list_token=TOK,
+    )
+    db = _make_db(session)
+    callback = _make_callback()
+
+    with patch.object(music, "handle_confirm_music_add", AsyncMock()) as music_confirm:
+        await music.handle_music_add(callback, MusicAddCB(tok=TOK), _make_db_user(), db)
 
     music_confirm.assert_awaited_once()
-    execute_grab.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -219,7 +250,7 @@ async def test_confirm_grab_dispatches_movie_to_grab_release():
     movie = MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)
     session = SearchSession(
         user_id=42, query="interstellar", content_type=ContentType.MOVIE, results=[result],
-        selected_result=result,
+        selected_result=result, list_token=TOK,
     )
     session.selected_content = movie
     db = _make_db(session)
@@ -230,7 +261,7 @@ async def test_confirm_grab_dispatches_movie_to_grab_release():
     with patch.object(search, "get_services", AsyncMock(return_value=services)), \
          patch("bot.handlers.music.handle_confirm_music_add", AsyncMock()) as music_confirm, \
          patch.object(search, "grab_release", AsyncMock()) as grab_release:
-        await search.handle_confirm_grab(callback, db_user, db)
+        await search.handle_confirm_grab(callback, GrabCB(tok=TOK, idx=0), db_user, db)
 
     grab_release.assert_awaited_once()
     music_confirm.assert_not_awaited()
@@ -244,11 +275,11 @@ async def test_confirm_grab_no_session_shows_expired():
     db_user = _make_db_user()
     callback = _make_callback()
 
-    await search.handle_confirm_grab(callback, db_user, db)
+    await search.handle_confirm_grab(callback, GrabCB(tok=TOK, idx=0), db_user, db)
 
     callback.answer.assert_awaited()
     answer_args = [c.args[0] for c in callback.answer.await_args_list if c.args]
-    assert any("истекла" in a.lower() for a in answer_args)
+    assert STALE_LIST_TEXT in answer_args
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +303,7 @@ def _session_with_title(**overrides) -> SearchSession:
         results=[release],
         selected_result=release,
         selected_content=MovieInfo(tmdb_id=157336, title="Interstellar", year=2014, radarr_id=99),
+        list_token=TOK,
     )
     data.update(overrides)
     return SearchSession(**data)
@@ -395,7 +427,7 @@ async def test_release_selection_acks_before_rendering():
 
     with patch.object(search, "get_services", AsyncMock(return_value=(MagicMock(), add_service))), \
          patch.object(search, "_emby_library_note", AsyncMock(return_value="")):
-        await search.handle_release_selection(callback, ReleaseCB(idx=0), _make_db_user(), db)
+        await search.handle_release_selection(callback, ReleaseCB(tok=TOK, idx=0), _make_db_user(), db)
 
     assert call_order[0] == "answer"
 
@@ -423,7 +455,7 @@ async def test_release_selection_does_not_hit_the_network_again():
 
     with patch.object(search, "get_services", AsyncMock(return_value=(search_service, add_service))), \
          patch.object(search, "_emby_library_note", AsyncMock(return_value="")):
-        await search.handle_release_selection(callback, ReleaseCB(idx=0), _make_db_user(), db)
+        await search.handle_release_selection(callback, ReleaseCB(tok=TOK, idx=0), _make_db_user(), db)
 
     search_service.radarr.lookup_movie.assert_not_awaited()
     search_service.sonarr.lookup_series.assert_not_awaited()
@@ -446,7 +478,7 @@ async def test_release_selection_without_title_still_offers_the_grab_buttons():
     callback = _make_callback()
 
     with patch.object(search, "get_services", AsyncMock(return_value=(MagicMock(), add_service))):
-        await search.handle_release_selection(callback, ReleaseCB(idx=0), _make_db_user(), db)
+        await search.handle_release_selection(callback, ReleaseCB(tok=TOK, idx=0), _make_db_user(), db)
 
     kwargs = callback.message.edit_text.await_args.kwargs
     assert kwargs["reply_markup"] is not None

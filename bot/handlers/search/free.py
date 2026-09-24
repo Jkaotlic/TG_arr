@@ -28,6 +28,7 @@ from bot.services.search_service import describe_search_failure
 from bot.ui.callbacks import FindGrabCB, FindPageCB, FindReleaseCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.list_token import answer_stale, new_list_token, token_matches
 
 from bot.handlers import search as _search
 from .services import MAX_QUERY_LENGTH, router
@@ -53,6 +54,16 @@ def _is_free_session(session) -> bool:
     return bool(session and session.free_search and session.results)
 
 
+def _is_current_hit(session, tok: str, idx: int) -> bool:
+    """Audit GRAB-03: the button's list token names the free-search list this
+    session holds now, and the index is inside it."""
+    return bool(
+        _is_free_session(session)
+        and token_matches(session.list_token, tok)
+        and idx < len(session.results)
+    )
+
+
 async def _render_page(message: Message, session: SearchSession, page: int) -> None:
     """Render one page of free-search hits into `message` (edit in place)."""
     per_page = get_settings().results_per_page
@@ -66,7 +77,9 @@ async def _render_page(message: Message, session: SearchSession, page: int) -> N
     await safe_edit(
         message,
         f"{text}\n\n🔎 <i>Свободный поиск — напрямую в Prowlarr, мимо каталога.</i>",
-        reply_markup=Keyboards.free_results(chunk, page, total_pages, offset=page * per_page),
+        reply_markup=Keyboards.free_results(
+            chunk, page, total_pages, offset=page * per_page, list_token=session.list_token,
+        ),
         parse_mode="HTML",
     )
 
@@ -107,6 +120,7 @@ async def run_free_search(
         content_type=ContentType.UNKNOWN,
         results=results,
         free_search=True,
+        list_token=new_list_token(),  # audit GRAB-03: a new list, a new token
     )
     await db.save_session(db_user.tg_id, session)
     await db.log_action(ActionLog(
@@ -190,8 +204,8 @@ async def handle_find_release(
         return
 
     session = await db.get_session(callback.from_user.id)
-    if not _is_free_session(session) or callback_data.idx >= len(session.results):
-        await callback.answer("Результаты устарели — повторите поиск", show_alert=True)
+    if not _is_current_hit(session, callback_data.tok, callback_data.idx):
+        await answer_stale(callback)
         return
 
     release = session.results[callback_data.idx]
@@ -199,7 +213,7 @@ async def handle_find_release(
     await safe_edit(
         message,
         f"{Formatters.format_release_details(release)}\n\n{_NOT_IN_LIBRARY_NOTE}",
-        reply_markup=Keyboards.free_release(callback_data.idx),
+        reply_markup=Keyboards.free_release(callback_data.idx, list_token=session.list_token),
         parse_mode="HTML",
     )
 
@@ -220,8 +234,8 @@ async def handle_find_grab(
 
     user_id = callback.from_user.id
     session = await db.get_session(user_id)
-    if not _is_free_session(session) or callback_data.idx >= len(session.results):
-        await callback.answer("Результаты устарели — повторите поиск", show_alert=True)
+    if not _is_current_hit(session, callback_data.tok, callback_data.idx):
+        await answer_stale(callback)
         return
 
     release = session.results[callback_data.idx]
@@ -258,3 +272,11 @@ async def handle_find_grab(
         await db.delete_session(user_id)
     finally:
         _search._release_grab(user_id)
+
+
+@router.callback_query(F.data.startswith("fr:") | F.data.startswith("fg:"))
+async def handle_legacy_find(callback: CallbackQuery) -> None:
+    """Audit 2026-09-23: ``fr:N``/``fg:N`` without a list token (messages
+    sent by the previous version) — the typed filters above do not unpack
+    them."""
+    await answer_stale(callback)

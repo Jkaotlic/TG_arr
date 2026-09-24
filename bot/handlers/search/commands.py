@@ -20,6 +20,7 @@ from bot.models import ActionLog, ActionType, ContentType, SearchSession, User
 from bot.services.search_service import SearchService, describe_search_failure
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import Keyboards
+from bot.ui.list_token import new_list_token
 from bot.ui.menu import MENU_BUTTONS, MENU_SEARCH
 
 from bot.handlers import search as _search
@@ -612,6 +613,9 @@ async def process_search(
             results=results,
             current_page=0,
             selected_content=title,
+            # Audit GRAB-03: a new result set = a new list token; buttons of
+            # any earlier list stop matching.
+            list_token=new_list_token(),
         )
         await db.save_session(user_id, session)
 
@@ -620,7 +624,8 @@ async def process_search(
 
         # LOGIC-04: shared renderer (also swallows "message is not modified").
         await _search._render_results_page(
-            status_msg, results, 0, total_pages, query, content_type, per_page, db_user, settings
+            status_msg, results, 0, total_pages, query, content_type, per_page, db_user, settings,
+            list_token=session.list_token,
         )
 
         action = ActionLog(

@@ -25,9 +25,9 @@ def _cbs(kb):
 def test_release_cb_roundtrip():
     from bot.ui.callbacks import ReleaseCB
 
-    packed = ReleaseCB(idx=7).pack()
+    packed = ReleaseCB(tok="abc123", idx=7).pack()
     got = ReleaseCB.unpack(packed)
-    assert got.idx == 7
+    assert (got.tok, got.idx) == ("abc123", 7)
 
 
 def test_search_results_release_buttons_use_typed_cb():
@@ -35,7 +35,7 @@ def test_search_results_release_buttons_use_typed_cb():
     from bot.ui.keyboards import Keyboards
 
     results = [SearchResult(guid=str(i), title=f"t{i}") for i in range(3)]
-    kb = Keyboards.search_results(results, 0, 1, 5, False, 0)
+    kb = Keyboards.search_results(results, 0, 1, 5, False, 0, list_token="abc123")
     cbs = _cbs(kb)
     rel_cbs = [c for c in cbs if c.startswith("rel:")]
     assert len(rel_cbs) == 3
@@ -52,6 +52,7 @@ async def test_handle_release_selection_reads_callback_data():
     session = SearchSession(
         user_id=1, query="q", content_type=ContentType.MOVIE,
         results=[SearchResult(guid=str(i), title=f"t{i}") for i in range(3)],
+        list_token="abc123",
     )
     db = AsyncMock()
     db.get_session = AsyncMock(return_value=session)
@@ -69,7 +70,7 @@ async def test_handle_release_selection_reads_callback_data():
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(results_mod._search, "get_services", AsyncMock(return_value=(MagicMock(), MagicMock(qbittorrent=None))))
-        await results_mod.handle_release_selection(cb, ReleaseCB(idx=1), db_user, db)
+        await results_mod.handle_release_selection(cb, ReleaseCB(tok="abc123", idx=1), db_user, db)
 
     assert session.selected_result.guid == "1"
 

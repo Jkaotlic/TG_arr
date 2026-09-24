@@ -10,6 +10,7 @@ from bot.ui.callbacks import (
     AlbumScopeCB,
     AlbumSourceCB,
     ArtistCB,
+    MusicAddCB,
 )
 from bot.ui.keyboards._constants import CallbackData
 
@@ -63,12 +64,18 @@ class _MusicKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
-    def artist_details(artist: ArtistInfo, already_in_library: bool = False) -> InlineKeyboardMarkup:
-        """Create keyboard for artist details (add/search)."""
+    def artist_details(
+        artist: ArtistInfo, already_in_library: bool = False, list_token: str = "",
+    ) -> InlineKeyboardMarkup:
+        """Create keyboard for artist details (add/search).
+
+        Audit 2026-09-23: the button is ``MusicAddCB(tok)``, not the shared
+        ``confirm_grab`` — a movie session used to route that to a movie grab.
+        """
         keyboard = []
         if already_in_library:
             keyboard.append([
-                InlineKeyboardButton(text="🔍 Искать", callback_data=CallbackData.CONFIRM_GRAB),
+                InlineKeyboardButton(text="🔍 Искать", callback_data=MusicAddCB(tok=list_token).pack()),
             ])
         else:
             # Кнопка больше не «добавить всю дискографию»: она резолвит артиста
@@ -76,7 +83,7 @@ class _MusicKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text="🔍 Искать (добавит в Lidarr)",
-                    callback_data=CallbackData.CONFIRM_GRAB,
+                    callback_data=MusicAddCB(tok=list_token).pack(),
                 ),
             ])
         keyboard.append([
@@ -168,7 +175,9 @@ class _MusicKeyboards:
         ])
 
     @staticmethod
-    def album_releases(releases: list, album_id: int, per_page: int = 5) -> InlineKeyboardMarkup:
+    def album_releases(
+        releases: list, album_id: int, per_page: int = 5, list_token: str = "",
+    ) -> InlineKeyboardMarkup:
         """Pick one torrent release of an album (see `AlbumGrabCB`).
 
         📚 на кнопке, а не только в тексте: тапают по кнопке, и раздача-
@@ -186,14 +195,14 @@ class _MusicKeyboards:
             verdict = " ⛔" if release.rejected else ""
             label = f"{idx + 1}. {release.size_formatted}{fmt}{pack}{verdict}"
             rows.append([InlineKeyboardButton(
-                text=label, callback_data=AlbumGrabCB(idx=idx, album_id=album_id).pack(),
+                text=label, callback_data=AlbumGrabCB(tok=list_token, idx=idx, album_id=album_id).pack(),
             )])
 
         rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
-    def slskd_results(results: list, per_page: int = 5) -> InlineKeyboardMarkup:
+    def slskd_results(results: list, per_page: int = 5, list_token: str = "") -> InlineKeyboardMarkup:
         """Keyboard for picking one Soulseek candidate (see `SlskdCB`)."""
         from bot.ui.callbacks import SlskdCB
 
@@ -204,7 +213,7 @@ class _MusicKeyboards:
             if len(label) > 60:
                 label = label[:57] + "..."
             keyboard.append([
-                InlineKeyboardButton(text=label, callback_data=SlskdCB(idx=idx).pack())
+                InlineKeyboardButton(text=label, callback_data=SlskdCB(tok=list_token, idx=idx).pack())
             ])
 
         keyboard.append([

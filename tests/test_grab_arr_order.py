@@ -14,7 +14,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from bot.models import ContentType, QualityInfo, SearchResult, SearchSession, User, UserPreferences
+from bot.models import (
+    ContentType,
+    MovieInfo,
+    QualityInfo,
+    SearchResult,
+    SearchSession,
+    User,
+    UserPreferences,
+)
+from bot.ui.callbacks import GrabBestCB
 
 
 def _arr(guid: str, *, weight: int, cf: int, rejected: bool = False, res: str = "1080p") -> SearchResult:
@@ -179,7 +188,10 @@ async def test_handle_grab_best_refuses_a_rejected_first_result():
 
     search._grab_in_progress.clear()
     rejected = _arr("bad", weight=1900, cf=500, rejected=True)
-    session = SearchSession(user_id=1, query="q", content_type=ContentType.MOVIE, results=[rejected])
+    session = SearchSession(
+        user_id=1, query="q", content_type=ContentType.MOVIE, results=[rejected],
+        selected_content=MovieInfo(tmdb_id=1, title="M", year=2024, radarr_id=5), list_token="tok123",
+    )
     db = MagicMock()
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
@@ -192,7 +204,7 @@ async def test_handle_grab_best_refuses_a_rejected_first_result():
 
     with patch.object(search, "get_services", AsyncMock(return_value=(MagicMock(), MagicMock()))), \
          patch.object(search, "grab_release", AsyncMock()) as gr:
-        await search.handle_grab_best(cb, db_user, db)
+        await search.handle_grab_best(cb, GrabBestCB(tok="tok123"), db_user, db)
 
     gr.assert_not_awaited()
     assert cb.answer.await_count >= 1

@@ -12,7 +12,17 @@ class via normal attribute lookup either way.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import ContentType, MovieInfo, SearchResult, SeriesInfo
-from bot.ui.callbacks import FindGrabCB, FindPageCB, FindReleaseCB, PageCB, ReleaseCB, SeasonPresetCB
+from bot.ui.callbacks import (
+    FindGrabCB,
+    FindPageCB,
+    FindReleaseCB,
+    ForceGrabCB,
+    GrabBestCB,
+    GrabCB,
+    PageCB,
+    ReleaseCB,
+    SeasonPresetCB,
+)
 from bot.ui.keyboards._constants import CallbackData
 
 
@@ -42,6 +52,7 @@ class _SearchKeyboards:
         per_page: int = 5,
         show_grab_best: bool = False,
         best_score: int = 0,
+        list_token: str = "",
     ) -> InlineKeyboardMarkup:
         """
         Create keyboard for search results with pagination.
@@ -53,6 +64,7 @@ class _SearchKeyboards:
             per_page: Results per page
             show_grab_best: Whether to show "Grab Best" button
             best_score: Score of the best result
+            list_token: token of this result list (bot/ui/list_token.py)
         """
         keyboard = []
 
@@ -72,7 +84,7 @@ class _SearchKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=label,
-                    callback_data=ReleaseCB(idx=idx).pack(),
+                    callback_data=ReleaseCB(tok=list_token, idx=idx).pack(),
                 )
             ])
 
@@ -81,7 +93,7 @@ class _SearchKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=f"⚡ Лучший (оценка: {best_score})",
-                    callback_data=CallbackData.GRAB_BEST,
+                    callback_data=GrabBestCB(tok=list_token).pack(),
                 )
             ])
 
@@ -118,11 +130,16 @@ class _SearchKeyboards:
         can_grab: bool = True,
         show_force_grab: bool = False,
         content: object = None,
+        list_token: str = "",
+        idx: int = 0,
     ) -> InlineKeyboardMarkup:
         """Create keyboard for release details view.
 
         When the resolved movie/series (``content``) is available, prepend a row
         of external-metadata link buttons (feature #5).
+
+        ``list_token``/``idx`` name the list and the release this card shows,
+        so its grab buttons act on exactly that release (audit GRAB-03).
         """
         keyboard = []
 
@@ -133,12 +150,17 @@ class _SearchKeyboards:
 
         if can_grab:
             keyboard.append([
-                InlineKeyboardButton(text="✅ Скачать", callback_data=CallbackData.CONFIRM_GRAB),
+                InlineKeyboardButton(
+                    text="✅ Скачать", callback_data=GrabCB(tok=list_token, idx=idx).pack(),
+                ),
             ])
 
         if show_force_grab:
             keyboard.append([
-                InlineKeyboardButton(text="⚡ Принудительно (qBit)", callback_data=CallbackData.FORCE_GRAB),
+                InlineKeyboardButton(
+                    text="⚡ Принудительно (qBit)",
+                    callback_data=ForceGrabCB(tok=list_token, idx=idx).pack(),
+                ),
             ])
 
         # #2: let the user choose which seasons are monitored (series only).
@@ -170,6 +192,7 @@ class _SearchKeyboards:
     @staticmethod
     def free_results(
         results: list[SearchResult], page: int, total_pages: int, offset: int = 0,
+        list_token: str = "",
     ) -> InlineKeyboardMarkup:
         """Free-search result list — same shape as `search_results`, different
         callbacks.
@@ -188,7 +211,7 @@ class _SearchKeyboards:
             if len(label) > 40:
                 label = label[:37] + "..."
             keyboard.append([
-                InlineKeyboardButton(text=label, callback_data=FindReleaseCB(idx=idx).pack()),
+                InlineKeyboardButton(text=label, callback_data=FindReleaseCB(tok=list_token, idx=idx).pack()),
             ])
 
         nav = []
@@ -203,11 +226,11 @@ class _SearchKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
-    def free_release(idx: int) -> InlineKeyboardMarkup:
+    def free_release(idx: int, list_token: str = "") -> InlineKeyboardMarkup:
         """One free-search hit. No season-monitoring button: there is no series
         in Sonarr to monitor."""
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Скачать", callback_data=FindGrabCB(idx=idx).pack())],
+            [InlineKeyboardButton(text="✅ Скачать", callback_data=FindGrabCB(tok=list_token, idx=idx).pack())],
             [
                 InlineKeyboardButton(text="◀️ Назад", callback_data=FindPageCB(page=0).pack()),
                 InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),

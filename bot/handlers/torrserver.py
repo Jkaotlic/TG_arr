@@ -21,6 +21,7 @@ from bot.models import TorrServerRelease
 from bot.ui.callbacks import TsAddCB, TsPageCB, TsReleaseCB, TsTorrentCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.list_token import ListTokenRegistry, answer_stale
 from bot.ui.menu import MENU_TORRSERVER, TORRSERVER_PROMPT
 
 logger = structlog.get_logger()
@@ -37,6 +38,10 @@ _results: dict[int, list[TorrServerRelease]] = {}
 #: Cap on remembered result sets, evicting the oldest — never clear() the whole
 #: dict, that would wipe every other user's in-flight selection.
 _MAX_CACHED_USERS = 50
+
+#: Audit 2026-09-23 GRAB-03: token of each user's current hit list — a button
+#: from an older search must not open/add the same index of a newer one.
+_tokens = ListTokenRegistry(max_users=_MAX_CACHED_USERS)
 
 _NOT_CONFIGURED = (
     "❌ TorrServer не настроен. Добавьте <code>TORRSERVER_URL</code>, "
@@ -116,7 +121,7 @@ async def _render_results(message: Message, user_id: int, page: int) -> None:
         message,
         Formatters.format_torrserver_results(chunk, page, per_page, len(releases)),
         reply_markup=Keyboards.torrserver_results(
-            chunk, page, total_pages, offset=page * per_page,
+            chunk, page, total_pages, offset=page * per_page, list_token=_tokens.current(user_id),
         ),
         parse_mode="HTML",
     )
@@ -161,6 +166,7 @@ async def handle_search_reply(message: Message) -> None:
 
     user_id = message.from_user.id
     remember_lru(_results, user_id, releases, _MAX_CACHED_USERS)
+    _tokens.issue(user_id)
     await _render_results(status_msg, user_id, 0)
 
 
@@ -183,20 +189,21 @@ async def handle_release(callback: CallbackQuery, callback_data: TsReleaseCB) ->
     message = accessible_message(callback)
     if message is None:
         return
-    releases = _results.get(callback.from_user.id) or []
+    user_id = callback.from_user.id
+    releases = _results.get(user_id) or []
     # The button index is absolute (see Keyboards.torrserver_results' `offset`),
     # so it can be used directly against the cached list without knowing the
     # page it came from.
     absolute = callback_data.idx
-    if absolute >= len(releases):
-        await callback.answer("Результаты устарели — повторите поиск", show_alert=True)
+    if not _tokens.check(user_id, callback_data.tok) or absolute >= len(releases):
+        await answer_stale(callback)
         return
 
     release = releases[absolute]
     await safe_edit(
         message,
         Formatters.format_torrserver_release(release),
-        reply_markup=Keyboards.torrserver_release(absolute),
+        reply_markup=Keyboards.torrserver_release(absolute, list_token=_tokens.current(user_id)),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -210,8 +217,8 @@ async def handle_add(callback: CallbackQuery, callback_data: TsAddCB) -> None:
         return
 
     releases = _results.get(callback.from_user.id) or []
-    if callback_data.idx >= len(releases):
-        await callback.answer("Результаты устарели — повторите поиск", show_alert=True)
+    if not _tokens.check(callback.from_user.id, callback_data.tok) or callback_data.idx >= len(releases):
+        await answer_stale(callback)
         return
     release = releases[callback_data.idx]
 
@@ -239,6 +246,13 @@ async def handle_add(callback: CallbackQuery, callback_data: TsAddCB) -> None:
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
+
+
+@router.callback_query(F.data.startswith("tsr:") | F.data.startswith("tsa:"))
+async def handle_legacy_pick(callback: CallbackQuery) -> None:
+    """Audit 2026-09-23: ``tsr:N``/``tsa:N`` without a list token — buttons
+    from messages sent by the previous version."""
+    await answer_stale(callback)
 
 
 @router.callback_query(F.data == CallbackData.TS_LIST)

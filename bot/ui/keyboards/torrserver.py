@@ -28,7 +28,8 @@ class _TorrServerKeyboards:
 
     @staticmethod
     def torrserver_results(
-        releases: list[TorrServerRelease], page: int, total_pages: int, offset: int = 0
+        releases: list[TorrServerRelease], page: int, total_pages: int, offset: int = 0,
+        list_token: str = "",
     ) -> InlineKeyboardMarkup:
         """One button per hit on this page, plus pagination.
 
@@ -41,7 +42,7 @@ class _TorrServerKeyboards:
             idx = offset + position
             builder.row(InlineKeyboardButton(
                 text=f"{idx + 1}. {release.title[:40]}",
-                callback_data=TsReleaseCB(idx=idx).pack(),
+                callback_data=TsReleaseCB(tok=list_token, idx=idx).pack(),
             ))
 
         nav = []
@@ -61,7 +62,7 @@ class _TorrServerKeyboards:
         return builder.as_markup()
 
     @staticmethod
-    def torrserver_release(idx: int) -> InlineKeyboardMarkup:
+    def torrserver_release(idx: int, list_token: str = "") -> InlineKeyboardMarkup:
         """Card of one hit: watch it, or go back to the list.
 
         The watch button is its own callback family (`TsAddCB`) rather than a
@@ -69,7 +70,7 @@ class _TorrServerKeyboards:
         aiogram's unpacking.
         """
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="▶️ Смотреть", callback_data=TsAddCB(idx=idx).pack())],
+            [InlineKeyboardButton(text="▶️ Смотреть", callback_data=TsAddCB(tok=list_token, idx=idx).pack())],
             [InlineKeyboardButton(text="⬅️ К результатам", callback_data=TsPageCB(page=0).pack())],
         ])
 
