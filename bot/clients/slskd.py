@@ -19,6 +19,7 @@ import asyncio
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import structlog
@@ -54,6 +55,32 @@ def _extension_of(filename: str) -> str:
 def _basename(path: str) -> str:
     """Soulseek paths are Windows-style regardless of the peer's OS."""
     return re.split(r"[\\/]", path or "")[-1]
+
+
+_ISO_FRACTION = re.compile(r"(\.\d{6})\d+")
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    """slskd timestamps: .NET ISO with up to 7 fractional digits, sometimes
+    without a zone (``requestedAt``). Naive values are UTC, not local time."""
+    if not value or not isinstance(value, str):
+        return None
+    text = _ISO_FRACTION.sub(lambda m: m.group(1), value.strip())
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _parent_path(path: str) -> str:
+    """Everything before the basename — the directory when slskd omits it."""
+    parts = re.split(r"[\\/]", path or "")
+    return "\\".join(parts[:-1])
 
 
 def _dirname(path: str) -> str:
@@ -277,6 +304,7 @@ class SlskdClient(BaseAPIClient):
         for user_entry in await self.get_downloads():
             username = user_entry.get("username") or "?"
             for directory in user_entry.get("directories") or []:
+                directory_name = directory.get("directory") or ""
                 for file_entry in directory.get("files") or []:
                     state = file_entry.get("state") or "Unknown"
                     # A completed-and-successful transfer is not "activity";
@@ -289,14 +317,22 @@ class SlskdClient(BaseAPIClient):
                         continue
                     size = file_entry.get("size") or 0
                     transferred = file_entry.get("bytesTransferred") or 0
+                    full_filename = file_entry.get("filename") or ""
                     transfers.append(
                         SlskdTransfer(
                             username=username,
-                            filename=_basename(file_entry.get("filename") or ""),
+                            filename=_basename(full_filename),
                             state=state,
                             size=size,
                             transferred=transferred,
                             average_speed=file_entry.get("averageSpeed") or 0,
+                            id=str(file_entry.get("id") or ""),
+                            batch_id=str(file_entry.get("batchId") or ""),
+                            directory=directory_name or _parent_path(full_filename),
+                            full_filename=full_filename,
+                            requested_at=_parse_timestamp(file_entry.get("requestedAt")),
+                            ended_at=_parse_timestamp(file_entry.get("endedAt")),
+                            exception=str(file_entry.get("exception") or ""),
                         )
                     )
         return transfers

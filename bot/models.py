@@ -434,11 +434,24 @@ class SlskdTransfer(BaseModel):
     """One in-flight (or failed) slskd download."""
 
     username: str
+    #: Basename only — what the download queue view shows.
     filename: str = ""
     state: str = "Unknown"
     size: int = 0
     transferred: int = 0
     average_speed: float = 0.0
+    #: slskd's own transfer id (a GUID) — the stable identity of one transfer.
+    id: str = ""
+    #: Groups transfers enqueued together (one album pick); may be empty.
+    batch_id: str = ""
+    #: The enclosing directory as slskd reports it (remote, Windows-style).
+    directory: str = ""
+    #: The raw remote path; two CDs can share a basename, this cannot.
+    full_filename: str = ""
+    requested_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    #: slskd's failure reason ("Transfer rejected: Banned"), empty on success.
+    exception: str = ""
 
     @property
     def progress_percent(self) -> int:
