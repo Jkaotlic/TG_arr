@@ -41,6 +41,39 @@ _AUDIO_EXTENSIONS = (".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".aac", "
 #: Quality ranking for sorting: lossless first, then bitrate-ish ordering.
 _FORMAT_RANK = {"flac": 100, "wav": 95, "alac": 90, "m4a": 60, "aac": 55, "ogg": 50, "opus": 50, "mp3": 40, "wma": 20}
 
+#: GRAB-18: a folder with at least this share of the biggest folder's track
+#: count counts as "the whole album".
+_COMPLETE_SHARE = 0.8
+
+
+def rank_candidates(
+    results: list[SlskdSearchResult], *, prefer_complete: bool = True,
+) -> list[SlskdSearchResult]:
+    """Order Soulseek candidates, best first.
+
+    Audit 2026-09-23 GRAB-18: format used to come first, so ONE FLAC track
+    outranked a complete MP3 album. For an album search (``prefer_complete``)
+    completeness comes first — a folder with ≥80% of the biggest folder's
+    track count — then format (m4a with lossless signs ranks as ALAC, see
+    ``SlskdSearchResult.effective_format``), then free slot, track count,
+    queue, speed. A track search (``/track``) ranks by format first.
+    """
+    most_tracks = max((r.track_count for r in results), default=0)
+
+    def key(r: SlskdSearchResult):
+        complete = r.track_count >= _COMPLETE_SHARE * most_tracks
+        return (
+            not complete if prefer_complete else False,
+            -_FORMAT_RANK.get(r.effective_format, 0),
+            not r.has_free_slot,
+            -r.track_count,
+            r.queue_length,
+            -r.upload_speed,
+        )
+
+    return sorted(results, key=key)
+
+
 #: How often to poll a running search.
 _POLL_INTERVAL_S = 2.0
 
@@ -141,6 +174,7 @@ class SlskdClient(BaseAPIClient):
         limit: int = 25,
         min_bitrate_free_only: bool = False,
         timeout: Optional[float] = None,
+        prefer_complete: bool = True,
     ) -> list[SlskdSearchResult]:
         """Run a Soulseek search and return the best candidates.
 
@@ -179,7 +213,9 @@ class SlskdClient(BaseAPIClient):
                 break
 
         responses = (payload or {}).get("responses") or []
-        results = self._flatten_responses(responses, min_free_slot_only=min_bitrate_free_only)
+        results = self._flatten_responses(
+            responses, min_free_slot_only=min_bitrate_free_only, prefer_complete=prefer_complete,
+        )
         logger.info(
             "slskd_search_completed",
             query=query[:80],
@@ -190,7 +226,11 @@ class SlskdClient(BaseAPIClient):
         return results[:limit]
 
     def _flatten_responses(
-        self, responses: list[dict[str, Any]], *, min_free_slot_only: bool = False
+        self,
+        responses: list[dict[str, Any]],
+        *,
+        min_free_slot_only: bool = False,
+        prefer_complete: bool = True,
     ) -> list[SlskdSearchResult]:
         """Group each peer's audio files into one album-ish candidate.
 
@@ -233,17 +273,7 @@ class SlskdClient(BaseAPIClient):
                     )
                 )
 
-        results = list(grouped.values())
-        results.sort(
-            key=lambda r: (
-                -_FORMAT_RANK.get(r.dominant_format, 0),
-                not r.has_free_slot,
-                -r.track_count,
-                r.queue_length,
-                -r.upload_speed,
-            )
-        )
-        return results
+        return rank_candidates(list(grouped.values()), prefer_complete=prefer_complete)
 
     async def lookup_artists(self, query: str, limit: int = 5) -> list[ArtistInfo]:
         """Best-effort artist lookup used only for content-type detection.

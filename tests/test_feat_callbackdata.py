@@ -184,7 +184,7 @@ def test_album_sources_offers_torrents_then_soulseek():
 def test_album_releases_keyboard_marks_a_discography_release():
     """Пометка нужна на КНОПКЕ, а не только в тексте: тапают по кнопке."""
     from bot.models import SearchResult
-    from bot.ui.callbacks import AlbumGrabCB
+    from bot.ui.callbacks import AlbumReleaseCB
     from bot.ui.keyboards import Keyboards
 
     releases = [
@@ -196,7 +196,8 @@ def test_album_releases_keyboard_marks_a_discography_release():
 
     assert any("📚" in t for t in labels)
     first = kb.inline_keyboard[0][0]
-    unpacked = AlbumGrabCB.unpack(first.callback_data)
+    # Audit 2026-09-23 UI-03: a row opens the release card, it no longer grabs.
+    unpacked = AlbumReleaseCB.unpack(first.callback_data)
     assert (unpacked.idx, unpacked.album_id) == (0, 3)
 
 

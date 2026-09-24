@@ -7,10 +7,16 @@ from bot.ui.callbacks import (
     AlbumGrabCB,
     AlbumPageCB,
     AlbumRefreshCB,
+    AlbumRelPageCB,
+    AlbumReleaseCB,
     AlbumScopeCB,
     AlbumSourceCB,
     ArtistCB,
+    DiscographyCB,
     MusicAddCB,
+    SlskdCardCB,
+    SlskdCB,
+    SlskdPageCB,
 )
 from bot.ui.keyboards._constants import CallbackData
 
@@ -175,16 +181,39 @@ class _MusicKeyboards:
         ])
 
     @staticmethod
+    def _page_nav(page: int, total_pages: int, make) -> list:
+        """◀️ N/M ▶️ row; ``make(page)`` packs the page callback."""
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="◀️", callback_data=make(page - 1)))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(text="▶️", callback_data=make(page + 1)))
+        return nav
+
+    @staticmethod
     def album_releases(
-        releases: list, album_id: int, per_page: int = 5, list_token: str = "",
+        releases: list,
+        album_id: int,
+        page: int = 0,
+        per_page: int = 5,
+        list_token: str = "",
+        artist_id: int = 0,
     ) -> InlineKeyboardMarkup:
-        """Pick one torrent release of an album (see `AlbumGrabCB`).
+        """One page of an album's torrent releases (whole list in, absolute
+        indices on the buttons).
+
+        Audit 2026-09-23: a row opens the release card (UI-03) — it used to
+        grab on tap; pages have ◀️ N/M ▶️ (UI-10); "◀️ Назад" returns to the
+        source choice ("Где искать?").
 
         📚 на кнопке, а не только в тексте: тапают по кнопке, и раздача-
         дискография весит десятки гигабайт вместо одного альбома.
         """
+        total_pages = max(1, (len(releases) + per_page - 1) // per_page)
+        start = page * per_page
         rows = []
-        for idx, release in enumerate(releases[:per_page]):
+        for idx, release in enumerate(releases[start:start + per_page], start=start):
             pack = " 📚" if release.is_season_pack else ""
             # Живой замер 2026-08-12: у музыки формат (FLAC/MP3-320/WAV) — это
             # главный различитель, и он лежит в `codec`; resolution/source —
@@ -195,28 +224,108 @@ class _MusicKeyboards:
             verdict = " ⛔" if release.rejected else ""
             label = f"{idx + 1}. {release.size_formatted}{fmt}{pack}{verdict}"
             rows.append([InlineKeyboardButton(
-                text=label, callback_data=AlbumGrabCB(tok=list_token, idx=idx, album_id=album_id).pack(),
+                text=label,
+                callback_data=AlbumReleaseCB(tok=list_token, idx=idx, album_id=album_id).pack(),
             )])
 
-        rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)])
+        if total_pages > 1:
+            rows.append(_MusicKeyboards._page_nav(
+                page, total_pages,
+                lambda p: AlbumRelPageCB(tok=list_token, page=p, album_id=album_id).pack(),
+            ))
+        rows.append([
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=AlbumScopeCB(album_id=album_id, artist_id=artist_id).pack(),
+            ),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
+        ])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
-    def slskd_results(results: list, per_page: int = 5, list_token: str = "") -> InlineKeyboardMarkup:
-        """Keyboard for picking one Soulseek candidate (see `SlskdCB`)."""
-        from bot.ui.callbacks import SlskdCB
+    def album_release_card(
+        release, idx: int, album_id: int, list_token: str, per_page: int = 5,
+    ) -> InlineKeyboardMarkup:
+        """Card of one album release. A release Lidarr rejects is taken only
+        through "⚠️ Всё равно скачать" (audit GRAB-02 pattern, B1)."""
+        if release.rejected:
+            take = InlineKeyboardButton(
+                text="⚠️ Всё равно скачать",
+                callback_data=AlbumGrabCB(tok=list_token, idx=idx, album_id=album_id, ok=1).pack(),
+            )
+        else:
+            take = InlineKeyboardButton(
+                text="✅ Скачать",
+                callback_data=AlbumGrabCB(tok=list_token, idx=idx, album_id=album_id).pack(),
+            )
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [take],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=AlbumRelPageCB(
+                        tok=list_token, page=idx // per_page, album_id=album_id,
+                    ).pack(),
+                ),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
+            ],
+        ])
 
+    @staticmethod
+    def slskd_results(
+        results: list, page: int = 0, per_page: int = 5, list_token: str = "",
+    ) -> InlineKeyboardMarkup:
+        """One page of Soulseek candidates; a row opens the candidate's card
+        (audit UI-03/UI-10)."""
+        total_pages = max(1, (len(results) + per_page - 1) // per_page)
+        start = page * per_page
         keyboard = []
-        for idx, result in enumerate(results[:per_page]):
-            fmt = result.dominant_format.upper() or "?"
+        for idx, result in enumerate(results[start:start + per_page], start=start):
+            fmt = (result.effective_format or "?").upper()
             label = f"{idx + 1}. {fmt} · {result.track_count} трек. · {result.size_formatted}"
             if len(label) > 60:
                 label = label[:57] + "..."
             keyboard.append([
-                InlineKeyboardButton(text=label, callback_data=SlskdCB(tok=list_token, idx=idx).pack())
+                InlineKeyboardButton(text=label, callback_data=SlskdCardCB(tok=list_token, idx=idx).pack())
             ])
-
+        if total_pages > 1:
+            keyboard.append(_MusicKeyboards._page_nav(
+                page, total_pages, lambda p: SlskdPageCB(tok=list_token, page=p).pack(),
+            ))
         keyboard.append([
             InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def slskd_card(idx: int, list_token: str, per_page: int = 5) -> InlineKeyboardMarkup:
+        """Card of one Soulseek candidate: enqueue, or back to its page."""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="✅ Скачать", callback_data=SlskdCB(tok=list_token, idx=idx).pack(),
+            )],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=SlskdPageCB(tok=list_token, page=idx // per_page).pack(),
+                ),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
+            ],
+        ])
+
+    @staticmethod
+    def discography_confirm(artist_id: int, list_token: str) -> InlineKeyboardMarkup:
+        """Audit UI-11: the whole discography is a big action — confirm it."""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="✅ Да, вся дискография",
+                callback_data=DiscographyCB(tok=list_token, artist_id=artist_id).pack(),
+            )],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=AlbumPageCB(page=0, artist_id=artist_id).pack(),
+                ),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
+            ],
+        ])

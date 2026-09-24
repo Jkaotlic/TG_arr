@@ -422,6 +422,23 @@ class SlskdSearchResult(BaseModel):
         return max(counts, key=lambda k: counts[k]) if counts else ""
 
     @property
+    def effective_format(self) -> str:
+        """``dominant_format``, with m4a resolved to "alac" when the files
+        look lossless (audit 2026-09-23 GRAB-18).
+
+        m4a is a container: AAC (lossy) or ALAC (lossless). Soulseek reports a
+        bit depth only for lossless audio, and AAC never runs near 600 kbps —
+        either sign means ALAC. Without a sign it stays "m4a".
+        """
+        fmt = self.dominant_format
+        if fmt != "m4a":
+            return fmt
+        m4a = [f for f in self.files if f.extension == "m4a"]
+        if any(f.bit_depth for f in m4a) or any((f.bitrate or 0) >= 600 for f in m4a):
+            return "alac"
+        return fmt
+
+    @property
     def guessed_artist(self) -> str:
         """Artist guessed from the folder name ("Artist - Album (2024)").
 

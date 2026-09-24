@@ -382,7 +382,7 @@ class _SearchFormatters:
         return "\n".join(lines)
 
     @staticmethod
-    def format_slskd_results(results: list, query: str) -> str:
+    def format_slskd_results(results: list, query: str, page: int = 0, per_page: int = 5) -> str:
         """Render Soulseek candidates.
 
         Each entry is one peer's folder, not a single file — Soulseek shares
@@ -390,17 +390,69 @@ class _SearchFormatters:
         `hasFreeUploadSlot` and the queue length matter more than raw speed
         here: a fast peer with 40 queued transfers is slower in practice.
         """
-        lines = [f"🎵 <b>Soulseek:</b> <code>{_e(query)}</code>\n"]
-        for idx, result in enumerate(results[:5], start=1):
-            fmt = (result.dominant_format or "?").upper()
+        total_pages = max(1, (len(results) + per_page - 1) // per_page)
+        start = page * per_page
+        lines = [
+            f"🎵 <b>Soulseek:</b> <code>{_e(query)}</code>",
+            f"Стр. {page + 1}/{total_pages} | Вариантов: {len(results)}\n",
+        ]
+        for idx, result in enumerate(results[start:start + per_page], start=start + 1):
+            fmt = (result.effective_format or "?").upper()
             slot = "🟢 свободен" if result.has_free_slot else f"⏳ очередь {result.queue_length}"
             lines.append(
                 f"<b>{idx}. {_e(result.display_name)}</b>\n"
                 f"   💿 {fmt} · {result.track_count} трек. · {result.size_formatted}\n"
                 f"   👤 {_e(result.username)} · {slot}"
             )
-        if len(results) > 5:
-            lines.append(f"\n<i>…и ещё {len(results) - 5} вариант(ов)</i>")
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_slskd_candidate(result) -> str:
+        """Card of one Soulseek candidate, shown before it is enqueued
+        (audit 2026-09-23 UI-03)."""
+        fmt = (result.effective_format or "?").upper()
+        slot = "🟢 слот свободен" if result.has_free_slot else f"⏳ очередь {result.queue_length}"
+        lines = [
+            f"🎧 <b>{_e(result.display_name)}</b>",
+            "",
+            f"💿 Формат: {fmt}",
+            f"🎵 Треков: {result.track_count}",
+            f"💾 Размер: {result.size_formatted}",
+            f"👤 {_e(result.username)} · {slot}",
+        ]
+        depths = sorted({f.bit_depth for f in result.files if f.bit_depth})
+        rates = sorted({f.bitrate for f in result.files if f.bitrate})
+        if depths:
+            lines.append(f"🔬 {'/'.join(str(d) for d in depths)} бит")
+        elif rates:
+            span = f"{rates[0]}–{rates[-1]}" if len(rates) > 1 else f"{rates[0]}"
+            lines.append(f"🔬 {span} kbps")
+        names = [f.name for f in result.files[:5]]
+        if names:
+            lines.append("")
+            lines.extend(f"• {_e(n)}" for n in names)
+            if result.track_count > 5:
+                lines.append(f"<i>…и ещё {result.track_count - 5}</i>")
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_album_release(release: SearchResult) -> str:
+        """Card of one album torrent release (audit 2026-09-23 UI-03): format,
+        size, seeders and Lidarr's verdict with its reasons."""
+        fmt = release.quality.codec or release.quality.source or "?"
+        lines = [f"💿 <b>{_e(release.title)}</b>", ""]
+        lines.append(f"🎵 Формат: {_e(fmt)}")
+        lines.append(f"💾 Размер: {release.size_formatted}")
+        if release.seeders is not None:
+            lines.append(f"🌱 Сиды: {release.seeders}")
+        lines.append(f"🔍 {_e(release.indexer)}")
+        if release.is_season_pack:
+            lines.append("📚 дискография целиком")
+        if release.rejected:
+            reasons = "\n".join(f"• {_e(r)}" for r in (release.rejections or ["причина не указана"]))
+            lines.append(f"\n⛔ <b>Lidarr не взял бы этот релиз:</b>\n{reasons}")
+        else:
+            lines.append("\n✅ <b>Одобрено Lidarr</b>")
         return "\n".join(lines)
 
     @staticmethod

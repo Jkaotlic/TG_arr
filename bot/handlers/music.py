@@ -37,11 +37,16 @@ from bot.ui.callbacks import (
     AlbumGrabCB,
     AlbumPageCB,
     AlbumRefreshCB,
+    AlbumRelPageCB,
+    AlbumReleaseCB,
     AlbumScopeCB,
     AlbumSourceCB,
     ArtistCB,
+    DiscographyCB,
     MusicAddCB,
+    SlskdCardCB,
     SlskdCB,
+    SlskdPageCB,
     TrendingItemCB,
 )
 from bot.ui.formatters import Formatters
@@ -205,6 +210,16 @@ _slskd_candidates: dict[int, list] = {}
 # Audit 2026-09-23 GRAB-03: token of each user's current Soulseek list — a
 # button from an older search must not enqueue the same index of a newer one.
 _slskd_tokens = ListTokenRegistry(max_users=_MAX_ARTIST_CANDIDATES)
+# The query behind each user's Soulseek list — the page header (UI-10).
+_slskd_queries: dict[int, str] = {}
+
+
+def _per_page() -> int:
+    return get_settings().results_per_page
+
+
+def _total_pages(count: int, per_page: int) -> int:
+    return max(1, (count + per_page - 1) // per_page)
 
 
 @router.message(Command("music"))
@@ -306,7 +321,9 @@ async def process_soulseek_search(
     status_msg = await message.answer("🔍 Ищу в Soulseek (это занимает ~25 секунд)...")
 
     try:
-        results = await slskd.search(query, limit=25)
+        # GRAB-18: an album search ranks complete folders first; a track
+        # search ranks by format.
+        results = await slskd.search(query, limit=25, prefer_complete=kind != "track")
     except Exception as e:
         log.error("slskd_search_failed", error=str(e), exc_info=True)
         await status_msg.edit_text(Formatters.format_error("Soulseek недоступен"))
@@ -320,6 +337,7 @@ async def process_soulseek_search(
         return
 
     _remember(_slskd_candidates, user_id, results)
+    _remember(_slskd_queries, user_id, query)
     list_token = _slskd_tokens.issue(user_id)
 
     await db.log_action(
@@ -332,9 +350,71 @@ async def process_soulseek_search(
     )
 
     note = await _navidrome_note(results[0].guessed_artist, query if kind == "album" else "")
+    per_page = _per_page()
     await status_msg.edit_text(
-        Formatters.format_slskd_results(results, query) + note,
-        reply_markup=Keyboards.slskd_results(results, list_token=list_token),
+        Formatters.format_slskd_results(results, query, page=0, per_page=per_page) + note,
+        reply_markup=Keyboards.slskd_results(results, page=0, per_page=per_page, list_token=list_token),
+        parse_mode="HTML",
+    )
+
+
+def _slskd_list(user_id: int, tok: str) -> list | None:
+    """The user's Soulseek candidates if ``tok`` names that list, else None."""
+    candidates = _slskd_candidates.get(user_id) or []
+    if not candidates or not _slskd_tokens.check(user_id, tok):
+        return None
+    return candidates
+
+
+@router.callback_query(SlskdPageCB.filter())
+async def handle_slskd_page(
+    callback: CallbackQuery, callback_data: SlskdPageCB, db_user: User, db: Database,
+) -> None:
+    """Audit UI-10: page through Soulseek candidates (same list, same token)."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+    user_id = callback.from_user.id
+    candidates = _slskd_list(user_id, callback_data.tok)
+    if candidates is None:
+        await answer_stale(callback)
+        return
+    per_page = _per_page()
+    if callback_data.page >= _total_pages(len(candidates), per_page):
+        await callback.answer("Неверная страница", show_alert=True)
+        return
+    await callback.answer()
+    await safe_edit(
+        message,
+        Formatters.format_slskd_results(
+            candidates, _slskd_queries.get(user_id, ""), page=callback_data.page, per_page=per_page,
+        ),
+        reply_markup=Keyboards.slskd_results(
+            candidates, page=callback_data.page, per_page=per_page, list_token=callback_data.tok,
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(SlskdCardCB.filter())
+async def handle_slskd_card(
+    callback: CallbackQuery, callback_data: SlskdCardCB, db_user: User, db: Database,
+) -> None:
+    """Audit UI-03: a row opens the candidate's card; "✅ Скачать" there
+    enqueues (``SlskdCB``)."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+    user_id = callback.from_user.id
+    candidates = _slskd_list(user_id, callback_data.tok)
+    if candidates is None or callback_data.idx >= len(candidates):
+        await answer_stale(callback)
+        return
+    await callback.answer()
+    await safe_edit(
+        message,
+        Formatters.format_slskd_candidate(candidates[callback_data.idx]),
+        reply_markup=Keyboards.slskd_card(callback_data.idx, callback_data.tok, per_page=_per_page()),
         parse_mode="HTML",
     )
 
@@ -362,6 +442,11 @@ async def handle_slskd_selection(
         await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
     try:
+        # Re-check after the claim: a finished first tap drops the token.
+        candidates = _slskd_list(user_id, callback_data.tok) or []
+        if idx >= len(candidates):
+            await answer_stale(callback)
+            return
         await _enqueue_slskd_candidate(callback, message, db, user_id, candidates[idx])
     finally:
         _release_grab(user_id)
@@ -386,7 +471,20 @@ async def _enqueue_slskd_candidate(
         release_title=f"{candidate.username}: {candidate.folder}"[:200],
     )
 
-    ok = await slskd.enqueue(candidate.username, candidate.files)
+    # Audit GRAB-16: say so before the API call — a second tap meanwhile
+    # sees "⏳" and the claim, not a live button.
+    await message.edit_text("⏳ Ставлю в очередь Soulseek…")
+    try:
+        ok = await slskd.enqueue(candidate.username, candidate.files)
+    except Exception as e:
+        logger.error("slskd_enqueue_failed", error=str(e), exc_info=True)
+        action.success = False
+        action.error_message = str(e)[:200]
+        await db.log_action(action)
+        await message.edit_text(
+            Formatters.format_error("Soulseek не ответил — очередь не изменилась, попробуйте ещё раз")
+        )
+        return
     action.success = ok
     if not ok:
         action.error_message = "slskd rejected the transfer"
@@ -604,36 +702,20 @@ async def handle_album_scope(
         if artist.lidarr_id and callback_data.artist_id != artist.lidarr_id:
             await answer_stale(callback)
             return
-        services = await _get_music_services()
-        if services is None:
-            await callback.answer("Lidarr не настроен", show_alert=True)
-            return
-        _search_service, add_service = services
-
-        # Double tap → one discography search (audit GRAB-16 part).
-        from bot.handlers.search import _claim_grab, _release_grab
-
-        if not await _claim_grab(user_id):
-            await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
-            return
-        try:
-            await callback.answer("Беру всю дискографию...")
-            artist_id = artist.lidarr_id or callback_data.artist_id
-            # Монитор и поиск делегируются Lidarr: он сам решает, что «все альбомы»
-            # значит для этого артиста по его metadata-профилю.
-            await add_service.lidarr.set_artist_monitored(artist_id, True)
-            await add_service.lidarr.search_artist(artist_id)
-            await message.edit_text(
-                Formatters.format_success(
-                    f"<b>{html.escape(artist.name)}</b>\n\n"
-                    "Вся дискография под мониторингом, запущен автопоиск."
-                ),
-                parse_mode="HTML",
-            )
-            await db.delete_session(user_id)
-            _album_candidates.pop(user_id, None)
-        finally:
-            _release_grab(user_id)
+        # Audit UI-11: the whole discography (tens of albums, tens of GB) is
+        # confirmed first; the confirm button carries a fresh token.
+        artist_id = artist.lidarr_id or callback_data.artist_id
+        async with db.session_lock(user_id):
+            session.list_token = new_list_token()
+            await db.save_session(user_id, session)
+        await callback.answer()
+        await message.edit_text(
+            f"💿 <b>{html.escape(artist.name)}</b> — вся дискография?\n\n"
+            "Lidarr возьмёт под мониторинг все альбомы артиста и начнёт их искать. "
+            "Это может быть много гигабайт.",
+            reply_markup=Keyboards.discography_confirm(artist_id, session.list_token),
+            parse_mode="HTML",
+        )
         return
 
     album = _find_album(user_id, callback_data.album_id)
@@ -648,6 +730,78 @@ async def handle_album_scope(
         reply_markup=Keyboards.album_sources(album.lidarr_id),
         parse_mode="HTML",
     )
+
+
+def _discography_session_ok(session: SearchSession | None, callback_data: DiscographyCB) -> bool:
+    """The confirm button still belongs to the artist and screen the session holds."""
+    if session is None or not isinstance(session.selected_content, ArtistInfo):
+        return False
+    artist = session.selected_content
+    return (
+        token_matches(session.list_token, callback_data.tok)
+        and (artist.lidarr_id or callback_data.artist_id) == callback_data.artist_id
+    )
+
+
+@router.callback_query(DiscographyCB.filter())
+async def handle_discography(
+    callback: CallbackQuery, callback_data: DiscographyCB, db_user: User, db: Database,
+) -> None:
+    """"✅ Да, вся дискография" (audit UI-11/GRAB-16): claimed against a
+    double tap, "⏳" before the API, and a Lidarr failure is said out loud."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    if not _discography_session_ok(session, callback_data):
+        await answer_stale(callback)
+        return
+
+    services = await _get_music_services()
+    if services is None:
+        await callback.answer("Lidarr не настроен", show_alert=True)
+        return
+    _search_service, add_service = services
+
+    from bot.handlers.search import _claim_grab, _release_grab
+
+    if not await _claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
+        return
+    try:
+        # Re-read after the claim: a finished first tap deleted the session.
+        session = await db.get_session(user_id)
+        if not _discography_session_ok(session, callback_data):
+            await answer_stale(callback)
+            return
+        assert session is not None and isinstance(session.selected_content, ArtistInfo)
+        artist = session.selected_content
+        artist_id = callback_data.artist_id
+        await callback.answer("Беру всю дискографию...")
+        await message.edit_text("⏳ Включаю мониторинг и поиск дискографии…")
+        try:
+            # Монитор и поиск делегируются Lidarr: он сам решает, что «все
+            # альбомы» значит для этого артиста по его metadata-профилю.
+            await add_service.lidarr.set_artist_monitored(artist_id, True)
+            await add_service.lidarr.search_artist(artist_id)
+        except Exception as e:
+            logger.error("discography_grab_failed", artist_id=artist_id, error=str(e), exc_info=True)
+            await message.edit_text(Formatters.format_error(
+                "Lidarr не ответил — дискография не поставлена в поиск. Попробуйте позже."
+            ))
+            return
+        await message.edit_text(
+            Formatters.format_success(
+                f"<b>{html.escape(artist.name)}</b>\n\n"
+                "Вся дискография под мониторингом, запущен автопоиск."
+            ),
+            parse_mode="HTML",
+        )
+        await db.delete_session(user_id)
+        _album_candidates.pop(user_id, None)
+    finally:
+        _release_grab(user_id)
 
 
 @router.callback_query(AlbumPageCB.filter())
@@ -740,12 +894,11 @@ async def handle_album_source(
         return
 
     # Живой замер 2026-08-12: 127 раздач на альбом, 24 из них Lidarr отверг
-    # («Album wasn't requested», «Wrong album»). Показываются первые пять, так
-    # что отвергнутые не должны занимать эти пять мест. Внутри групп — по
-    # сидам: размер и формат у музыки дело вкуса, а сиды отвечают на вопрос
-    # «скачается ли вообще». Свой ключ, а не ScoringService: тот считает
-    # видео-качество, которого у аудио-раздач нет.
-    releases.sort(key=lambda r: (r.rejected, -(r.seeders or 0)))
+    # («Album wasn't requested», «Wrong album») — отвергнутые уходят вниз.
+    # Audit 2026-09-23 GRAB-15: внутри групп — порядок самого Lidarr (он уже
+    # отсортировал по профилю качества), а не по сидам: пересортировка по сидам
+    # ставила MP3 выше FLAC, который профиль хотел. Сортировка стабильна.
+    releases.sort(key=lambda r: r.rejected)
 
     async with db.session_lock(user_id):
         session.results = releases
@@ -753,15 +906,98 @@ async def handle_album_source(
         session.list_token = new_list_token()  # audit GRAB-03: new list, new token
         await db.save_session(user_id, session)
 
-    per_page = get_settings().results_per_page
-    await message.edit_text(
+    await _render_album_releases(message, session, album.lidarr_id, page=0)
+
+
+def _album_label(user_id: int, session: SearchSession, album_id: int) -> str:
+    artist = session.selected_content
+    album = _find_album(user_id, album_id)
+    name = artist.name if isinstance(artist, ArtistInfo) else ""
+    return f"{name} — {album.title}" if album else name
+
+
+async def _render_album_releases(
+    message: Message, session: SearchSession, album_id: int, page: int,
+) -> None:
+    """One page of the album's torrent releases (audit UI-10)."""
+    per_page = _per_page()
+    releases = session.results
+    artist = session.selected_content
+    await safe_edit(
+        message,
         Formatters.format_search_results_page(
-            releases[:per_page], 0,
-            max(1, (len(releases) + per_page - 1) // per_page),
-            f"{artist.name} — {album.title}", ContentType.MUSIC, per_page=per_page,
+            releases[page * per_page:(page + 1) * per_page], page,
+            _total_pages(len(releases), per_page),
+            _album_label(session.user_id, session, album_id), ContentType.MUSIC, per_page=per_page,
         ),
         reply_markup=Keyboards.album_releases(
-            releases[:per_page], album.lidarr_id, per_page=per_page, list_token=session.list_token,
+            releases, album_id, page=page, per_page=per_page, list_token=session.list_token,
+            artist_id=(artist.lidarr_id or 0) if isinstance(artist, ArtistInfo) else 0,
+        ),
+        parse_mode="HTML",
+    )
+
+
+def _album_list_ok(session: SearchSession | None, tok: str) -> bool:
+    """Audit GRAB-03: the button names the album-release list this music
+    session holds now (a movie/series session shares the index space)."""
+    return bool(
+        session
+        and session.content_type is ContentType.MUSIC
+        and isinstance(session.selected_content, ArtistInfo)
+        and session.results
+        and token_matches(session.list_token, tok)
+    )
+
+
+@router.callback_query(AlbumRelPageCB.filter())
+async def handle_album_release_page(
+    callback: CallbackQuery, callback_data: AlbumRelPageCB, db_user: User, db: Database,
+) -> None:
+    """Audit UI-10: ◀️ N/M ▶️ through an album's releases (same list)."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+    session = await db.get_session(callback.from_user.id)
+    if session is None or not _album_list_ok(session, callback_data.tok):
+        await answer_stale(callback)
+        return
+    if callback_data.page >= _total_pages(len(session.results), _per_page()):
+        await callback.answer("Неверная страница", show_alert=True)
+        return
+    await callback.answer()
+    await _render_album_releases(message, session, callback_data.album_id, callback_data.page)
+
+
+@router.callback_query(AlbumReleaseCB.filter())
+async def handle_album_release_card(
+    callback: CallbackQuery, callback_data: AlbumReleaseCB, db_user: User, db: Database,
+) -> None:
+    """Audit UI-03: a row tap opens the release card — format, size, seeders,
+    Lidarr's verdict — instead of grabbing."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+    session = await db.get_session(callback.from_user.id)
+    if (
+        session is None
+        or not _album_list_ok(session, callback_data.tok)
+        or callback_data.idx >= len(session.results)
+    ):
+        await answer_stale(callback)
+        return
+    await callback.answer()
+    await _show_album_release_card(message, session, callback_data.idx, callback_data.album_id)
+
+
+async def _show_album_release_card(
+    message: Message, session: SearchSession, idx: int, album_id: int,
+) -> None:
+    await safe_edit(
+        message,
+        Formatters.format_album_release(session.results[idx]),
+        reply_markup=Keyboards.album_release_card(
+            session.results[idx], idx, album_id, session.list_token, per_page=_per_page(),
         ),
         parse_mode="HTML",
     )
@@ -785,13 +1021,18 @@ async def handle_album_grab(
     # Audit GRAB-03: the button names the album-release list it was drawn for;
     # a movie/series session (same index space!) or a newer list is stale.
     if (
-        not session
-        or session.content_type is not ContentType.MUSIC
-        or not isinstance(session.selected_content, ArtistInfo)
-        or not token_matches(session.list_token, callback_data.tok)
+        session is None
+        or not _album_list_ok(session, callback_data.tok)
         or callback_data.idx >= len(session.results)
     ):
         await answer_stale(callback)
+        return
+
+    # GRAB-02 (B1 pattern): a release Lidarr rejects needs the explicit
+    # "⚠️ Всё равно скачать" (ok=1) from its card.
+    if session.results[callback_data.idx].rejected and not callback_data.ok:
+        await callback.answer()
+        await _show_album_release_card(message, session, callback_data.idx, callback_data.album_id)
         return
 
     services = await _get_music_services()
@@ -806,6 +1047,15 @@ async def handle_album_grab(
         await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
     try:
+        # Re-read after the claim: a finished first tap deleted the session.
+        session = await db.get_session(user_id)
+        if (
+            session is None
+            or not _album_list_ok(session, callback_data.tok)
+            or callback_data.idx >= len(session.results)
+        ):
+            await answer_stale(callback)
+            return
         await _grab_album_release(callback, callback_data, message, session, add_service, db, user_id)
     finally:
         _release_grab(user_id)
@@ -823,9 +1073,19 @@ async def _grab_album_release(
     """The guarded body of `handle_album_grab`."""
     release = session.results[callback_data.idx]
     await callback.answer("Беру...")
-    ok, action = await add_service.grab_release(
-        release, ContentType.MUSIC, arr_id=callback_data.album_id,
-    )
+    # Audit GRAB-16: "⏳" before the API call, so the card's button is gone
+    # while Lidarr works.
+    await message.edit_text(f"⏳ Беру раздачу: <i>{html.escape(release.title)}</i>…", parse_mode="HTML")
+    try:
+        ok, action = await add_service.grab_release(
+            release, ContentType.MUSIC, arr_id=callback_data.album_id,
+        )
+    except Exception as e:
+        logger.error("album_grab_failed", error=str(e), exc_info=True)
+        await message.edit_text(
+            Formatters.format_error("Lidarr не ответил — раздача не взята, попробуйте ещё раз"),
+        )
+        return
     action.user_id = user_id
     await db.log_action(action)
 
@@ -835,11 +1095,15 @@ async def _grab_album_release(
         )
         return
 
-    # Монитор — следствие успешного взятия, а не попытки.
-    await add_service.lidarr.set_album_monitored(callback_data.album_id, True)
-    artist = session.selected_content
-    if isinstance(artist, ArtistInfo) and artist.lidarr_id:
-        await add_service.lidarr.set_artist_monitored(artist.lidarr_id, True)
+    # Монитор — следствие успешного взятия, а не попытки. Сбой здесь не
+    # отменяет взятую раздачу — логируется, как в `_execute_grab`.
+    try:
+        await add_service.lidarr.set_album_monitored(callback_data.album_id, True)
+        artist = session.selected_content
+        if isinstance(artist, ArtistInfo) and artist.lidarr_id:
+            await add_service.lidarr.set_artist_monitored(artist.lidarr_id, True)
+    except Exception as e:
+        logger.warning("album_monitor_enable_failed", album_id=callback_data.album_id, error=str(e))
 
     await message.edit_text(
         Formatters.format_success(

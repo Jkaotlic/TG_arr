@@ -358,6 +358,52 @@ class AlbumGrabCB(CallbackData, prefix="alg"):
     tok: str
     idx: int = Field(ge=0)
     album_id: int
+    # Audit 2026-09-23 UI-03/GRAB-02: the grab button sits on a release card
+    # now; ``ok=1`` is "⚠️ Всё равно скачать" for a release Lidarr rejects.
+    # A B1-era ``alg:tok:idx:album`` (no ``ok``) no longer unpacks → stale.
+    ok: int = Field(default=0, ge=0, le=1)
+
+
+class AlbumReleaseCB(CallbackData, prefix="alr"):
+    """Open the card of one album torrent release (audit UI-03): a row tap
+    used to grab straight away."""
+
+    tok: str
+    idx: int = Field(ge=0)
+    album_id: int
+
+
+class AlbumRelPageCB(CallbackData, prefix="alrp"):
+    """Page through an album's torrent releases (audit UI-10: "Стр. 1/26"
+    had no buttons). ``tok`` — the same list; a page of a newer list is
+    another list."""
+
+    tok: str
+    page: int = Field(ge=0)
+    album_id: int
+
+
+class DiscographyCB(CallbackData, prefix="dsc"):
+    """"✅ Да, вся дискография" on the confirm screen (audit UI-11): the
+    whole-discography grab used to run on the first tap."""
+
+    tok: str
+    artist_id: int
+
+
+class SlskdCardCB(CallbackData, prefix="skc"):
+    """Open the card of one Soulseek candidate before enqueueing it
+    (audit UI-03)."""
+
+    tok: str
+    idx: int = Field(ge=0)
+
+
+class SlskdPageCB(CallbackData, prefix="skp"):
+    """Page through Soulseek candidates (audit UI-10)."""
+
+    tok: str
+    page: int = Field(ge=0)
 
 
 class AlbumRefreshCB(CallbackData, prefix="alrf"):

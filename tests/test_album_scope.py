@@ -118,6 +118,15 @@ async def test_zero_album_id_means_the_whole_discography():
         await music.handle_album_scope(
             callback, AlbumScopeCB(album_id=0, artist_id=7), _user(), db,
         )
+        # Audit 2026-09-23 UI-11: the scope button asks first; the confirm
+        # button (DiscographyCB) runs it.
+        add_service.lidarr.set_artist_monitored.assert_not_awaited()
+        from bot.ui.callbacks import DiscographyCB
+
+        confirmed = db.save_session.await_args.args[1]
+        await music.handle_discography(
+            _callback(), DiscographyCB(tok=confirmed.list_token, artist_id=7), _user(), db,
+        )
 
     add_service.lidarr.set_artist_monitored.assert_awaited_once_with(7, True)
     add_service.lidarr.search_artist.assert_awaited_once_with(7)
@@ -500,7 +509,9 @@ async def test_rejected_releases_sink_to_the_bottom():
         )
 
     saved = db.save_session.await_args.args[1]
-    assert [r.guid for r in saved.results] == ["ok-high", "ok-low", "bad"]
+    # Audit 2026-09-23 GRAB-15: within a group, Lidarr's own order (its
+    # quality profile ranked them) — no longer re-sorted by seeders.
+    assert [r.guid for r in saved.results] == ["ok-low", "ok-high", "bad"]
 
 
 # ---------------------------------------------------------------------------
