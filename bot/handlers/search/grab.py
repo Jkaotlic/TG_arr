@@ -16,6 +16,7 @@ from bot.services.add_service import (
     AddService,
     grab_outcome,
 )
+from bot.services import live_status
 from bot.services.scoring import grab_best_candidate
 from bot.services.search_service import SearchService
 from bot.ui.callbacks import AutoSearchCB, ForceGrabCB, GrabBestCB, GrabCB, SeasonPresetCB
@@ -402,6 +403,14 @@ async def _execute_grab(
                     logger.warning("monitor_enable_failed", arr_id=arr_id, error=str(e))
 
             year_str = f" ({title.year})" if title.year else ""
+            if db_user.preferences.notify_library:
+                # E1: the confirmation becomes the living status message.
+                await _start_living_message(
+                    message, db, title, f"{title.title}{year_str}", result, session,
+                    force_download=force_download, auto_search=auto_search,
+                )
+                await db.delete_session(user_id)
+                return
             if auto_search:
                 body = (
                     f"<b>{html.escape(title.title)}</b>{year_str}\n\n"
@@ -447,6 +456,59 @@ async def _execute_grab(
         logger.error("Grab failed", error=str(e), exc_info=True)
         await message.edit_text(Formatters.format_error("Операция временно недоступна"))
         await db.delete_session(user_id)
+
+
+async def _start_living_message(
+    message: Message,
+    db: Database,
+    title: MovieInfo | SeriesInfo,
+    display: str,
+    result: SearchResult,
+    session: SearchSession,
+    *,
+    force_download: bool,
+    auto_search: bool,
+) -> None:
+    """Improvements round 2 (E1): turn the grab confirmation into the one
+    message that follows the download (``bot.services.live_status``).
+
+    Only for users with «в библиотеке» on (``notify_library``): muting that
+    category mutes the living updates too. Registration is best-effort — a
+    failure leaves an ordinary confirmation and never undoes the grab.
+    """
+    arr_name = _arr_name(session.content_type)
+    if auto_search:
+        release = None
+        status = f"🔍 {arr_name} ищет сам — релиз может быть другим"
+    else:
+        release = result.title
+        status = live_status.LINE_WAITING
+    await message.edit_text(
+        live_status.initial_text(display, release, status=status), parse_mode="HTML",
+    )
+    is_movie = isinstance(title, MovieInfo)
+    if isinstance(title, MovieInfo):
+        provider = f"tmdb.{title.tmdb_id}" if title.tmdb_id else None
+        arr_id = title.radarr_id
+    else:
+        provider = f"tvdb.{title.tvdb_id}" if title.tvdb_id else None
+        arr_id = title.sonarr_id
+    try:
+        await live_status.register_grab(
+            db,
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            kind="movie" if is_movie else "series",
+            title=display,
+            release=release,
+            arr="qbit" if force_download else ("radarr" if is_movie else "sonarr"),
+            arr_id=arr_id,
+            guid=None if auto_search else result.guid,
+            provider_id=None if force_download else provider,
+            detail=status if auto_search else None,
+        )
+    except Exception as e:
+        logger.warning("live_status_register_failed", error=str(e))
 
 
 @router.callback_query(ForceGrabCB.filter())

@@ -17,6 +17,7 @@ API notes (slskd 0.24.x, `/api/v0`):
 
 import asyncio
 import re
+import statistics
 import time
 import uuid
 from datetime import datetime, timezone
@@ -41,9 +42,24 @@ _AUDIO_EXTENSIONS = (".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".aac", "
 #: Quality ranking for sorting: lossless first, then bitrate-ish ordering.
 _FORMAT_RANK = {"flac": 100, "wav": 95, "alac": 90, "m4a": 60, "aac": 55, "ogg": 50, "opus": 50, "mp3": 40, "wma": 20}
 
-#: GRAB-18: a folder with at least this share of the biggest folder's track
-#: count counts as "the whole album".
+#: GRAB-18: a folder with at least this share of the reference track count
+#: counts as "the whole album" (reference: see ``_reference_track_count``).
 _COMPLETE_SHARE = 0.8
+
+
+def _reference_track_count(results: list[SlskdSearchResult]) -> float:
+    """What "the whole album" means for this query, in tracks.
+
+    Round 2 / D3: the MEDIAN folder, not the largest — one deluxe or
+    discography folder used to raise the bar so high that every normal album
+    counted as incomplete. Single-track folders are left out of the median
+    (unless nothing else was found), so a pile of stray singles cannot drag
+    it down and let a lone FLAC track beat a whole MP3 album (GRAB-18).
+    """
+    counts = [r.track_count for r in results if r.track_count > 1]
+    if not counts:
+        counts = [r.track_count for r in results]
+    return float(statistics.median(counts)) if counts else 0.0
 
 
 def rank_candidates(
@@ -53,15 +69,15 @@ def rank_candidates(
 
     Audit 2026-09-23 GRAB-18: format used to come first, so ONE FLAC track
     outranked a complete MP3 album. For an album search (``prefer_complete``)
-    completeness comes first — a folder with ≥80% of the biggest folder's
-    track count — then format (m4a with lossless signs ranks as ALAC, see
+    completeness comes first — a folder with ≥80% of the median folder's
+    track count (``_reference_track_count``) — then format (m4a with lossless signs ranks as ALAC, see
     ``SlskdSearchResult.effective_format``), then free slot, track count,
     queue, speed. A track search (``/track``) ranks by format first.
     """
-    most_tracks = max((r.track_count for r in results), default=0)
+    reference = _reference_track_count(results)
 
     def key(r: SlskdSearchResult):
-        complete = r.track_count >= _COMPLETE_SHARE * most_tracks
+        complete = r.track_count >= _COMPLETE_SHARE * reference
         return (
             not complete if prefer_complete else False,
             -_FORMAT_RANK.get(r.effective_format, 0),

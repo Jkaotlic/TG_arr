@@ -13,10 +13,11 @@ from aiogram.types import CallbackQuery, Message
 from bot.clients.qbittorrent import QBittorrentClient, QBittorrentError
 from bot.clients.registry import get_qbittorrent, get_slskd
 from bot.handlers._cache import remember_lru
-from bot.handlers.common import accessible_message, safe_edit, strip_command
-from bot.models import QBittorrentStatus, TorrentFilter, TorrentInfo, User, format_speed
-from bot.ui.callbacks import TorrentActionCB, TorrentPageCB
+from bot.handlers.common import accessible_message, safe_edit, strip_command, swallow_not_modified
+from bot.models import QBittorrentStatus, TorrentFilter, TorrentInfo, User
+from bot.ui.callbacks import TorrentActionCB, TorrentMoreCB, TorrentPageCB
 from bot.ui.formatters import Formatters
+from bot.ui.formatters.torrent import format_limit_ru
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.keyboards._constants import MSG_OLD_BUTTON
 from bot.ui.menu import MENU_DOWNLOADS, MENU_QSTATUS
@@ -374,6 +375,33 @@ async def handle_torrent_page(
     except Exception as e:
         logger.error("Pagination error", error=str(e), exc_info=True)
         await callback.answer("Ошибка операции", show_alert=True)
+
+
+@router.callback_query(TorrentMoreCB.filter())
+async def handle_torrent_more(
+    callback: CallbackQuery, callback_data: TorrentMoreCB, is_admin: bool = False,
+) -> None:
+    """Open the "⋯ Ещё" panel on the same message (round 2 / D2).
+
+    Only the keyboard is swapped — the list text stays. The view is
+    remembered so pause-all / speed opened from here return to it.
+    """
+    message = accessible_message(callback)
+    if message is None:
+        await callback.answer()
+        return
+    filter_type = _parse_filter(callback_data.flt)
+    page = max(0, callback_data.page)
+    _remember_view(_user_id(callback), filter_type, page)
+    try:
+        await swallow_not_modified(message.edit_reply_markup(
+            reply_markup=Keyboards.torrent_more(filter_type, page, is_admin=is_admin),
+        ))
+    except Exception as e:
+        logger.error("Torrent more panel error", error=str(e), exc_info=True)
+        await callback.answer("Ошибка операции", show_alert=True)
+        return
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith(CallbackData.TORRENT_PAGE))
@@ -771,7 +799,11 @@ async def handle_filter_select(callback: CallbackQuery, is_admin: bool = False) 
 
 @router.callback_query(F.data == CallbackData.SPEED_MENU)
 async def handle_speed_menu(callback: CallbackQuery, is_admin: bool = False) -> None:
-    """Show speed limits menu (admin-only: the limits are global qBit settings)."""
+    """Show the speed screen (admin-only: the limits are global qBit settings).
+
+    Round 2 / D1: the screen is now the turtle toggle; the exact preset grid
+    lives behind "⋯ Точные лимиты" (``handle_speed_exact``).
+    """
     if not is_admin:
         await callback.answer(MSG_ADMIN_ONLY, show_alert=True)
         return
@@ -784,8 +816,7 @@ async def handle_speed_menu(callback: CallbackQuery, is_admin: bool = False) -> 
         return
 
     try:
-        status = await qbt.get_status()
-        await _render_speed_menu(message, status, _user_id(callback))
+        await _render_speed_screen(message, qbt, _user_id(callback))
         await callback.answer()
 
     except Exception as e:
@@ -793,34 +824,139 @@ async def handle_speed_menu(callback: CallbackQuery, is_admin: bool = False) -> 
         await callback.answer("Ошибка операции", show_alert=True)
 
 
-async def _render_speed_menu(message: Message, status, user_id: int = 0) -> None:
-    """Render the speed-limits menu into ``message``.
+async def _render_speed_screen(message: Message, qbt: QBittorrentClient, user_id: int = 0) -> None:
+    """Render the speed screen: current transfer speeds, the turtle limits and
+    whether turtle mode is on — three independent reads fetched together.
+
+    Does NOT answer the callback — the caller owns the single ack (BUG-15).
+    """
+    transfer, turtle_on, (alt_dl, alt_ul) = await asyncio.gather(
+        qbt.get_transfer_info(), qbt.get_speed_limits_mode(), qbt.get_alt_speed_limits(),
+    )
+    text = Formatters.format_speed_screen(
+        dl_speed=int(transfer.get("dl_info_speed", 0) or 0),
+        ul_speed=int(transfer.get("up_info_speed", 0) or 0),
+        alt_dl=alt_dl,
+        alt_ul=alt_ul,
+    )
+    await safe_edit(
+        message,
+        text,
+        reply_markup=Keyboards.speed_screen(turtle_on, *_view_of(user_id)),
+        parse_mode="HTML",
+    )
+
+
+#: qBittorrent's out-of-the-box turtle limits (10 KiB/s both ways) — they all
+#: but stop traffic, and nobody chose them (fix round 1). Bytes/s.
+_FACTORY_ALT_LIMITS = (10240, 10240)
+#: What the bot sets instead the first time the turtle is switched on.
+_DEFAULT_ALT_LIMITS = (2 * 1024 * 1024, 512 * 1024)
+
+
+@router.callback_query(F.data == CallbackData.SPEED_TURTLE)
+async def handle_speed_turtle(callback: CallbackQuery, is_admin: bool = False) -> None:
+    """Toggle qBit's alternative ("turtle") speed limits and redraw the screen
+    with the state qBit reports afterwards (not an assumed flip).
+
+    Fix round 1: turning it ON with qBit's factory 10 KiB/s limits first sets
+    usable ones (2 МБ/с · 512 КБ/с) and says so; custom limits are kept, and
+    turning it OFF never touches them. The callback is answered exactly once.
+    """
+    if not is_admin:
+        await callback.answer(MSG_ADMIN_ONLY, show_alert=True)
+        return
+
+    qbt = await check_qbt_enabled(callback)
+    if not qbt:
+        return
+
+    try:
+        was_on, alt = await asyncio.gather(qbt.get_speed_limits_mode(), qbt.get_alt_speed_limits())
+        if not was_on and tuple(alt) == _FACTORY_ALT_LIMITS:
+            await qbt.set_alt_speed_limits(*_DEFAULT_ALT_LIMITS)
+            alt = _DEFAULT_ALT_LIMITS
+        await qbt.toggle_speed_limits_mode()
+        turtle_on = await qbt.get_speed_limits_mode()
+    except Exception as e:
+        logger.error("Speed turtle toggle error", error=str(e), exc_info=True)
+        await callback.answer("Ошибка операции", show_alert=True)
+        return
+
+    if turtle_on:
+        answer = f"🐢 Черепаха включена: ⬇️ {format_limit_ru(alt[0])} · ⬆️ {format_limit_ru(alt[1])}"
+    else:
+        answer = "🐢 Черепаха выключена"
+    await callback.answer(answer)
+
+    if (message := accessible_message(callback)) is not None:
+        try:
+            await _render_speed_screen(message, qbt, _user_id(callback))
+        except Exception as e:
+            # Already answered — a failed redraw is only logged (no 2nd ack).
+            logger.error("Speed screen redraw error", error=str(e), exc_info=True)
+
+
+async def _turtle_on(qbt: QBittorrentClient) -> bool:
+    """Best-effort turtle state for the exact-limits grid note."""
+    try:
+        return (await qbt.get_speed_limits_mode()) is True
+    except Exception as e:
+        logger.warning("speed_limits_mode_failed", error=str(e))
+        return False
+
+
+@router.callback_query(F.data == CallbackData.SPEED_EXACT)
+async def handle_speed_exact(callback: CallbackQuery, is_admin: bool = False) -> None:
+    """Show the exact speed-limit preset grid (behaviour unchanged, admin-only)."""
+    if not is_admin:
+        await callback.answer(MSG_ADMIN_ONLY, show_alert=True)
+        return
+    message = accessible_message(callback)
+    if message is None:
+        return
+
+    qbt = await check_qbt_enabled(callback)
+    if not qbt:
+        return
+
+    try:
+        status, turtle_on = await asyncio.gather(qbt.get_status(), _turtle_on(qbt))
+        await _render_speed_menu(message, status, turtle_on)
+        await callback.answer()
+
+    except Exception as e:
+        logger.error("Speed limits grid error", error=str(e), exc_info=True)
+        await callback.answer("Ошибка операции", show_alert=True)
+
+
+async def _render_speed_menu(message: Message, status, turtle_on: bool = False) -> None:
+    """Render the exact speed-limits preset grid into ``message``.
 
     LOGIC-03: passes the qBittorrent-reported current limits into
     ``Keyboards.speed_limits_menu`` so the "✓" marker reflects the real
     setting instead of always defaulting to "unlimited".
 
     BUG-04a/LOGIC-02: extracted so ``handle_speed_set`` can redraw the menu
-    after its own ``callback.answer`` without triggering a second one via
-    ``handle_speed_menu``.
-    """
-    current_dl = "Без лимита" if status.download_limit == 0 else format_speed(status.download_limit)
-    current_ul = "Без лимита" if status.upload_limit == 0 else format_speed(status.upload_limit)
+    after its own ``callback.answer`` without triggering a second one.
 
+    Fix round 1: with the turtle on, these (global) limits wait for it to be
+    switched off — the grid says so.
+    """
+    turtle_note = "🐢 включена — эти лимиты действуют после её выключения\n" if turtle_on else ""
     text = (
         f"<b>Лимиты скорости</b>\n\n"
+        f"{turtle_note}"
         f"Текущие:\n"
-        f"⬇️ Загрузка: {current_dl}\n"
-        f"⬆️ Отдача: {current_ul}\n\n"
+        f"⬇️ Загрузка: {format_limit_ru(status.download_limit)}\n"
+        f"⬆️ Отдача: {format_limit_ru(status.upload_limit)}\n\n"
         f"Выберите новый лимит:"
     )
 
     await safe_edit(
         message,
         text,
-        reply_markup=Keyboards.speed_limits_menu(
-            status.download_limit, status.upload_limit, *_view_of(user_id),
-        ),
+        reply_markup=Keyboards.speed_limits_menu(status.download_limit, status.upload_limit),
         parse_mode="HTML",
     )
 
@@ -858,8 +994,8 @@ async def handle_speed_set(callback: CallbackQuery, is_admin: bool = False) -> N
         # BUG-04a/LOGIC-02: render directly — do NOT call handle_speed_menu,
         # which would ack the callback a second time.
         if (message := accessible_message(callback)) is not None:
-            status = await qbt.get_status()
-            await _render_speed_menu(message, status, _user_id(callback))
+            status, turtle_on = await asyncio.gather(qbt.get_status(), _turtle_on(qbt))
+            await _render_speed_menu(message, status, turtle_on)
 
     except Exception as e:
         logger.error("Speed set error", error=str(e), exc_info=True)

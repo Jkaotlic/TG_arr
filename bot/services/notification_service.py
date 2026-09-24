@@ -25,6 +25,7 @@ class NotificationService:
         self,
         qbittorrent: QBittorrentClient,
         send_notification: Callable[[int, str], Awaitable[bool] | Awaitable[None]],
+        exclude_chats: Optional[Callable[[str], Awaitable[set[int]]]] = None,
     ):
         """
         Initialize notification service.
@@ -40,6 +41,10 @@ class NotificationService:
         """
         self.qbittorrent = qbittorrent
         self.send_notification = send_notification
+        #: E1 (improvements round 2): chats whose living grab message already
+        #: follows this torrent (``LiveStatusService.owner_chats``) — they
+        #: get no separate "download complete" message.
+        self._exclude_chats = exclude_chats
         self.settings = get_settings()
 
         # Track known torrents and their completion state
@@ -369,7 +374,17 @@ class NotificationService:
 
         message = Formatters.format_download_complete_notification(torrent)
 
+        skip: set[int] = set()
+        if self._exclude_chats is not None:
+            try:
+                skip = await self._exclude_chats(torrent.hash)
+            except Exception as e:
+                logger.warning("notification_exclude_failed", error=str(e))
+
         for user_id in self.get_subscribed_users():
+            if user_id in skip:
+                logger.debug("completion_left_to_living_message", user_id=user_id)
+                continue
             try:
                 result = await self.send_notification(user_id, message)
             except Exception as e:

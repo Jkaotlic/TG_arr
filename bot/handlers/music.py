@@ -1,6 +1,7 @@
 """Music (Lidarr) handlers: search artists, view details, add to Lidarr."""
 
 import asyncio
+import hashlib
 import html
 from typing import Optional
 
@@ -44,6 +45,7 @@ from bot.ui.callbacks import (
     ArtistCB,
     DiscographyCB,
     MusicAddCB,
+    MusicRetryCB,
     SlskdCardCB,
     SlskdCB,
     SlskdPageCB,
@@ -752,15 +754,28 @@ async def handle_album_scope(
         # Audit UI-11: the whole discography (tens of albums, tens of GB) is
         # confirmed first; the confirm button carries a fresh token.
         artist_id = artist.lidarr_id or callback_data.artist_id
+        # Round 2 / D3: re-read under the lock — saving the copy read above
+        # would overwrite whatever another handler wrote in between.
         async with db.session_lock(user_id):
-            session.list_token = new_list_token()
-            await db.save_session(user_id, session)
+            locked = await db.get_session(user_id)
+            if (
+                locked is None
+                or not isinstance(locked.selected_content, ArtistInfo)
+                or _artist_fingerprint(locked.selected_content) != _artist_fingerprint(artist)
+            ):
+                await answer_stale(callback)
+                return
+            locked.list_token = new_list_token()
+            await db.save_session(user_id, locked)
+            list_token = locked.list_token
         await callback.answer()
         await message.edit_text(
             f"💿 <b>{html.escape(artist.name)}</b> — вся дискография?\n\n"
             "Lidarr возьмёт под мониторинг все альбомы артиста и начнёт их искать. "
             "Это может быть много гигабайт.",
-            reply_markup=Keyboards.discography_confirm(artist_id, session.list_token),
+            reply_markup=Keyboards.discography_confirm(
+                artist_id, list_token, artist_fp=_artist_fingerprint(artist),
+            ),
             parse_mode="HTML",
         )
         return
@@ -786,15 +801,27 @@ async def handle_album_scope(
     )
 
 
+def _artist_fingerprint(artist: ArtistInfo) -> str:
+    """Short stable id of an artist for callback data (round 2 / D3): the
+    MusicBrainz id, else the name — for artists without a Lidarr id."""
+    key = (artist.mb_id or artist.name or "").strip().casefold()
+    return hashlib.sha1(key.encode()).hexdigest()[:8]
+
+
 def _discography_session_ok(session: SearchSession | None, callback_data: DiscographyCB) -> bool:
-    """The confirm button still belongs to the artist and screen the session holds."""
+    """The confirm button still belongs to the artist and screen the session holds.
+
+    Round 2 / D3: without a Lidarr id the id check degenerates to ``0 == 0``,
+    so the artist fingerprint carried by the button must match instead.
+    """
     if session is None or not isinstance(session.selected_content, ArtistInfo):
         return False
     artist = session.selected_content
-    return (
-        token_matches(session.list_token, callback_data.tok)
-        and (artist.lidarr_id or callback_data.artist_id) == callback_data.artist_id
-    )
+    if not token_matches(session.list_token, callback_data.tok):
+        return False
+    if artist.lidarr_id:
+        return artist.lidarr_id == callback_data.artist_id
+    return bool(callback_data.fp) and callback_data.fp == _artist_fingerprint(artist)
 
 
 @router.callback_query(DiscographyCB.filter())
@@ -1418,3 +1445,44 @@ async def handle_legacy_trending_artist(callback: CallbackQuery) -> None:
     through unhandled.
     """
     await callback.answer(MSG_OLD_BUTTON, show_alert=True)
+
+
+#: M1: answers to a «🔁 Докачать» tap, by `MusicRetryService.retry` outcome.
+_RETRY_ANSWERS = {
+    "started": "🔁 Lidarr ищет альбом заново",
+    "already": "🔁 Lidarr уже ищет альбом заново",
+    "unavailable": "Lidarr не настроен",
+    "failed": "❌ Lidarr не ответил — попробуйте позже",
+}
+
+
+@router.callback_query(MusicRetryCB.filter())
+async def handle_music_retry(callback: CallbackQuery, callback_data: MusicRetryCB, db: Database) -> None:
+    """M1 (improvements round 2): «🔁 Докачать» under a music summary sends
+    Lidarr's AlbumSearch for the album behind the token. Double taps (and
+    other recipients of the same summary) within the cooldown don't search
+    twice; after a started search the pressed button leaves this message."""
+    from bot.services.music_retry import MusicRetryService
+
+    result = await MusicRetryService(db, get_lidarr).retry(callback_data.tok)
+    if result == "stale":
+        await callback.answer(MSG_OLD_BUTTON, show_alert=True)
+        return
+    await callback.answer(_RETRY_ANSWERS[result], show_alert=result in ("unavailable", "failed"))
+    if result != "started":
+        return
+    message = accessible_message(callback)
+    markup = message.reply_markup if message is not None else None
+    if message is None or markup is None:
+        return
+    pressed = callback_data.pack()
+    rows = [
+        [b for b in row if b.callback_data != pressed] for row in markup.inline_keyboard
+    ]
+    rows = [row for row in rows if row]
+    try:
+        await message.edit_reply_markup(
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
+        )
+    except Exception as e:  # "message is not modified", too old, …: cosmetic only
+        logger.debug("music_retry_markup_edit_failed", error=str(e))

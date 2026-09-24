@@ -470,7 +470,8 @@ async def test_whole_discography_asks_first():
     add_service.lidarr.search_artist.assert_not_awaited()
     saved = db.save_session.await_args.args[1]
     kb = cb.message.edit_text.await_args.kwargs["reply_markup"]
-    assert DiscographyCB(tok=saved.list_token, artist_id=7).pack() in _datas(kb)
+    fp = music._artist_fingerprint(_artist())  # round 2 / D3
+    assert DiscographyCB(tok=saved.list_token, artist_id=7, fp=fp).pack() in _datas(kb)
     assert "◀️ Назад" in _texts(kb)
 
 

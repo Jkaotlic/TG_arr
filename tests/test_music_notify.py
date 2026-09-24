@@ -1004,7 +1004,7 @@ LIVE_DIRS = [
      "Apollo Brown — No Pressure, No Diamond. (2026)"),
     ("music\\Anix, The\\Album\\(2011) Sleepwalker",
      "Anix, The — Sleepwalker (2011)"),
-    ("@@sypuj\\Music\\Metallica\\(2016) Hardwired... to Self-Destruct",
+    ("@@abcde\\Music\\Metallica\\(2016) Hardwired... to Self-Destruct",
      "Metallica — Hardwired... to Self-Destruct (2016)"),
 ]
 

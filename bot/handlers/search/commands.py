@@ -661,11 +661,14 @@ async def process_search(
         # Audit GRAB-13: "S01E05" asks for one episode. The season search
         # returns every episode of the season; keep that episode and the
         # season packs (flagged "пак сезона" in the list) that contain it.
+        # Round 2 / D3: multi-episode releases ("S01E04-E06") that cover it too.
         wanted_episode = parsed.get("episode")
         if is_episodic and wanted_episode is not None and parsed.get("season") is not None:
             results = [
                 r for r in results
-                if r.is_season_pack or r.detected_episode == wanted_episode
+                if r.is_season_pack
+                or r.detected_episode == wanted_episode
+                or wanted_episode in r.detected_episodes
             ]
 
         if not results:

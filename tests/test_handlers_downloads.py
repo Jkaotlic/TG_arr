@@ -410,8 +410,9 @@ async def test_handle_speed_set_calls_answer_once_and_redraws():
 
 
 @pytest.mark.asyncio
-async def test_handle_speed_menu_passes_current_limits_to_keyboard():
-    """LOGIC-03: the ✓ marker must reflect the real qBit-reported limits."""
+async def test_handle_speed_exact_passes_current_limits_to_keyboard():
+    """LOGIC-03: the ✓ marker must reflect the real qBit-reported limits.
+    Round 2 / D1: the preset grid is now "⋯ Точные лимиты" (speed_exact)."""
     from bot.handlers import downloads
     from bot.models import QBittorrentStatus
 
@@ -425,10 +426,10 @@ async def test_handle_speed_menu_passes_current_limits_to_keyboard():
         )
     )
 
-    cb = _make_callback("speed_menu")
+    cb = _make_callback("speed_exact")
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
-        await downloads.handle_speed_menu(cb, is_admin=True)
+        await downloads.handle_speed_exact(cb, is_admin=True)
 
     cb.message.edit_text.assert_awaited_once()
     _, kwargs = cb.message.edit_text.call_args

@@ -36,6 +36,15 @@ class TorrentPageCB(CallbackData, prefix="tpg"):
     flt: str
 
 
+class TorrentMoreCB(CallbackData, prefix="tmore"):
+    """The "⋯ Ещё" button under the torrent list (round 2 / D2): opens the secondary
+    actions panel on the same message. Carries the list view (``page``,
+    ``flt`` — see ``TorrentPageCB``) so the panel's "◀️ Назад" restores it."""
+
+    page: int
+    flt: str
+
+
 # ---------------------------------------------------------------------------
 # r5 follow-up: migration of the remaining data-carrying callback families
 # (see analysis/r5/05-logic-issues.md "Карта миграции CallbackData"). Each
@@ -401,10 +410,16 @@ class AlbumRelPageCB(CallbackData, prefix="alrp"):
 
 class DiscographyCB(CallbackData, prefix="dsc"):
     """"✅ Да, вся дискография" on the confirm screen (audit UI-11): the
-    whole-discography grab used to run on the first tap."""
+    whole-discography grab used to run on the first tap.
+
+    Round 2 / D3: ``fp`` — a short fingerprint of the artist (MusicBrainz id,
+    else name) so the confirm is checked against the artist in the session
+    even when it has no Lidarr id (``artist_id`` is then 0 for everyone).
+    """
 
     tok: str
     artist_id: int
+    fp: str = ""
 
 
 class SlskdCardCB(CallbackData, prefix="skc"):
@@ -432,3 +447,13 @@ class AlbumRefreshCB(CallbackData, prefix="alrf"):
     """
 
     artist_id: int
+
+
+class MusicRetryCB(CallbackData, prefix="mr"):
+    """M1 (improvements round 2): «🔁 Докачать» under a music summary.
+
+    ``tok`` is the 6-char token whose album id lives in
+    ``notify_kv['music_retry:<tok>']`` (`bot.services.music_retry`).
+    """
+
+    tok: str

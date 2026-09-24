@@ -274,22 +274,31 @@ class SonarrClient(ArrBaseClient):
     async def delete_series(self, series_id: int, delete_files: bool = False) -> bool:
         return await self._delete_resource("series", series_id, delete_files)
 
-    async def get_calendar(self, days: int = 7) -> list[dict[str, Any]]:
+    async def get_calendar(
+        self, days: int = 7, *, start: Optional[datetime] = None,
+    ) -> list[dict[str, Any]]:
         """Get upcoming episodes from Sonarr calendar.
 
         Args:
             days: Number of days to look ahead.
+            start: exact start instant (batch E fix 1: the digest asks from
+                LOCAL midnight); default — today's UTC date.
 
         Returns:
             List of episode dicts with series info.
         """
-        now = datetime.now(timezone.utc)
-        start = now.strftime("%Y-%m-%d")
-        end = (now + timedelta(days=days)).strftime("%Y-%m-%d")
+        if start is not None:
+            begin = start.astimezone(timezone.utc)
+            start_s = begin.strftime("%Y-%m-%dT%H:%M:%SZ")
+            end_s = (begin + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            now = datetime.now(timezone.utc)
+            start_s = now.strftime("%Y-%m-%d")
+            end_s = (now + timedelta(days=days)).strftime("%Y-%m-%d")
 
         params = {
-            "start": start,
-            "end": end,
+            "start": start_s,
+            "end": end_s,
             "includeSeries": "true",
             "includeEpisodeFile": "false",
         }

@@ -74,10 +74,16 @@ venv.bak/
 *~
 
 # Database
+# Живой бэкап БД однажды лежал untracked в checkout этого ПУБЛИЧНОГО репо
+# на проде (data/bot.db.bak-<дата>). Закрываем весь data/ (кроме .gitkeep)
+# и любые копии/журналы sqlite где угодно.
 *.db
+*.db.*
+*.db-journal
 *.sqlite
 *.sqlite3
-data/*.db
+data/*
+!data/.gitkeep
 
 # Logs
 *.log

@@ -179,6 +179,39 @@ class LidarrClient(ArrBaseClient):
         result = await self.post("/api/v1/command", json_data=payload)
         return result if isinstance(result, dict) else {}
 
+    async def get_grab_history(self, page_size: int = 100) -> list[dict[str, Any]]:
+        """Recent `grabbed` history records (eventType 1), newest first, with
+        the album and artist embedded (M1: mapping an slskd album folder to a
+        Lidarr album). Records carry ``albumId``, ``sourceTitle`` and
+        ``data.downloadClient``."""
+        params = {
+            "eventType": 1, "pageSize": page_size, "sortKey": "date",
+            "sortDirection": "descending", "includeAlbum": "true", "includeArtist": "true",
+        }
+        result = await self.get("/api/v1/history", params=params)
+        records = result.get("records") if isinstance(result, dict) else None
+        return [r for r in records if isinstance(r, dict)] if isinstance(records, list) else []
+
+    async def get_album(self, album_id: int) -> dict[str, Any]:
+        """One album with its ``statistics`` (trackFileCount / trackCount)."""
+        result = await self.get(f"/api/v1/album/{album_id}")
+        return result if isinstance(result, dict) else {}
+
+    async def album_in_queue(self, album_id: int) -> bool:
+        """Whether anything for this album sits in Lidarr's download queue.
+
+        ``albumIds`` narrows the answer on Lidarr's side; the records are
+        still checked here, so a Lidarr that ignores the filter can't make
+        another album's download count. Errors propagate.
+        """
+        result = await self.get(
+            "/api/v1/queue", params={"albumIds": album_id, "pageSize": 200},
+        )
+        records = result.get("records") if isinstance(result, dict) else result
+        if not isinstance(records, list):
+            return False
+        return any(isinstance(r, dict) and r.get("albumId") == album_id for r in records)
+
     async def search_artist(self, artist_id: int) -> dict[str, Any]:
         """Trigger a search for every monitored album of an artist (201, как выше)."""
         payload = {"name": "ArtistSearch", "artistId": artist_id}

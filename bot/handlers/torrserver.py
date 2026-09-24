@@ -231,18 +231,29 @@ async def handle_add(callback: CallbackQuery, callback_data: TsAddCB) -> None:
         await callback.answer("TorrServer не настроен", show_alert=True)
         return
 
-    await callback.answer("Добавляю...")
-    await message.edit_text("⏳ Добавляю раздачу и жду метаданные...")
+    # Round 2 / D3: a double tap must not add (and publish) the release twice
+    # — the same per-user slot every grab uses.
+    from bot.handlers.search import _claim_grab, _release_grab
 
+    user_id = callback.from_user.id
+    if not await _claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
+        return
     try:
-        result = await service.add_and_publish(release.link, release.title, "")
-    except TorrServerError as e:
-        await message.edit_text(Formatters.format_error(html.escape(str(e))))
-        return
-    except Exception as e:
-        logger.error("torrserver_add_failed", error=str(e), exc_info=True)
-        await message.edit_text(Formatters.format_error("Не удалось добавить раздачу"))
-        return
+        await callback.answer("Добавляю...")
+        await message.edit_text("⏳ Добавляю раздачу и жду метаданные...")
+
+        try:
+            result = await service.add_and_publish(release.link, release.title, "")
+        except TorrServerError as e:
+            await message.edit_text(Formatters.format_error(html.escape(str(e))))
+            return
+        except Exception as e:
+            logger.error("torrserver_add_failed", error=str(e), exc_info=True)
+            await message.edit_text(Formatters.format_error("Не удалось добавить раздачу"))
+            return
+    finally:
+        _release_grab(user_id)
 
     await message.edit_text(
         Formatters.format_torrserver_added(result),

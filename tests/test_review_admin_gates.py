@@ -138,7 +138,9 @@ def test_torrent_list_hides_speed_button_for_non_admin():
 
     t = TorrentInfo(hash="a" * 40, name="Test.Torrent", size=1, progress=0.5,
                     download_speed=0, upload_speed=0, eta=None, state=TorrentState.DOWNLOADING)
-    user = _texts(Keyboards.torrent_list([t], 0, 1, TorrentFilter.ALL, is_admin=False))
-    admin = _texts(Keyboards.torrent_list([t], 0, 1, TorrentFilter.ALL, is_admin=True))
+    # Round 2 / D2: speed moved into the "⋯ Ещё" panel.
+    assert not any("🚀" in x for x in _texts(Keyboards.torrent_list([t], 0, 1, TorrentFilter.ALL, is_admin=True)))
+    user = _texts(Keyboards.torrent_more(TorrentFilter.ALL, 0, is_admin=False))
+    admin = _texts(Keyboards.torrent_more(TorrentFilter.ALL, 0, is_admin=True))
     assert not any("🚀" in x for x in user)
     assert any("🚀" in x for x in admin)

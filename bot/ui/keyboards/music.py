@@ -1,5 +1,8 @@
 """Music (Lidarr/Deezer artist lookup) keyboards."""
 
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import AlbumInfo, ArtistInfo
@@ -14,11 +17,15 @@ from bot.ui.callbacks import (
     ArtistCB,
     DiscographyCB,
     MusicAddCB,
+    MusicRetryCB,
     SlskdCardCB,
     SlskdCB,
     SlskdPageCB,
 )
 from bot.ui.keyboards._constants import CallbackData
+
+if TYPE_CHECKING:
+    from bot.services.music_retry import RetryOffer
 
 
 class _MusicKeyboards:
@@ -326,12 +333,14 @@ class _MusicKeyboards:
         ])
 
     @staticmethod
-    def discography_confirm(artist_id: int, list_token: str) -> InlineKeyboardMarkup:
-        """Audit UI-11: the whole discography is a big action — confirm it."""
+    def discography_confirm(artist_id: int, list_token: str, artist_fp: str = "") -> InlineKeyboardMarkup:
+        """Audit UI-11: the whole discography is a big action — confirm it.
+
+        ``artist_fp`` — see ``DiscographyCB.fp`` (round 2 / D3)."""
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
                 text="✅ Да, вся дискография",
-                callback_data=DiscographyCB(tok=list_token, artist_id=artist_id).pack(),
+                callback_data=DiscographyCB(tok=list_token, artist_id=artist_id, fp=artist_fp).pack(),
             )],
             [
                 InlineKeyboardButton(
@@ -340,4 +349,13 @@ class _MusicKeyboards:
                 ),
                 InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
             ],
+        ])
+
+    @staticmethod
+    def music_retry(offers: Sequence["RetryOffer"]) -> InlineKeyboardMarkup:
+        """M1 (improvements round 2): one «🔁 Докачать: <album>» per album
+        under a music summary (`bot.services.music_retry` caps them at 3)."""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=o.label, callback_data=MusicRetryCB(tok=o.token).pack())]
+            for o in offers
         ])

@@ -11,7 +11,7 @@ import structlog
 from bot.clients.base import APIError, BaseAPIClient, ServiceConnectionError
 from bot.config import get_settings
 from bot.models import MIN_PACK_EPISODES, ContentType, QualityInfo, SearchResult
-from bot.services.release_parser import parse_title_quality
+from bot.services.release_parser import parse_episode_numbers, parse_title_quality
 
 logger = structlog.get_logger()
 
@@ -294,6 +294,7 @@ class ProwlarrClient(BaseAPIClient):
             detected_year=detected_year,
             detected_season=detected_season,
             detected_episode=detected_episode,
+            detected_episodes=parse_episode_numbers(title),
             is_season_pack=is_season_pack,
         )
 

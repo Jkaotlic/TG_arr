@@ -487,6 +487,54 @@ class QBittorrentClient:
         )
         logger.info("Set upload limit", limit=limit)
 
+    async def get_speed_limits_mode(self) -> bool:
+        """True when qBit's alternative ("turtle") speed limits are active.
+
+        ``GET /api/v2/transfer/speedLimitsMode`` answers ``1`` / ``0`` (parsed
+        as JSON into an int by ``_request``; tolerate the string too).
+        """
+        result = await self._request("GET", "/api/v2/transfer/speedLimitsMode")
+        return str(result).strip() == "1"
+
+    async def toggle_speed_limits_mode(self) -> None:
+        """Flip the alternative ("turtle") speed limits on/off.
+
+        qBit ≥5 answers 204 with no body — ``_request`` returns None, fine.
+        """
+        await self._request("POST", "/api/v2/transfer/toggleSpeedLimitsMode")
+        logger.info("Toggled alternative speed limits")
+
+    async def get_alt_speed_limits(self) -> tuple[int, int]:
+        """The turtle-mode limits ``(download, upload)`` in bytes/s, 0 = none.
+
+        Read from ``/api/v2/app/preferences`` (``alt_dl_limit``/``alt_up_limit``;
+        qBit reports them in bytes/s — its own WebUI divides by 1024 to show
+        KiB/s). A malformed answer degrades to ``(0, 0)``.
+        """
+        app_prefs = await self._request("GET", "/api/v2/app/preferences")
+        if not isinstance(app_prefs, dict):
+            return 0, 0
+
+        def _limit(key: str) -> int:
+            try:
+                value = int(app_prefs.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+            return max(0, value)
+
+        return _limit("alt_dl_limit"), _limit("alt_up_limit")
+
+    async def set_alt_speed_limits(self, download: int, upload: int) -> None:
+        """Set the turtle-mode limits in bytes/s (0 = none).
+
+        ``POST /api/v2/app/setPreferences`` takes one form field ``json`` with
+        the changed preferences; qBit answers 200 (≤5.1) or 204 (≥5.2) with
+        an empty body — ``_request`` returns None for both.
+        """
+        payload = json.dumps({"alt_dl_limit": int(download), "alt_up_limit": int(upload)})
+        await self._request("POST", "/api/v2/app/setPreferences", data={"json": payload})
+        logger.info("Set alternative speed limits", download=download, upload=upload)
+
     async def add_torrent_url(
         self,
         urls: list[str] | str,

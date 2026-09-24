@@ -206,3 +206,35 @@ def enrich_from_title(quality: QualityInfo, title: str) -> QualityInfo:
     return quality.model_copy(update=updates) if updates else quality
 
 
+
+
+# Round 2 / D3: multi-episode releases. "S01E04-E06" / "S01E04-06" are a
+# range, "S01E04E05E06" lists every episode. The range needs a non-alnum after
+# its last number, so "S01E05-720p" / "S01E05-4HD" stay a single episode (same
+# rule as the Prowlarr pack detector). Fix round 1: a spaced dash needs an
+# "E" ("S01E04 - E06"); "S01E04 - 12 из 20" is episode 4, not 4–12. A bare
+# number is a range end only after a tight dash ("S01E04-06").
+_EP_RANGE_RE = re.compile(
+    r"s(\d{1,2})\s*e(\d{1,3})(?:\s*-\s*e(\d{1,3})|-(\d{1,3}))(?![0-9a-zа-яё])"
+)
+_EP_CHAIN_RE = re.compile(r"s\d{1,2}((?:e\d{1,3}){2,})(?![0-9])")
+_EP_SINGLE_RE = re.compile(r"s\d{1,2}\s*e(\d{1,3})")
+#: A longer "range" is more likely a misparse than one release.
+_MAX_EPISODE_SPAN = 100
+
+
+def parse_episode_numbers(title: str) -> list[int]:
+    """Every episode number a release title covers, ascending; [] if none."""
+    lower = title.lower()
+    match = _EP_RANGE_RE.search(lower)
+    if match:
+        first, last = int(match.group(2)), int(match.group(3) or match.group(4))
+        if first < last <= first + _MAX_EPISODE_SPAN:
+            return list(range(first, last + 1))
+    match = _EP_CHAIN_RE.search(lower)
+    if match:
+        return sorted({int(n) for n in re.findall(r"e(\d{1,3})", match.group(1))})
+    match = _EP_SINGLE_RE.search(lower)
+    if match:
+        return [int(match.group(1))]
+    return []

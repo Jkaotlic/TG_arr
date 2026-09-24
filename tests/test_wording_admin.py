@@ -194,8 +194,9 @@ def _torrent(state=TorrentState.DOWNLOADING) -> TorrentInfo:
 def test_torrent_list_hides_blanket_actions_from_non_admin():
     from bot.ui.keyboards import Keyboards
 
-    admin = _texts(Keyboards.torrent_list([_torrent()], is_admin=True))
-    user = _texts(Keyboards.torrent_list([_torrent()], is_admin=False))
+    # Round 2 / D2: the blanket actions live in the "⋯ Ещё" panel.
+    admin = _texts(Keyboards.torrent_more(is_admin=True))
+    user = _texts(Keyboards.torrent_more(is_admin=False))
     assert "▶️ Возобновить все" in admin and "⏸ Пауза всех" in admin
     assert "▶️ Возобновить все" not in user and "⏸ Пауза всех" not in user
 
@@ -280,7 +281,7 @@ def test_arrows_and_close_are_unified():
     assert BTN_BACK in _texts(Keyboards.torrserver_list([], is_admin=False))
     assert not any("⬅️" in t for t in _texts(Keyboards.torrserver_confirm_delete("a" * 40)))
 
-    for kb in (Keyboards.torrent_list([_torrent()], is_admin=True), Keyboards.emby_main(is_admin=True)):
+    for kb in (Keyboards.torrent_more(is_admin=True), Keyboards.emby_main(is_admin=True)):
         close = [b for b in _buttons(kb) if b.text == BTN_CLOSE]
         assert len(close) == 1 and close[0].callback_data == CallbackData.CLOSE
 

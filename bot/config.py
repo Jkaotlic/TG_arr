@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     emby_url: Optional[str] = Field(default=None, description="Emby server URL")
     emby_api_key: Optional[str] = Field(default=None, description="Emby API key")
     emby_timeout: float = Field(default=30.0, ge=5.0, description="Emby request timeout in seconds")
+    # Improvements round 2 (E2): what the «▶️ Смотреть в Emby» button opens —
+    # EMBY_URL is often an internal address a phone can't reach.
+    emby_public_url: Optional[str] = Field(
+        default=None, description="Public Emby base URL for watch links (empty → EMBY_URL)"
+    )
 
     # TorrServer (optional) — streaming contour: "watch now" instead of
     # "have it in the library". Deliberately its own search/add path.
@@ -159,6 +164,9 @@ class Settings(BaseSettings):
     def arr_torrent_category_set(self) -> set[str]:
         return {c.strip() for c in self.arr_torrent_categories.split(",") if c.strip()}
 
+    # Improvements round 2 (E3): local hour (TIMEZONE) of the morning digest.
+    digest_hour: int = Field(default=9, ge=0, le=23, description="Local hour of the morning digest")
+
     # Optional
     timezone: str = Field(default="Europe/Moscow", description="Timezone for timestamps")
     log_level: str = Field(default="INFO", description="Logging level")
@@ -212,7 +220,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "qbittorrent_url", "emby_url", "lidarr_url", "slskd_url", "navidrome_url",
-        "torrserver_url", "emby_sync_hook_url", mode="after",
+        "torrserver_url", "emby_sync_hook_url", "emby_public_url", mode="after",
     )
     @classmethod
     def strip_trailing_slash_optional(cls, v: Optional[str]) -> Optional[str]:
@@ -223,7 +231,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "torrserver_url", "torrserver_username", "torrserver_password",
-        "emby_sync_hook_url", "emby_sync_hook_token", mode="before",
+        "emby_sync_hook_url", "emby_sync_hook_token", "emby_public_url", mode="before",
     )
     @classmethod
     def _empty_ts_field_is_unset(cls, v: Optional[str]) -> Optional[str]:
@@ -255,7 +263,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "music_notify_settle_seconds", "music_notify_stall_seconds", "arr_torrent_categories",
-        mode="before",
+        "digest_hour", mode="before",
     )
     @classmethod
     def _empty_tuning_value_is_default(cls, v: object, info: ValidationInfo) -> object:
@@ -354,6 +362,11 @@ class Settings(BaseSettings):
             and self.torrserver_username is not None
             and self.torrserver_password is not None
         )
+
+    @property
+    def emby_watch_base(self) -> Optional[str]:
+        """Base of «▶️ Смотреть в Emby» links: EMBY_PUBLIC_URL, else EMBY_URL."""
+        return self.emby_public_url or self.emby_url
 
     @property
     def emby_sync_hook_enabled(self) -> bool:

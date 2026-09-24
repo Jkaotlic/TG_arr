@@ -129,7 +129,30 @@ async def test_get_history_rejects_an_unmapped_event_type():
 
     client = RadarrClient("http://radarr", "key")
     with pytest.raises(ValueError):
-        await client.get_history(event_type="grabbed")
+        await client.get_history(event_type="downloadFailed")
+
+
+@pytest.mark.asyncio
+async def test_get_history_grabbed_uses_code_1_and_details_flags():
+    """E1: the living message links a grab through its grabbed record."""
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    with patch.object(client, "get", AsyncMock(return_value={"records": []})) as get:
+        await client.get_history(event_type="grabbed", include_details=True)
+    params = get.call_args.kwargs["params"]
+    assert params["eventType"] == 1
+    assert params["includeMovie"] == "true" and params["includeSeries"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_get_queue_returns_records():
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    payload = {"records": [{"title": "A", "downloadId": "H"}, "junk"]}
+    with patch.object(client, "get", AsyncMock(return_value=payload)):
+        assert await client.get_queue() == [{"title": "A", "downloadId": "H"}]
 
 
 @pytest.mark.asyncio

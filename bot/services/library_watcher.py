@@ -39,6 +39,7 @@ from bot.services import music_notify
 
 if TYPE_CHECKING:
     from bot.db import Database
+    from bot.services.live_status import LiveStatusService
 
 logger = structlog.get_logger()
 
@@ -104,6 +105,18 @@ def _episodes(count: int) -> str:
     return f"{count} {word}"
 
 
+def provider_id(record: dict[str, Any]) -> Optional[str]:
+    """``tmdb.<id>`` / ``tvdb.<id>`` from a history record read with
+    ``include_details`` (E2: finding the item in Emby); None without them."""
+    movie = record.get("movie")
+    if isinstance(movie, dict) and movie.get("tmdbId"):
+        return f"tmdb.{movie['tmdbId']}"
+    series = record.get("series")
+    if isinstance(series, dict) and series.get("tvdbId"):
+        return f"tvdb.{series['tvdbId']}"
+    return None
+
+
 #: How many history rows to ask each *arr service for per poll. Comfortably
 #: more than a single interval can produce, so nothing is missed between
 #: polls; the seen-set keeps re-reads silent.
@@ -130,6 +143,10 @@ class LibraryWatcher:
         music_settle_seconds: float = 300,
         music_stall_seconds: float = 3600,
         poll_interval_seconds: float = 60,
+        live: Optional["LiveStatusService"] = None,
+        music_retry: Optional[
+            Callable[[list[tuple[str, music_notify.BatchSummary]]], Awaitable[list[Any]]]
+        ] = None,
     ):
         self.radarr = radarr
         self.sonarr = sonarr
@@ -155,6 +172,13 @@ class LibraryWatcher:
         #: `_poll_imports`). Per service, not global: a service that was down
         #: on the first cycle must not be counted as seeded (NOTIF-04).
         self._primed_services: set[str] = set()
+        #: E1 (improvements round 2): `LiveStatusService` — an import that
+        #: finishes a bot grab's living message is not announced again to
+        #: that chat (`claim_import` returns the chats to skip).
+        self._live = live
+        #: M1 (improvements round 2): ``MusicRetryService.offers`` — retry
+        #: buttons for a music summary, passed on as ``retry=``.
+        self._music_retry = music_retry
 
     # --------------------------------------------------------------- *arr
     async def _fetch_imports(
@@ -176,6 +200,8 @@ class LibraryWatcher:
             try:
                 records = await client.get_history(
                     event_type="downloadFolderImported", page_size=_HISTORY_PAGE_SIZE,
+                    # E2: the title's provider ids, for the Emby button.
+                    include_details=True,
                 )
             except Exception as e:
                 _log_poll_failure("library_watch_imports_failed", e, service=label)
@@ -226,7 +252,7 @@ class LibraryWatcher:
           `sourceTitle`), so a season pack is one message, not ten.
         """
         landed, answered = await self._fetch_imports()
-        to_announce: list[dict[str, Any]] = []
+        to_announce: list[tuple[str, dict[str, Any]]] = []
         for label, newest in answered.items():
             watermark = await self._import_watermark(label)
             records = [record for service, record in landed if service == label]
@@ -236,22 +262,31 @@ class LibraryWatcher:
                     records = []  # silent seed
                 else:
                     records = [r for r in records if (_record_date(r) or watermark) > watermark]
-            to_announce.extend(records)
+            to_announce.extend((label, r) for r in records)
             if newest is not None and (watermark is None or newest > watermark):
                 await self._set_import_watermark(label, newest)
 
-        to_announce.sort(key=lambda r: r.get("date") or "")
-        groups: dict[str, list[dict[str, Any]]] = {}
-        for record in to_announce:
+        to_announce.sort(key=lambda pair: pair[1].get("date") or "")
+        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for label, record in to_announce:
             key = str(record.get("downloadId") or record.get("sourceTitle") or record.get("id"))
-            groups.setdefault(key, []).append(record)
-        for records in groups.values():
+            groups.setdefault((label, key), []).append(record)
+        for (label, _key), records in groups.items():
             title = html.escape(str(records[0].get("sourceTitle") or "Unknown"))
             if len(records) > 1:
                 text = f"✅ <b>{title}</b> — в библиотеке ({_episodes(len(records))})."
             else:
                 text = f"✅ <b>{title}</b> — в библиотеке."
-            await self._announce(text, "library")
+            extra: dict[str, Any] = {}
+            download_id = records[0].get("downloadId")
+            if self._live is not None and download_id:
+                exclude = await self._live.claim_import(label, str(download_id), records)
+                if exclude:
+                    extra["exclude"] = frozenset(exclude)
+            provider = provider_id(records[0])
+            if provider:
+                extra["provider"] = provider
+            await self._announce(text, "library", **extra)
 
     async def _import_watermark(self, label: str) -> Optional[datetime]:
         if self._db is None:
@@ -344,6 +379,7 @@ class LibraryWatcher:
         assert self._db is not None
         ready: list[str] = []
         summaries: list[music_notify.BatchSummary] = []
+        keyed: list[tuple[str, music_notify.BatchSummary]] = []
         for batch in await self._db.music_pending_batches():
             summary = music_notify.summarize(batch["title"], batch["tracks"])
             quiet = (now - batch["last_change_at"]).total_seconds()
@@ -354,15 +390,25 @@ class LibraryWatcher:
             ready.append(batch["batch_key"])
             if not summary.all_cancelled:
                 summaries.append(summary)
+                keyed.append((batch["batch_key"], summary))
 
         # Marked before sending: a Telegram blip costs one summary, never a
         # repeat loop.
         await self._db.music_mark_notified(ready, now)
         text = music_notify.format_message(summaries)
         if text:
-            await self._announce(text, "music")
+            extra: dict[str, Any] = {}
+            if self._music_retry is not None:
+                try:
+                    offers = await self._music_retry(keyed)
+                except Exception as e:
+                    logger.warning("music_retry_offers_failed", error=str(e))
+                    offers = []
+                if offers:
+                    extra["retry"] = offers
+            await self._announce(text, "music", **extra)
 
-    async def _announce(self, text: str, category: NotifyCategory) -> None:
+    async def _announce(self, text: str, category: NotifyCategory, **extra: Any) -> None:
         """Deliver one notification; a failure is logged, never raised.
 
         ``category`` ("music" | "library") lets the delivery side honour each
@@ -376,6 +422,8 @@ class LibraryWatcher:
         if self.notify is None:
             return
         try:
-            await self.notify(text, category)
+            # ``extra`` (``exclude`` chats, Emby ``provider`` id) is passed only
+            # when set, so a plain ``notify(text, category)`` keeps working.
+            await self.notify(text, category, **extra)
         except Exception as e:
             logger.warning("library_notify_failed", error=str(e))

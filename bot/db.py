@@ -5,6 +5,7 @@ import json
 import os
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -328,6 +329,8 @@ class Database:
             await self._migrate_to_v5()
         if version < 6:
             await self._migrate_to_v6()
+        if version < 7:
+            await self._migrate_to_v7()
 
     async def _migrate_to_v1(self) -> None:
         """
@@ -582,6 +585,101 @@ class Database:
                 raise
         await self._set_schema_version(6)
 
+    async def _migrate_to_v7(self) -> None:
+        """Improvements round 2 (E1): one living status message per grab.
+
+        ``live_status`` holds every message the bot keeps editing in place
+        (``bot.services.live_status``): the grab confirmation that follows the
+        download, and «в библиотеке» notices waiting for their Emby button.
+        Persisted so a restart resumes editing the same message instead of
+        sending a new one. Additive and idempotent.
+        """
+        await self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS live_status (
+                key TEXT PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                arr TEXT NOT NULL,
+                arr_id INTEGER,
+                download_id TEXT,
+                state TEXT NOT NULL,
+                progress INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                release TEXT,
+                guid TEXT,
+                provider_id TEXT,
+                detail TEXT,
+                edited_at TEXT,
+                stalled_since TEXT,
+                emby_tries INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_live_status_download ON live_status(download_id);
+            CREATE INDEX IF NOT EXISTS idx_live_status_state ON live_status(state);
+        """)
+        await self.conn.commit()
+        await self._set_schema_version(7)
+
+    # ------------------------------------------------------------------
+    # Living status messages (schema v7)
+    # ------------------------------------------------------------------
+    _LIVE_COLUMNS = frozenset({
+        "key", "chat_id", "message_id", "kind", "title", "arr", "arr_id", "download_id",
+        "state", "progress", "created_at", "updated_at", "release", "guid", "provider_id",
+        "detail", "edited_at", "stalled_since", "emby_tries",
+    })
+
+    async def live_add(self, row: dict[str, Any]) -> None:
+        """Insert (or replace) one living-message row."""
+        cols = [c for c in row if c in self._LIVE_COLUMNS]
+        async with self._write_lock:
+            await self.conn.execute(
+                f"INSERT OR REPLACE INTO live_status ({', '.join(cols)}) "
+                f"VALUES ({', '.join('?' for _ in cols)})",
+                tuple(row[c] for c in cols),
+            )
+            await self.conn.commit()
+
+    async def live_rows(self, states: Optional[Iterable[str]] = None) -> list[dict[str, Any]]:
+        """Rows (optionally only those in ``states``), oldest first."""
+        params: tuple[str, ...] = ()
+        if states is None:
+            query = "SELECT * FROM live_status ORDER BY created_at, key"
+        else:
+            wanted = tuple(states)
+            marks = ", ".join("?" for _ in wanted)
+            query = f"SELECT * FROM live_status WHERE state IN ({marks}) ORDER BY created_at, key"
+            params = wanted
+        async with self.conn.execute(query, params) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def live_update(self, key: str, **fields: Any) -> None:
+        """Patch named columns of one row (unknown names are rejected)."""
+        if not fields:
+            return
+        unknown = set(fields) - self._LIVE_COLUMNS
+        if unknown:
+            raise ValueError(f"unknown live_status columns: {sorted(unknown)}")
+        sets = ", ".join(f"{name} = ?" for name in fields)
+        async with self._write_lock:
+            await self.conn.execute(
+                f"UPDATE live_status SET {sets} WHERE key = ?", (*fields.values(), key),
+            )
+            await self.conn.commit()
+
+    async def cleanup_live_status(self, days: int = 7) -> int:
+        """Drop rows untouched for ``days`` (terminal ones, and any tracking
+        that has gone nowhere for a week)."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        async with self._write_lock:
+            cursor = await self.conn.execute(
+                "DELETE FROM live_status WHERE updated_at < ?", (cutoff,),
+            )
+            await self.conn.commit()
+            return cursor.rowcount
+
     # ------------------------------------------------------------------
     # Notification state (schema v5)
     # ------------------------------------------------------------------
@@ -599,6 +697,22 @@ class Database:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+            await self.conn.commit()
+
+    async def kv_items(self, prefix: str) -> dict[str, str]:
+        """Every ``notify_kv`` entry whose key starts with ``prefix``."""
+        async with self.conn.execute(
+            "SELECT key, value FROM notify_kv WHERE substr(key, 1, ?) = ?", (len(prefix), prefix),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
+    async def kv_delete(self, keys: list[str]) -> None:
+        """Remove ``notify_kv`` entries (unknown keys are ignored)."""
+        if not keys:
+            return
+        async with self._write_lock:
+            await self.conn.executemany("DELETE FROM notify_kv WHERE key = ?", [(k,) for k in keys])
             await self.conn.commit()
 
     async def music_transfer_states(self) -> dict[str, str]:
@@ -691,6 +805,18 @@ class Database:
                 (now.isoformat(),),
             )
             await self.conn.commit()
+
+    async def music_albums_notified_since(self, since: datetime) -> int:
+        """E3 digest: albums whose summary went out since ``since`` and that
+        got at least one file (seeded or all-cancelled batches don't count)."""
+        async with self.conn.execute(
+            "SELECT COUNT(*) FROM music_batch b WHERE b.notified_at >= ? AND EXISTS ("
+            "SELECT 1 FROM music_transfer t WHERE t.batch_key = b.batch_key "
+            "AND t.state LIKE 'Completed, Succeeded%')",
+            (since.isoformat(),),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row[0]) if row else 0
 
     async def cleanup_music_notify(self, days: int = 7) -> int:
         """Drop batches announced more than ``days`` ago, with their transfers.
@@ -1169,13 +1295,14 @@ class Database:
           DB. Copying ``backup/`` off-device (e.g. host cron) is out of scope
           for the bot itself.
 
-        Returns counts: ``{"sessions", "searches", "actions", "music_batches", "backup"}``;
+        Returns counts: ``{"sessions", "searches", "actions", "music_batches", "live_status", "backup"}``;
         ``music_batches`` = music notification batches announced over 7 days ago.
         """
         sessions = await self.cleanup_old_sessions()
         searches = await self.cleanup_old_searches()
         actions = await self.cleanup_old_actions()
         music_batches = await self.cleanup_music_notify()
+        live = await self.cleanup_live_status()
 
         try:
             await self.conn.execute("PRAGMA optimize")
@@ -1194,6 +1321,7 @@ class Database:
             "searches": searches,
             "actions": actions,
             "music_batches": music_batches,
+            "live_status": live,
             "backup": backup_made,
         }
         logger.info("run_maintenance_completed", **result)

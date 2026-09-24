@@ -43,6 +43,8 @@ services:
       EMBY_URL: ${EMBY_URL:-}
       EMBY_API_KEY: ${EMBY_API_KEY:-}
       EMBY_TIMEOUT: ${EMBY_TIMEOUT:-30.0}
+      # Address for the «▶️ Смотреть в Emby» button (empty → EMBY_URL)
+      EMBY_PUBLIC_URL: ${EMBY_PUBLIC_URL:-}
       # TorrServer (optional) — streaming contour: "watch now"
       TORRSERVER_URL: ${TORRSERVER_URL:-}
       TORRSERVER_USERNAME: ${TORRSERVER_USERNAME:-admin}
@@ -84,6 +86,8 @@ services:
       ARR_TORRENT_CATEGORIES: ${ARR_TORRENT_CATEGORIES:-radarr,tv-sonarr,sonarr}
       # Tuning
       TIMEZONE: ${TIMEZONE:-Europe/Moscow}
+      # Morning digest: local hour (TIMEZONE); users opt out in /settings
+      DIGEST_HOUR: ${DIGEST_HOUR:-9}
       # DEPLOY-03: TZ feeds glibc; tzdata is installed in the image.
       TZ: ${TIMEZONE:-Europe/Moscow}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

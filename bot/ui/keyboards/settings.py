@@ -113,6 +113,10 @@ class _SettingsKeyboards:
             text=f"🎬 «В библиотеке»: {'вкл' if prefs.notify_library else 'выкл'}",
             callback_data=SettingCB(key="notify_library", value="0" if prefs.notify_library else "1").pack(),
         )])
+        rows.append([InlineKeyboardButton(
+            text=f"🌅 Утренняя сводка: {'вкл' if prefs.digest_enabled else 'выкл'}",
+            callback_data=SettingCB(key="digest_enabled", value="0" if prefs.digest_enabled else "1").pack(),
+        )])
         rows.append([InlineKeyboardButton(text=BTN_CLOSE, callback_data=CallbackData.CLOSE)])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 

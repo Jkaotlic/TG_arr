@@ -20,7 +20,7 @@ from tenacity import (
 
 from bot.config import Settings, get_settings
 from bot.models import MIN_PACK_EPISODES, QualityProfile, RootFolder, SearchResult
-from bot.services.release_parser import enrich_from_title, parse_quality_name
+from bot.services.release_parser import enrich_from_title, parse_episode_numbers, parse_quality_name
 
 logger = structlog.get_logger()
 
@@ -117,7 +117,9 @@ class CircuitBreaker:
     growing backoff (30 → 60 → 120 → 300 → 600 s, capped). While open:
 
     - background callers get `ServiceUnavailable` immediately until the
-      backoff expires, then one probe goes through (half-open);
+      backoff expires, then exactly ONE background probe goes through
+      (half-open) — the first caller takes the slot, the rest keep failing
+      fast until the probe resolves (round 2 / D3);
     - interactive callers always get one attempt (no retries), so a user
       pressing a button is never refused on stale information.
 
@@ -133,6 +135,11 @@ class CircuitBreaker:
         self._failures = 0
         self._open_until = 0.0
         self._down_since: Optional[float] = None
+        #: A half-open background probe is in flight (round 2 / D3).
+        self._probing = False
+        #: Token of the current probe (fix round 1): a late-finishing old
+        #: probe must not free a newer probe's slot.
+        self.probe_token = 0
 
     @property
     def is_open(self) -> bool:
@@ -145,10 +152,31 @@ class CircuitBreaker:
         return self._down_since is not None
 
     def allow(self, *, background: bool) -> bool:
-        return not background or not self.is_open
+        """May this call go to the network?
+
+        Interactive: always. Background: yes while closed; no while open; in
+        half-open only the first caller (it takes the probe slot, released by
+        ``record_*`` or ``end_probe``).
+        """
+        if not background or self._down_since is None:
+            return True
+        if self.is_open or self._probing:
+            return False
+        self._probing = True
+        self.probe_token += 1
+        return True
+
+    def end_probe(self, token: int | None = None) -> None:
+        """Free the half-open slot (the probe ended without a verdict).
+
+        With ``token``, only if that probe still holds the slot.
+        """
+        if token is None or token == self.probe_token:
+            self._probing = False
 
     def record_failure(self, error: str = "") -> None:
         now = self._clock()
+        self._probing = False
         self._failures += 1
         if self._down_since is None:
             self._down_since = now
@@ -166,6 +194,7 @@ class CircuitBreaker:
         self._failures = 0
         self._open_until = 0.0
         self._down_since = None
+        self._probing = False
 
 
 class BaseAPIClient:
@@ -413,6 +442,30 @@ class BaseAPIClient:
         breaker = self.breaker
         if not breaker.allow(background=background):
             raise ServiceUnavailable(f"{self.service_name} временно недоступен")
+        # Round 2 / D3: this call holds the half-open probe slot.
+        probe_token = breaker.probe_token if (background and breaker.is_down) else None
+        try:
+            return await self._send_through_breaker(
+                breaker, background, method, endpoint,
+                params=params, json_data=json_data, timeout=timeout, headers=headers,
+            )
+        finally:
+            if probe_token is not None:
+                breaker.end_probe(probe_token)
+
+    async def _send_through_breaker(
+        self,
+        breaker: "CircuitBreaker",
+        background: bool,
+        method: str,
+        endpoint: str,
+        *,
+        params: Optional[dict[str, Any]],
+        json_data: Optional[dict[str, Any] | list[Any]],
+        timeout: Optional[float],
+        headers: Optional[dict[str, str]],
+    ) -> dict[str, Any] | list[Any]:
+        """One request with the breaker's bookkeeping (see the caller)."""
         send = self._request_once if (background or breaker.is_down) else self._request
         try:
             result = await send(
@@ -659,6 +712,16 @@ class ArrBaseClient(BaseAPIClient):
             for r in records
         )
 
+    async def get_queue(self, page_size: int = 200) -> list[dict[str, Any]]:
+        """The download queue's records (``[]`` on an unexpected shape).
+
+        Records carry the release ``title``, ``downloadId`` (torrent hash)
+        and the tracked-download status/messages; errors propagate.
+        """
+        result = await self.get(f"{self._api_prefix}/queue", params={"pageSize": page_size})
+        records = result.get("records") if isinstance(result, dict) else result
+        return [r for r in records if isinstance(r, dict)] if isinstance(records, list) else []
+
     async def get_quality_profiles(self) -> list[QualityProfile]:
         """Get all quality profiles (PERF-07: cached for _PROFILE_CACHE_TTL)."""
         return await self._ttl_cached(
@@ -774,10 +837,15 @@ class ArrBaseClient(BaseAPIClient):
     #: both Radarr and Sonarr 2026-08-11: sending the string name 400s
     #: ("The value 'downloadFolderImported' is not valid"), sending `3`
     #: returns exactly the downloadFolderImported rows on both services.
-    _HISTORY_EVENT_TYPE_CODES: dict[str, int] = {"downloadFolderImported": 3}
+    #: `grabbed` (1) — improvements round 2 (E1): the living status message
+    #: links a bot grab to its torrent through the grabbed record, whose
+    #: `data.guid` is the guid the bot pushed and `downloadId` the hash
+    #: (live-verified 2026-09-24).
+    _HISTORY_EVENT_TYPE_CODES: dict[str, int] = {"grabbed": 1, "downloadFolderImported": 3}
 
     async def get_history(
         self, event_type: str = "downloadFolderImported", page_size: int = 50,
+        *, include_details: bool = False,
     ) -> list[dict[str, Any]]:
         """Read the *arr history journal, filtered to one event type.
 
@@ -797,6 +865,11 @@ class ArrBaseClient(BaseAPIClient):
             "sortKey": "date",
             "sortDirection": "descending",
         }
+        if include_details:
+            # Radarr reads includeMovie, Sonarr includeSeries; each ignores
+            # the other's flag. Adds the title and its provider ids.
+            params["includeMovie"] = "true"
+            params["includeSeries"] = "true"
         result = await self.get(f"{self._api_prefix}/history", params=params)
         if isinstance(result, dict):
             records = result.get("records", [])
@@ -911,5 +984,7 @@ class ArrBaseClient(BaseAPIClient):
             custom_formats=custom_formats,
             detected_season=season_number if isinstance(season_number, int) else None,
             detected_episode=episode_numbers[0] if len(episode_numbers) == 1 else None,
+            # Round 2 / D3: Sonarr's own list first, the title as a fallback.
+            detected_episodes=sorted(set(episode_numbers)) or parse_episode_numbers(title),
             is_season_pack=is_season_pack,
         )

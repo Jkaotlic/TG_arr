@@ -183,6 +183,9 @@ class SearchResult(BaseModel):
     detected_year: Optional[int] = Field(default=None)
     detected_season: Optional[int] = Field(default=None)
     detected_episode: Optional[int] = Field(default=None)
+    #: Round 2 / D3: every episode a multi-episode release covers
+    #: ("S01E04-E06" → [4, 5, 6]); [] when unknown.
+    detected_episodes: list[int] = Field(default_factory=list)
     is_season_pack: bool = Field(default=False)
 
     @property
@@ -550,6 +553,8 @@ class UserPreferences(BaseModel):
     notify_music: Literal["summary", "off"] = "summary"
     #: «✅ … — в библиотеке» messages from Radarr/Sonarr imports.
     notify_library: bool = True
+    #: Improvements round 2 (E3): «🌅 Сводка за сутки» once a morning.
+    digest_enabled: bool = True
 
 
 class User(BaseModel):

@@ -95,7 +95,9 @@ class CallbackData:
     TORRENT_RESUME_ALL = "t_resume_all"
     TORRENT_CLOSE = "t_close"  # Close torrent list message
     SPEED_LIMIT = "speed:"  # speed:1024 (KB/s)
-    SPEED_MENU = "speed_menu"
+    SPEED_MENU = "speed_menu"  # the speed screen (turtle toggle)
+    SPEED_TURTLE = "speed_turtle"  # toggle qBit alternative ("turtle") limits
+    SPEED_EXACT = "speed_exact"  # the exact preset grid (speed_limits_menu)
 
     # Emby
     EMBY_REFRESH = "emby_refresh"  # Refresh status

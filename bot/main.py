@@ -9,15 +9,19 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+)
 from aiogram.types import ErrorEvent
 
 from bot.clients.base import background_calls
@@ -26,12 +30,14 @@ from bot.clients.registry import get_qbittorrent
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers import setup_routers
+from bot.models import UserPreferences
 from bot.middleware.auth import (
     AuthMiddleware,
     LoggingMiddleware,
     RateLimitMiddleware,
     StaleMessageMiddleware,
 )
+from bot.services.live_status import EditOutcome, LiveStatusService, button_base
 from bot.services.notification_service import NotificationService
 from bot.ui.commands import bot_commands
 
@@ -458,7 +464,7 @@ _chat_send_locks: dict[int, asyncio.Lock] = {}
 _SAME_CHAT_GAP_S = 1.0
 
 
-async def send_telegram(bot: Bot, chat_id: int, text: str) -> None:
+async def send_telegram(bot: Bot, chat_id: int, text: str, reply_markup=None):
     """Send one background notification (HTML) politely.
 
     Audit 2026-09-23 (NOTIF-11): keeps ≥1 s between messages to the same
@@ -477,19 +483,97 @@ async def send_telegram(bot: Bot, chat_id: int, text: str) -> None:
                 await asyncio.sleep(wait)
         try:
             try:
-                await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+                return await bot.send_message(
+                    chat_id, text, parse_mode=ParseMode.HTML, reply_markup=reply_markup,
+                )
+            except TelegramBadRequest as e:
+                if reply_markup is None:
+                    raise
+                # Batch E fix 1: a rejected button (e.g. BUTTON_URL_INVALID)
+                # must not cost the message itself — send it bare.
+                structlog.get_logger().warning(
+                    "telegram_markup_rejected", user_id=chat_id, error=str(e)
+                )
+                return await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=None)
             except TelegramRetryAfter as e:
                 structlog.get_logger().warning(
                     "telegram_retry_after", user_id=chat_id, retry_after=e.retry_after
                 )
                 await asyncio.sleep(e.retry_after)
-                await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+                return await bot.send_message(
+                    chat_id, text, parse_mode=ParseMode.HTML, reply_markup=reply_markup,
+                )
         finally:
             _last_sent_at[chat_id] = time.monotonic()
 
 
+#: Batch E fix 1: per chat, no living-message edit before this monotonic
+#: time (set from Telegram's RetryAfter).
+_edit_not_before: dict[int, float] = {}
+
+
+async def edit_living_message(
+    bot: Bot, chat_id: int, message_id: int, text: str, reply_markup=None,
+) -> EditOutcome:
+    """Edit one living status message in place (E1, improvements round 2).
+
+    Shares the per-chat lock/gap with ``send_telegram`` so edits and sends to
+    one chat never burst. Outcomes for ``LiveStatusService``:
+    - "ok" — edited, or Telegram says "message is not modified";
+    - "lost" — the message is gone/uneditable or the chat blocked the bot:
+      tracking stops silently;
+    - "retry" — flood control or a network blip: skip this tick, nothing is
+      persisted, the same edit is tried on the next one.
+    """
+    log = structlog.get_logger()
+    # Batch E fix 1: inside a flood window, don't even ask (and don't log).
+    if time.monotonic() < _edit_not_before.get(chat_id, 0.0):
+        return "retry"
+    lock = _chat_send_locks.setdefault(chat_id, asyncio.Lock())
+    async with lock:
+        last = _last_sent_at.get(chat_id)
+        if last is not None:
+            wait = _SAME_CHAT_GAP_S - (time.monotonic() - last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+        try:
+            try:
+                await bot.edit_message_text(
+                    text=text, chat_id=chat_id, message_id=message_id,
+                    parse_mode=ParseMode.HTML, reply_markup=reply_markup,
+                )
+            except TelegramBadRequest as e:
+                if reply_markup is None or "not modified" in str(e).lower():
+                    raise
+                # A rejected button (BUTTON_URL_INVALID) must not cost the
+                # message: edit once more without it.
+                log.warning("live_status_markup_rejected", user_id=chat_id, error=str(e))
+                await bot.edit_message_text(
+                    text=text, chat_id=chat_id, message_id=message_id,
+                    parse_mode=ParseMode.HTML, reply_markup=None,
+                )
+        except TelegramRetryAfter as e:
+            _edit_not_before[chat_id] = time.monotonic() + float(e.retry_after)
+            log.warning("live_status_retry_after", user_id=chat_id, retry_after=e.retry_after)
+            return "retry"
+        except TelegramBadRequest as e:
+            if "not modified" in str(e).lower():
+                return "ok"
+            log.info("live_status_message_lost", user_id=chat_id, error=str(e))
+            return "lost"
+        except TelegramForbiddenError as e:
+            log.info("live_status_message_lost", user_id=chat_id, error=str(e))
+            return "lost"
+        except Exception as e:
+            log.warning("live_status_edit_failed", user_id=chat_id, error=str(e))
+            return "retry"
+        finally:
+            _last_sent_at[chat_id] = time.monotonic()
+    return "ok"
+
+
 async def send_library_notification(
-    bot: Bot, user_ids: Iterable[int], text: str, logger
+    bot: Bot, user_ids: Iterable[int], text: str, logger, *, reply_markup=None, on_sent=None,
 ) -> int:
     """Deliver one library notification, returning how many recipients took it.
 
@@ -504,11 +588,17 @@ async def send_library_notification(
     failed = 0
     for uid in user_ids:
         try:
-            await send_telegram(bot, uid, text)
+            sent = await send_telegram(bot, uid, text, reply_markup=reply_markup)
             delivered += 1
         except Exception as e:
             failed += 1
             logger.warning("library_notify_send_failed", user_id=uid, error=str(e))
+            continue
+        if on_sent is not None:
+            try:
+                await on_sent(uid, sent)
+            except Exception as e:
+                logger.warning("library_notify_after_send_failed", user_id=uid, error=str(e))
 
     logger.info(
         "library_notify_sent",
@@ -517,6 +607,20 @@ async def send_library_notification(
         text=" ".join(text.split())[:200],
     )
     return delivered
+
+
+async def recipient_preferences(db: Database) -> list[tuple[int, UserPreferences]]:
+    """Everyone allowed to use the bot, with their preferences (defaults for
+    an allowed user who never opened the bot) — the morning digest (E3)
+    filters per section itself."""
+    settings = get_settings()
+    db_user_ids = await db.list_allowed_users()
+    candidates = set(settings.allowed_tg_ids) | set(settings.admin_tg_ids) | set(db_user_ids)
+    result: list[tuple[int, UserPreferences]] = []
+    for uid in sorted(candidates):
+        user = await db.get_user(uid)
+        result.append((uid, user.preferences if user is not None else UserPreferences()))
+    return result
 
 
 async def notification_recipients(db: Database, category: str) -> list[int]:
@@ -543,7 +647,155 @@ async def notification_recipients(db: Database, category: str) -> list[int]:
     return recipients
 
 
-async def _library_watch(bot: Bot, db: Database, logger) -> None:
+async def deliver_library_notice(
+    bot: Bot,
+    db: Database,
+    text: str,
+    category: str,
+    logger,
+    *,
+    exclude: frozenset[int] = frozenset(),
+    provider: Optional[str] = None,
+    live: Optional[LiveStatusService] = None,
+    retry: Sequence[Any] = (),
+) -> int:
+    """One `LibraryWatcher` notice to everyone who has not muted ``category``,
+    minus ``exclude`` — the chats whose living grab message already said it
+    (E1, improvements round 2).
+
+    E2: with the title's ``provider`` id and Emby configured, the notice
+    carries «▶️ Смотреть в Emby» when Emby already has the item; otherwise
+    each sent notice is handed to ``live`` to get the button in place once
+    Emby's scan catches up (a few tries over ~5 min, then silently none).
+
+    M1: ``retry`` offers (`bot.services.music_retry.RetryOffer`) of a music
+    summary become its «🔁 Докачать» buttons.
+    """
+    recipients = [uid for uid in await notification_recipients(db, category) if uid not in exclude]
+    if retry:
+        from bot.ui.keyboards import Keyboards
+
+        return await send_library_notification(
+            bot, recipients, text, logger, reply_markup=Keyboards.music_retry(retry),
+        )
+    url = await live.emby_url(provider) if live is not None and provider else None
+    markup = live.markup_for(url) if live is not None else None
+    on_sent = None
+    if live is not None and provider and url is None and live.emby_enabled:
+        tracker, provider_id = live, provider
+
+        async def on_sent(uid: int, message) -> None:
+            await tracker.register_notice(uid, int(message.message_id), text, provider_id, category)
+    return await send_library_notification(
+        bot, recipients, text, logger, reply_markup=markup, on_sent=on_sent,
+    )
+
+
+async def _build_live_status(bot: Bot, db: Database) -> LiveStatusService:
+    """The living-status service (E1) over the registry's singleton clients."""
+    from bot.clients.registry import get_emby, get_radarr, get_sonarr
+
+    async def _edit(chat_id: int, message_id: int, text: str, markup=None) -> EditOutcome:
+        return await edit_living_message(bot, chat_id, message_id, text, markup)
+
+    settings = get_settings()
+    qbittorrent = await get_qbittorrent() if settings.qbittorrent_enabled else None
+    emby = await get_emby()
+    # Batch E fix 1: an internal EMBY_URL is no valid Telegram button URL.
+    base = button_base(settings.emby_public_url, settings.emby_url)
+    emby_link = None
+    if emby is not None and base:
+        client, public_base = emby, base
+
+        async def emby_link(provider_id: str) -> Optional[str]:
+            return await client.watch_url(provider_id, public_base=public_base)
+
+    from bot.ui.keyboards import Keyboards
+
+    return LiveStatusService(
+        db, _edit, radarr=await get_radarr(), sonarr=await get_sonarr(), qbittorrent=qbittorrent,
+        emby_link=emby_link, make_markup=Keyboards.watch_in_emby,
+    )
+
+
+#: How often living status messages are advanced (seconds). Progress edits
+#: are throttled to ≥60 s inside the service; an idle tick costs no requests.
+_LIVE_STATUS_INTERVAL_S = 30
+
+
+async def _live_status_watch(live: LiveStatusService, logger) -> None:
+    """Drive `LiveStatusService.tick()` forever (E1)."""
+    structlog.contextvars.bind_contextvars(component="live_status")
+    try:
+        while True:
+            try:
+                await asyncio.sleep(_LIVE_STATUS_INTERVAL_S)
+                with background_calls():
+                    await live.tick()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("live_status_watch_failed", error=str(e))
+    finally:
+        structlog.contextvars.unbind_contextvars("component")
+
+
+#: How often the digest checks whether today's is due (seconds).
+_DIGEST_CHECK_S = 300
+
+
+async def _digest_watch(bot: Bot, db: Database, logger) -> None:
+    """Morning digest (E3): once per local day at DIGEST_HOUR, with catch-up
+    after downtime (see `bot.services.digest`)."""
+    from zoneinfo import ZoneInfo
+
+    from bot.clients.registry import get_radarr, get_slskd, get_sonarr
+    from bot.services.digest import DigestService
+
+    settings = get_settings()
+    try:
+        tz = ZoneInfo(settings.timezone)
+    except Exception:
+        logger.warning("digest_bad_timezone", timezone=settings.timezone)
+        tz = ZoneInfo("UTC")
+
+    async def _send(uid: int, text: str) -> None:
+        await send_telegram(bot, uid, text)
+
+    async def _recipients() -> list[tuple[int, UserPreferences]]:
+        return await recipient_preferences(db)
+
+    digest = DigestService(
+        db,
+        radarr=await get_radarr(),
+        sonarr=await get_sonarr(),
+        qbittorrent=await get_qbittorrent() if settings.qbittorrent_enabled else None,
+        get_slskd=get_slskd,
+        recipients=_recipients,
+        send=_send,
+        tz=tz,
+        hour=settings.digest_hour,
+    )
+    structlog.contextvars.bind_contextvars(component="digest")
+    delay = 60
+    try:
+        while True:
+            try:
+                await asyncio.sleep(delay)
+                delay = _DIGEST_CHECK_S
+                with background_calls():
+                    await digest.maybe_send()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("digest_watch_failed", error=str(e))
+    finally:
+        structlog.contextvars.unbind_contextvars("component")
+
+
+async def _library_watch(
+    bot: Bot, db: Database, logger, live: Optional[LiveStatusService] = None,
+) -> None:
     """Announce library imports and finished music downloads.
 
     qBittorrent's watcher only knows "the torrent finished"; this covers the
@@ -551,15 +803,15 @@ async def _library_watch(bot: Bot, db: Database, logger) -> None:
     or Sonarr's library (rollback 2026-08-10, Tasks 14/15) — and music, which
     never had completion notices at all (slskd is a separate client).
     """
-    from bot.clients.registry import get_radarr, get_slskd, get_sonarr
+    from bot.clients.registry import get_lidarr, get_radarr, get_slskd, get_sonarr
     from bot.services.library_watcher import LibraryWatcher
+    from bot.services.music_retry import MusicRetryService
 
     settings = get_settings()
     interval = max(settings.notify_check_interval, 60)
 
-    async def _notify(text: str, category: str) -> None:
-        recipients = await notification_recipients(db, category)
-        await send_library_notification(bot, recipients, text, logger)
+    async def _notify(text: str, category: str, **extra) -> None:
+        await deliver_library_notice(bot, db, text, category, logger, live=live, **extra)
 
     radarr = await get_radarr()
     sonarr = await get_sonarr()
@@ -572,6 +824,9 @@ async def _library_watch(bot: Bot, db: Database, logger) -> None:
         music_settle_seconds=settings.music_notify_settle_seconds,
         music_stall_seconds=settings.music_notify_stall_seconds,
         poll_interval_seconds=interval,
+        live=live,
+        # M1: «🔁 Докачать» only where Lidarr gave up (see music_retry).
+        music_retry=MusicRetryService(db, get_lidarr).offers,
     )
     structlog.contextvars.bind_contextvars(component="library_watch")
     try:
@@ -768,6 +1023,9 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
+    # E1 (improvements round 2): one living status message per bot grab.
+    live = await _build_live_status(bot, db)
+
     # Initialize qBittorrent client and notification service if configured
     notification_service: Optional[NotificationService] = None
 
@@ -797,7 +1055,9 @@ async def main() -> None:
                 return False
 
         if qbittorrent is not None:
-            notification_service = NotificationService(qbittorrent, send_notification)
+            notification_service = NotificationService(
+                qbittorrent, send_notification, exclude_chats=live.owner_chats,
+            )
     else:
         logger.info("qBittorrent integration disabled")
 
@@ -855,8 +1115,12 @@ async def main() -> None:
         _health_watch(bot, sorted(set(settings.admin_tg_ids)), logger, db)
     )
     logger.info("background_task_started", task="health_watch")
-    library_task = asyncio.create_task(_library_watch(bot, db, logger))
+    library_task = asyncio.create_task(_library_watch(bot, db, logger, live))
     logger.info("background_task_started", task="library_watch")
+    live_task = asyncio.create_task(_live_status_watch(live, logger))
+    logger.info("background_task_started", task="live_status")
+    digest_task = asyncio.create_task(_digest_watch(bot, db, logger))
+    logger.info("background_task_started", task="digest")
 
     faulthandler.enable()
     threading.Thread(
@@ -886,7 +1150,7 @@ async def main() -> None:
     finally:
         # BUG-R6-01: await the cancellation instead of firing and forgetting.
         await _cancel_background_tasks(
-            [liveness_task, cleanup_task, health_task, library_task]
+            [liveness_task, cleanup_task, health_task, library_task, live_task, digest_task]
         )
         await bot.session.close()
 

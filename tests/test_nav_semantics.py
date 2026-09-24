@@ -262,7 +262,9 @@ def test_speed_menu_back_keeps_view():
     from bot.ui.callbacks import TorrentPageCB
     from bot.ui.keyboards import Keyboards
 
-    kb = Keyboards.speed_limits_menu(0, 0, current_filter=TorrentFilter.PAUSED, page=1)
+    # Round 2 / D1: the list is left from the speed screen; the preset grid's
+    # Back goes to the speed screen (test_speed_turtle.py).
+    kb = Keyboards.speed_screen(False, current_filter=TorrentFilter.PAUSED, page=1)
     back = _buttons(kb)[-1]
     assert TorrentPageCB.unpack(back.callback_data) == TorrentPageCB(page=1, flt="paused")
 

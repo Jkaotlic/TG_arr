@@ -5,7 +5,7 @@ speed-limit menu and delete confirmation.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import TorrentFilter, TorrentInfo
-from bot.ui.callbacks import TorrentActionCB, TorrentPageCB
+from bot.ui.callbacks import TorrentActionCB, TorrentMoreCB, TorrentPageCB
 from bot.ui.keyboards._constants import BTN_BACK, BTN_CLOSE, CallbackData
 
 
@@ -22,8 +22,9 @@ class _TorrentKeyboards:
     ) -> InlineKeyboardMarkup:
         """Create keyboard for torrent list with pagination.
 
-        Audit UI-16: "pause/resume all" are admin-only (SEC-06), so only an
-        admin sees them — a user used to get "Недостаточно прав" on a tap.
+        Round 2 / D2: the bottom is exactly Обновить / Фильтр / ⋯ Ещё (+ the
+        pagination row). ``is_admin`` is kept for callers; the admin-only
+        blanket actions (audit UI-16) now live in ``torrent_more``.
 
         LOGIC-01: pagination buttons carry ``current_filter`` via the typed
         ``TorrentPageCB`` so paging through a filtered list doesn't silently
@@ -58,6 +59,20 @@ class _TorrentKeyboards:
                 )
             ])
 
+        # Round 2 / D2: exactly Обновить / Фильтр / ⋯ Ещё; the blanket
+        # actions, speed and Close moved into the "⋯ Ещё" panel.
+        keyboard.append([
+            InlineKeyboardButton(
+                text="🔄 Обновить",
+                callback_data=TorrentPageCB(page=current_page, flt=current_filter.value).pack(),
+            ),
+            InlineKeyboardButton(text="🔍 Фильтр", callback_data=f"{CallbackData.TORRENT_FILTER}menu"),
+            InlineKeyboardButton(
+                text="⋯ Ещё",
+                callback_data=TorrentMoreCB(page=current_page, flt=current_filter.value).pack(),
+            ),
+        ])
+
         # Pagination row
         if total_pages > 1:
             nav_buttons = []
@@ -80,15 +95,21 @@ class _TorrentKeyboards:
                 )
             keyboard.append(nav_buttons)
 
-        # Filter and action buttons
-        keyboard.append([
-            InlineKeyboardButton(
-                text="🔄 Обновить",
-                callback_data=TorrentPageCB(page=current_page, flt=current_filter.value).pack(),
-            ),
-            InlineKeyboardButton(text="🔍 Фильтр", callback_data=f"{CallbackData.TORRENT_FILTER}menu"),
-        ])
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+    @staticmethod
+    def torrent_more(
+        current_filter: TorrentFilter = TorrentFilter.ALL,
+        page: int = 0,
+        is_admin: bool = False,
+    ) -> InlineKeyboardMarkup:
+        """The "⋯ Ещё" panel of the torrent list (round 2 / D2).
+
+        Audit UI-16/SEC-06: "pause/resume all" and speed are admin-only, so a
+        non-admin sees only the navigation row. "◀️ Назад" redraws the list
+        at the same filter/page.
+        """
+        keyboard: list[list[InlineKeyboardButton]] = []
         if is_admin:
             keyboard.append([
                 InlineKeyboardButton(text="⏸ Пауза всех", callback_data=CallbackData.TORRENT_PAUSE_ALL),
@@ -96,13 +117,15 @@ class _TorrentKeyboards:
             ])
             # Speed limits are global qBit settings — admin-only (final review 2026-09-24).
             keyboard.append([
-                InlineKeyboardButton(text="🚀 Лимиты скорости", callback_data=CallbackData.SPEED_MENU),
+                InlineKeyboardButton(text="🚀 Скорость", callback_data=CallbackData.SPEED_MENU),
             ])
-
         keyboard.append([
+            InlineKeyboardButton(
+                text=BTN_BACK,
+                callback_data=TorrentPageCB(page=page, flt=current_filter.value).pack(),
+            ),
             InlineKeyboardButton(text=BTN_CLOSE, callback_data=CallbackData.CLOSE),
         ])
-
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
@@ -227,18 +250,36 @@ class _TorrentKeyboards:
         return row
 
     @staticmethod
-    def speed_limits_menu(
-        current_dl_limit: int = 0,
-        current_ul_limit: int = 0,
+    def speed_screen(
+        turtle_on: bool,
         current_filter: TorrentFilter = TorrentFilter.ALL,
         page: int = 0,
     ) -> InlineKeyboardMarkup:
-        """Create keyboard for speed limit presets.
+        """The speed screen (round 2 / D1): one turtle toggle, the exact
+        preset grid behind "⋯", and "◀️ Назад" to the list view it came from."""
+        state = "вкл" if turtle_on else "выкл"
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"🐢 Черепаха: {state}", callback_data=CallbackData.SPEED_TURTLE)],
+            [InlineKeyboardButton(text="⋯ Точные лимиты", callback_data=CallbackData.SPEED_EXACT)],
+            [InlineKeyboardButton(
+                text=BTN_BACK,
+                callback_data=TorrentPageCB(page=page, flt=current_filter.value).pack(),
+            )],
+        ])
+
+    @staticmethod
+    def speed_limits_menu(
+        current_dl_limit: int = 0,
+        current_ul_limit: int = 0,
+    ) -> InlineKeyboardMarkup:
+        """Create keyboard for speed limit presets ("⋯ Точные лимиты").
 
         LOGIC-03: callers must pass the qBittorrent-reported current limits
         (bytes/s) so the "✓" marker reflects reality — previously this was
         always called with the 0/0 defaults, which happened to always match
         the "unlimited" preset regardless of the real setting.
+
+        Round 2 / D1: "◀️ Назад" returns to the speed screen, not the list.
         """
         # Presets in KB/s (0 = unlimited)
         presets = [
@@ -257,10 +298,7 @@ class _TorrentKeyboards:
             [InlineKeyboardButton(text="⬆️ Лимит отдачи:", callback_data="noop")],
             _TorrentKeyboards._speed_preset_row(presets[:3], "ul", current_ul_limit),
             _TorrentKeyboards._speed_preset_row(presets[3:], "ul", current_ul_limit),
-            [InlineKeyboardButton(
-                text=BTN_BACK,
-                callback_data=TorrentPageCB(page=page, flt=current_filter.value).pack(),
-            )],
+            [InlineKeyboardButton(text=BTN_BACK, callback_data=CallbackData.SPEED_MENU)],
         ]
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)

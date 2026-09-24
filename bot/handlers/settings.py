@@ -445,7 +445,7 @@ async def handle_set_auto_grab(
     await callback.answer(f"Кнопка «Скачать лучший» {'включена' if enabled else 'выключена'}")
 
 
-@router.callback_query(SettingCB.filter(F.key.in_({"notify_music", "notify_library"})))
+@router.callback_query(SettingCB.filter(F.key.in_({"notify_music", "notify_library", "digest_enabled"})))
 async def handle_set_notify(
     callback: CallbackQuery, callback_data: SettingCB, db_user: User, db: Database
 ) -> None:
@@ -460,6 +460,12 @@ async def handle_set_notify(
             await db.update_user_preference(db_user.tg_id, "notify_music", music)
             db_user.preferences.notify_music = music
             answer = "Уведомления о музыке: " + ("сводка" if music == "summary" else "выкл")
+        elif callback_data.key == "digest_enabled":
+            # E3 (improvements round 2): the morning digest opt-out.
+            digest = callback_data.value == "1"
+            await db.update_user_preference(db_user.tg_id, "digest_enabled", digest)
+            db_user.preferences.digest_enabled = digest
+            answer = "Утренняя сводка: " + ("вкл" if digest else "выкл")
         else:
             library = callback_data.value == "1"
             await db.update_user_preference(db_user.tg_id, "notify_library", library)

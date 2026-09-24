@@ -6,12 +6,12 @@ import html
 import structlog
 from aiogram import F
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, Message
 
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import accessible_message
-from bot.models import ContentType, SeriesInfo, User
+from bot.models import ContentType, SearchSession, SeriesInfo, User
 from bot.ui.callbacks import PageCB, ReleaseCB, SeasonPageCB, SeasonScopeCB, TitleCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -461,6 +461,36 @@ async def handle_season_scope(
         await answer_stale(callback)
         return
 
+    # Round 2 / D3: "📺 Весь сериал" sends Sonarr's SeriesSearch — a double
+    # tap must not send it twice. Same per-user slot as every grab.
+    whole_series = callback_data.season == 0
+    if whole_series and not await _search._claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
+        return
+    try:
+        if whole_series:
+            # Re-read after the claim: a finished first tap deleted the session.
+            session = await db.get_session(user_id)
+            title = session.selected_content if session else None
+            if session is None or not isinstance(title, SeriesInfo) or str(title.sonarr_id) != callback_data.title_id:
+                await answer_stale(callback)
+                return
+        await _continue_season_scope(callback, message, session, callback_data, db_user, db)
+    finally:
+        if whole_series:
+            _search._release_grab(user_id)
+
+
+async def _continue_season_scope(
+    callback: CallbackQuery,
+    message: Message,
+    session: SearchSession,
+    callback_data: SeasonScopeCB,
+    db_user: User,
+    db: Database,
+) -> None:
+    """The rest of ``handle_season_scope`` (split out so the whole-series
+    claim can wrap it in one try/finally)."""
     await callback.answer()
     try:
         await message.edit_reply_markup(reply_markup=None)

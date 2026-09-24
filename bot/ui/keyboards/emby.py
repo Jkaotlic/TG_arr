@@ -53,6 +53,14 @@ class _EmbyKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
+    def watch_in_emby(url: str) -> InlineKeyboardMarkup:
+        """E2 (improvements round 2): «▶️ Смотреть в Emby» under a library
+        notice / the living grab message — a plain URL button."""
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="▶️ Смотреть в Emby", url=url),
+        ]])
+
+    @staticmethod
     def emby_confirm_restart() -> InlineKeyboardMarkup:
         """Create confirmation keyboard for server restart."""
         return InlineKeyboardMarkup(

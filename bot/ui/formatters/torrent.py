@@ -248,6 +248,19 @@ class _TorrentFormatters:
         return f"✅ {direction}: {speed_str}"
 
     @staticmethod
+    def format_speed_screen(dl_speed: int, ul_speed: int, alt_dl: int, alt_ul: int) -> str:
+        """The speed screen (round 2 / D1): current transfer + turtle limits.
+
+        All values are bytes/s; a turtle limit of 0 means "no limit". Russian
+        units, like the preset grid (fix round 1).
+        """
+        return (
+            "<b>🚀 Скорость</b>\n"
+            f"Сейчас: ⬇️ {format_speed_ru(dl_speed)} · ⬆️ {format_speed_ru(ul_speed)}\n"
+            f"🐢 Черепаха: ⬇️ {format_limit_ru(alt_dl)} · ⬆️ {format_limit_ru(alt_ul)}"
+        )
+
+    @staticmethod
     def format_torrent_action(
         action: str, torrent_name: str, success: bool = True
     ) -> str:
@@ -268,3 +281,26 @@ class _TorrentFormatters:
             return action_messages.get(action, f"✅ {action}: {_e(name)}")
         else:
             return f"❌ Ошибка {action}: {_e(name)}"
+
+
+def format_speed_ru(bytes_per_sec: int | float) -> str:
+    """Speed in Russian units — "512 КБ/с", "2 МБ/с", "2.5 МБ/с" (the preset
+    grid's spelling). Zero is "0 КБ/с"."""
+    value = float(bytes_per_sec)
+    if value <= 0:
+        return "0 КБ/с"
+    for unit in ("Б/с", "КБ/с", "МБ/с"):
+        if value < 1024:
+            return f"{_trim(value)} {unit}"
+        value /= 1024
+    return f"{_trim(value)} ГБ/с"
+
+
+def format_limit_ru(bytes_per_sec: int) -> str:
+    """A speed LIMIT: 0 means none."""
+    return "∞ без лимита" if bytes_per_sec <= 0 else format_speed_ru(bytes_per_sec)
+
+
+def _trim(value: float) -> str:
+    """One decimal at most, no trailing ".0"."""
+    return f"{value:.1f}".rstrip("0").rstrip(".")

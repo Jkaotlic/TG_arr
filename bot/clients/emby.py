@@ -65,6 +65,7 @@ class EmbyClient:
         self.api_key = api_key
         self.timeout = timeout
         self._client: Optional[httpx.AsyncClient] = None
+        self._server_id: Optional[str] = None
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -270,6 +271,67 @@ class EmbyClient:
             except (TypeError, ValueError):
                 continue
         return False
+
+    async def find_item_id(self, provider_id: str) -> Optional[str]:
+        """E2 (improvements round 2): the Emby item for ``tmdb.<id>`` /
+        ``tvdb.<id>``, or None.
+
+        Asks with both spellings of the provider name, then checks the
+        returned item's own ``ProviderIds`` — should Emby ignore the filter,
+        "the first item of the library" must never become the link. Any error
+        reads as "not found" (the button is optional).
+        """
+        name, _, value = provider_id.partition(".")
+        if not name or not value:
+            return None
+        params = {
+            "Recursive": "true",
+            "AnyProviderIdEquals": f"{name.lower()}.{value},{name.capitalize()}.{value}",
+            "IncludeItemTypes": "Movie,Series",
+            "Fields": "ProviderIds",
+            "Limit": 5,
+        }
+        try:
+            result = await self._request("GET", "/Items", params=params)
+        except Exception as e:
+            logger.debug("emby_find_item_failed", provider=provider_id, error=str(e))
+            return None
+        items = result.get("Items", []) if isinstance(result, dict) else []
+        for item in items:
+            ids = item.get("ProviderIds") if isinstance(item, dict) else None
+            if not isinstance(ids, dict):
+                continue
+            if any(k.lower() == name.lower() and str(v) == value for k, v in ids.items()):
+                item_id = item.get("Id")
+                return str(item_id) if item_id else None
+        return None
+
+    async def get_server_id(self) -> Optional[str]:
+        """The server's id (``/System/Info/Public``), cached once known."""
+        if self._server_id:
+            return self._server_id
+        try:
+            result = await self._request("GET", "/System/Info/Public")
+        except Exception as e:
+            logger.debug("emby_server_id_failed", error=str(e))
+            return None
+        server_id = result.get("Id") if isinstance(result, dict) else None
+        if server_id:
+            self._server_id = str(server_id)
+            return self._server_id
+        return None
+
+    async def watch_url(self, provider_id: str, *, public_base: str) -> Optional[str]:
+        """``<public_base>/web/index.html#!/item?id=<item>&serverId=<server>``
+        for the item, or None when it isn't in Emby (yet)."""
+        item_id = await self.find_item_id(provider_id)
+        if item_id is None:
+            return None
+        server_id = await self.get_server_id()
+        if server_id is None:
+            return None
+        base = public_base.rstrip("/")
+        return f"{base}/web/index.html#!/item?id={item_id}&serverId={server_id}"
 
     async def check_connection(self) -> tuple[bool, Optional[str], Optional[float]]:
         """Check if Emby is available."""
