@@ -324,6 +324,8 @@ class Database:
             await self._migrate_to_v3()
         if version < 4:
             await self._migrate_to_v4()
+        if version < 5:
+            await self._migrate_to_v5()
 
     async def _migrate_to_v1(self) -> None:
         """
@@ -446,6 +448,151 @@ class Database:
                     )
             await self.conn.commit()
         await self._set_schema_version(4)
+
+    async def _migrate_to_v5(self) -> None:
+        """Audit 2026-09-23 (NOTIF-01/05): persisted notification state.
+
+        - ``music_transfer`` / ``music_batch`` — per-transfer state and the
+          album (batch) it belongs to, so music summaries survive a restart
+          and are sent exactly once (see ``bot.services.music_notify``).
+        - ``notify_kv`` — small key/value store for watermarks and similar
+          notification bookkeeping (``slskd_watermark``, per-service import
+          watermarks, open health problems).
+
+        Additive only (``CREATE ... IF NOT EXISTS``): idempotent and never
+        touches existing data.
+        """
+        await self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS music_transfer (
+                transfer_id TEXT PRIMARY KEY,
+                batch_key TEXT NOT NULL,
+                track_key TEXT NOT NULL,
+                state TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_music_transfer_batch ON music_transfer(batch_key);
+
+            CREATE TABLE IF NOT EXISTS music_batch (
+                batch_key TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_change_at TEXT NOT NULL,
+                notified_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS notify_kv (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        """)
+        await self.conn.commit()
+        await self._set_schema_version(5)
+
+    # ------------------------------------------------------------------
+    # Notification state (schema v5)
+    # ------------------------------------------------------------------
+    async def kv_get(self, key: str) -> Optional[str]:
+        """Read one ``notify_kv`` value, None when unset."""
+        async with self.conn.execute("SELECT value FROM notify_kv WHERE key = ?", (key,)) as cursor:
+            row = await cursor.fetchone()
+        return None if row is None else str(row["value"])
+
+    async def kv_set(self, key: str, value: str) -> None:
+        """Insert or replace one ``notify_kv`` value."""
+        async with self._write_lock:
+            await self.conn.execute(
+                "INSERT INTO notify_kv (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            await self.conn.commit()
+
+    async def music_transfer_states(self) -> dict[str, str]:
+        """All known transfers: ``transfer_id -> state`` (bounded by maintenance)."""
+        async with self.conn.execute("SELECT transfer_id, state FROM music_transfer") as cursor:
+            rows = await cursor.fetchall()
+        return {row["transfer_id"]: row["state"] for row in rows}
+
+    async def music_record(
+        self, changes: list[tuple[str, str, str, str, str]], now: datetime
+    ) -> None:
+        """Apply one poll's transfer changes in a single transaction.
+
+        ``changes`` rows are ``(transfer_id, batch_key, track_key, state,
+        batch_title)``. Each upserts the transfer and creates its batch (or
+        bumps the batch's ``last_change_at``).
+        """
+        if not changes:
+            return
+        stamp = now.isoformat()
+        async with self._write_lock:
+            await self.conn.execute("BEGIN")
+            try:
+                for tid, bkey, tkey, state, title in changes:
+                    await self.conn.execute(
+                        "INSERT INTO music_transfer (transfer_id, batch_key, track_key, state, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(transfer_id) DO UPDATE SET "
+                        "state = excluded.state, updated_at = excluded.updated_at",
+                        (tid, bkey, tkey, state, stamp),
+                    )
+                    await self.conn.execute(
+                        "INSERT INTO music_batch (batch_key, title, first_seen_at, last_change_at) "
+                        "VALUES (?, ?, ?, ?) ON CONFLICT(batch_key) DO UPDATE SET "
+                        "last_change_at = excluded.last_change_at",
+                        (bkey, title, stamp, stamp),
+                    )
+                await self.conn.commit()
+            except Exception:
+                await self.conn.rollback()
+                raise
+
+    async def music_pending_batches(self) -> list[dict[str, Any]]:
+        """Batches not yet announced, each with its ``(track_key, state)`` rows."""
+        async with self.conn.execute(
+            "SELECT batch_key, title, first_seen_at, last_change_at FROM music_batch "
+            "WHERE notified_at IS NULL ORDER BY first_seen_at"
+        ) as cursor:
+            batches = [dict(row) for row in await cursor.fetchall()]
+        for batch in batches:
+            async with self.conn.execute(
+                "SELECT track_key, state FROM music_transfer WHERE batch_key = ?",
+                (batch["batch_key"],),
+            ) as cursor:
+                batch["tracks"] = [(row["track_key"], row["state"]) for row in await cursor.fetchall()]
+            batch["last_change_at"] = datetime.fromisoformat(batch["last_change_at"])
+        return batches
+
+    async def music_mark_notified(self, batch_keys: list[str], now: datetime) -> None:
+        if not batch_keys:
+            return
+        stamp = now.isoformat()
+        async with self._write_lock:
+            await self.conn.executemany(
+                "UPDATE music_batch SET notified_at = ? WHERE batch_key = ?",
+                [(stamp, key) for key in batch_keys],
+            )
+            await self.conn.commit()
+
+    async def cleanup_music_notify(self, days: int = 7) -> int:
+        """Drop batches announced more than ``days`` ago, with their transfers."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        async with self._write_lock:
+            await self.conn.execute("BEGIN")
+            try:
+                await self.conn.execute(
+                    "DELETE FROM music_transfer WHERE batch_key IN "
+                    "(SELECT batch_key FROM music_batch WHERE notified_at IS NOT NULL AND notified_at < ?)",
+                    (cutoff,),
+                )
+                cursor = await self.conn.execute(
+                    "DELETE FROM music_batch WHERE notified_at IS NOT NULL AND notified_at < ?",
+                    (cutoff,),
+                )
+                await self.conn.commit()
+            except Exception:
+                await self.conn.rollback()
+                raise
+            return cursor.rowcount
 
     # User methods
     async def get_user(self, tg_id: int) -> Optional[User]:
@@ -895,11 +1042,13 @@ class Database:
           DB. Copying ``backup/`` off-device (e.g. host cron) is out of scope
           for the bot itself.
 
-        Returns counts: ``{"sessions": n, "searches": n, "actions": n, "backup": 0|1}``.
+        Returns counts: ``{"sessions", "searches", "actions", "music_batches", "backup"}``;
+        ``music_batches`` = music notification batches announced over 7 days ago.
         """
         sessions = await self.cleanup_old_sessions()
         searches = await self.cleanup_old_searches()
         actions = await self.cleanup_old_actions()
+        music_batches = await self.cleanup_music_notify()
 
         try:
             await self.conn.execute("PRAGMA optimize")
@@ -917,6 +1066,7 @@ class Database:
             "sessions": sessions,
             "searches": searches,
             "actions": actions,
+            "music_batches": music_batches,
             "backup": backup_made,
         }
         logger.info("run_maintenance_completed", **result)

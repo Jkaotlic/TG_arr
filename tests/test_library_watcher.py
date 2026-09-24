@@ -185,94 +185,8 @@ async def test_the_title_is_escaped():
 
 
 # --------------------------------------------------------------------- music
-@pytest.mark.asyncio
-async def test_finished_soulseek_transfer_is_announced():
-    sent: list[str] = []
-
-    async def notify(text: str) -> None:
-        sent.append(text)
-
-    radarr, sonarr = _services()
-    slskd = AsyncMock()
-    slskd.get_transfers = AsyncMock(return_value=[_transfer()])
-    watcher = LibraryWatcher(radarr, sonarr, notify=notify, get_slskd=AsyncMock(return_value=slskd))
-
-    await watcher.poll()
-    slskd.get_transfers = AsyncMock(
-        return_value=[_transfer(state="Completed, Succeeded", transferred=100)]
-    )
-    await watcher.poll()
-
-    assert len(sent) == 1
-    assert "Battery" in sent[0]
-
-
-@pytest.mark.asyncio
-async def test_an_errored_transfer_is_not_reported_as_success():
-    sent: list[str] = []
-
-    async def notify(text: str) -> None:
-        sent.append(text)
-
-    radarr, sonarr = _services()
-    slskd = AsyncMock()
-    slskd.get_transfers = AsyncMock(return_value=[_transfer()])
-    watcher = LibraryWatcher(radarr, sonarr, notify=notify, get_slskd=AsyncMock(return_value=slskd))
-
-    await watcher.poll()
-    slskd.get_transfers = AsyncMock(
-        return_value=[_transfer(state="Completed, Errored", transferred=10)]
-    )
-    await watcher.poll()
-
-    assert len(sent) == 1
-    assert "ошибк" in sent[0].lower() or "не удалось" in sent[0].lower()
-
-
-@pytest.mark.asyncio
-async def test_a_cancelled_transfer_is_not_reported_as_done():
-    """BUG-02: "the key vanished from the active list" was treated as
-    success, so a cancelled transfer used to be announced as downloaded."""
-    sent: list[str] = []
-
-    async def notify(text: str) -> None:
-        sent.append(text)
-
-    radarr, sonarr = _services()
-    slskd = AsyncMock()
-    slskd.get_transfers = AsyncMock(return_value=[_transfer()])
-    watcher = LibraryWatcher(radarr, sonarr, notify=notify, get_slskd=AsyncMock(return_value=slskd))
-
-    await watcher.poll()
-    slskd.get_transfers = AsyncMock(return_value=[_transfer(state="Completed, Cancelled")])
-    await watcher.poll()
-
-    assert not any("скачано" in m for m in sent)
-
-
-@pytest.mark.asyncio
-async def test_an_empty_transfer_list_does_not_mass_announce():
-    """A slskd restart (or a cleared queue) returns an empty list — that is
-    not proof every in-flight transfer succeeded."""
-    sent: list[str] = []
-
-    async def notify(text: str) -> None:
-        sent.append(text)
-
-    radarr, sonarr = _services()
-    slskd = AsyncMock()
-    slskd.get_transfers = AsyncMock(
-        return_value=[_transfer(filename=f"track-{i}.flac") for i in range(5)]
-    )
-    watcher = LibraryWatcher(radarr, sonarr, notify=notify, get_slskd=AsyncMock(return_value=slskd))
-
-    await watcher.poll()
-    slskd.get_transfers = AsyncMock(return_value=[])
-    await watcher.poll()
-
-    assert sent == []
-
-
+# Per-album aggregation (audit 2026-09-23, NOTIF-01) is covered end to end in
+# tests/test_music_notify.py; what stays here is the wiring contract.
 @pytest.mark.asyncio
 async def test_unconfigured_slskd_is_skipped():
     radarr, sonarr = _services()
@@ -283,25 +197,41 @@ async def test_unconfigured_slskd_is_skipped():
 
 # ------------------------------------------------------------------ failures
 @pytest.mark.asyncio
-async def test_one_backend_failing_does_not_stop_the_other():
+async def test_one_backend_failing_does_not_stop_the_other(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from bot.db import Database
+
     sent: list[str] = []
 
     async def notify(text: str) -> None:
         sent.append(text)
 
-    radarr, sonarr = _services()
-    radarr.get_history.side_effect = RuntimeError("radarr down")
-    slskd = AsyncMock()
-    slskd.get_transfers = AsyncMock(return_value=[_transfer()])
-    watcher = LibraryWatcher(radarr, sonarr, notify=notify, get_slskd=AsyncMock(return_value=slskd))
+    now = [datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)]
+    db = Database(str(tmp_path / "bot.db"))
+    await db.connect()
+    try:
+        radarr, sonarr = _services()
+        radarr.get_history.side_effect = RuntimeError("radarr down")
+        slskd = AsyncMock()
+        slskd.get_transfers = AsyncMock(return_value=[_transfer(id="t1", directory="x\A - B")])
+        watcher = LibraryWatcher(
+            radarr, sonarr, notify=notify, get_slskd=AsyncMock(return_value=slskd),
+            db=db, clock=lambda: now[0], music_settle_seconds=0,
+        )
 
-    await watcher.poll()  # must not raise
-    slskd.get_transfers = AsyncMock(
-        return_value=[_transfer(state="Completed, Succeeded")]
-    )
-    await watcher.poll()
+        await watcher.poll()  # must not raise
+        slskd.get_transfers = AsyncMock(return_value=[
+            _transfer(id="t1", directory="x\A - B", state="Completed, Succeeded",
+                      ended_at=now[0] + timedelta(seconds=30)),
+        ])
+        now[0] += timedelta(seconds=60)
+        await watcher.poll()
+    finally:
+        await db.close()
 
     assert len(sent) == 1
+    assert "1/1 скачано" in sent[0]
 
 
 @pytest.mark.asyncio

@@ -126,6 +126,15 @@ class Settings(BaseSettings):
         description="Send admins a 'bot is up' card on startup (matches the other bots' behaviour)",
     )
     notify_check_interval: int = Field(default=60, ge=10, le=3600, description="Check interval for notifications (seconds)")
+    # Audit 2026-09-23 (NOTIF-01): music is announced once per album, after
+    # the batch has been quiet for `settle` seconds; a batch with tracks
+    # still queued after `stall` seconds of silence gets a partial summary.
+    music_notify_settle_seconds: int = Field(
+        default=300, ge=0, description="Quiet time before an album summary is sent (seconds)"
+    )
+    music_notify_stall_seconds: int = Field(
+        default=3600, ge=60, description="Quiet time after which a stuck album gets a partial summary (seconds)"
+    )
 
     # Optional
     timezone: str = Field(default="Europe/Moscow", description="Timezone for timestamps")

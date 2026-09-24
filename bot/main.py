@@ -477,7 +477,15 @@ async def _library_watch(bot: Bot, db: Database, logger) -> None:
 
     radarr = await get_radarr()
     sonarr = await get_sonarr()
-    watcher = LibraryWatcher(radarr, sonarr, notify=_notify, get_slskd=get_slskd)
+    watcher = LibraryWatcher(
+        radarr,
+        sonarr,
+        notify=_notify,
+        get_slskd=get_slskd,
+        db=db,
+        music_settle_seconds=settings.music_notify_settle_seconds,
+        music_stall_seconds=settings.music_notify_stall_seconds,
+    )
     structlog.contextvars.bind_contextvars(component="library_watch")
     try:
         while True:

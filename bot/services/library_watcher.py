@@ -29,11 +29,29 @@ episode burst reads in the order it actually happened.
 
 import html
 from collections.abc import Awaitable, Callable
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 
+from bot.services import music_notify
+
+if TYPE_CHECKING:
+    from bot.db import Database
+
 logger = structlog.get_logger()
+
+#: `notify_kv` key: start time of the last successful slskd poll (ISO, UTC).
+_SLSKD_WATERMARK_KEY = "slskd_watermark"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 #: How many history rows to ask each *arr service for per poll. Comfortably
 #: more than a single interval can produce, so nothing is missed between
@@ -44,12 +62,6 @@ _HISTORY_PAGE_SIZE = 50
 #: the set without limit. Well above `_HISTORY_PAGE_SIZE` so an id is never
 #: forgotten while it is still being returned by the history endpoint.
 _SEEN_IMPORTS_CAP = 500
-
-#: slskd transfer states that mean "this transfer is over". slskd reports e.g.
-#: "Completed, Succeeded" / "Completed, Cancelled" / "Completed, Errored".
-_TRANSFER_SUCCEEDED = "Succeeded"
-_TRANSFER_CANCELLED = "Cancelled"
-_TRANSFER_ERRORED = "Errored"
 
 
 class LibraryWatcher:
@@ -62,15 +74,23 @@ class LibraryWatcher:
         *,
         notify: Optional[Callable[[str], Awaitable[None]]] = None,
         get_slskd: Optional[Callable[[], Awaitable[Any]]] = None,
+        db: Optional["Database"] = None,
+        clock: Callable[[], datetime] = _utcnow,
+        music_settle_seconds: float = 300,
+        music_stall_seconds: float = 3600,
     ):
         self.radarr = radarr
         self.sonarr = sonarr
         self.notify = notify
         self._get_slskd = get_slskd
+        #: Persisted notification state; music announcements need it (without
+        #: a database the slskd side is skipped entirely).
+        self._db = db
+        self._clock = clock
+        self._music_settle_seconds = music_settle_seconds
+        self._music_stall_seconds = music_stall_seconds
         #: (service_label, record id) already reported (insertion-ordered, bounded)
         self._seen_imports: dict[tuple[str, Any], None] = {}
-        #: slskd "user/file" -> last seen state
-        self._transfers: dict[str, str] = {}
         #: Whether `poll()` has completed a cycle yet. *arr's history journal
         #: already contains everything imported before this process started —
         #: unlike slskd's transfer list (which only reports on a *change* of
@@ -140,8 +160,24 @@ class LibraryWatcher:
 
     # -------------------------------------------------------------- slskd
     async def _poll_transfers(self) -> None:
-        if self._get_slskd is None:
+        """Record slskd transfer changes and announce settled albums.
+
+        Audit 2026-09-23 (NOTIF-01/02/03/05): one summary per batch instead of
+        one message per file. State lives in SQLite (`music_transfer`,
+        `music_batch`, `notify_kv['slskd_watermark']`), so a restart neither
+        replays history nor loses a half-finished album.
+
+        - A transfer first seen already finished counts only if it ended
+          after the watermark (the start of the last successful poll). The
+          very first run sets the watermark to "now", so pre-existing history
+          stays quiet.
+        - Keys that vanish from slskd are simply not updated: slskd prunes its
+          own list and a restart empties it wholesale (BUG-02).
+        - A failed poll leaves the watermark untouched.
+        """
+        if self._get_slskd is None or self._db is None:
             return
+        poll_started = self._clock()
         try:
             slskd = await self._get_slskd()
             if slskd is None:
@@ -151,32 +187,57 @@ class LibraryWatcher:
             logger.warning("library_watch_transfers_failed", error=str(e))
             return
 
-        seen: dict[str, str] = {}
+        db = self._db
+        raw_watermark = await db.kv_get(_SLSKD_WATERMARK_KEY)
+        watermark = _parse_iso(raw_watermark) if raw_watermark else poll_started
+
+        known = await db.music_transfer_states()
+        changes: list[tuple[str, str, str, str, str]] = []
         for transfer in transfers:
-            key = f"{transfer.username}/{transfer.filename}"
+            tid = music_notify.transfer_id(transfer)
             state = transfer.state or ""
-            seen[key] = state
-            previous = self._transfers.get(key)
-
-            # Unknown key, or an unchanged state, is not an event. A key first
-            # seen already finished is history (restart), not news.
-            if previous is None or previous == state:
+            previous = known.get(tid)
+            if previous == state:
                 continue
+            if previous is None and music_notify.is_terminal(state):
+                ended = transfer.ended_at
+                if ended is None or ended <= watermark:
+                    continue  # history, not news
+            known[tid] = state
+            changes.append((
+                tid,
+                music_notify.batch_key(transfer),
+                music_notify.track_key(transfer),
+                state,
+                music_notify.album_title(transfer.directory),
+            ))
+        await db.music_record(changes, poll_started)
 
-            name = html.escape(transfer.filename)
-            if _TRANSFER_SUCCEEDED in state:
-                await self._announce(f"🎵 <b>{name}</b> — скачано.")
-            elif _TRANSFER_ERRORED in state:
-                await self._announce(
-                    f"⚠️ 🎵 <b>{name}</b> — не удалось скачать ({html.escape(state)})"
-                )
-            elif _TRANSFER_CANCELLED in state:
-                await self._announce(f"🚫 🎵 <b>{name}</b> — загрузка отменена.")
+        await self._announce_ready_batches(poll_started)
+        await db.kv_set(_SLSKD_WATERMARK_KEY, poll_started.isoformat())
 
-        # Keys that vanished are dropped silently: slskd prunes its own history,
-        # and a restart empties the list wholesale — neither is evidence of a
-        # completed download (BUG-02).
-        self._transfers = seen
+    async def _announce_ready_batches(self, now: datetime) -> None:
+        """Send one message for every batch that settled (or stalled)."""
+        assert self._db is not None
+        ready: list[str] = []
+        summaries: list[music_notify.BatchSummary] = []
+        for batch in await self._db.music_pending_batches():
+            summary = music_notify.summarize(batch["title"], batch["tracks"])
+            quiet = (now - batch["last_change_at"]).total_seconds()
+            settled = summary.active == 0 and quiet >= self._music_settle_seconds
+            stalled = quiet >= self._music_stall_seconds
+            if not (settled or stalled):
+                continue
+            ready.append(batch["batch_key"])
+            if not summary.all_cancelled:
+                summaries.append(summary)
+
+        # Marked before sending: a Telegram blip costs one summary, never a
+        # repeat loop.
+        await self._db.music_mark_notified(ready, now)
+        text = music_notify.format_message(summaries)
+        if text:
+            await self._announce(text)
 
     async def _announce(self, text: str) -> None:
         """Deliver one notification; a failure is logged, never raised.

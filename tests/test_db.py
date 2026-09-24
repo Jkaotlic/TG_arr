@@ -1088,4 +1088,4 @@ class TestLegacyPreferenceMigration:
         finally:
             await database.close()
 
-        assert version == 4
+        assert version >= 4
