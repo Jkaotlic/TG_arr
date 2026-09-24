@@ -79,7 +79,7 @@ import structlog
 
 from bot.clients.base import APIError, ArrBaseClient, ServiceConnectionError
 from bot.clients.lidarr import LidarrClient
-from bot.clients.qbittorrent import QBittorrentClient
+from bot.clients.qbittorrent import DIRECT_TAG, QBittorrentClient
 from bot.clients.radarr import RadarrClient
 from bot.clients.sonarr import SonarrClient
 from bot.models import (
@@ -866,6 +866,9 @@ class AddService:
             ok = await self.qbittorrent.add_torrent_url(
                 download_url,
                 category=_qbit_category(content_type, release),
+                # No *arr grabs this one, so library_watch will never announce
+                # it — the tag keeps its qBit completion message (final review).
+                tags=[DIRECT_TAG],
             )
         except Exception as e:
             log.error("qbittorrent_force_download_failed", error=str(e), exc_info=True)

@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.qbittorrent import STATE_MAP, QBittorrentClient
+from bot.clients.qbittorrent import DIRECT_TAG, STATE_MAP, QBittorrentClient
 from bot.config import get_settings
 from bot.models import TorrentInfo, TorrentState
 from bot.ui.formatters import Formatters
@@ -328,7 +328,13 @@ class NotificationService:
 
             if is_complete:
                 if not tracked["notified"]:
-                    if (torrent.category or "") in self.settings.arr_torrent_category_set:
+                    if (
+                        (torrent.category or "") in self.settings.arr_torrent_category_set
+                        # Final review 2026-09-24: the bot pushed this one
+                        # straight into qBit — no *arr grabbed it, so
+                        # library_watch never will announce it.
+                        and DIRECT_TAG not in torrent.tags
+                    ):
                         # NOTIF-07 (audit 2026-09-23): Radarr/Sonarr
                         # import this torrent and library_watch announces
                         # it once it is in the library — a qBit message

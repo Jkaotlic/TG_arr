@@ -47,6 +47,14 @@ STATE_MAP = {
     "unknown": TorrentState.UNKNOWN,
 }
 
+#: qBit tag on every torrent the bot adds itself, bypassing Radarr/Sonarr
+#: (final review 2026-09-24). Such a torrent may sit in the radarr/tv-sonarr
+#: category, but no *arr grabbed it, so library_watch will never announce it —
+#: NotificationService exempts this tag from the "left to library_watch" rule.
+#: A tag rather than a stored info-hash: it lives in qBittorrent, survives bot
+#: restarts, and needs no hash (a Prowlarr .torrent URL does not expose one).
+DIRECT_TAG = "tgarr-direct"
+
 
 class QBittorrentError(Exception):
     """qBittorrent API error."""
@@ -484,8 +492,12 @@ class QBittorrentClient:
         urls: list[str] | str,
         category: Optional[str] = None,
         paused: bool = False,
+        tags: Optional[list[str]] = None,
     ) -> bool:
         """Add torrent by URL(s) or magnet link(s).
+
+        ``tags`` are attached at add time (qBit creates unknown tags itself);
+        see ``DIRECT_TAG``.
 
         Returns:
             True if torrent was added successfully, False otherwise.
@@ -498,6 +510,8 @@ class QBittorrentClient:
             data["category"] = category
         if paused:
             data["paused"] = "true"
+        if tags:
+            data["tags"] = ",".join(tags)
 
         result = await self._request("POST", "/api/v2/torrents/add", data=data)
 
