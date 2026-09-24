@@ -733,3 +733,142 @@ async def test_v6_rekey_is_idempotent(tmp_path):
             assert (await cur.fetchone())[0] == 3
     finally:
         await database.close()
+
+
+# ------------------------------------------------ review fix round 1 (keys)
+def _file(name: str, state: str, *, directory: str = ALBUM_DIR, username: str = "peer1",
+          tid: Optional[str] = None, ended: Optional[datetime] = None) -> SlskdTransfer:
+    return SlskdTransfer(
+        username=username, filename=name, state=state, size=100,
+        transferred=100 if "Succeeded" in state else 0,
+        id=tid or f"{username}:{directory}\\{name}", batch_id=f"b-{username}-{name}",
+        directory=directory, full_filename=f"{directory}\\{name}",
+        ended_at=ended if ended is not None else (T0 if "Completed" in state else None),
+    )
+
+
+def test_generic_album_names_keep_the_artist_folder():
+    key = music_notify.album_key
+    assert key("x\Artist\Greatest Hits") != key("y\Other\Greatest Hits")
+    assert key("x\Artist\Greatest Hits") == key("@@share\Music\Artist\Greatest Hits [FLAC]")
+    assert key("x\Artist\Live\CD2") == key("y/Artist/Live/")
+    assert music_notify.album_title("x\Artist\Greatest Hits") == "Artist — Greatest Hits"
+    # an album folder already naming its artist does not take the parent in
+    assert music_notify.album_title("x\Artist\Artist - LP (2001)") == "Artist — LP (2001)"
+
+
+def test_loose_files_in_a_share_root_are_never_one_album_across_peers():
+    key = music_notify.album_key
+    for root in ("music_readonly", "Music", "@@abcde", "@@share\Music", "share", "Downloads",
+                 "complete", ""):
+        assert key(root, "peer1") != key(root, "peer2"), root
+        assert key(root, "peer1").startswith(music_notify.ALBUM_KEY_PREFIX)
+        assert music_notify.album_title(root) == "Музыка"
+    assert key("music", "peer1") != key("x\Artist - LP", "peer1")
+
+
+@pytest.mark.asyncio
+async def test_loose_files_of_two_peers_get_separate_lines(db):
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    watcher = _watcher(db, slskd, clock, sent)
+    await _prime(watcher, clock)
+    slskd.transfers = [
+        _file("a.flac", "Completed, Succeeded", directory="music_readonly", ended=clock.now),
+        _file("b.flac", "Completed, Succeeded", directory="music_readonly", username="peer2",
+              ended=clock.now),
+    ]
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+
+    assert len(sent) == 1
+    assert sent[0].count("1/1 скачано") == 2
+
+
+def test_dashes_and_format_tags_are_normalised_in_the_key():
+    key = music_notify.album_key
+    assert key("x\Artist – Album (2023) (FLAC)") == key("y\Artist - Album (2023) [FLAC]")
+    assert key("x\Artist — Album (2023) {24bit}") == key(ALBUM_DIR)
+    assert key("x\Artist - Album (2023) (MP3 320)") == key(ALBUM_DIR)
+    assert key("x\Artist - Album (2023) (WEB FLAC 24-96)") == key(ALBUM_DIR)
+    assert key("x\Artist - Album (2024)") != key(ALBUM_DIR)  # the year is not a tag
+    assert music_notify.album_title("x\Artist – Album (2023) (FLAC)") == "Artist — Album (2023)"
+
+
+def test_disc_folder_variants_collapse_into_the_album():
+    for disc in ("Disc 1 - Bonus", "CD.1", "CD-1", "Disc 1 of 2", "cd_2"):
+        assert music_notify.album_key(f"{ALBUM_DIR}\{disc}") == music_notify.album_key(ALBUM_DIR), disc
+        assert music_notify.album_title(f"{ALBUM_DIR}\{disc}") == "Artist — Album (2023)"
+
+
+def test_track_identity_ignores_extension_punctuation_and_layout():
+    tk = music_notify.album_track_key
+
+    def ident(directory: str, name: str) -> str:
+        return music_notify.track_identity(tk(directory, name))
+
+    same = [
+        (ALBUM_DIR, "01 - Track 1.flac"),
+        (ALBUM_DIR, "01 - Track 1.mp3"),
+        (ALBUM_DIR, "01. Track 1.flac"),
+        (ALBUM_DIR, "1 Track 1.FLAC"),
+        (ALBUM_DIR + "\CD1", "01 - Track 1.flac"),
+        (ALBUM_DIR, "1-01 Track 1.flac"),
+    ]
+    assert len({ident(d, n) for d, n in same}) == 1
+    assert ident(ALBUM_DIR + "\CD2", "01 - Track 1.flac") != ident(ALBUM_DIR, "01 - Track 1.flac")
+    assert ident(ALBUM_DIR, "02 - Track 2.flac") != ident(ALBUM_DIR, "01 - Track 1.flac")
+    # no track number: the normalised stem is the identity
+    assert ident(ALBUM_DIR, "Intro.flac") == ident(ALBUM_DIR, "intro.mp3")
+    assert ident(ALBUM_DIR, "Intro.flac") != ident(ALBUM_DIR, "Outro.flac")
+    # the display name stays the real file name
+    assert music_notify.track_name(tk(ALBUM_DIR, "01. Track 1.flac")) == "01. Track 1.flac"
+
+
+@pytest.mark.asyncio
+async def test_a_track_delivered_in_another_format_by_another_peer_counts_once(db):
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    watcher = _watcher(db, slskd, clock, sent)
+    await _prime(watcher, clock)
+    other = "@@share\Artist - Album (2023) [MP3]"
+    slskd.transfers = [
+        _file("01 - Track 1.flac", "Completed, Rejected", ended=clock.now),
+        _file("02 - Track 2.flac", "Completed, Errored", directory=ALBUM_DIR + "\CD1", ended=clock.now),
+    ]
+    await watcher.poll()
+    clock.advance(60)
+    slskd.transfers += [
+        _file("01. Track 1.mp3", "Completed, Succeeded", directory=other, username="peer2",
+              ended=clock.now),
+        _file("02 - Track 2.flac", "Completed, Succeeded", directory=other, username="peer2",
+              ended=clock.now),
+    ]
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+
+    assert len(sent) == 1
+    assert "2/2 скачано" in sent[0]
+    assert "не удалось" not in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_v6_rekey_keeps_loose_files_of_v5_apart(tmp_path):
+    """v5 rows carry no peer name: loose files keep one bucket per old batch."""
+    seeded = (T0 - timedelta(hours=2)).isoformat()
+    rows = [
+        ("t-1", "b-1", "music_readonly\a.flac", "Queued, Remotely", seeded),
+        ("t-2", "b-2", "music_readonly\b.flac", "Queued, Remotely", None),
+    ]
+    database = await _reopen_as_v5(tmp_path, rows)
+    try:
+        async with database.conn.execute(
+            "SELECT t.transfer_id, b.notified_at FROM music_transfer t "
+            "JOIN music_batch b ON b.batch_key = t.batch_key ORDER BY t.transfer_id"
+        ) as cur:
+            joined = [tuple(r) for r in await cur.fetchall()]
+        assert joined == [("t-1", seeded), ("t-2", None)]
+        async with database.conn.execute("SELECT COUNT(*) FROM music_batch") as cur:
+            assert (await cur.fetchone())[0] == 2
+    finally:
+        await database.close()

@@ -43,8 +43,19 @@ _FAILED_NAMES_SHOWN = 3
 _TITLE_CAP = 200
 _NAME_CAP = 80
 
-_DISC_DIR = re.compile(r"^(?:cd|disc|disk|dvd|диск)\s*(\d+)$", re.IGNORECASE)
-_TRAILING_TAGS = re.compile(r"(\s*\[[^\]]*\])+\s*$")
+_DISC_DIR = re.compile(r"^(?:cd|disc|disk|dvd|диск)[\s._-]*(\d+)\b.*$", re.IGNORECASE)
+_DASHES = re.compile(r"\s+[–—]\s+")
+#: A trailing ``(..)``/``{..}`` group is a tag only if every word in it is a
+#: format word (``(FLAC)``, ``{24bit}``, ``(WEB FLAC 24-96)``) — never a year.
+_FORMAT_WORD = (
+    r"(?:flac|mp3|aac|alac|ogg|opus|wav|ape|m4a|web|cd|vinyl|lossless|hi-?res|v0|v2"
+    r"|\d{2,3}(?:k|kbps)?|\d{2}\s*-?\s*bits?|\d{2}(?:[.,]\d)?\s*khz|\d{2}-\d{2,3})"
+)
+_FORMAT_GROUP = rf"[(\{{]\s*{_FORMAT_WORD}(?:[\s,/+-]+{_FORMAT_WORD})*\s*[)\}}]"
+_TRAILING_TAGS = re.compile(rf"(?:\s*(?:\[[^\]]*\]|{_FORMAT_GROUP}))+\s*$", re.IGNORECASE)
+_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+#: ``1-01 ...`` (disc-track) or ``01 ...`` / ``01. ...`` / ``01 - ...``.
+_TRACK_NO = re.compile(r"^\s*(?:(\d)[-.](\d{2,3})|(\d{1,3}))(?=[\s._-]|$)")
 
 
 def split_path(path: str) -> list[str]:
@@ -92,52 +103,97 @@ def transfer_id(t: SlskdTransfer) -> str:
 #: ``user/dir``) never carry it, which is how ``_migrate_to_v6`` tells them apart.
 ALBUM_KEY_PREFIX = "album:"
 
+#: Share roots, not albums: files lying directly in one are "loose".
+#: ``@@xxxxx`` is how slskd shows a peer's share alias.
+_ROOT_DIRS = frozenset({"music", "music_readonly", "share", "downloads", "complete"})
 
-def _album_parts(directory: str) -> tuple[list[str], Optional[str]]:
-    """Split a directory into the album path and its disc subfolder, if any.
+_ARTIST_SEP = " - "
 
-    The disc comes back normalised (``CD 2`` / ``Disc2`` -> ``disc2``).
-    """
+
+def _is_root_dir(part: str) -> bool:
+    folded = part.casefold()
+    return folded in _ROOT_DIRS or folded.startswith("@@")
+
+
+def _album_parts(directory: str) -> tuple[list[str], Optional[int]]:
+    """Split a directory into the album path and its disc number, if any."""
     parts = split_path(directory)
     if len(parts) > 1:
         match = _DISC_DIR.match(parts[-1])
         if match:
-            return parts[:-1], f"disc{int(match.group(1))}"
+            return parts[:-1], int(match.group(1))
     return parts, None
 
 
-def _album_name(parts: list[str]) -> str:
-    if not parts:
-        return ""
-    return _TRAILING_TAGS.sub("", parts[-1]).strip() or parts[-1]
+def _clean_name(part: str) -> str:
+    """Dashes unified to `` - ``, trailing ``[..]`` and format ``(..)``/``{..}`` dropped."""
+    name = _DASHES.sub(_ARTIST_SEP, part)
+    name = _TRAILING_TAGS.sub("", name).strip()
+    return name or part.strip()
 
 
-def album_key(directory: str) -> str:
-    """Normalised album folder: the unit a music summary is about.
+def album_label(directory: str) -> Optional[str]:
+    """``Artist - Album (2023)`` for an album folder, None for loose files.
 
-    Only the album folder's own name counts (peers share one album from
-    different roots), minus a disc subfolder and trailing ``[tags]`` — the
-    same reading `album_title` uses — case-folded, whitespace collapsed. The
-    peer's username is deliberately not part of it: Lidarr switching peers
-    mid-album must still give one summary.
+    The album folder name, disc subfolder collapsed, tags dropped. A name that
+    does not carry its artist (no `` - ``: "Greatest Hits", "Live") takes the
+    parent folder as the artist, so generic names of different artists stay
+    apart. A share root (or no folder at all) is not an album.
     """
     parts, _disc = _album_parts(directory)
-    return ALBUM_KEY_PREFIX + " ".join(_album_name(parts).casefold().split())
+    if not parts or _is_root_dir(parts[-1]):
+        return None
+    name = _clean_name(parts[-1])
+    if _ARTIST_SEP not in name and len(parts) > 1 and not _is_root_dir(parts[-2]):
+        name = f"{_clean_name(parts[-2])}{_ARTIST_SEP}{name}"
+    return name
+
+
+def album_key(directory: str, username: str = "") -> str:
+    """Normalised album folder: the unit a music summary is about.
+
+    Built from `album_label`, case-folded, whitespace collapsed. The peer's
+    root path and username are deliberately not part of it: Lidarr switching
+    peers mid-album must still give one summary. Loose files (share root, no
+    folder) are no album: they are bucketed per peer and directory, so
+    different peers' loose files never merge.
+    """
+    label = album_label(directory)
+    if label is not None:
+        return ALBUM_KEY_PREFIX + " ".join(label.casefold().split())
+    where = "/".join(p.casefold() for p in split_path(directory))
+    return f"{ALBUM_KEY_PREFIX}loose:{username.casefold()}:{where}"
+
+
+def track_identity(key: str) -> str:
+    """The part of a track key that says which track it is (see below)."""
+    return re.split(r"[\\/]", key, maxsplit=1)[0].casefold()
 
 
 def album_track_key(directory: str, filename: str) -> str:
-    """Track identity inside its album: ``disc2\\01 - x.flac`` or ``01 - x.flac``.
+    """``<identity>\\<file name>``: identity for counting, file name for display.
 
-    Independent of the peer's root path, so the same file fetched from another
-    peer is the same track; CD1/CD2 tracks with equal names stay apart.
+    The identity survives what differs between peers: extension and format
+    (``.flac``/``.mp3``), punctuation (``01 -``/``01.``), layout (``CD1\\01``
+    vs flat ``1-01``). With a leading track number it is disc + number
+    (disc 1 when the layout is flat); otherwise the normalised file stem.
     """
     _parts, disc = _album_parts(directory)
-    return f"{disc}\\{filename}" if disc else filename
+    stem = _EXTENSION.sub("", filename)
+    match = _TRACK_NO.match(stem)
+    if match:
+        prefix_disc, number = match.group(1), match.group(2) or match.group(3)
+        disc_no = disc or (int(prefix_disc) if prefix_disc else 1)
+        identity = f"d{disc_no}t{int(number):03d}"
+    else:
+        words = re.sub(r"[\W_]+", " ", stem.casefold()).strip()
+        identity = f"d{disc or 1}:{words}"
+    return f"{identity}\\{filename}"
 
 
 def batch_key(t: SlskdTransfer) -> str:
     """The album folder — never ``t.batch_id``: live slskd sets one per file."""
-    return album_key(t.directory)
+    return album_key(t.directory, t.username)
 
 
 def track_key(t: SlskdTransfer) -> str:
@@ -152,14 +208,13 @@ def track_name(key: str) -> str:
 def album_title(directory: str) -> str:
     """``music\\Artist - Album (2023) [FLAC]`` -> ``Artist — Album (2023)``.
 
-    Takes the last path component (or its parent for ``CD1``-style disc
-    folders), drops trailing ``[tags]`` and turns the first `` - `` into an
-    em dash.
+    `album_label` with the first `` - `` turned into an em dash; loose files
+    read as "Музыка".
     """
-    parts, _disc = _album_parts(directory)
-    if not parts:
+    label = album_label(directory)
+    if label is None:
         return "Музыка"
-    return _album_name(parts).replace(" - ", " — ", 1)
+    return label.replace(_ARTIST_SEP, " — ", 1)
 
 
 @dataclass
@@ -189,16 +244,17 @@ def summarize(title: str, tracks: Iterable[tuple[str, str]]) -> BatchSummary:
     by_track: dict[str, list[str]] = {}
     shown_as: dict[str, str] = {}
     for key, state in tracks:
-        # Peers may spell the same file name in a different case.
-        folded = key.casefold()
-        by_track.setdefault(folded, []).append(state)
-        shown_as.setdefault(folded, key)
+        # Grouped by track identity, not file name: peers differ in format,
+        # punctuation and disc layout for the same track.
+        identity = track_identity(key)
+        by_track.setdefault(identity, []).append(state)
+        shown_as.setdefault(identity, key)
     succeeded = 0
     active = 0
     failed: list[str] = []
-    for folded in sorted(by_track):
-        key = shown_as[folded]
-        outcome = track_outcome(by_track[folded])
+    for identity in sorted(by_track):
+        key = shown_as[identity]
+        outcome = track_outcome(by_track[identity])
         if outcome == "succeeded":
             succeeded += 1
         elif outcome == "active":

@@ -515,23 +515,28 @@ class Database:
         # module load; music_notify itself only depends on bot.models.
         from bot.services import music_notify
 
-        async with self.conn.execute(
-            "SELECT transfer_id, batch_key, track_key FROM music_transfer "
-            "WHERE batch_key NOT LIKE ?",
-            (music_notify.ALBUM_KEY_PREFIX + "%",),
-        ) as cursor:
-            legacy = [tuple(row) for row in await cursor.fetchall()]
-
         async with self._write_lock:
             await self.conn.execute("BEGIN")
             try:
+                async with self.conn.execute(
+                    "SELECT transfer_id, batch_key, track_key FROM music_transfer "
+                    "WHERE batch_key NOT LIKE ?",
+                    (music_notify.ALBUM_KEY_PREFIX + "%",),
+                ) as cursor:
+                    legacy = [tuple(row) for row in await cursor.fetchall()]
                 sources: dict[str, set[str]] = {}
                 titles: dict[str, str] = {}
                 for tid, old_batch, old_track in legacy:
                     parts = music_notify.split_path(old_track)
                     filename = parts[-1] if parts else old_track
                     directory = "\\".join(parts[:-1])
-                    new_batch = music_notify.album_key(directory)
+                    if music_notify.album_label(directory) is None:
+                        # Loose file in a share root: v5 rows carry no peer
+                        # name, so keep each in its own old bucket rather
+                        # than merge different peers' loose files.
+                        new_batch = f"{music_notify.ALBUM_KEY_PREFIX}loose:v5:{old_batch}"
+                    else:
+                        new_batch = music_notify.album_key(directory)
                     await self.conn.execute(
                         "UPDATE music_transfer SET batch_key = ?, track_key = ? WHERE transfer_id = ?",
                         (new_batch, music_notify.album_track_key(directory, filename), tid),
