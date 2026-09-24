@@ -573,20 +573,41 @@ class Database:
             )
             await self.conn.commit()
 
+    async def music_touch_pending(self, now: datetime) -> None:
+        """Restart the settle/stall timers of every not-yet-announced batch.
+
+        Used after a stretch of unobserved time (slskd unreachable, bot down):
+        those hours say nothing about whether an album is stuck.
+        """
+        async with self._write_lock:
+            await self.conn.execute(
+                "UPDATE music_batch SET last_change_at = ? WHERE notified_at IS NULL",
+                (now.isoformat(),),
+            )
+            await self.conn.commit()
+
     async def cleanup_music_notify(self, days: int = 7) -> int:
-        """Drop batches announced more than ``days`` ago, with their transfers."""
+        """Drop batches announced more than ``days`` ago, with their transfers.
+
+        Only batches whose transfers are all finished (state ``Completed, …``)
+        are dropped: a batch still holding a queued/in-progress transfer is
+        kept as a tombstone, or the watcher would see that transfer as new
+        and announce the same stuck queue again every week.
+        """
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        stale = (
+            "SELECT b.batch_key FROM music_batch b WHERE b.notified_at IS NOT NULL "
+            "AND b.notified_at < ? AND NOT EXISTS (SELECT 1 FROM music_transfer t "
+            "WHERE t.batch_key = b.batch_key AND t.state NOT LIKE 'Completed%')"
+        )
         async with self._write_lock:
             await self.conn.execute("BEGIN")
             try:
                 await self.conn.execute(
-                    "DELETE FROM music_transfer WHERE batch_key IN "
-                    "(SELECT batch_key FROM music_batch WHERE notified_at IS NOT NULL AND notified_at < ?)",
-                    (cutoff,),
+                    f"DELETE FROM music_transfer WHERE batch_key IN ({stale})", (cutoff,)
                 )
                 cursor = await self.conn.execute(
-                    "DELETE FROM music_batch WHERE notified_at IS NOT NULL AND notified_at < ?",
-                    (cutoff,),
+                    f"DELETE FROM music_batch WHERE batch_key IN ({stale})", (cutoff,)
                 )
                 await self.conn.commit()
             except Exception:

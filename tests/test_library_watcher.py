@@ -226,6 +226,10 @@ async def test_one_backend_failing_does_not_stop_the_other(tmp_path):
             db=db, clock=lambda: now[0], music_settle_seconds=0,
         )
 
+        slskd.get_transfers = AsyncMock(return_value=[])
+        await watcher.poll()  # first-ever run: seeds the watermark
+        now[0] += timedelta(seconds=60)
+        slskd.get_transfers = AsyncMock(return_value=[_transfer(id="t1", directory="x\A - B")])
         await watcher.poll()  # must not raise
         slskd.get_transfers = AsyncMock(return_value=[
             _transfer(id="t1", directory="x\A - B", state="Completed, Succeeded",

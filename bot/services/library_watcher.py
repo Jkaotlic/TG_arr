@@ -29,7 +29,7 @@ episode burst reads in the order it actually happened.
 
 import html
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import structlog
@@ -47,6 +47,11 @@ NotifyCategory = Literal["music", "library"]
 
 #: `notify_kv` key: start time of the last successful slskd poll (ISO, UTC).
 _SLSKD_WATERMARK_KEY = "slskd_watermark"
+
+#: Tolerated clock skew between the slskd host and the bot (seconds). Used as
+#: the margin below the watermark for first-seen finished transfers, and as
+#: slack in the "unobserved gap" test.
+_CLOCK_SKEW_MARGIN_S = 120
 
 
 def _utcnow() -> datetime:
@@ -124,6 +129,7 @@ class LibraryWatcher:
         clock: Callable[[], datetime] = _utcnow,
         music_settle_seconds: float = 300,
         music_stall_seconds: float = 3600,
+        poll_interval_seconds: float = 60,
     ):
         self.radarr = radarr
         self.sonarr = sonarr
@@ -135,6 +141,9 @@ class LibraryWatcher:
         self._clock = clock
         self._music_settle_seconds = music_settle_seconds
         self._music_stall_seconds = music_stall_seconds
+        #: A gap between successful slskd polls longer than this means time
+        #: went unobserved (see `_poll_transfers`).
+        self._unobserved_gap_s = 2 * poll_interval_seconds + _CLOCK_SKEW_MARGIN_S
         #: (service_label, record id) already reported (insertion-ordered, bounded)
         self._seen_imports: dict[tuple[str, Any], None] = {}
         #: Services whose history has been read successfully at least once in
@@ -285,7 +294,20 @@ class LibraryWatcher:
 
         db = self._db
         raw_watermark = await db.kv_get(_SLSKD_WATERMARK_KEY)
-        watermark = _parse_iso(raw_watermark) if raw_watermark else poll_started
+        first_run = raw_watermark is None
+        watermark = poll_started if raw_watermark is None else _parse_iso(raw_watermark)
+        # Review round 1: slskd's host clock may run a little behind the
+        # bot's, so a transfer that finished between two polls can carry an
+        # `endedAt` just before the watermark. Transfers already recorded are
+        # matched by id, so the margin can't make anything count twice.
+        cutoff = watermark - timedelta(seconds=_CLOCK_SKEW_MARGIN_S)
+
+        # Review round 1: time nobody observed (slskd unreachable, or the bot
+        # itself down) is not "quiet time". If the last successful poll is
+        # much older than one interval, restart the settle/stall timers of
+        # the pending albums instead of declaring them stalled on wake.
+        if not first_run and (poll_started - watermark).total_seconds() > self._unobserved_gap_s:
+            await db.music_touch_pending(poll_started)
 
         known = await db.music_transfer_states()
         changes: list[tuple[str, str, str, str, str]] = []
@@ -297,7 +319,7 @@ class LibraryWatcher:
                 continue
             if previous is None and music_notify.is_terminal(state):
                 ended = transfer.ended_at
-                if ended is None or ended <= watermark:
+                if ended is None or ended <= cutoff:
                     continue  # history, not news
             known[tid] = state
             changes.append((
@@ -308,6 +330,11 @@ class LibraryWatcher:
                 music_notify.album_title(transfer.directory),
             ))
         await db.music_record(changes, poll_started)
+        if first_run:
+            # Review round 1: the very first run seeds whatever slskd already
+            # holds (e.g. remote queues that never move) as announced —
+            # otherwise the stall rule would report them an hour later.
+            await db.music_mark_notified(sorted({c[1] for c in changes}), poll_started)
 
         await self._announce_ready_batches(poll_started)
         await db.kv_set(_SLSKD_WATERMARK_KEY, poll_started.isoformat())

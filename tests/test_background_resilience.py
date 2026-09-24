@@ -333,3 +333,30 @@ async def test_completed_torrents_are_not_kept_in_tracking():
     await svc._initial_sync()
 
     assert set(svc._tracked_torrents) == {"b" * 40}
+
+
+@pytest.mark.asyncio
+async def test_spacing_holds_for_concurrent_senders(monkeypatch):
+    """Two tasks messaging one chat at once must still be a second apart."""
+    import asyncio
+
+    from bot import main
+
+    real_sleep = asyncio.sleep
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        await real_sleep(0)
+
+    async def send_message(*_args, **_kwargs) -> None:
+        await real_sleep(0)  # a real send yields to the loop
+
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(main, "_last_sent_at", {})
+    bot = AsyncMock()
+    bot.send_message = send_message
+
+    await asyncio.gather(main.send_telegram(bot, 555, "a"), main.send_telegram(bot, 555, "b"))
+
+    assert len(sleeps) == 1

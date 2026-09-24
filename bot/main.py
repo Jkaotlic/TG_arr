@@ -441,6 +441,8 @@ async def _health_watch(bot: Bot, admin_ids: list, logger, db: Optional[Database
 
 #: NOTIF-11: when each chat last got a background message (monotonic time).
 _last_sent_at: dict[int, float] = {}
+#: One lock per chat (bounded by the handful of users this bot serves).
+_chat_send_locks: dict[int, asyncio.Lock] = {}
 
 #: Minimum gap between two background messages to the same chat. Telegram's
 #: per-chat limit is about one message per second; a burst above it earns a
@@ -456,22 +458,26 @@ async def send_telegram(bot: Bot, chat_id: int, text: str) -> None:
     Telegram asked for and retries once. A second flood error (or any other
     error) propagates to the caller, which logs it per recipient.
     """
-    last = _last_sent_at.get(chat_id)
-    if last is not None:
-        wait = _SAME_CHAT_GAP_S - (time.monotonic() - last)
-        if wait > 0:
-            await asyncio.sleep(wait)
-    try:
+    # Review round 1: per-chat lock, so two background tasks (library watch,
+    # health, qBit) can't both read "last send was long ago" and burst.
+    lock = _chat_send_locks.setdefault(chat_id, asyncio.Lock())
+    async with lock:
+        last = _last_sent_at.get(chat_id)
+        if last is not None:
+            wait = _SAME_CHAT_GAP_S - (time.monotonic() - last)
+            if wait > 0:
+                await asyncio.sleep(wait)
         try:
-            await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
-        except TelegramRetryAfter as e:
-            structlog.get_logger().warning(
-                "telegram_retry_after", user_id=chat_id, retry_after=e.retry_after
-            )
-            await asyncio.sleep(e.retry_after)
-            await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
-    finally:
-        _last_sent_at[chat_id] = time.monotonic()
+            try:
+                await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+            except TelegramRetryAfter as e:
+                structlog.get_logger().warning(
+                    "telegram_retry_after", user_id=chat_id, retry_after=e.retry_after
+                )
+                await asyncio.sleep(e.retry_after)
+                await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+        finally:
+            _last_sent_at[chat_id] = time.monotonic()
 
 
 async def send_library_notification(
@@ -557,6 +563,7 @@ async def _library_watch(bot: Bot, db: Database, logger) -> None:
         db=db,
         music_settle_seconds=settings.music_notify_settle_seconds,
         music_stall_seconds=settings.music_notify_stall_seconds,
+        poll_interval_seconds=interval,
     )
     structlog.contextvars.bind_contextvars(component="library_watch")
     try:

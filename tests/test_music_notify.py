@@ -14,6 +14,7 @@ from typing import Optional
 
 import pytest
 
+from bot.clients.base import ServiceConnectionError
 from bot.db import Database
 from bot.models import SlskdTransfer
 from bot.services import music_notify
@@ -42,7 +43,7 @@ class FakeSlskd:
 
     async def get_transfers(self, *, include_completed: bool = False) -> list[SlskdTransfer]:
         if self.fail:
-            raise ConnectionError("connection refused")
+            raise ServiceConnectionError("Не удалось подключиться к slskd")
         return list(self.transfers)
 
 
@@ -76,7 +77,11 @@ async def db(tmp_path):
     await database.close()
 
 
-def _watcher(db: Database, slskd: FakeSlskd, clock: Clock, sent: list[str]) -> LibraryWatcher:
+def _watcher(db: Database, slskd: FakeSlskd, clock: Clock, sent: list[str],
+             poll_interval: float = 3600) -> LibraryWatcher:
+    """Most tests jump the clock between sparse polls; they declare a long
+    poll interval so those jumps are not read as unobserved time. Tests of
+    the unobserved-gap rule pass the real 60 s."""
     async def notify(text: str, category: str = "library") -> None:
         sent.append(text)
 
@@ -86,7 +91,15 @@ def _watcher(db: Database, slskd: FakeSlskd, clock: Clock, sent: list[str]) -> L
     return LibraryWatcher(
         _NoHistory(), _NoHistory(), notify=notify, get_slskd=get_slskd, db=db,
         clock=clock, music_settle_seconds=300, music_stall_seconds=3600,
+        poll_interval_seconds=poll_interval,
     )
+
+
+async def _poll_for(watcher: LibraryWatcher, clock: Clock, seconds: int) -> None:
+    """Poll every 60 s like production does."""
+    for _ in range(seconds // 60):
+        clock.advance(60)
+        await watcher.poll()
 
 
 async def _prime(watcher: LibraryWatcher, clock: Clock) -> None:
@@ -370,3 +383,106 @@ async def test_maintenance_drops_batches_notified_over_a_week_ago(db):
     assert result["music_batches"] == 1
     async with db.conn.execute("SELECT COUNT(*) FROM music_transfer") as cur:
         assert (await cur.fetchone())[0] == 0
+
+
+# -------------------------------------------- review round 1 (unobserved time)
+@pytest.mark.asyncio
+async def test_slskd_down_for_hours_mid_album_does_not_send_a_stalled_summary(db):
+    """Hours slskd was unreachable are not "quiet time" — nobody watched them."""
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    watcher = _watcher(db, slskd, clock, sent, poll_interval=60)
+    await _prime(watcher, clock)
+    slskd.transfers = [_t(n, "Completed, Succeeded", ended=clock.now) for n in range(1, 4)]
+    slskd.transfers += [_t(n, "InProgress") for n in range(4, 13)]
+    await watcher.poll()
+
+    slskd.fail = True
+    for _ in range(5 * 60):
+        clock.advance(60)
+        await watcher.poll()
+    slskd.fail = False
+    await watcher.poll()  # wake
+    assert sent == []
+
+    clock.advance(60)
+    slskd.transfers = [_t(n, "Completed, Succeeded", ended=clock.now) for n in range(1, 13)]
+    await watcher.poll()
+    await _poll_for(watcher, clock, 360)
+
+    assert len(sent) == 1
+    assert "12/12 скачано" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_bot_down_for_hours_mid_album_does_not_send_a_stalled_summary(db):
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    watcher = _watcher(db, slskd, clock, sent, poll_interval=60)
+    await _prime(watcher, clock)
+    slskd.transfers = [_t(n, "Completed, Succeeded", ended=clock.now) for n in range(1, 4)]
+    slskd.transfers += [_t(n, "InProgress") for n in range(4, 13)]
+    await watcher.poll()
+
+    clock.advance(5 * 3600)  # the bot itself was down
+    restarted = _watcher(db, slskd, clock, sent, poll_interval=60)
+    await restarted.poll()
+    await _poll_for(restarted, clock, 600)  # still downloading, observed
+
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_first_ever_run_with_a_stuck_remote_queue_is_silent(db):
+    """The live instance has 16 'Queued, Remotely' transfers that never move."""
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    slskd.transfers = [
+        _t(n, "Completed, Succeeded", ended=T0 - timedelta(days=3)) for n in range(1, 11)
+    ] + [_t(11, "Queued, Remotely"), _t(12, "Queued, Remotely")]
+    watcher = _watcher(db, slskd, clock, sent)
+
+    for _ in range(3):
+        await watcher.poll()
+        clock.advance(3601)
+
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_maintenance_keeps_a_batch_that_still_has_live_transfers(db):
+    """Deleting it would re-announce the same stuck queue every week."""
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    watcher = _watcher(db, slskd, clock, sent)
+    await _prime(watcher, clock)
+    slskd.transfers = [_t(1, "Queued, Remotely")]
+    await watcher.poll()
+    clock.advance(3601)
+    await watcher.poll()
+    assert len(sent) == 1  # the stalled summary, once
+
+    async with db._write_lock:
+        await db.conn.execute(
+            "UPDATE music_batch SET notified_at = ?", ((T0 - timedelta(days=9)).isoformat(),)
+        )
+        await db.conn.commit()
+    assert await db.cleanup_music_notify() == 0
+
+    await watcher.poll()
+    clock.advance(3601)
+    await watcher.poll()
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_small_clock_skew_between_slskd_and_the_bot_is_tolerated(db):
+    """slskd's host clock slightly behind the bot's: a transfer that finished
+    between two polls may carry an `endedAt` just before the watermark."""
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    watcher = _watcher(db, slskd, clock, sent)
+    await _prime(watcher, clock)  # watermark = T0
+
+    slskd.transfers = [_t(1, "Completed, Succeeded", ended=T0 - timedelta(seconds=60))]
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+
+    assert len(sent) == 1
+    assert "1/1 скачано" in sent[0]
