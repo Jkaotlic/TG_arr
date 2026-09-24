@@ -101,7 +101,8 @@ async def test_handle_resume_torrent_calls_answer_once(fake_torrent):
 
 @pytest.mark.asyncio
 async def test_handle_delete_torrent_calls_answer_once(fake_torrent):
-    """BUG-15: delete handler must call callback.answer exactly once."""
+    """BUG-15: delete handler must call callback.answer exactly once.
+    Audit UI-16: "delete" only asks; the confirmed "delc" deletes."""
     from bot.handlers import downloads
 
     qbt = AsyncMock()
@@ -110,7 +111,7 @@ async def test_handle_delete_torrent_calls_answer_once(fake_torrent):
     qbt.delete = AsyncMock()
     qbt.get_torrents = AsyncMock(return_value=[])
 
-    cb = _action_cb("delete", fake_torrent.hash)
+    cb = _action_cb("delc", fake_torrent.hash)
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
         await _run_action(downloads, cb, is_admin=True)

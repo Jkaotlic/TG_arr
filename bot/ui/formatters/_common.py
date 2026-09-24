@@ -167,3 +167,21 @@ def release_button_label(result, idx: int) -> str:
     room = LABEL_MAX - len(tail) - 1
     short_head = head[: max(room - 1, 1)].rstrip() + "…"
     return f"{short_head} {tail}" if tail else short_head
+
+
+#: Human names of Sonarr's season-monitoring presets (audit UI-15: the card
+#: used to show "latestSeason").
+SEASON_PRESET_NAMES = {
+    "all": "все сезоны",
+    "future": "только будущие",
+    "firstSeason": "первый сезон",
+    "latestSeason": "последний сезон",
+    "none": "нет",
+}
+
+
+def season_preset_name(preset: str | None) -> str:
+    """Russian name of a season preset; ``None`` = decided by the release."""
+    if preset is None:
+        return "авто (по релизу)"
+    return SEASON_PRESET_NAMES.get(preset, preset)

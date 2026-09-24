@@ -88,7 +88,7 @@ class _SearchKeyboards:
         if show_grab_best and results:
             keyboard.append([
                 InlineKeyboardButton(
-                    text=f"⚡ Лучший (оценка: {best_score})",
+                    text=f"⚡ Скачать лучший (оценка: {best_score})",
                     callback_data=GrabBestCB(tok=list_token).pack(),
                 )
             ])
@@ -159,13 +159,15 @@ class _SearchKeyboards:
         if show_force_grab:
             keyboard.append([
                 InlineKeyboardButton(
-                    text="⚡ Принудительно (qBit)",
+                    # Audit UI-20: ⚡ is "Скачать лучший" only; 📥 = qBittorrent.
+                    text="📥 Принудительно (qBit)",
                     callback_data=ForceGrabCB(tok=list_token, idx=idx).pack(),
                 ),
             ])
 
-        # #2: let the user choose which seasons are monitored (series only).
-        if content_type == ContentType.SERIES and season_menu:
+        # #2: let the user choose which seasons are monitored — anime is a
+        # Sonarr series as well (audit UI-15).
+        if content_type in (ContentType.SERIES, ContentType.ANIME) and season_menu:
             keyboard.append([
                 InlineKeyboardButton(text="📺 Мониторинг сезонов", callback_data=CallbackData.SEASON_MENU),
             ])
@@ -218,7 +220,7 @@ class _SearchKeyboards:
         rows = []
         if offer_qbit:
             rows.append([InlineKeyboardButton(
-                text="⚡ Скачать напрямую (qBit)",
+                text="📥 Скачать напрямую (qBit)",
                 callback_data=FindGrabCB(tok=list_token, idx=idx, q=1).pack(),
             )])
         rows.append([
@@ -371,7 +373,9 @@ class _SearchKeyboards:
             )
             if monitored
             else InlineKeyboardButton(
-                text="🔔 Включить мониторинг",
+                # Controller ruling (audit UI-06/UI-20): for a series the
+                # action is the "future" season preset — say so.
+                text="🔔 Следить за новыми сериями" if kind == "series" else "🔔 Включить мониторинг",
                 callback_data=TitleActionCB(action="mon", kind=kind, title_id=title_id).pack(),
             )
         )

@@ -210,6 +210,19 @@ class _SearchFormatters:
         return _safe_truncate(page_text, max_len=3800)
 
     @staticmethod
+    def format_release_card(result: SearchResult, content: object = None) -> str:
+        """The release card: release details plus, when the title is known,
+        its movie/series info below a separator. One renderer for the first
+        open and for every way back to the card (audit UI-15: the season
+        picker used to return to a bare release block)."""
+        text = _SearchFormatters.format_release_details(result)
+        if isinstance(content, MovieInfo):
+            return f"{text}\n\n---\n{_SearchFormatters.format_movie_info(content)}"
+        if isinstance(content, SeriesInfo):
+            return f"{text}\n\n---\n{_SearchFormatters.format_series_info(content)}"
+        return text
+
+    @staticmethod
     def format_release_details(result: SearchResult) -> str:
         """Format detailed view of a release."""
         lines = [f"<b>{_e(result.title)}</b>\n"]
@@ -575,7 +588,7 @@ class _SearchFormatters:
         lines.append("\n<b>🎯 Общие:</b>")
         lines.append(f"  Качество: {prefs.preferred_resolution or 'Любое'}")
         lines.append(
-            f"  Авто-граб: {'ВКЛ ✓' if prefs.auto_grab_enabled else 'ВЫКЛ'}"
+            f"  Кнопка «Скачать лучший»: {'вкл' if prefs.auto_grab_enabled else 'выкл'}"
         )
 
         return "\n".join(lines)

@@ -18,7 +18,7 @@ logger = structlog.get_logger()
 router = Router()
 
 
-async def _render_status_text() -> tuple[str, InlineKeyboardMarkup | None]:
+async def _render_status_text(is_admin: bool = False) -> tuple[str, InlineKeyboardMarkup | None]:
     """LOGIC-20: fetch Emby status and build (text, keyboard) — no I/O side
     effects on Telegram, so both cmd_emby and handle_refresh can call it and
     decide for themselves whether to answer()/edit_text()/send a new message.
@@ -52,6 +52,7 @@ async def _render_status_text() -> tuple[str, InlineKeyboardMarkup | None]:
             has_update=info.has_update_available,
             can_restart=info.can_self_restart,
             can_update=info.can_self_update,
+            is_admin=is_admin,
         )
         return text, keyboard
 
@@ -64,7 +65,7 @@ async def _render_status_text() -> tuple[str, InlineKeyboardMarkup | None]:
         return "❌ Ошибка получения статуса Emby", None
 
 
-async def _edit_status(callback: CallbackQuery) -> None:
+async def _edit_status(callback: CallbackQuery, is_admin: bool = True) -> None:
     """BUG-04c: re-render the status card in place WITHOUT calling
     callback.answer() — callers that already answered (e.g. with a
     "✅ Сканирование запущено" toast) must not answer a second time.
@@ -72,22 +73,22 @@ async def _edit_status(callback: CallbackQuery) -> None:
     message = accessible_message(callback)
     if message is None:
         return
-    text, keyboard = await _render_status_text()
+    text, keyboard = await _render_status_text(is_admin)
     await safe_edit(message, text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.message(F.text == MENU_EMBY)
 @router.message(Command("emby"))
-async def cmd_emby(message: Message) -> None:
+async def cmd_emby(message: Message, is_admin: bool = False) -> None:
     """Handle /emby command."""
-    text, keyboard = await _render_status_text()
+    text, keyboard = await _render_status_text(is_admin)
     await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.callback_query(F.data == CallbackData.EMBY_REFRESH)
-async def handle_refresh(callback: CallbackQuery) -> None:
+async def handle_refresh(callback: CallbackQuery, is_admin: bool = False) -> None:
     """Refresh Emby status. BUG-04c: exactly one callback.answer()."""
-    text, keyboard = await _render_status_text()
+    text, keyboard = await _render_status_text(is_admin)
     if (message := accessible_message(callback)) is not None:
         await safe_edit(message, text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
@@ -95,7 +96,8 @@ async def handle_refresh(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == CallbackData.EMBY_CLOSE)
 async def handle_close(callback: CallbackQuery) -> None:
-    """Close Emby message."""
+    """Close Emby message — legacy ``emby_close``; new panels use
+    ``CallbackData.CLOSE`` (audit UI-20)."""
     if (message := accessible_message(callback)) is not None:
         await message.delete()
     await callback.answer()
@@ -194,8 +196,12 @@ async def handle_scan_series(callback: CallbackQuery, is_admin: bool = False) ->
 
 
 @router.callback_query(F.data == CallbackData.EMBY_RESTART)
-async def handle_restart_prompt(callback: CallbackQuery) -> None:
-    """Show restart confirmation."""
+async def handle_restart_prompt(callback: CallbackQuery, is_admin: bool = False) -> None:
+    """Show restart confirmation — to an admin only (audit UI-16: a user got
+    the confirm screen and only then "Недостаточно прав")."""
+    if not is_admin:
+        await callback.answer("Недостаточно прав для перезагрузки", show_alert=True)
+        return
     message = accessible_message(callback)
     if message is None:
         return
@@ -245,8 +251,11 @@ async def handle_restart_confirm(callback: CallbackQuery, is_admin: bool = False
 
 
 @router.callback_query(F.data == CallbackData.EMBY_UPDATE)
-async def handle_update_prompt(callback: CallbackQuery) -> None:
-    """Show update confirmation."""
+async def handle_update_prompt(callback: CallbackQuery, is_admin: bool = False) -> None:
+    """Show update confirmation — to an admin only (audit UI-16)."""
+    if not is_admin:
+        await callback.answer("Недостаточно прав для обновления", show_alert=True)
+        return
     message = accessible_message(callback)
     if message is None:
         return

@@ -38,6 +38,7 @@ from bot.services.add_service import AddService, resolve_profile_with_source
 from bot.ui.callbacks import SettingCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.keyboards._constants import MSG_OLD_BUTTON
 from bot.ui.menu import MENU_SETTINGS
 
 logger = structlog.get_logger()
@@ -374,12 +375,15 @@ async def handle_auto_grab_menu(callback: CallbackQuery, db_user: User) -> None:
     if message is None:
         return
 
-    settings = get_settings()
-
+    # Audit UI-12 / GRAB-12: the text states the gate grab_best_candidate()
+    # really applies to Radarr/Sonarr results — no longer a score of 80.
     await message.edit_text(
-        f"<b>Авто-загрузка</b>\n\n"
-        f"При включении релизы с высоким рейтингом (≥ {settings.auto_grab_score_threshold}) "
-        f"покажут кнопку «Скачать лучшее» для быстрой загрузки.",
+        "<b>⚡ Кнопка «Скачать лучший»</b>\n\n"
+        "Над списком релизов появляется кнопка «⚡ Скачать лучший»: одно "
+        "нажатие скачивает первый релиз списка, без карточки.\n\n"
+        "Кнопка показывается, только если этот релиз принят профилем качества "
+        "Radarr/Sonarr и его оценка форматов CF ≥ 0. Сам бот ничего не "
+        "скачивает — только по нажатию.",
         reply_markup=Keyboards.auto_grab_toggle(db_user.preferences.auto_grab_enabled),
         parse_mode="HTML",
     )
@@ -409,7 +413,7 @@ async def handle_set_auto_grab(
         await callback.answer("Ошибка обновления", show_alert=True)
         return
 
-    await callback.answer(f"Авто-загрузка {'включена' if enabled else 'выключена'}!")
+    await callback.answer(f"Кнопка «Скачать лучший» {'включена' if enabled else 'выключена'}")
 
 
 @router.callback_query(SettingCB.filter(F.key.in_({"notify_music", "notify_library"})))
@@ -453,4 +457,4 @@ async def handle_legacy_setting_set(callback: CallbackQuery) -> None:
     typed CallbackData still serializes with the same "set:" text prefix,
     but structural unpacking there always wins first).
     """
-    await callback.answer("Кнопка устарела — откройте настройки заново", show_alert=True)
+    await callback.answer(MSG_OLD_BUTTON, show_alert=True)

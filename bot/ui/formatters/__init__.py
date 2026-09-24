@@ -18,6 +18,7 @@ from bot.ui.formatters._common import (
     _progress_bar,
     _safe_truncate,
     _to_local,
+    season_preset_name,
 )
 from bot.ui.formatters.calendar import _extract_date_key, _format_date_header
 from bot.ui.formatters.emby import _EmbyFormatters
@@ -25,7 +26,7 @@ from bot.ui.formatters.search import _SearchFormatters
 from bot.ui.formatters.torrent import _TorrentFormatters
 from bot.ui.formatters.torrserver import _TorrServerFormatters
 
-__all__ = ["Formatters"]
+__all__ = ["Formatters", "season_preset_name"]
 
 
 class Formatters(_SearchFormatters, _TorrentFormatters, _EmbyFormatters, _TorrServerFormatters):

@@ -178,7 +178,7 @@ async def test_accepted_best_shows_best_button():
         )
 
     markup = edit.await_args.kwargs["reply_markup"]
-    assert any("Лучший" in t for t in _kb_texts(markup))
+    assert any("Скачать лучший" in t for t in _kb_texts(markup))  # audit UI-12 name
 
 
 @pytest.mark.asyncio

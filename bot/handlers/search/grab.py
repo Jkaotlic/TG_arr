@@ -19,8 +19,9 @@ from bot.services.add_service import (
 from bot.services.scoring import grab_best_candidate
 from bot.services.search_service import SearchService
 from bot.ui.callbacks import AutoSearchCB, ForceGrabCB, GrabBestCB, GrabCB, SeasonPresetCB
-from bot.ui.formatters import Formatters
+from bot.ui.formatters import Formatters, season_preset_name
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.keyboards._constants import MSG_OLD_BUTTON
 from bot.ui.list_token import answer_stale, token_matches
 
 from bot.handlers import search as _search
@@ -502,9 +503,9 @@ async def handle_season_menu(callback: CallbackQuery, db_user: User, db: Databas
         await callback.answer(_EXISTING_SERIES_NOTE, show_alert=True)
         return
     await callback.answer()
-    current = session.monitor_type or "auto"
+    current = season_preset_name(session.monitor_type)
     await message.edit_text(
-        f"📺 <b>Мониторинг сезонов</b>\n\nТекущий: <code>{current}</code>\n\nВыберите, какие сезоны отслеживать:",
+        f"📺 <b>Мониторинг сезонов</b>\n\nСейчас: <b>{current}</b>\n\nВыберите, какие сезоны отслеживать:",
         reply_markup=Keyboards.season_presets(),
         parse_mode="HTML",
     )
@@ -541,13 +542,13 @@ async def handle_season_preset(
             await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
             return
 
-    await callback.answer(f"Мониторинг: {preset}")
+    await callback.answer(f"Мониторинг: {season_preset_name(preset)}")
     _, add_service = await _search.get_services()
     has_qbittorrent = add_service.qbittorrent is not None
     result = session.selected_result
-    text = Formatters.format_release_details(result)
+    text = Formatters.format_release_card(result, session.selected_content)
     await message.edit_text(
-        f"{text}\n\n📺 Мониторинг: <b>{preset}</b>",
+        f"{text}\n\n📺 Мониторинг сезонов: <b>{season_preset_name(preset)}</b>",
         reply_markup=Keyboards.release_details(
             result, session.content_type,
             show_force_grab=has_qbittorrent,
@@ -582,7 +583,10 @@ async def handle_season_back(callback: CallbackQuery, db_user: User, db: Databas
     _, add_service = await _search.get_services()
     has_qbittorrent = add_service.qbittorrent is not None
     result = session.selected_result
-    text = Formatters.format_release_details(result)
+    # Audit UI-15: back to the whole card, not a bare release block.
+    text = Formatters.format_release_card(result, session.selected_content)
+    if session.monitor_type:
+        text += f"\n\n📺 Мониторинг сезонов: <b>{season_preset_name(session.monitor_type)}</b>"
     await message.edit_text(
         text,
         reply_markup=Keyboards.release_details(
@@ -603,7 +607,7 @@ async def handle_legacy_season_preset(callback: CallbackQuery) -> None:
     before the SeasonPresetCB migration — surface an explicit alert instead
     of falling through unhandled.
     """
-    await callback.answer("Кнопка устарела — откройте карточку релиза заново", show_alert=True)
+    await callback.answer(MSG_OLD_BUTTON, show_alert=True)
 
 
 @router.callback_query(F.data == CallbackData.GRAB_BEST)

@@ -11,7 +11,7 @@ from aiogram.types import CallbackQuery
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import accessible_message
-from bot.models import ContentType, MovieInfo, SeriesInfo, User
+from bot.models import ContentType, SeriesInfo, User
 from bot.ui.callbacks import PageCB, ReleaseCB, SeasonPageCB, SeasonScopeCB, TitleCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -207,16 +207,11 @@ async def handle_release_selection(
             )
             return
 
-        if isinstance(content, MovieInfo):
-            info_text = Formatters.format_movie_info(content)
-        elif isinstance(content, SeriesInfo):
-            info_text = Formatters.format_series_info(content)
-        else:
-            # ArtistInfo: music has its own card, it never reaches this one.
-            info_text = ""
+        # Shared with the season picker's way back (audit UI-15). ArtistInfo
+        # never reaches this card — music has its own.
         emby_note = await _emby_library_note(content)
         await message.edit_text(
-            f"{text}\n\n---\n{info_text}{emby_note}",
+            f"{Formatters.format_release_card(result, content)}{emby_note}",
             reply_markup=Keyboards.release_details(
                 result, session.content_type, show_force_grab=has_qbittorrent, content=content,
                 list_token=session.list_token, idx=idx,
@@ -359,7 +354,7 @@ async def handle_legacy_page(callback: CallbackQuery) -> None:
     tap on them used to spin forever (no answer() ever fired). Surface an
     explicit alert instead of a silent hang.
     """
-    await callback.answer("Кнопка устарела — повторите поиск", show_alert=True)
+    await answer_stale(callback)
 
 
 @router.callback_query(F.data.startswith(CallbackData.RELEASE))

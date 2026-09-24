@@ -2,7 +2,7 @@
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from bot.ui.keyboards._constants import CallbackData
+from bot.ui.keyboards._constants import BTN_BACK, BTN_CLOSE, CallbackData
 
 
 class _EmbyKeyboards:
@@ -13,37 +13,41 @@ class _EmbyKeyboards:
         has_update: bool = False,
         can_restart: bool = True,
         can_update: bool = True,
+        is_admin: bool = False,
     ) -> InlineKeyboardMarkup:
-        """Create main Emby control keyboard."""
+        """Create main Emby control keyboard.
+
+        Audit UI-16: scans, restart and update are admin-only in the handlers,
+        so only an admin sees them.
+        """
         keyboard = []
 
-        # Library scan buttons
         keyboard.append([
             InlineKeyboardButton(text="🔄 Обновить статус", callback_data=CallbackData.EMBY_REFRESH),
         ])
 
-        keyboard.append([
-            InlineKeyboardButton(text="📚 Сканировать всё", callback_data=CallbackData.EMBY_SCAN_ALL),
-        ])
-
-        keyboard.append([
-            InlineKeyboardButton(text="🎬 Фильмы", callback_data=CallbackData.EMBY_SCAN_MOVIES),
-            InlineKeyboardButton(text="📺 Сериалы", callback_data=CallbackData.EMBY_SCAN_SERIES),
-        ])
+        if is_admin:
+            keyboard.append([
+                InlineKeyboardButton(text="📚 Сканировать всё", callback_data=CallbackData.EMBY_SCAN_ALL),
+            ])
+            keyboard.append([
+                InlineKeyboardButton(text="🎬 Фильмы", callback_data=CallbackData.EMBY_SCAN_MOVIES),
+                InlineKeyboardButton(text="📺 Сериалы", callback_data=CallbackData.EMBY_SCAN_SERIES),
+            ])
 
         # Server control buttons
-        if can_restart:
+        if is_admin and can_restart:
             keyboard.append([
                 InlineKeyboardButton(text="🔁 Перезагрузить", callback_data=CallbackData.EMBY_RESTART),
             ])
 
-        if can_update and has_update:
+        if is_admin and can_update and has_update:
             keyboard.append([
                 InlineKeyboardButton(text="⬆️ Установить обновление", callback_data=CallbackData.EMBY_UPDATE),
             ])
 
         keyboard.append([
-            InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.EMBY_CLOSE),
+            InlineKeyboardButton(text=BTN_CLOSE, callback_data=CallbackData.CLOSE),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -60,7 +64,7 @@ class _EmbyKeyboards:
                     ),
                 ],
                 [
-                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.EMBY_REFRESH),
+                    InlineKeyboardButton(text=BTN_BACK, callback_data=CallbackData.EMBY_REFRESH),
                 ],
             ]
         )
@@ -77,7 +81,7 @@ class _EmbyKeyboards:
                     ),
                 ],
                 [
-                    InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.EMBY_REFRESH),
+                    InlineKeyboardButton(text=BTN_BACK, callback_data=CallbackData.EMBY_REFRESH),
                 ],
             ]
         )

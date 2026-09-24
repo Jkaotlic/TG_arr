@@ -462,7 +462,7 @@ def test_torrent_list_and_details_buttons_use_typed_action_cb():
         assert got.action == "view"
 
     torrent = TorrentInfo(hash="b" * 40, name="T", progress=0.5, state=TorrentState.DOWNLOADING)
-    details_kb = Keyboards.torrent_details(torrent, TorrentFilter.ALL)
+    details_kb = Keyboards.torrent_details(torrent, TorrentFilter.ALL, is_admin=True)
     detail_cbs = [c for c in _cbs(details_kb) if c.startswith("ta:")]
     actions = {TorrentActionCB.unpack(c).action for c in detail_cbs}
     assert "pause" in actions

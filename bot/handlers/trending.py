@@ -20,6 +20,7 @@ from bot.services.search_service import SearchService
 from bot.ui.callbacks import AddContentCB, TrendingItemCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.keyboards._constants import MSG_OLD_BUTTON
 from bot.ui.menu import MENU_TRENDING
 
 logger = structlog.get_logger()
@@ -621,4 +622,4 @@ async def handle_legacy_trending_item(callback: CallbackQuery) -> None:
     string buttons — surface an explicit alert instead of falling through
     unhandled.
     """
-    await callback.answer("Кнопка устарела — обновите список", show_alert=True)
+    await callback.answer(MSG_OLD_BUTTON, show_alert=True)

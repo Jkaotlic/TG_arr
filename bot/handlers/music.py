@@ -51,6 +51,7 @@ from bot.ui.callbacks import (
 )
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.keyboards._constants import MSG_OLD_BUTTON
 from bot.ui.list_token import ListTokenRegistry, answer_stale, new_list_token, token_matches
 from bot.ui.menu import MENU_MUSIC, MUSIC_PROMPT
 
@@ -1195,7 +1196,7 @@ async def handle_legacy_artist(callback: CallbackQuery) -> None:
     ArtistCB migration — surface an explicit alert instead of falling
     through unhandled.
     """
-    await callback.answer("Кнопка устарела — повторите поиск", show_alert=True)
+    await answer_stale(callback)
 
 
 @router.callback_query(MusicAddCB.filter())
@@ -1402,4 +1403,4 @@ async def handle_legacy_trending_artist(callback: CallbackQuery) -> None:
     TrendingItemCB migration — surface an explicit alert instead of falling
     through unhandled.
     """
-    await callback.answer("Кнопка устарела — обновите список", show_alert=True)
+    await callback.answer(MSG_OLD_BUTTON, show_alert=True)

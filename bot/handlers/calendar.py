@@ -17,6 +17,7 @@ from bot.handlers.common import accessible_message, swallow_not_modified
 from bot.ui.callbacks import CalCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.keyboards._constants import MSG_OLD_BUTTON
 from bot.ui.menu import MENU_CALENDAR
 
 logger = structlog.get_logger()
@@ -222,7 +223,7 @@ async def handle_legacy_calendar_period(callback: CallbackQuery) -> None:
     sent before the CalCB migration — surface an explicit alert instead of
     falling through unhandled.
     """
-    await callback.answer("Кнопка устарела — откройте календарь заново", show_alert=True)
+    await callback.answer(MSG_OLD_BUTTON, show_alert=True)
 
 
 @router.callback_query(F.data == CallbackData.CALENDAR_REFRESH)

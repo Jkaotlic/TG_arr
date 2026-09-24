@@ -48,17 +48,17 @@ class _TorrServerKeyboards:
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton(
-                text="⬅️", callback_data=TsPageCB(page=page - 1).pack()))
+                text="◀️", callback_data=TsPageCB(page=page - 1).pack()))
         if total_pages > 1:
             nav.append(InlineKeyboardButton(
                 text=f"{page + 1}/{total_pages}", callback_data="noop"))
         if page < total_pages - 1:
             nav.append(InlineKeyboardButton(
-                text="➡️", callback_data=TsPageCB(page=page + 1).pack()))
+                text="▶️", callback_data=TsPageCB(page=page + 1).pack()))
         if nav:
             builder.row(*nav)
 
-        builder.row(InlineKeyboardButton(text="⬅️ В меню", callback_data=CallbackData.TS_BACK))
+        builder.row(InlineKeyboardButton(text=BTN_BACK, callback_data=CallbackData.TS_BACK))
         return builder.as_markup()
 
     @staticmethod
@@ -93,7 +93,7 @@ class _TorrServerKeyboards:
                     text=f"🗑 {torrent.title[:35]}",
                     callback_data=TsTorrentCB(action="del", h=torrent.hash).pack(),
                 ))
-        builder.row(InlineKeyboardButton(text="⬅️ В меню", callback_data=CallbackData.TS_BACK))
+        builder.row(InlineKeyboardButton(text=BTN_BACK, callback_data=CallbackData.TS_BACK))
         return builder.as_markup()
 
     @staticmethod
@@ -104,6 +104,6 @@ class _TorrServerKeyboards:
                 InlineKeyboardButton(
                     text="🗑 Удалить",
                     callback_data=TsTorrentCB(action="delconf", h=torrent_hash).pack()),
-                InlineKeyboardButton(text="⬅️ Отмена", callback_data=CallbackData.TS_LIST),
+                InlineKeyboardButton(text=BTN_BACK, callback_data=CallbackData.TS_LIST),
             ],
         ])

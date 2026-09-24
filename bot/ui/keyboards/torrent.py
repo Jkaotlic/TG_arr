@@ -6,7 +6,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import TorrentFilter, TorrentInfo
 from bot.ui.callbacks import TorrentActionCB, TorrentPageCB
-from bot.ui.keyboards._constants import BTN_BACK, CallbackData
+from bot.ui.keyboards._constants import BTN_BACK, BTN_CLOSE, CallbackData
 
 
 class _TorrentKeyboards:
@@ -18,8 +18,12 @@ class _TorrentKeyboards:
         current_page: int = 0,
         total_pages: int = 1,
         current_filter: TorrentFilter = TorrentFilter.ALL,
+        is_admin: bool = False,
     ) -> InlineKeyboardMarkup:
         """Create keyboard for torrent list with pagination.
+
+        Audit UI-16: "pause/resume all" are admin-only (SEC-06), so only an
+        admin sees them — a user used to get "Недостаточно прав" on a tap.
 
         LOGIC-01: pagination buttons carry ``current_filter`` via the typed
         ``TorrentPageCB`` so paging through a filtered list doesn't silently
@@ -85,17 +89,18 @@ class _TorrentKeyboards:
             InlineKeyboardButton(text="🔍 Фильтр", callback_data=f"{CallbackData.TORRENT_FILTER}menu"),
         ])
 
-        keyboard.append([
-            InlineKeyboardButton(text="⏸ Пауза всех", callback_data=CallbackData.TORRENT_PAUSE_ALL),
-            InlineKeyboardButton(text="▶️ Возобновить", callback_data=CallbackData.TORRENT_RESUME_ALL),
-        ])
+        if is_admin:
+            keyboard.append([
+                InlineKeyboardButton(text="⏸ Пауза всех", callback_data=CallbackData.TORRENT_PAUSE_ALL),
+                InlineKeyboardButton(text="▶️ Возобновить все", callback_data=CallbackData.TORRENT_RESUME_ALL),
+            ])
 
         keyboard.append([
             InlineKeyboardButton(text="🚀 Лимиты скорости", callback_data=CallbackData.SPEED_MENU),
         ])
 
         keyboard.append([
-            InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.TORRENT_CLOSE),
+            InlineKeyboardButton(text=BTN_CLOSE, callback_data=CallbackData.CLOSE),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -105,8 +110,11 @@ class _TorrentKeyboards:
         torrent: TorrentInfo,
         current_filter: TorrentFilter = TorrentFilter.ALL,
         page: int = 0,
+        is_admin: bool = False,
     ) -> InlineKeyboardMarkup:
         """Create keyboard for torrent details view.
+
+        Audit UI-16: delete buttons are admin-only and shown only to admins.
 
         LOGIC-01: ``current_filter`` (defaults to ALL when the caller doesn't
         know it — e.g. reached via a legacy ``t_page:`` callback) is threaded
@@ -128,11 +136,12 @@ class _TorrentKeyboards:
                 InlineKeyboardButton(text="⏸ Пауза", callback_data=TorrentActionCB(action="pause", h=full_hash).pack()),
             ])
 
-        # Delete options
-        keyboard.append([
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=TorrentActionCB(action="delete", h=full_hash).pack()),
-            InlineKeyboardButton(text="🗑 + Файлы", callback_data=TorrentActionCB(action="delf", h=full_hash).pack()),
-        ])
+        # Delete options — both ask for confirmation first (audit UI-16).
+        if is_admin:
+            keyboard.append([
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=TorrentActionCB(action="delete", h=full_hash).pack()),
+                InlineKeyboardButton(text="🗑 + Файлы", callback_data=TorrentActionCB(action="delf", h=full_hash).pack()),
+            ])
 
         # Back button — carries the filter so the list redraw stays filtered.
         keyboard.append([
@@ -273,8 +282,9 @@ class _TorrentKeyboards:
             confirm_callback = TorrentActionCB(action="delfc", h=full_hash).pack()
             text = "⚠️ Да, удалить с файлами"
         else:
-            confirm_callback = TorrentActionCB(action="delete", h=full_hash).pack()
-            text = "Да, удалить торрент"
+            # Audit UI-16: "delc" does it; "delete" only asks (this screen).
+            confirm_callback = TorrentActionCB(action="delc", h=full_hash).pack()
+            text = "🗑 Да, удалить торрент"
 
         return InlineKeyboardMarkup(
             inline_keyboard=[
@@ -283,7 +293,7 @@ class _TorrentKeyboards:
                 ],
                 [
                     InlineKeyboardButton(
-                        text="❌ Отмена", callback_data=TorrentActionCB(action="view", h=full_hash).pack()
+                        text=BTN_BACK, callback_data=TorrentActionCB(action="view", h=full_hash).pack()
                     ),
                 ],
             ]

@@ -178,7 +178,7 @@ async def handle_page(callback: CallbackQuery, callback_data: TsPageCB) -> None:
     if message is None:
         return
     if not _results.get(callback.from_user.id):
-        await callback.answer("Результаты устарели — повторите поиск", show_alert=True)
+        await answer_stale(callback)
         return
     await _render_results(message, callback.from_user.id, callback_data.page)
     await callback.answer()

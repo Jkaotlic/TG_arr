@@ -17,6 +17,7 @@ from bot.models import TorrentFilter, TorrentInfo, User, format_speed
 from bot.ui.callbacks import TorrentActionCB, TorrentPageCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
+from bot.ui.keyboards._constants import MSG_OLD_BUTTON
 from bot.ui.menu import MENU_DOWNLOADS, MENU_QSTATUS
 
 logger = structlog.get_logger()
@@ -111,7 +112,7 @@ async def _soulseek_section() -> str:
 
 @router.message(F.text == MENU_DOWNLOADS)
 @router.message(Command("downloads", "dl"))
-async def cmd_downloads(message: Message, db_user: User) -> None:
+async def cmd_downloads(message: Message, db_user: User, is_admin: bool = False) -> None:
     """Handle /downloads command - show active downloads."""
     qbt = await check_qbt_enabled(message)
     if not qbt:
@@ -141,7 +142,7 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
 
         await status_msg.edit_text(
             text + soulseek,
-            reply_markup=Keyboards.torrent_list(torrents, 0, total_pages, TorrentFilter.ALL),
+            reply_markup=Keyboards.torrent_list(torrents, 0, total_pages, TorrentFilter.ALL, is_admin=is_admin),
             parse_mode="HTML",
         )
 
@@ -253,6 +254,7 @@ async def _render_torrent_list(
     filter_type: TorrentFilter = TorrentFilter.ALL,
     page: int = 0,
     user_id: int | None = None,
+    is_admin: bool = False,
 ) -> None:
     """Render a (optionally filtered) page of the torrent list into ``message``.
 
@@ -282,13 +284,15 @@ async def _render_torrent_list(
     await safe_edit(
         message,
         text,
-        reply_markup=Keyboards.torrent_list(torrents, clamped_page, total_pages, filter_type),
+        reply_markup=Keyboards.torrent_list(torrents, clamped_page, total_pages, filter_type, is_admin=is_admin),
         parse_mode="HTML",
     )
 
 
 @router.callback_query(TorrentPageCB.filter())
-async def handle_torrent_page(callback: CallbackQuery, callback_data: TorrentPageCB) -> None:
+async def handle_torrent_page(
+    callback: CallbackQuery, callback_data: TorrentPageCB, is_admin: bool = False,
+) -> None:
     """Render the torrent list at ``callback_data.page``/``callback_data.flt``.
 
     LOGIC-01: replaces the old separate ``t_refresh``/``t_page:N``/``t_back``
@@ -331,7 +335,9 @@ async def handle_torrent_page(callback: CallbackQuery, callback_data: TorrentPag
         await safe_edit(
             message,
             text,
-            reply_markup=Keyboards.torrent_list(torrents, requested_page, total_pages, filter_type),
+            reply_markup=Keyboards.torrent_list(
+                torrents, requested_page, total_pages, filter_type, is_admin=is_admin,
+            ),
             parse_mode="HTML",
         )
         await callback.answer()
@@ -348,7 +354,7 @@ async def handle_legacy_page(callback: CallbackQuery) -> None:
     so they cannot be redrawn correctly. Tell the user to refresh instead of
     silently rendering an unfiltered list.
     """
-    await callback.answer("Кнопка устарела, обновите список", show_alert=True)
+    await callback.answer(MSG_OLD_BUTTON, show_alert=True)
 
 
 async def _refetch_one(qbt: QBittorrentClient, torrent: TorrentInfo, short_hash: str):
@@ -378,6 +384,7 @@ async def _render_torrent_details(
     torrent: TorrentInfo,
     current_filter: TorrentFilter = TorrentFilter.ALL,
     page: int = 0,
+    is_admin: bool = False,
 ) -> None:
     """Render torrent details into ``message``.
 
@@ -394,7 +401,7 @@ async def _render_torrent_details(
     await safe_edit(
         message,
         text,
-        reply_markup=Keyboards.torrent_details(torrent, current_filter, page),
+        reply_markup=Keyboards.torrent_details(torrent, current_filter, page, is_admin=is_admin),
         parse_mode="HTML",
     )
 
@@ -414,17 +421,21 @@ async def _resolve_torrent(qbt: QBittorrentClient, hash_or_short: str) -> Option
     return await qbt.get_torrent_by_short_hash(hash_or_short)
 
 
-async def _do_view(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str) -> None:
+async def _do_view(
+    callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str, is_admin: bool = False,
+) -> None:
     """Show torrent details (was ``t:<hash>``)."""
     message = accessible_message(callback)
     if message is None:
         await callback.answer()
         return
-    await _render_torrent_details(message, torrent, *_view_of(_user_id(callback)))
+    await _render_torrent_details(message, torrent, *_view_of(_user_id(callback)), is_admin=is_admin)
     await callback.answer()
 
 
-async def _do_pause(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, h: str) -> None:
+async def _do_pause(
+    callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, h: str, is_admin: bool = False,
+) -> None:
     """Pause a torrent (was ``t_pause:<hash>``)."""
     await qbt.pause([torrent.hash])
     await callback.answer(f"⏸️ Приостановлен: {torrent.name[:30]}")
@@ -437,10 +448,14 @@ async def _do_pause(callback: CallbackQuery, qbt: QBittorrentClient, torrent: To
         # pulling and parsing the whole list again. Fall back to a
         # short-hash lookup if the targeted fetch returns nothing.
         refreshed = await _refetch_one(qbt, torrent, h)
-        await _render_torrent_details(message, refreshed or torrent, *_view_of(_user_id(callback)))
+        await _render_torrent_details(
+            message, refreshed or torrent, *_view_of(_user_id(callback)), is_admin=is_admin,
+        )
 
 
-async def _do_resume(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, h: str) -> None:
+async def _do_resume(
+    callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, h: str, is_admin: bool = False,
+) -> None:
     """Resume a torrent (was ``t_resume:<hash>``)."""
     await qbt.resume([torrent.hash])
     await callback.answer(f"▶️ Возобновлён: {torrent.name[:30]}")
@@ -449,20 +464,46 @@ async def _do_resume(callback: CallbackQuery, qbt: QBittorrentClient, torrent: T
     if (message := accessible_message(callback)) is not None:
         # PERF-01: targeted single-torrent re-fetch (see _refetch_one).
         refreshed = await _refetch_one(qbt, torrent, h)
-        await _render_torrent_details(message, refreshed or torrent, *_view_of(_user_id(callback)))
+        await _render_torrent_details(
+            message, refreshed or torrent, *_view_of(_user_id(callback)), is_admin=is_admin,
+        )
 
 
-async def _do_delete(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str) -> None:
-    """Delete a torrent, keeping files (was ``t_delete:<hash>``)."""
+async def _do_delete(
+    callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str, is_admin: bool = False,
+) -> None:
+    """Ask before deleting a torrent, keeping files (audit UI-16: "🗑 Удалить"
+    used to act on the first tap). The delete itself is ``_do_delc``."""
+    message = accessible_message(callback)
+    if message is None:
+        await callback.answer()
+        return
+    await safe_edit(
+        message,
+        f"🗑 Удалить торрент?\n\n{html.escape(torrent.name)}\n\nФайлы на диске останутся.",
+        reply_markup=Keyboards.confirm_delete_torrent(torrent.hash, with_files=False),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+async def _do_delc(
+    callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str, is_admin: bool = False,
+) -> None:
+    """Confirmed delete of a torrent, keeping files."""
     await qbt.delete([torrent.hash], delete_files=False)
     await callback.answer(f"🗑️ Удалён: {torrent.name[:30]}")
 
     # BUG-15: redraw list directly — do NOT call a callback handler.
     if (message := accessible_message(callback)) is not None:
-        await _render_torrent_list(message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback))
+        await _render_torrent_list(
+            message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback), is_admin=is_admin,
+        )
 
 
-async def _do_delf(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str) -> None:
+async def _do_delf(
+    callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str, is_admin: bool = False,
+) -> None:
     """Ask for confirmation before deleting a torrent with its files (was
     ``t_delf:<hash>``).
 
@@ -483,7 +524,9 @@ async def _do_delf(callback: CallbackQuery, qbt: QBittorrentClient, torrent: Tor
     await callback.answer()
 
 
-async def _do_delfc(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str) -> None:
+async def _do_delfc(
+    callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str, is_admin: bool = False,
+) -> None:
     """Confirmed deletion of a torrent with its files (was ``t_delfc:<hash>``,
     BUG-14/DEAD-03)."""
     await qbt.delete([torrent.hash], delete_files=True)
@@ -491,22 +534,25 @@ async def _do_delfc(callback: CallbackQuery, qbt: QBittorrentClient, torrent: To
 
     # BUG-15: redraw list directly — do NOT call a callback handler.
     if (message := accessible_message(callback)) is not None:
-        await _render_torrent_list(message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback))
+        await _render_torrent_list(
+            message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback), is_admin=is_admin,
+        )
 
 
 # r5: was six separate ``F.data.startswith(CallbackData.TORRENT_*)`` handlers
 # parsing "<prefix><hash>" by hand (LOGIC-12) — now one TorrentActionCB
 # dispatch table. ``delete``/``delf``/``delfc`` stay admin-gated exactly as
 # before; ``view``/``pause``/``resume`` remain open to all allowed users.
-_TORRENT_ACTIONS: dict[str, Callable[[CallbackQuery, QBittorrentClient, TorrentInfo, str], Awaitable[None]]] = {
+_TORRENT_ACTIONS: dict[str, Callable[..., Awaitable[None]]] = {
     "view": _do_view,
     "pause": _do_pause,
     "resume": _do_resume,
     "delete": _do_delete,
+    "delc": _do_delc,
     "delf": _do_delf,
     "delfc": _do_delfc,
 }
-_ADMIN_ONLY_ACTIONS = frozenset({"delete", "delf", "delfc"})
+_ADMIN_ONLY_ACTIONS = frozenset({"delete", "delc", "delf", "delfc"})
 
 
 @router.callback_query(TorrentActionCB.filter())
@@ -536,7 +582,7 @@ async def handle_torrent_action(
             await callback.answer("Торрент не найден", show_alert=True)
             return
 
-        await handler(callback, qbt, torrent, h)
+        await handler(callback, qbt, torrent, h, is_admin=is_admin)
 
     except Exception as e:
         logger.error("Torrent action failed", action=action, error=str(e), exc_info=True)
@@ -559,7 +605,7 @@ async def handle_legacy_torrent_action(callback: CallbackQuery) -> None:
     what the typed ``TorrentActionCB.filter()`` handler above didn't already
     claim.
     """
-    await callback.answer("Кнопка устарела, обновите список", show_alert=True)
+    await callback.answer(MSG_OLD_BUTTON, show_alert=True)
 
 
 @router.callback_query(F.data == CallbackData.TORRENT_PAUSE_ALL)
@@ -582,7 +628,7 @@ async def handle_pause_all(callback: CallbackQuery, is_admin: bool = False) -> N
         # would ack the callback a second time.
         if (message := accessible_message(callback)) is not None:
             await _render_torrent_list(
-                message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback),
+                message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback), is_admin=True,
             )
 
     except Exception as e:
@@ -609,7 +655,7 @@ async def handle_resume_all(callback: CallbackQuery, is_admin: bool = False) -> 
         # LOGIC-02/BUG-04a: render directly — see handle_pause_all.
         if (message := accessible_message(callback)) is not None:
             await _render_torrent_list(
-                message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback),
+                message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback), is_admin=True,
             )
 
     except Exception as e:
@@ -619,7 +665,7 @@ async def handle_resume_all(callback: CallbackQuery, is_admin: bool = False) -> 
 
 @router.callback_query(F.data == CallbackData.TORRENT_BACK)
 @router.callback_query(F.data == CallbackData.TORRENT_REFRESH)  # audit UI-19: had no handler
-async def handle_back_to_list(callback: CallbackQuery) -> None:
+async def handle_back_to_list(callback: CallbackQuery, is_admin: bool = False) -> None:
     """Legacy plain "back to list" callback (``torrent_filters``/
     ``speed_limits_menu`` "Назад" buttons sent before they carried the view) —
     renders the user's last list view (audit UI-09).
@@ -634,7 +680,9 @@ async def handle_back_to_list(callback: CallbackQuery) -> None:
 
     try:
         await callback.answer()
-        await _render_torrent_list(message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback))
+        await _render_torrent_list(
+            message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback), is_admin=is_admin,
+        )
     except Exception as e:
         logger.error("Failed to render torrent list", error=str(e), exc_info=True)
         await callback.answer("Ошибка операции", show_alert=True)
@@ -665,7 +713,7 @@ async def handle_filter_menu(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith(CallbackData.TORRENT_FILTER))
-async def handle_filter_select(callback: CallbackQuery) -> None:
+async def handle_filter_select(callback: CallbackQuery, is_admin: bool = False) -> None:
     """Apply filter to torrent list."""
     message = accessible_message(callback)
     if message is None or not callback.data:
@@ -685,7 +733,7 @@ async def handle_filter_select(callback: CallbackQuery) -> None:
         filter_type = _parse_filter(filter_value)
 
         await callback.answer()
-        await _render_torrent_list(message, qbt, filter_type, 0, user_id=_user_id(callback))
+        await _render_torrent_list(message, qbt, filter_type, 0, user_id=_user_id(callback), is_admin=is_admin)
 
     except Exception as e:
         logger.error("Filter error", error=str(e), exc_info=True)

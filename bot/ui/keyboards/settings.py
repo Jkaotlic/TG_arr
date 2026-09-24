@@ -11,6 +11,11 @@ from bot.ui.callbacks import SettingCB
 from bot.ui.keyboards._constants import BTN_CLOSE, CallbackData
 
 
+def grab_best_label(enabled: bool) -> str:
+    """Name + state of the "⚡ Скачать лучший" setting (audit UI-12)."""
+    return f"⚡ Кнопка «Скачать лучший»: {'вкл' if enabled else 'выкл'}"
+
+
 class _SettingsKeyboards:
     """Settings keyboard mixin."""
 
@@ -91,10 +96,14 @@ class _SettingsKeyboards:
                 InlineKeyboardButton(text="🎧 Lidarr metadata", callback_data="settings:lidarr_meta"),
             ])
         rows.append([InlineKeyboardButton(text="🎯 Качество", callback_data="settings:resolution")])
-        rows.append([InlineKeyboardButton(text="⚡ Авто-граб", callback_data="settings:auto_grab")])
         # Audit 2026-09-23 (NOTIF-06): one-tap toggles; the label shows the
         # current state, the button sets the other one.
         prefs = prefs or UserPreferences()
+        # Audit UI-12: the setting only shows/hides a button — "Авто-граб"
+        # promised automatic grabs the bot never makes.
+        rows.append([InlineKeyboardButton(
+            text=grab_best_label(prefs.auto_grab_enabled), callback_data="settings:auto_grab",
+        )])
         music_on = prefs.notify_music != "off"
         rows.append([InlineKeyboardButton(
             text=f"🎵 Уведомления о музыке: {'сводка' if music_on else 'выкл'}",
@@ -144,15 +153,14 @@ class _SettingsKeyboards:
 
     @staticmethod
     def auto_grab_toggle(current: bool) -> InlineKeyboardMarkup:
-        """Create keyboard for toggling auto-grab."""
-        current_text = "ВКЛ ✓" if current else "ВЫКЛ"
+        """Toggle for the "⚡ Скачать лучший" button (audit UI-12)."""
         new_value = 0 if current else 1
 
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text=f"Авто-граб: {current_text}",
+                        text=grab_best_label(current),
                         callback_data=SettingCB(key="auto_grab_enabled", value=str(new_value)).pack(),
                     ),
                 ],

@@ -193,7 +193,7 @@ async def handle_find_page(
 
     session = await db.get_session(callback.from_user.id)
     if not _is_free_session(session):
-        await callback.answer("Результаты устарели — повторите поиск", show_alert=True)
+        await answer_stale(callback)
         return
 
     await callback.answer()
