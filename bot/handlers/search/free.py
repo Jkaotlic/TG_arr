@@ -24,6 +24,7 @@ from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import accessible_message, safe_edit, strip_command
 from bot.models import ActionLog, ActionType, ContentType, SearchSession, User
+from bot.services.add_service import GRAB_OUTCOME_REJECTED, GRAB_OUTCOME_UNREACHABLE, grab_outcome
 from bot.services.search_service import describe_search_failure
 from bot.ui.callbacks import FindGrabCB, FindPageCB, FindReleaseCB
 from bot.ui.formatters import Formatters
@@ -43,6 +44,14 @@ _NOT_IN_LIBRARY_NOTE = (
 )
 
 _SEARCHING = "🔎 Ищу раздачи напрямую в Prowlarr..."
+
+#: GRAB-09: which *arr a free-search hit is pushed to, by Prowlarr's category.
+#: Anything else (music, unknown) is not pushed at all — see handle_find_grab.
+_ARR_TARGETS = {
+    ContentType.MOVIE: ContentType.MOVIE,
+    ContentType.SERIES: ContentType.SERIES,
+    ContentType.ANIME: ContentType.ANIME,
+}
 
 
 def _is_free_session(session) -> bool:
@@ -249,26 +258,65 @@ async def handle_find_grab(
         await message.edit_text("⏳ Отправляю раздачу...")
 
         _search_service, add_service = await _search.get_services()
-        success, action = await add_service.grab_release(release, session.content_type)
+
+        # GRAB-09: pick *arr by what the release is, not "always Sonarr". A
+        # type nobody recognised goes to qBittorrent directly — and says so —
+        # instead of being pushed to an *arr that will refuse it.
+        target = _ARR_TARGETS.get(release.detected_type)
+        direct = bool(callback_data.q) or target is None
+        if direct and add_service.qbittorrent is None:
+            await message.edit_text(Formatters.format_error("qBittorrent не настроен"))
+            return
+
+        if direct or target is None:
+            success, action = await add_service.grab_release(
+                release, release.detected_type, force_download=True,
+            )
+        else:
+            success, action = await add_service.grab_release(release, target)
         action.user_id = user_id
         await db.log_action(action)
 
         if success:
-            await message.edit_text(
-                Formatters.format_success(
-                    f"Релиз: <i>{html.escape(release.title)}</i>\n\n"
+            if direct:
+                lead = "" if callback_data.q else "Тип раздачи не распознан — "
+                note = (
+                    f"{lead}отправил напрямую в qBittorrent. Тайтла нет в "
+                    "библиотеке — Radarr/Sonarr эту раздачу не увидят и не импортируют."
+                )
+            else:
+                note = (
                     "Тайтла нет в библиотеке — файл появится в загрузках, "
                     "но Radarr/Sonarr его не импортируют."
+                )
+            await message.edit_text(
+                Formatters.format_success(
+                    f"Релиз: <i>{html.escape(release.title)}</i>\n\n{note}"
                 ),
                 parse_mode="HTML",
             )
-        else:
-            await message.edit_text(
-                Formatters.format_error(
-                    html.escape(action.error_message or "Не удалось скачать релиз")
-                )
-            )
+            await db.delete_session(user_id)
+            return
 
+        # format_error escapes its argument itself (it was escaped twice here).
+        error = action.error_message or "Не удалось скачать релиз"
+        outcome = None if direct else grab_outcome(action)
+        if outcome in (GRAB_OUTCOME_REJECTED, GRAB_OUTCOME_UNREACHABLE):
+            # GRAB-08: say why, and make qBittorrent an explicit choice rather
+            # than the silent fallback it used to be. The session stays for it.
+            arr_name = "Radarr" if target is ContentType.MOVIE else "Sonarr"
+            lead = f"{arr_name} отклонил релиз: " if outcome == GRAB_OUTCOME_REJECTED else ""
+            await message.edit_text(
+                Formatters.format_error(f"{lead}{error}"),
+                reply_markup=Keyboards.free_grab_failed(
+                    session.list_token, callback_data.idx,
+                    offer_qbit=add_service.qbittorrent is not None,
+                ),
+                parse_mode="HTML",
+            )
+            return
+
+        await message.edit_text(Formatters.format_error(error))
         await db.delete_session(user_id)
     finally:
         _search._release_grab(user_id)

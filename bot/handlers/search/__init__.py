@@ -55,6 +55,7 @@ from .grab import (  # noqa: E402,F401
     _resolve_folder,
     _SEASON_PRESETS,
     grab_release,
+    handle_auto_search,
     handle_confirm_grab,
     handle_force_grab,
     handle_grab_best,

@@ -636,6 +636,29 @@ class ArrBaseClient(BaseAPIClient):
             return result[0] if result and isinstance(result[0], dict) else {}
         return result if isinstance(result, dict) else {}
 
+    async def find_in_queue(self, release_title: str) -> bool:
+        """Whether a release with this title sits in *arr's download queue.
+
+        Audit 2026-09-23 GRAB-14: a grab POST that timed out may still have
+        landed. Queue records carry the release title (no guid), so the title
+        is the match key, compared case-insensitively. Any error reads as
+        "not found" — the caller then reports the failure it already had.
+        """
+        wanted = release_title.strip().casefold()
+        if not wanted:
+            return False
+        try:
+            result = await self.get(f"{self._api_prefix}/queue", params={"pageSize": 200})
+        except Exception:
+            return False
+        records = result.get("records") if isinstance(result, dict) else result
+        if not isinstance(records, list):
+            return False
+        return any(
+            isinstance(r, dict) and str(r.get("title") or "").strip().casefold() == wanted
+            for r in records
+        )
+
     async def get_quality_profiles(self) -> list[QualityProfile]:
         """Get all quality profiles (PERF-07: cached for _PROFILE_CACHE_TTL)."""
         return await self._ttl_cached(

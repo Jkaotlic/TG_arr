@@ -395,14 +395,11 @@ async def test_grab_native_success_path():
 
 
 @pytest.mark.asyncio
-async def test_rejected_push_falls_back_to_qbittorrent():
-    """The push -> qBittorrent -> auto-search chain is restored deliberately.
-
-    The removed backend treated its own verdict as final and only reached
-    qBittorrent on an explicit `force_download`. The *arr rollback brings back
-    the pre-migration chain: a release *arr refuses is still handed to
-    qBittorrent, because qBittorrent handles magnet redirects that *arr's push
-    endpoint may refuse — the exact gap that made the previous backend unusable.
+async def test_rejected_push_does_not_fall_back_to_qbittorrent():
+    """Audit 2026-09-23 GRAB-08 reverses the 2026-08-10 restoration: a release
+    *arr refuses used to be handed to qBittorrent silently, so the user never
+    learned the profile said no. Now the rejection is reported and
+    qBittorrent is reached only through the explicit `force_download` button.
     """
     from bot.models import ContentType
 
@@ -416,9 +413,9 @@ async def test_rejected_push_falls_back_to_qbittorrent():
         _release_with_token(origin="prowlarr"), ContentType.MOVIE, arr_id=15,
     )
 
-    assert success is True
-    assert action.success is True
-    qbt.add_torrent_url.assert_awaited_once()
+    assert success is False
+    assert action.error_message == "blocked"
+    qbt.add_torrent_url.assert_not_awaited()
 
 
 @pytest.mark.asyncio

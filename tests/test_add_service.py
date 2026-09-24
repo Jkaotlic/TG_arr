@@ -11,7 +11,8 @@ parser built it) AND `indexer_id`:
 - push chain: anything else (today: `origin == "prowlarr"` — either a real
   Prowlarr free-text hit, or ANY release built without an explicit origin,
   since the field defaults to "prowlarr") — the restored pre-migration
-  release/push -> qBittorrent -> auto-search fallback.
+  release/push and *arr's verdict (since the 2026-09-23 audit qBittorrent and
+  auto-search are explicit choices, not fallbacks).
 
 Fix round 1 (2026-08-10 review): `indexer_id` truthiness ALONE used to be the
 signal, which was wrong — `ProwlarrClient._normalize_result` also fills
@@ -201,13 +202,14 @@ async def test_untagged_release_never_takes_the_native_path():
 async def test_push_release_rejects_a_private_url():
     """SEC-16 (fix round 1, restored): push_release must never be called with
     a private URL — *arr would fetch it itself, from inside the LAN, turning
-    *arr into an SSRF proxy. Restored from `f30545d~1`
-    (`test_push_release_rejects_private_url_movie`), adapted to the current
-    `grab_release(release, content_type, arr_id)` shape: no verdict was
-    rendered (the push never even ran), so — same as pre-migration — this
-    falls through to *arr's own auto-search rather than being reported as a
-    rejection.
+    *arr into an SSRF proxy. No verdict was rendered (the push never ran).
+
+    Audit 2026-09-23 GRAB-08: that no longer turns silently into *arr's own
+    auto-search reported as a grab — it is a failure with outcome
+    "unreachable", and the handler offers the auto-search explicitly.
     """
+    from bot.services.add_service import GRAB_OUTCOME_UNREACHABLE, grab_outcome
+
     radarr = AsyncMock()
     service = _service(radarr=radarr)
 
@@ -215,9 +217,9 @@ async def test_push_release_rejects_a_private_url():
     ok, action = await service.grab_release(release, ContentType.MOVIE, arr_id=15)
 
     radarr.push_release.assert_not_awaited()
-    assert ok is True
-    assert action.success is True
-    radarr.search_movie.assert_awaited_once_with(15)
+    assert ok is False
+    radarr.search_movie.assert_not_awaited()
+    assert grab_outcome(action) == GRAB_OUTCOME_UNREACHABLE
 
 
 @pytest.mark.asyncio
@@ -231,9 +233,8 @@ async def test_push_release_rejects_a_loopback_url():
     ok, action = await service.grab_release(release, ContentType.SERIES, arr_id=77)
 
     sonarr.push_release.assert_not_awaited()
-    assert ok is True
-    assert action.success is True
-    sonarr.search_series.assert_awaited_once_with(77)
+    assert ok is False
+    sonarr.search_series.assert_not_awaited()
 
 
 # ------------------------------------------------------------------ fallback
@@ -302,7 +303,9 @@ async def test_push_rejection_stops_the_chain_without_a_qbit_fallback():
 
 
 @pytest.mark.asyncio
-async def test_push_rejection_falls_back_to_qbittorrent_when_configured():
+async def test_push_rejection_never_falls_back_to_qbittorrent_even_when_configured():
+    """Audit 2026-09-23 GRAB-08: a profile rejection is a verdict, reported as
+    such — qBittorrent is an explicit button, never a silent fallback."""
     radarr = AsyncMock()
     radarr.push_release.return_value = {"approved": False, "rejections": ["blocked"]}
     qbt = AsyncMock()
@@ -314,33 +317,35 @@ async def test_push_rejection_falls_back_to_qbittorrent_when_configured():
         ContentType.MOVIE, arr_id=15,
     )
 
-    assert ok is True
-    assert action.success is True
-    qbt.add_torrent_url.assert_awaited_once()
-    assert qbt.add_torrent_url.await_args.kwargs["category"] == "radarr"
+    assert ok is False
+    assert action.error_message == "blocked"
+    qbt.add_torrent_url.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_qbittorrent_fallback_uses_the_anime_category():
+async def test_anime_rejection_does_not_reach_qbittorrent_either():
     sonarr = AsyncMock()
     sonarr.push_release.return_value = {"approved": False, "rejections": ["blocked"]}
     qbt = AsyncMock()
-    qbt.add_torrent_url.return_value = True
     service = _service(sonarr=sonarr, qbt=qbt)
 
-    await service.grab_release(
+    ok, _ = await service.grab_release(
         _release(indexer_id=None, download_url="magnet:?xt=urn:btih:abcdef0123456789"),
         ContentType.ANIME, arr_id=15,
     )
 
-    assert qbt.add_torrent_url.await_args.kwargs["category"] == "anime"
+    assert ok is False
+    qbt.add_torrent_url.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_push_transport_failure_falls_through_to_auto_search():
+async def test_push_transport_failure_offers_auto_search_instead_of_running_it():
     """A push that never got a verdict (transport error) is not a rejection —
-    fall back to *arr's own auto-search rather than reporting failure."""
+    but running *arr's auto-search silently and calling it a grab of THIS
+    release was a lie (audit 2026-09-23 GRAB-08). Failure, outcome
+    "unreachable"; the handler offers the search as a labelled choice."""
     from bot.clients.base import APIError
+    from bot.services.add_service import GRAB_OUTCOME_UNREACHABLE, grab_outcome
 
     radarr = AsyncMock()
     radarr.push_release.side_effect = APIError("Radarr временно недоступен (503)")
@@ -348,22 +353,21 @@ async def test_push_transport_failure_falls_through_to_auto_search():
 
     ok, action = await service.grab_release(_release(indexer_id=None), ContentType.MOVIE, arr_id=15)
 
-    assert ok is True
-    assert action.success is True
-    radarr.search_movie.assert_awaited_once_with(15)
+    assert ok is False
+    radarr.search_movie.assert_not_awaited()
+    assert grab_outcome(action) == GRAB_OUTCOME_UNREACHABLE
 
 
 @pytest.mark.asyncio
 async def test_auto_search_targets_the_picked_season_for_a_season_pack():
     """A season-pack release must trigger SeasonSearch, not a full series search."""
     sonarr = AsyncMock()
-    sonarr.push_release.return_value = {"approved": False, "rejections": []}
     service = _service(sonarr=sonarr)
 
     release = _release(
         indexer_id=None, download_url=None, is_season_pack=True, detected_season=2,
     )
-    ok, _ = await service.grab_release(release, ContentType.SERIES, arr_id=7)
+    ok, _ = await service.auto_search(release, ContentType.SERIES, arr_id=7)
 
     assert ok is True
     sonarr.search_season.assert_awaited_once_with(7, 2)
@@ -376,7 +380,7 @@ async def test_auto_search_falls_back_to_the_whole_series_without_a_season():
     service = _service(sonarr=sonarr)
 
     release = _release(indexer_id=None, download_url=None)
-    ok, _ = await service.grab_release(release, ContentType.SERIES, arr_id=7)
+    ok, _ = await service.auto_search(release, ContentType.SERIES, arr_id=7)
 
     assert ok is True
     sonarr.search_series.assert_awaited_once_with(7)
@@ -845,17 +849,20 @@ async def test_free_grab_succeeds_when_arr_approves_the_push():
 
 
 @pytest.mark.asyncio
-async def test_free_grab_falls_back_to_qbittorrent_on_rejection():
+async def test_free_grab_rejection_is_reported_not_sent_to_qbittorrent():
+    """Audit 2026-09-23 GRAB-08: the free-search handler offers qBittorrent as
+    an explicit button; the service itself never substitutes it."""
     radarr = AsyncMock()
     radarr.push_release = AsyncMock(return_value={"approved": False, "rejections": ["Unknown movie"]})
     qbt = AsyncMock()
     qbt.add_torrent_url = AsyncMock(return_value=True)
     service = _service(radarr=radarr, qbt=qbt)
 
-    ok, _action = await service.grab_release(_free_release(), ContentType.MOVIE)
+    ok, action = await service.grab_release(_free_release(), ContentType.MOVIE)
 
-    assert ok is True
-    qbt.add_torrent_url.assert_awaited_once()
+    assert ok is False
+    assert "Unknown movie" in action.error_message
+    qbt.add_torrent_url.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -906,23 +913,24 @@ async def test_free_grab_writes_an_empty_content_id():
 @pytest.mark.asyncio
 async def test_qbit_category_falls_back_to_the_detected_type():
     """Свободный поиск не знает фасет заранее (ContentType.UNKNOWN), но
-    категории Prowlarr обычно знают — detected_type это несёт."""
-    radarr = AsyncMock()
-    radarr.push_release = AsyncMock(return_value={"approved": False, "rejections": ["nope"]})
+    категории Prowlarr обычно знают — detected_type это несёт. Since the
+    2026-09-23 audit qBittorrent is reached only explicitly (force_download)."""
     qbt = AsyncMock()
     qbt.add_torrent_url = AsyncMock(return_value=True)
-    service = _service(radarr=radarr, qbt=qbt)
+    service = _service(qbt=qbt)
 
     await service.grab_release(
-        _free_release(detected_type=ContentType.SERIES), ContentType.UNKNOWN,
+        _free_release(detected_type=ContentType.SERIES), ContentType.UNKNOWN, force_download=True,
     )
 
     assert qbt.add_torrent_url.await_args.kwargs["category"] == "tv-sonarr"
 
 
 @pytest.mark.asyncio
-async def test_arr_id_grab_still_reaches_auto_search():
-    """Регрессия: путь с arr_id не изменился."""
+async def test_arr_id_grab_no_longer_auto_searches_silently():
+    """Audit 2026-09-23 GRAB-08: with an arr_id the failed push used to end in
+    a silent auto-search reported as success. Now it is a failure the handler
+    turns into an explicit "🔍 Пусть Radarr ищет сам" offer."""
     from bot.clients.base import APIError
 
     radarr = AsyncMock()
@@ -932,8 +940,8 @@ async def test_arr_id_grab_still_reaches_auto_search():
 
     ok, _action = await service.grab_release(_free_release(), ContentType.MOVIE, arr_id=42)
 
-    assert ok is True
-    radarr.search_movie.assert_awaited_once_with(42)
+    assert ok is False
+    radarr.search_movie.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -963,17 +971,21 @@ async def test_music_grab_goes_to_lidarr_not_sonarr():
 
 
 @pytest.mark.asyncio
-async def test_music_push_chain_falls_back_to_album_search():
-    """Без indexer_id нативный путь недоступен: последний шаг цепочки —
-    автопоиск ЭТОГО альбома (arr_id для музыки и есть album_id), а не всей
-    библиотеки."""
+async def test_music_auto_search_targets_the_album():
+    """Автопоиск для музыки — ЭТОГО альбома (arr_id для музыки и есть
+    album_id), а не всей библиотеки. С аудита 2026-09-23 — только явным
+    выбором (`auto_search`), не молчаливым хвостом цепочки."""
     lidarr = AsyncMock()
     lidarr.push_release = AsyncMock(side_effect=Exception("push failed"))
     service = AddService(AsyncMock(), AsyncMock(), lidarr=lidarr)
     release = SearchResult(guid="g2", title="Album", origin="prowlarr", indexer_id=0)
 
-    ok, action = await service.grab_release(release, ContentType.MUSIC, arr_id=3)
+    ok, _action = await service.grab_release(release, ContentType.MUSIC, arr_id=3)
+    assert ok is False
+    lidarr.search_album.assert_not_awaited()
 
+    ok, _action = await service.auto_search(release, ContentType.MUSIC, arr_id=3)
+    assert ok is True
     lidarr.search_album.assert_awaited_once_with(3)
 
 

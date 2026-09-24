@@ -9,11 +9,16 @@ from aiogram.types import CallbackQuery, Message
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import accessible_message
-from bot.models import MovieInfo, SearchSession, SeriesInfo, User
-from bot.services.add_service import AddService
+from bot.models import ContentType, MovieInfo, SearchResult, SearchSession, SeriesInfo, User
+from bot.services.add_service import (
+    GRAB_OUTCOME_REJECTED,
+    GRAB_OUTCOME_UNREACHABLE,
+    AddService,
+    grab_outcome,
+)
 from bot.services.scoring import grab_best_candidate
 from bot.services.search_service import SearchService
-from bot.ui.callbacks import ForceGrabCB, GrabBestCB, GrabCB, SeasonPresetCB
+from bot.ui.callbacks import AutoSearchCB, ForceGrabCB, GrabBestCB, GrabCB, SeasonPresetCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.list_token import answer_stale, token_matches
@@ -59,6 +64,34 @@ def _selected_index(session: SearchSession) -> int:
     return 0
 
 
+def _arr_name(content_type: ContentType) -> str:
+    if content_type is ContentType.MOVIE:
+        return "Radarr"
+    if content_type is ContentType.MUSIC:
+        return "Lidarr"
+    return "Sonarr"
+
+
+def _rejection_text(release: SearchResult, content_type: ContentType) -> str:
+    """GRAB-02: why *arr refuses a release, before the user takes it anyway."""
+    reasons = release.rejections or ["причина не указана"]
+    lines = "\n".join(f"• {html.escape(r)}" for r in reasons)
+    return (
+        f"⚠️ <b>{_arr_name(content_type)} отклоняет этот релиз</b>\n\n"
+        f"<i>{html.escape(release.title)}</i>\n\n"
+        f"Причины:\n{lines}\n\n"
+        "Скачать всё равно?"
+    )
+
+
+async def _show_rejection_card(message: Message, session: SearchSession, idx: int) -> None:
+    await message.edit_text(
+        _rejection_text(session.results[idx], session.content_type),
+        reply_markup=Keyboards.rejected_confirm(session.list_token, idx),
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(GrabBestCB.filter())
 async def handle_grab_best(
     callback: CallbackQuery, callback_data: GrabBestCB, db_user: User, db: Database,
@@ -91,6 +124,11 @@ async def handle_grab_best(
             threshold=settings.auto_grab_score_threshold,
         )
         if result is None:
+            if session.results[0].rejected:
+                # Ambiguity resolution 2026-09-24: never grab, show why instead.
+                await callback.answer()
+                await _show_rejection_card(message, session, 0)
+                return
             await callback.answer(
                 "Лучший релиз не проходит профиль качества — выберите вручную",
                 show_alert=True,
@@ -134,6 +172,12 @@ async def handle_confirm_grab(
         or callback_data.idx >= len(session.results)
     ):
         await answer_stale(callback)
+        return
+
+    # GRAB-02: a release *arr rejected needs a second, explicit tap.
+    if session.results[callback_data.idx].rejected and not callback_data.ok:
+        await callback.answer()
+        await _show_rejection_card(message, session, callback_data.idx)
         return
 
     # RACE-01: reject a concurrent second grab for this user.
@@ -208,8 +252,15 @@ async def _execute_grab(
     add_service: AddService,
     *,
     force_download: bool = False,
+    auto_search: bool = False,
 ) -> None:
-    """Common grab logic for normal and force grab.
+    """Common grab logic for normal, force and *arr-auto-search grabs.
+
+    Audit 2026-09-23: ``auto_search=True`` is the explicit "🔍 Пусть *arr ищет
+    сам" choice (GRAB-08) — same monitoring follow-up as a grab, but the
+    message says *arr may take a different release. A failed grab keeps the
+    session when there is something to offer next (auto-search, or the way
+    back to a card whose rejection reasons were just shown).
 
     Rollback 2026-08-10 (Task 12): the title was already added to Radarr/
     Sonarr (and its releases listed) before this point — see
@@ -252,12 +303,17 @@ async def _execute_grab(
         return
 
     try:
-        success, action = await add_service.grab_release(
-            result,
-            session.content_type,
-            arr_id=arr_id,
-            force_download=force_download,
-        )
+        if auto_search:
+            success, action = await add_service.auto_search(
+                result, session.content_type, arr_id=arr_id,
+            )
+        else:
+            success, action = await add_service.grab_release(
+                result,
+                session.content_type,
+                arr_id=arr_id,
+                force_download=force_download,
+            )
 
         action.user_id = user_id
         await db.log_action(action)
@@ -293,17 +349,45 @@ async def _execute_grab(
                 logger.warning("monitor_enable_failed", arr_id=arr_id, error=str(e))
 
             year_str = f" ({title.year})" if title.year else ""
-            await message.edit_text(
-                Formatters.format_success(
+            if auto_search:
+                body = (
+                    f"<b>{html.escape(title.title)}</b>{year_str}\n\n"
+                    f"🔍 {_arr_name(session.content_type)} ищет сам — релиз может быть другим"
+                )
+            else:
+                body = (
                     f"<b>{html.escape(title.title)}</b>{year_str}\n\n"
                     f"Релиз: <i>{html.escape(result.title)}</i>"
+                )
+            await message.edit_text(Formatters.format_success(body), parse_mode="HTML")
+            await db.delete_session(user_id)
+            return
+
+        # format_error escapes its argument itself.
+        error_text = action.error_message or "Не удалось скачать релиз"
+        outcome = grab_outcome(action) if not (force_download or auto_search) else None
+        if outcome in (GRAB_OUTCOME_UNREACHABLE, GRAB_OUTCOME_REJECTED):
+            arr_name = _arr_name(session.content_type)
+            if outcome == GRAB_OUTCOME_REJECTED:
+                text = f"{arr_name} отклонил релиз: {error_text}"
+            else:
+                text = (
+                    f"{error_text}\n\n"
+                    f"Можно попросить {arr_name} найти раздачу самому — "
+                    "релиз может быть другим."
+                )
+            # The session stays: the buttons below act on it.
+            await message.edit_text(
+                Formatters.format_error(text),
+                reply_markup=Keyboards.grab_failed(
+                    session.list_token, _selected_index(session), arr_name,
+                    offer_auto_search=outcome == GRAB_OUTCOME_UNREACHABLE,
                 ),
                 parse_mode="HTML",
             )
-        else:
-            error_text = action.error_message or "Не удалось скачать релиз"
-            await message.edit_text(Formatters.format_error(error_text))
+            return
 
+        await message.edit_text(Formatters.format_error(error_text))
         await db.delete_session(user_id)
 
     except Exception as e:
@@ -469,3 +553,37 @@ async def handle_legacy_grab(callback: CallbackQuery) -> None:
     buttons from messages sent before list tokens — they name no list, so
     they must not act on whatever the session holds now."""
     await answer_stale(callback)
+
+
+@router.callback_query(AutoSearchCB.filter())
+async def handle_auto_search(
+    callback: CallbackQuery, callback_data: AutoSearchCB, db_user: User, db: Database,
+) -> None:
+    """"🔍 Пусть *arr ищет сам" — the explicit form of what the push chain used
+    to do silently (audit 2026-09-23 GRAB-08)."""
+    message = accessible_message(callback)
+    if message is None:
+        return
+
+    user_id = callback.from_user.id
+    session = await db.get_session(user_id)
+    if (
+        session is None
+        or not _catalogue_list(session, callback_data.tok)
+        or callback_data.idx >= len(session.results)
+    ):
+        await answer_stale(callback)
+        return
+
+    if not await _search._claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
+        return
+    try:
+        session.selected_result = session.results[callback_data.idx]
+        search_service, add_service = await _search.get_services()
+        await callback.answer("Запускаю поиск...")
+        await _search._execute_grab(
+            message, session, db_user, db, search_service, add_service, auto_search=True,
+        )
+    finally:
+        _search._release_grab(user_id)

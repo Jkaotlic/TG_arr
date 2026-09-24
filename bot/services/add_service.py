@@ -31,10 +31,14 @@ collection errors mid-rollback. Replaced with the two *arr grab paths:
         push chain — release.origin != "arr" (today: a Prowlarr free-text
                    hit, OR anything hand-built without an explicit origin —
                    Prowlarr numbers indexers differently from *arr, so its id
-                   is meaningless to the native endpoint): the restored
-                   pre-migration three-step chain — release/push
-                   (SEC-16-gated, see `_validate_download_url`) ->
-                   qBittorrent by downloadUrl -> *arr auto-search command.
+                   is meaningless to the native endpoint): release/push
+                   (SEC-16-gated, see `_validate_download_url`) and *arr's
+                   verdict, reported as is. Audit 2026-09-23 GRAB-08 removed
+                   the two silent steps that followed (qBittorrent after a
+                   rejection, *arr auto-search after a failed push): both are
+                   now explicit user choices — `force_download=True` and
+                   `auto_search()` — and a failed grab records WHY in
+                   `ActionLog.details` (`grab_outcome()`).
 
 The push chain was UNREACHABLE from the rollback until 2026-08-12: every
 selectable release came from `SearchService.search_releases_for_title` — *arr's
@@ -45,9 +49,8 @@ interactive search — and was therefore tagged `origin="arr"`, while
 названию" button on a dead-end search screen.
 
 Such a hit usually has no library entry behind it, which is why `arr_id` is
-optional: with no id, the chain's final auto-search step is skipped rather than
-faked — that command takes an id there is none of, and reporting success for a
-queue nothing entered would be a lie.
+optional: with no id there is nothing for *arr to auto-search, and reporting
+success for a queue nothing entered would be a lie.
 
 `arr_id` is the movie/series id already in Radarr/Sonarr. `grab_release`'s
 caller is expected to have ensured the title exists in the library before
@@ -74,7 +77,7 @@ from typing import Optional
 
 import structlog
 
-from bot.clients.base import APIError, ArrBaseClient
+from bot.clients.base import APIError, ArrBaseClient, ServiceConnectionError
 from bot.clients.lidarr import LidarrClient
 from bot.clients.qbittorrent import QBittorrentClient
 from bot.clients.radarr import RadarrClient
@@ -135,6 +138,34 @@ def _qbit_category(content_type: ContentType, release: SearchResult) -> str:
     if content_type in _QBIT_CATEGORIES:
         return _QBIT_CATEGORIES[content_type]
     return _QBIT_CATEGORIES.get(release.detected_type, "radarr")
+
+
+#: Audit 2026-09-23 (GRAB-08/14): why a grab did not happen, stored as
+#: ``{"outcome": ...}`` in ``ActionLog.details`` (the JSON blob the history
+#: already keeps rejections in). Handlers read it with :func:`grab_outcome`
+#: to decide what to offer next.
+GRAB_OUTCOME_REJECTED = "rejected"        # *arr refused THIS release (reasons attached)
+GRAB_OUTCOME_UNREACHABLE = "unreachable"  # never got a verdict/queue — *arr may search itself
+GRAB_OUTCOME_GONE = "gone"                # *arr's release cache no longer has it
+
+#: User-facing text for GRAB_OUTCOME_GONE (GRAB-14).
+RELEASE_GONE_TEXT = "Релиз больше недоступен — обновите поиск"
+
+
+def _set_outcome(action: ActionLog, outcome: str, **extra) -> None:
+    action.details = json.dumps({"outcome": outcome, **extra}, ensure_ascii=False)
+
+
+def grab_outcome(action: ActionLog) -> Optional[str]:
+    """The ``outcome`` a failed grab recorded, or None (success / unknown)."""
+    if not action.details:
+        return None
+    try:
+        data = json.loads(action.details)
+    except (TypeError, ValueError):
+        return None
+    outcome = data.get("outcome") if isinstance(data, dict) else None
+    return outcome if isinstance(outcome, str) else None
 
 
 def _safe_push_result(result: Optional[dict]) -> dict:
@@ -493,7 +524,7 @@ class AddService:
         # `origin` defaults to "prowlarr", so an untagged release fails
         # closed here rather than being trusted as native by omission.
         if release.indexer_id and release.origin == "arr":
-            return await self._grab_native(log, action, arr_client, release, content_type)
+            return await self._grab_native(log, action, arr_client, release, content_type, arr_id)
 
         return await self._grab_via_push_chain(
             log, action, arr_client, release, content_type, arr_id,
@@ -506,24 +537,117 @@ class AddService:
         arr_client: ArrBaseClient,
         release: SearchResult,
         content_type: ContentType,
+        arr_id: Optional[int] = None,
     ) -> tuple[bool, ActionLog]:
-        """Native path: hand *arr the guid+indexerId it already scored itself."""
+        """Native path: hand *arr the guid+indexerId it already scored itself.
+
+        Audit 2026-09-23 GRAB-14, two honest recoveries:
+        - 404: *arr keeps interactive-search results ~30 min, the bot's
+          session lives 24 h. Re-run the interactive search, find the SAME
+          guid and retry once; otherwise say the release is gone.
+        - timeout / connection drop: the POST may have landed. Look for the
+          release in *arr's queue before calling it a failure.
+        Any other failure is "unreachable": nothing was queued, and the
+        handler offers *arr's own search as an explicit, labelled choice.
+        """
+        indexer_id = release.indexer_id or 0
         try:
-            await arr_client.grab_release(release.guid, release.indexer_id)
+            await arr_client.grab_release(release.guid, indexer_id)
+        except APIError as e:
+            if e.status_code == 404:
+                return await self._retry_expired_release(
+                    log, action, arr_client, release, content_type, arr_id,
+                )
+            if isinstance(e, ServiceConnectionError) and await self._landed_in_queue(
+                arr_client, release,
+            ):
+                log.info("native_grab_found_in_queue_after_error", error=str(e))
+                action.success = True
+                _log_grab_completed(
+                    log, success=True, path="native", force_download=False,
+                    content_type=content_type, detail="queued_despite_error",
+                )
+                return True, action
+            return self._native_failed(log, action, content_type, e)
         except Exception as e:
-            log.warning("native_grab_failed", error=str(e))
-            action.success = False
-            action.error_message = str(e)
-            _log_grab_completed(
-                log, success=False, path="failed", force_download=False, content_type=content_type,
-            )
-            return False, action
+            return self._native_failed(log, action, content_type, e)
 
         action.success = True
         _log_grab_completed(
             log, success=True, path="native", force_download=False, content_type=content_type,
         )
         return True, action
+
+    def _native_failed(
+        self, log, action: ActionLog, content_type: ContentType, error: Exception,
+    ) -> tuple[bool, ActionLog]:
+        log.warning("native_grab_failed", error=str(error))
+        action.success = False
+        action.error_message = str(error)
+        _set_outcome(action, GRAB_OUTCOME_UNREACHABLE)
+        _log_grab_completed(
+            log, success=False, path="failed", force_download=False, content_type=content_type,
+        )
+        return False, action
+
+    @staticmethod
+    async def _landed_in_queue(arr_client: ArrBaseClient, release: SearchResult) -> bool:
+        try:
+            return bool(await arr_client.find_in_queue(release.title))
+        except Exception:
+            return False
+
+    async def _refetch_releases(
+        self, content_type: ContentType, arr_id: int, release: SearchResult,
+    ) -> list[SearchResult]:
+        """Re-run *arr's interactive search the list came from."""
+        if content_type is ContentType.MOVIE:
+            return await self.radarr.get_releases(arr_id)
+        if content_type is ContentType.MUSIC:
+            if self.lidarr is None:
+                return []
+            return await self.lidarr.get_releases(arr_id)
+        return await self.sonarr.get_releases(arr_id, season_number=release.detected_season)
+
+    async def _retry_expired_release(
+        self,
+        log,
+        action: ActionLog,
+        arr_client: ArrBaseClient,
+        release: SearchResult,
+        content_type: ContentType,
+        arr_id: Optional[int],
+    ) -> tuple[bool, ActionLog]:
+        """GRAB-14: *arr forgot the release (404) — look it up again, retry once."""
+        fresh: Optional[SearchResult] = None
+        if arr_id is not None:
+            try:
+                releases = await self._refetch_releases(content_type, arr_id, release)
+            except Exception as e:
+                log.warning("release_refetch_failed", error=str(e))
+                releases = []
+            fresh = next((r for r in releases if r.guid == release.guid), None)
+
+        if fresh is not None:
+            try:
+                await arr_client.grab_release(fresh.guid, fresh.indexer_id or 0)
+            except Exception as e:
+                return self._native_failed(log, action, content_type, e)
+            action.success = True
+            _log_grab_completed(
+                log, success=True, path="native", force_download=False,
+                content_type=content_type, detail="retried_after_404",
+            )
+            return True, action
+
+        action.success = False
+        action.error_message = RELEASE_GONE_TEXT
+        _set_outcome(action, GRAB_OUTCOME_GONE)
+        _log_grab_completed(
+            log, success=False, path="failed", force_download=False,
+            content_type=content_type, detail="release_gone",
+        )
+        return False, action
 
     async def _grab_via_push_chain(
         self,
@@ -534,28 +658,25 @@ class AddService:
         content_type: ContentType,
         arr_id: Optional[int],
     ) -> tuple[bool, ActionLog]:
-        """Restored pre-migration fallback for a release with no *arr indexer id.
+        """Push a release with no *arr indexer id to *arr and report its verdict.
 
-        release/push -> qBittorrent by downloadUrl -> *arr auto-search
-        command. Each step only runs if the previous one did not already
-        finish the job. An explicit profile rejection stops the chain rather
-        than falling through to auto-search — the user asked for THIS
-        release, not "anything the profile likes"; auto-search is reserved
-        for when *arr never got to render a verdict at all (e.g. the push
-        request itself failed).
+        Audit 2026-09-23 GRAB-08 — the chain used to end in two silent
+        substitutions: a profile rejection went on to qBittorrent anyway, and a
+        push that never reached a verdict turned into *arr's own auto-search,
+        reported to the user as if THIS release had been taken. Now:
+        - approved → success;
+        - rejected → stop, reasons in ``error_message`` and ``details``
+          (qBittorrent stays an explicit button, never a fallback);
+        - no verdict (transport error, no/unsafe URL) → failure with outcome
+          "unreachable"; the handler offers :meth:`auto_search` as a labelled
+          choice ("релиз может быть другим").
         """
         try:
-            release_rejected = False
-            rejections: list[str] = []
-
             if release.download_url:
                 # SEC-16 (fix round 1, restored): validate the URL BEFORE
                 # handing it to Radarr/Sonarr. *arr fetches whatever URL it
                 # is given, from inside the LAN — handing it a private/
                 # loopback URL would turn *arr itself into an SSRF proxy.
-                # An unsafe URL is treated the same as a transport failure
-                # below: no verdict was rendered, so this falls through to
-                # auto-search rather than being reported as a rejection.
                 if not await _validate_download_url(release.download_url):
                     log.warning(
                         "push_skipped_unsafe_url",
@@ -569,6 +690,10 @@ class AddService:
                             protocol=release.protocol,
                             publish_date=release.publish_date.isoformat() if release.publish_date else None,
                         )
+                    except APIError as e:
+                        # A transport failure is not a verdict.
+                        log.warning("push_release_failed", error=str(e))
+                    else:
                         log.info("push_release_result", result=_safe_push_result(result))
                         if result and result.get("approved") is True:
                             action.success = True
@@ -576,112 +701,95 @@ class AddService:
                                 log, success=True, path="push", force_download=False, content_type=content_type,
                             )
                             return True, action
-                        rejections = result.get("rejections", []) if result else []
-                        release_rejected = True
-                    except APIError as e:
-                        # Falls through to auto-search below, same as pre-migration:
-                        # a transport failure is not a verdict, so it isn't treated
-                        # as one.
-                        log.warning("push_release_failed", error=str(e))
-
-            if release_rejected and self.qbittorrent is not None:
-                download_url = release.download_url or release.magnet_url
-                if download_url and await _validate_download_url(download_url):
-                    try:
-                        success = await self.qbittorrent.add_torrent_url(
-                            download_url, category=_qbit_category(content_type, release),
-                        )
-                    except Exception as e:
-                        log.error("qbittorrent_fallback_failed", error=str(e), exc_info=True)
+                        raw = result.get("rejections") if isinstance(result, dict) else None
+                        rejections = [str(r) for r in raw] if isinstance(raw, list) else []
                         action.success = False
-                        action.error_message = f"qBittorrent fallback failed: {e}"
+                        rejection_msg = ", ".join(rejections) if rejections else "Отклонено"
+                        action.error_message = rejection_msg
+                        # OBS-03: structured rejection reasons for history forensics.
+                        _set_outcome(action, GRAB_OUTCOME_REJECTED, rejections=rejections)
                         _log_grab_completed(
-                            log, success=False, path="failed", force_download=False, content_type=content_type,
+                            log, success=False, path="rejected", force_download=False,
+                            content_type=content_type, detail=rejection_msg[:200],
                         )
                         return False, action
 
-                    if success:
-                        action.success = True
-                        _log_grab_completed(
-                            log, success=True, path="qbit", force_download=False, content_type=content_type,
-                        )
-                        return True, action
-
-                    log.error("qbittorrent_rejected_torrent", download_url=_mask_url(download_url))
-                    action.success = False
-                    action.error_message = "qBittorrent rejected the torrent"
-                    _log_grab_completed(
-                        log, success=False, path="failed", force_download=False, content_type=content_type,
-                    )
-                    return False, action
-
-            if release_rejected:
-                action.success = False
-                rejection_msg = ", ".join(rejections) if rejections else "Отклонено"
-                action.error_message = rejection_msg
-                # OBS-03: keep the structured rejection reasons in details for history forensics.
-                action.details = json.dumps({"rejections": rejections}, ensure_ascii=False)
-                _log_grab_completed(
-                    log, success=False, path="rejected", force_download=False,
-                    content_type=content_type, detail=rejection_msg[:200],
-                )
-                return False, action
-
-            # Push never ran (no download_url) or transport-failed: fall back
-            # to *arr's own auto-search rather than giving up outright.
-            if arr_id is None:
-                # Free-text grab: no library entry for *arr to search against.
-                # Reporting success here would be a lie — nothing was queued.
-                action.success = False
-                action.error_message = (
-                    "Тайтла нет в библиотеке — Radarr/Sonarr не может искать сам"
-                )
-                _log_grab_completed(
-                    log, success=False, path="failed", force_download=False,
-                    content_type=content_type, detail="no_arr_id_for_auto_search",
-                )
-                return False, action
-
-            try:
-                # `self.radarr`/`self.sonarr` rather than the pre-resolved
-                # `arr_client`: these three commands are defined on the
-                # concrete clients, not on ArrBaseClient (which carries only
-                # what Radarr, Sonarr and Lidarr genuinely share). Going
-                # through the base would mean typing `arr_client` loosely
-                # enough to hide a typo in any of these names.
-                if content_type is ContentType.MOVIE:
-                    await self.radarr.search_movie(arr_id)
-                elif content_type is ContentType.MUSIC:
-                    # `arr_id` для музыки — это album_id: ищем ровно тот альбом,
-                    # который выбрал пользователь, а не всю библиотеку.
-                    await self.lidarr.search_album(arr_id)
-                elif release.is_season_pack and release.detected_season is not None:
-                    await self.sonarr.search_season(arr_id, release.detected_season)
-                else:
-                    await self.sonarr.search_series(arr_id)
-            except APIError as e:
-                log.warning("auto_search_failed", error=str(e))
-                action.success = False
-                action.error_message = str(e)
-                _log_grab_completed(
-                    log, success=False, path="failed", force_download=False, content_type=content_type,
-                )
-                return False, action
-
-            action.success = True
-            _log_grab_completed(
-                log, success=True, path="auto_search", force_download=False, content_type=content_type,
+            # No verdict at all: nothing was queued.
+            action.success = False
+            action.error_message = (
+                "Не удалось передать релиз в Radarr/Sonarr"
+                if arr_id is not None
+                else "Тайтла нет в библиотеке — Radarr/Sonarr не может искать сам"
             )
-            return True, action
+            _set_outcome(action, GRAB_OUTCOME_UNREACHABLE)
+            _log_grab_completed(
+                log, success=False, path="failed", force_download=False,
+                content_type=content_type, detail="no_verdict",
+            )
+            return False, action
 
         except Exception as e:
             log.error("push_chain_failed", error=str(e), exc_info=True)
+            action.success = False
+            action.error_message = str(e)
+            _set_outcome(action, GRAB_OUTCOME_UNREACHABLE)
+            _log_grab_completed(
+                log, success=False, path="failed", force_download=False, content_type=content_type,
+            )
+            return False, action
+
+    async def auto_search(
+        self,
+        release: SearchResult,
+        content_type: ContentType,
+        *,
+        arr_id: int,
+    ) -> tuple[bool, ActionLog]:
+        """Ask *arr to search for the title itself — an explicit user choice.
+
+        Audit 2026-09-23 GRAB-08: this used to run silently at the end of the
+        push chain and was reported as a grab of the selected release. It is
+        now offered as "🔍 Пусть *arr ищет сам", with the warning that *arr
+        may pick a different release. The scope is the narrowest one the
+        release names: a season pack → that season; music → that album.
+        """
+        action = ActionLog(
+            user_id=0,
+            action_type=ActionType.GRAB,
+            content_type=content_type,
+            content_id=str(arr_id),
+            release_title=release.title,
+        )
+        log = logger.bind(arr_id=arr_id, release_title=release.title[:80])
+        try:
+            # `self.radarr`/`self.sonarr`/`self.lidarr`: these commands live
+            # on the concrete clients, not on ArrBaseClient.
+            if content_type is ContentType.MOVIE:
+                await self.radarr.search_movie(arr_id)
+            elif content_type is ContentType.MUSIC:
+                if self.lidarr is None:
+                    action.success = False
+                    action.error_message = "Lidarr не настроен"
+                    return False, action
+                await self.lidarr.search_album(arr_id)
+            elif release.is_season_pack and release.detected_season is not None:
+                await self.sonarr.search_season(arr_id, release.detected_season)
+            else:
+                await self.sonarr.search_series(arr_id)
+        except Exception as e:
+            log.warning("auto_search_failed", error=str(e))
             action.success = False
             action.error_message = str(e)
             _log_grab_completed(
                 log, success=False, path="failed", force_download=False, content_type=content_type,
             )
             return False, action
+
+        action.success = True
+        _log_grab_completed(
+            log, success=True, path="auto_search", force_download=False, content_type=content_type,
+        )
+        return True, action
 
     async def _force_download(
         self,

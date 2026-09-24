@@ -84,6 +84,14 @@ class ForceGrabCB(CallbackData, prefix="gq"):
     idx: int = Field(ge=0)
 
 
+class AutoSearchCB(CallbackData, prefix="as"):
+    """"🔍 Пусть *arr ищет сам" after a grab that never reached *arr's queue
+    (audit 2026-09-23 GRAB-08: this used to happen silently)."""
+
+    tok: str
+    idx: int = Field(ge=0)
+
+
 class MusicAddCB(CallbackData, prefix="ma"):
     """"🔍 Искать" on an artist card (was the shared ``confirm_grab`` string,
     which a movie session would have routed to a movie grab)."""
@@ -288,11 +296,14 @@ class FindGrabCB(CallbackData, prefix="fg"):
 
     Carries the index rather than relying on ``selected_result``, so a stale
     card left open in an old message cannot grab whatever the session happens
-    to point at now. ``tok`` does the same across searches.
+    to point at now. ``tok`` does the same across searches. ``q=1`` is the
+    explicit "download directly via qBittorrent" choice (audit GRAB-08: no
+    longer a silent fallback after *arr refuses the push).
     """
 
     tok: str
     idx: int = Field(ge=0)
+    q: int = 0
 
 
 class AlbumScopeCB(CallbackData, prefix="al"):

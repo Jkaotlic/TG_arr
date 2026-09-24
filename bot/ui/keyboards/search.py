@@ -13,6 +13,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import ContentType, MovieInfo, SearchResult, SeriesInfo
 from bot.ui.callbacks import (
+    AutoSearchCB,
     FindGrabCB,
     FindPageCB,
     FindReleaseCB,
@@ -175,6 +176,56 @@ class _SearchKeyboards:
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def rejected_confirm(list_token: str, idx: int) -> InlineKeyboardMarkup:
+        """Audit 2026-09-23 GRAB-02: a release *arr rejected is taken only
+        after an explicit second tap."""
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="⚠️ Всё равно скачать",
+                callback_data=GrabCB(tok=list_token, idx=idx, ok=1).pack(),
+            )],
+            [InlineKeyboardButton(
+                text="◀️ Назад", callback_data=ReleaseCB(tok=list_token, idx=idx).pack(),
+            )],
+        ])
+
+    @staticmethod
+    def grab_failed(
+        list_token: str, idx: int, arr_name: str, offer_auto_search: bool,
+    ) -> InlineKeyboardMarkup:
+        """After a grab that did not happen: *arr's own search as an explicit,
+        labelled choice (GRAB-08), and the way back to the release card."""
+        rows = []
+        if offer_auto_search:
+            rows.append([InlineKeyboardButton(
+                text=f"🔍 Пусть {arr_name} ищет сам",
+                callback_data=AutoSearchCB(tok=list_token, idx=idx).pack(),
+            )])
+        rows.append([
+            InlineKeyboardButton(
+                text="◀️ Назад", callback_data=ReleaseCB(tok=list_token, idx=idx).pack(),
+            ),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @staticmethod
+    def free_grab_failed(list_token: str, idx: int, offer_qbit: bool) -> InlineKeyboardMarkup:
+        """Free search after *arr refused/never saw the push: qBittorrent as an
+        explicit choice, never a silent fallback (GRAB-08)."""
+        rows = []
+        if offer_qbit:
+            rows.append([InlineKeyboardButton(
+                text="⚡ Скачать напрямую (qBit)",
+                callback_data=FindGrabCB(tok=list_token, idx=idx, q=1).pack(),
+            )])
+        rows.append([
+            InlineKeyboardButton(text="◀️ Назад", callback_data=FindPageCB(page=0).pack()),
+            InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
+        ])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
     def free_search_offer() -> InlineKeyboardMarkup:
