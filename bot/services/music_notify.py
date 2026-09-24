@@ -2,10 +2,15 @@
 
 Audit 2026-09-23, NOTIF-01/02/03/05: the watcher used to send one message per
 transfer state change — 185 of 188 notifications in ten days were about
-single files. The unit of news is the album (a slskd batch), so transfers are
-grouped by batch, a track's outcome is the *best* state across all of its
+single files. The unit of news is the album, so transfers are grouped by
+album folder, a track's outcome is the *best* state across all of its
 transfers (a retry that succeeded wins over the earlier failure), and one
-summary goes out once the batch has settled.
+summary goes out once the album has settled.
+
+2026-09-24 (live): the album is the *folder*, not slskd's ``batchId``. Live
+slskd gives most files their own batchId (one directory of 17 files enqueued
+together carried 17 ids), so batchId grouping made every track its own
+"album" again. See `album_key`.
 
 Everything here is side-effect free; persistence lives in `bot.db`
 (`music_transfer` / `music_batch` / `notify_kv`), orchestration in
@@ -38,7 +43,7 @@ _FAILED_NAMES_SHOWN = 3
 _TITLE_CAP = 200
 _NAME_CAP = 80
 
-_DISC_DIR = re.compile(r"^(cd|disc|disk|диск)\s*\d+$", re.IGNORECASE)
+_DISC_DIR = re.compile(r"^(?:cd|disc|disk|dvd|диск)\s*(\d+)$", re.IGNORECASE)
 _TRAILING_TAGS = re.compile(r"(\s*\[[^\]]*\])+\s*$")
 
 
@@ -83,13 +88,60 @@ def transfer_id(t: SlskdTransfer) -> str:
     return t.id or f"{t.username}/{t.full_filename or t.filename}"
 
 
+#: Prefix of album-folder batch keys. Schema-v5 keys (raw slskd batchIds or
+#: ``user/dir``) never carry it, which is how ``_migrate_to_v6`` tells them apart.
+ALBUM_KEY_PREFIX = "album:"
+
+
+def _album_parts(directory: str) -> tuple[list[str], Optional[str]]:
+    """Split a directory into the album path and its disc subfolder, if any.
+
+    The disc comes back normalised (``CD 2`` / ``Disc2`` -> ``disc2``).
+    """
+    parts = split_path(directory)
+    if len(parts) > 1:
+        match = _DISC_DIR.match(parts[-1])
+        if match:
+            return parts[:-1], f"disc{int(match.group(1))}"
+    return parts, None
+
+
+def _album_name(parts: list[str]) -> str:
+    if not parts:
+        return ""
+    return _TRAILING_TAGS.sub("", parts[-1]).strip() or parts[-1]
+
+
+def album_key(directory: str) -> str:
+    """Normalised album folder: the unit a music summary is about.
+
+    Only the album folder's own name counts (peers share one album from
+    different roots), minus a disc subfolder and trailing ``[tags]`` — the
+    same reading `album_title` uses — case-folded, whitespace collapsed. The
+    peer's username is deliberately not part of it: Lidarr switching peers
+    mid-album must still give one summary.
+    """
+    parts, _disc = _album_parts(directory)
+    return ALBUM_KEY_PREFIX + " ".join(_album_name(parts).casefold().split())
+
+
+def album_track_key(directory: str, filename: str) -> str:
+    """Track identity inside its album: ``disc2\\01 - x.flac`` or ``01 - x.flac``.
+
+    Independent of the peer's root path, so the same file fetched from another
+    peer is the same track; CD1/CD2 tracks with equal names stay apart.
+    """
+    _parts, disc = _album_parts(directory)
+    return f"{disc}\\{filename}" if disc else filename
+
+
 def batch_key(t: SlskdTransfer) -> str:
-    return t.batch_id or f"{t.username}/{t.directory}"
+    """The album folder — never ``t.batch_id``: live slskd sets one per file."""
+    return album_key(t.directory)
 
 
 def track_key(t: SlskdTransfer) -> str:
-    """Directory + basename, so CD1/CD2 tracks with equal names stay apart."""
-    return f"{t.directory}\\{t.filename}"
+    return album_track_key(t.directory, t.filename)
 
 
 def track_name(key: str) -> str:
@@ -104,13 +156,10 @@ def album_title(directory: str) -> str:
     folders), drops trailing ``[tags]`` and turns the first `` - `` into an
     em dash.
     """
-    parts = split_path(directory)
-    if len(parts) > 1 and _DISC_DIR.match(parts[-1]):
-        parts = parts[:-1]
+    parts, _disc = _album_parts(directory)
     if not parts:
         return "Музыка"
-    name = _TRAILING_TAGS.sub("", parts[-1]).strip() or parts[-1]
-    return name.replace(" - ", " — ", 1)
+    return _album_name(parts).replace(" - ", " — ", 1)
 
 
 @dataclass
@@ -138,13 +187,18 @@ def summarize(title: str, tracks: Iterable[tuple[str, str]]) -> BatchSummary:
     them off, so they are neither downloaded nor failed.
     """
     by_track: dict[str, list[str]] = {}
+    shown_as: dict[str, str] = {}
     for key, state in tracks:
-        by_track.setdefault(key, []).append(state)
+        # Peers may spell the same file name in a different case.
+        folded = key.casefold()
+        by_track.setdefault(folded, []).append(state)
+        shown_as.setdefault(folded, key)
     succeeded = 0
     active = 0
     failed: list[str] = []
-    for key in sorted(by_track):
-        outcome = track_outcome(by_track[key])
+    for folded in sorted(by_track):
+        key = shown_as[folded]
+        outcome = track_outcome(by_track[folded])
         if outcome == "succeeded":
             succeeded += 1
         elif outcome == "active":

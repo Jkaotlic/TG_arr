@@ -486,3 +486,250 @@ async def test_a_small_clock_skew_between_slskd_and_the_bot_is_tolerated(db):
 
     assert len(sent) == 1
     assert "1/1 скачано" in sent[0]
+
+
+# ------------------------------- live shape: slskd gives each FILE a batchId
+# Measured 2026-09-24 on the live instance: one album directory with 17 files
+# enqueued together carried 17 different batchIds (10 files -> 10 ids, 7 -> 7).
+# Grouping by batchId turned every track into its own "album" with its own
+# settle timer, i.e. the per-track spam came back. The album folder is the key.
+def _per_file(n: int, state: str, **kwargs) -> SlskdTransfer:
+    directory = kwargs.get("directory", ALBUM_DIR)
+    return _t(n, state, batch_id=f"batch-{directory}-{n}", **kwargs)
+
+
+def test_batch_key_is_the_album_folder_not_the_batch_id():
+    a = _t(1, "Queued, Remotely", batch_id="b-1")
+    b = _t(2, "Queued, Remotely", batch_id="b-2", username="peer2",
+           directory="@@share\\Music/Artist - Album (2023) [MP3 320]\\")
+    c = _t(3, "Queued, Remotely", batch_id="b-3", directory=ALBUM_DIR.upper() + "\\Disc 2")
+    assert music_notify.batch_key(a) == music_notify.batch_key(b) == music_notify.batch_key(c)
+    for disc in ("CD1", "cd 2", "Disc 1", "Disk2", "DVD1", "диск 3"):
+        assert music_notify.album_title(f"x\\Band - LP\\{disc}") == "Band — LP"
+        d = _t(1, "Queued, Remotely", directory=f"x\\Band - LP\\{disc}")
+        assert music_notify.batch_key(d) == music_notify.batch_key(
+            _t(1, "Queued, Remotely", directory="y/Band - LP/"))
+    assert music_notify.batch_key(a) != music_notify.batch_key(
+        _t(1, "Queued, Remotely", directory="x\\Band - LP"))
+
+
+@pytest.mark.asyncio
+async def test_live_shape_per_file_batch_ids_give_one_message(db):
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    watcher = _watcher(db, slskd, clock, sent, poll_interval=60)
+    await _prime(watcher, clock)
+
+    slskd.transfers = [_per_file(n, "Queued, Remotely") for n in range(1, 13)]
+    await watcher.poll()
+    # the files finish at uneven times over ~10 minutes
+    for n in range(1, 13):
+        clock.advance(50)
+        slskd.transfers[n - 1] = _per_file(n, "Completed, Succeeded", ended=clock.now)
+        await watcher.poll()
+    assert sent == []
+
+    await _poll_for(watcher, clock, 600)
+
+    assert len(sent) == 1
+    assert sent[0].startswith("🎵 <b>Artist — Album (2023)</b>")
+    assert "12/12 скачано" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_disc_folders_with_per_file_batch_ids_give_one_summary(db):
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    watcher = _watcher(db, slskd, clock, sent)
+    await _prime(watcher, clock)
+
+    slskd.transfers = (
+        [_per_file(n, "Completed, Succeeded", ended=clock.now, directory=ALBUM_DIR + "\\CD1")
+         for n in range(1, 5)]
+        + [_per_file(n, "Completed, Succeeded", ended=clock.now, directory=ALBUM_DIR + "\\CD2")
+           for n in range(1, 4)]
+    )
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+
+    assert len(sent) == 1
+    assert "7/7 скачано" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_same_album_from_two_peers_gives_one_summary(db):
+    """Lidarr switches peers: peer1 fails a track, peer2 delivers it."""
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    watcher = _watcher(db, slskd, clock, sent)
+    await _prime(watcher, clock)
+
+    other_dir = "@@share\\Music\\Artist - Album (2023) [MP3 320]"
+    slskd.transfers = [_per_file(n, "Completed, Succeeded", ended=clock.now) for n in range(1, 6)]
+    slskd.transfers.append(_per_file(6, "Completed, Rejected", ended=clock.now))
+    await watcher.poll()
+    clock.advance(120)
+    slskd.transfers.append(_per_file(6, "Completed, Succeeded", ended=clock.now,
+                                     directory=other_dir, username="peer2"))
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+
+    assert len(sent) == 1
+    assert "6/6 скачано" in sent[0]
+    assert "не удалось" not in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_two_albums_with_per_file_batch_ids_share_one_message(db):
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    watcher = _watcher(db, slskd, clock, sent)
+    await _prime(watcher, clock)
+
+    other = "music\\Band - Record (1999) [MP3]"
+    slskd.transfers = [_per_file(n, "Completed, Succeeded", ended=clock.now) for n in range(1, 4)]
+    slskd.transfers += [_per_file(n, "Completed, Succeeded", ended=clock.now, directory=other)
+                        for n in range(1, 3)]
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+
+    assert len(sent) == 1
+    assert sent[0].count("\n") == 2  # header + exactly two album lines
+    assert "Artist — Album (2023)</b>: 3/3" in sent[0]
+    assert "Band — Record (1999)</b>: 2/2" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_a_new_grab_of_an_announced_album_is_announced_again_once(db):
+    """Keying by folder must not swallow a later re-grab of the same album."""
+    slskd, clock, sent = FakeSlskd(), Clock(), []
+    watcher = _watcher(db, slskd, clock, sent)
+    await _prime(watcher, clock)
+
+    slskd.transfers = [_per_file(n, "Completed, Succeeded", ended=clock.now) for n in range(1, 3)]
+    slskd.transfers.append(_per_file(3, "Completed, Errored", ended=clock.now))
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+    assert len(sent) == 1 and "2/3 скачано, 1 не удалось" in sent[0]
+
+    clock.advance(600)
+    slskd.transfers.append(_per_file(3, "Completed, Succeeded", ended=clock.now,
+                                     directory="@@share\\Artist - Album (2023)", username="peer2"))
+    for _ in range(3):
+        await watcher.poll()
+        clock.advance(301)
+
+    assert len(sent) == 2
+    assert "3/3 скачано" in sent[1]
+
+
+# ------------------------------------ re-key of v5 rows (per-file batch keys)
+async def _write_v5_rows(db: Database, rows: list[tuple[str, str, str, str, Optional[str]]]) -> None:
+    """Rows as the v5 code wrote them: one batch per file, keyed by batchId.
+
+    ``(transfer_id, batch_key, track_key, state, notified_at)``.
+    """
+    stamp = (T0 - timedelta(minutes=1)).isoformat()  # last seen by the v5 bot
+    title = music_notify.album_title(ALBUM_DIR)
+    async with db._write_lock:
+        for tid, bkey, tkey, state, notified in rows:
+            await db.conn.execute(
+                "INSERT INTO music_transfer (transfer_id, batch_key, track_key, state, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)", (tid, bkey, tkey, state, stamp))
+            await db.conn.execute(
+                "INSERT INTO music_batch (batch_key, title, first_seen_at, last_change_at, notified_at) "
+                "VALUES (?, ?, ?, ?, ?)", (bkey, title, stamp, stamp, notified))
+        await db.conn.execute("PRAGMA user_version = 5")
+        await db.conn.commit()
+
+
+async def _reopen_as_v5(tmp_path, rows) -> Database:
+    path = str(tmp_path / "v5.db")
+    seed = Database(path)
+    await seed.connect()
+    await seed.kv_set("slskd_watermark", (T0 - timedelta(minutes=1)).isoformat())
+    await _write_v5_rows(seed, rows)
+    await seed.close()
+    database = Database(path)
+    await database.connect()
+    return database
+
+
+def _v5_row(n: int, state: str, notified: Optional[str]) -> tuple[str, str, str, str, Optional[str]]:
+    t = _per_file(n, state)
+    return (music_notify.transfer_id(t), t.batch_id, f"{t.directory}\\{t.filename}", state, notified)
+
+
+@pytest.mark.asyncio
+async def test_v5_seeded_per_file_batches_are_rekeyed_and_stay_silent(tmp_path):
+    """The live DB: 16 per-file batches of one album, seeded as announced at
+    first run, all still 'Queued, Remotely'. Re-keyed into one album batch that
+    inherits the silence; when the queue finally moves: never per-track."""
+    seeded = (T0 - timedelta(hours=2)).isoformat()
+    database = await _reopen_as_v5(
+        tmp_path, [_v5_row(n, "Queued, Remotely", seeded) for n in range(1, 17)])
+    try:
+        async with database.conn.execute("SELECT DISTINCT batch_key FROM music_transfer") as cur:
+            keys = [r[0] for r in await cur.fetchall()]
+        assert keys == [music_notify.batch_key(_t(1, "Queued, Remotely"))]
+        async with database.conn.execute("SELECT COUNT(*), MIN(notified_at) FROM music_batch") as cur:
+            count, notified = await cur.fetchone()
+        assert (count, notified) == (1, seeded)
+
+        slskd, clock, sent = FakeSlskd(), Clock(), []
+        slskd.transfers = [_per_file(n, "Queued, Remotely") for n in range(1, 17)]
+        watcher = _watcher(database, slskd, clock, sent, poll_interval=60)
+        await watcher.poll()
+        for n in range(1, 17):
+            clock.advance(40)
+            slskd.transfers[n - 1] = _per_file(n, "Completed, Succeeded", ended=clock.now)
+            await watcher.poll()
+        await _poll_for(watcher, clock, 3 * 3600)
+
+        assert len(sent) <= 1
+        assert not any("1/1" in text for text in sent)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_v5_mixed_per_file_batches_give_exactly_one_album_summary(tmp_path):
+    """Some per-file batches already announced, others pending: one summary."""
+    announced = (T0 - timedelta(hours=1)).isoformat()
+    rows = [_v5_row(n, "Completed, Succeeded", announced) for n in range(1, 4)]
+    rows += [_v5_row(n, "InProgress", None) for n in range(4, 9)]
+    database = await _reopen_as_v5(tmp_path, rows)
+    try:
+        slskd, clock, sent = FakeSlskd(), Clock(), []
+        slskd.transfers = [_per_file(n, "Completed, Succeeded", ended=T0 - timedelta(hours=1))
+                           for n in range(1, 4)]
+        slskd.transfers += [_per_file(n, "InProgress") for n in range(4, 9)]
+        watcher = _watcher(database, slskd, clock, sent, poll_interval=60)
+        await watcher.poll()
+        for n in range(4, 9):
+            clock.advance(60)
+            slskd.transfers[n - 1] = _per_file(n, "Completed, Succeeded", ended=clock.now)
+            await watcher.poll()
+        await _poll_for(watcher, clock, 3 * 3600)
+
+        assert len(sent) == 1
+        assert "8/8 скачано" in sent[0]
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_v6_rekey_is_idempotent(tmp_path):
+    seeded = (T0 - timedelta(hours=2)).isoformat()
+    database = await _reopen_as_v5(
+        tmp_path, [_v5_row(n, "Queued, Remotely", seeded) for n in range(1, 4)])
+    try:
+        assert await database._get_schema_version() >= 6
+        await database._migrate_to_v6()  # re-run on migrated data
+        async with database.conn.execute("SELECT batch_key, notified_at FROM music_batch") as cur:
+            rows = [tuple(r) for r in await cur.fetchall()]
+        assert rows == [(music_notify.batch_key(_t(1, "Queued, Remotely")), seeded)]
+        async with database.conn.execute("SELECT COUNT(*) FROM music_transfer") as cur:
+            assert (await cur.fetchone())[0] == 3
+    finally:
+        await database.close()

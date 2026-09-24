@@ -326,6 +326,8 @@ class Database:
             await self._migrate_to_v4()
         if version < 5:
             await self._migrate_to_v5()
+        if version < 6:
+            await self._migrate_to_v6()
 
     async def _migrate_to_v1(self) -> None:
         """
@@ -488,6 +490,93 @@ class Database:
         await self.conn.commit()
         await self._set_schema_version(5)
 
+    async def _migrate_to_v6(self) -> None:
+        """2026-09-24 (live): re-key music state from slskd batchId to album folder.
+
+        v5 keyed ``music_batch`` by slskd's ``batchId``, but live slskd gives
+        most files their own batchId, so every track became its own "album".
+        This moves every v5 transfer to its album-folder key
+        (`music_notify.album_key`) and its album-relative track key, both
+        derived from the stored v5 ``track_key`` (``<directory>\\<file>``),
+        and folds the per-file batch rows into one row per album:
+
+        - ``first_seen_at`` = earliest, ``last_change_at`` = latest;
+        - ``notified_at`` is inherited (latest stamp) only if EVERY contributing
+          old batch was already announced/seeded — then the whole album is
+          already "said" and a re-key must not say it again (the live DB: 16
+          per-file batches of one album, all seeded silently at first run and
+          still queued). If any contributing batch was still pending, the
+          album starts unannounced and gets exactly one summary once settled.
+
+        Idempotent: rows already carrying ``album:`` keys are left alone, so a
+        re-run changes nothing. One transaction.
+        """
+        # Local import: keeps the storage layer free of service imports at
+        # module load; music_notify itself only depends on bot.models.
+        from bot.services import music_notify
+
+        async with self.conn.execute(
+            "SELECT transfer_id, batch_key, track_key FROM music_transfer "
+            "WHERE batch_key NOT LIKE ?",
+            (music_notify.ALBUM_KEY_PREFIX + "%",),
+        ) as cursor:
+            legacy = [tuple(row) for row in await cursor.fetchall()]
+
+        async with self._write_lock:
+            await self.conn.execute("BEGIN")
+            try:
+                sources: dict[str, set[str]] = {}
+                titles: dict[str, str] = {}
+                for tid, old_batch, old_track in legacy:
+                    parts = music_notify.split_path(old_track)
+                    filename = parts[-1] if parts else old_track
+                    directory = "\\".join(parts[:-1])
+                    new_batch = music_notify.album_key(directory)
+                    await self.conn.execute(
+                        "UPDATE music_transfer SET batch_key = ?, track_key = ? WHERE transfer_id = ?",
+                        (new_batch, music_notify.album_track_key(directory, filename), tid),
+                    )
+                    sources.setdefault(new_batch, set()).add(old_batch)
+                    titles.setdefault(new_batch, music_notify.album_title(directory))
+
+                # Read every involved batch row before touching any: one old
+                # batch may feed several albums.
+                involved = sorted(set().union(*sources.values(), sources)) if sources else []
+                batches: dict[str, tuple[str, str, Optional[str]]] = {}
+                for key in involved:
+                    async with self.conn.execute(
+                        "SELECT first_seen_at, last_change_at, notified_at FROM music_batch "
+                        "WHERE batch_key = ?",
+                        (key,),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                    if row is not None:
+                        batches[key] = (row[0], row[1], row[2])
+                await self.conn.executemany(
+                    "DELETE FROM music_batch WHERE batch_key = ?", [(key,) for key in involved]
+                )
+
+                for new_batch, old_keys in sources.items():
+                    rows = [batches[k] for k in sorted(old_keys | {new_batch}) if k in batches]
+                    if not rows:
+                        continue  # orphan transfers: the next change recreates the batch
+                    first_seen = min(r[0] for r in rows)
+                    last_change = max(r[1] for r in rows)
+                    stamps = [r[2] for r in rows]
+                    notified = (
+                        None if any(x is None for x in stamps) else max(x for x in stamps if x)
+                    )
+                    await self.conn.execute(
+                        "INSERT INTO music_batch (batch_key, title, first_seen_at, last_change_at, notified_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (new_batch, titles[new_batch], first_seen, last_change, notified),
+                    )
+                await self.conn.commit()
+            except Exception:
+                await self.conn.rollback()
+                raise
+        await self._set_schema_version(6)
+
     # ------------------------------------------------------------------
     # Notification state (schema v5)
     # ------------------------------------------------------------------
@@ -521,6 +610,12 @@ class Database:
         ``changes`` rows are ``(transfer_id, batch_key, track_key, state,
         batch_title)``. Each upserts the transfer and creates its batch (or
         bumps the batch's ``last_change_at``).
+
+        Batches are album folders (schema v6), so a later re-grab of an album
+        already announced lands in the same batch. A transfer *new to the
+        database* joining an announced batch reopens it (one more summary once
+        it settles, over all of the album's transfers); a state change of a
+        known transfer never does — that keeps seeded stuck queues silent.
         """
         if not changes:
             return
@@ -529,17 +624,23 @@ class Database:
             await self.conn.execute("BEGIN")
             try:
                 for tid, bkey, tkey, state, title in changes:
+                    async with self.conn.execute(
+                        "SELECT 1 FROM music_transfer WHERE transfer_id = ?", (tid,)
+                    ) as cursor:
+                        is_new = await cursor.fetchone() is None
                     await self.conn.execute(
                         "INSERT INTO music_transfer (transfer_id, batch_key, track_key, state, updated_at) "
                         "VALUES (?, ?, ?, ?, ?) ON CONFLICT(transfer_id) DO UPDATE SET "
+                        "batch_key = excluded.batch_key, track_key = excluded.track_key, "
                         "state = excluded.state, updated_at = excluded.updated_at",
                         (tid, bkey, tkey, state, stamp),
                     )
                     await self.conn.execute(
                         "INSERT INTO music_batch (batch_key, title, first_seen_at, last_change_at) "
                         "VALUES (?, ?, ?, ?) ON CONFLICT(batch_key) DO UPDATE SET "
-                        "last_change_at = excluded.last_change_at",
-                        (bkey, title, stamp, stamp),
+                        "last_change_at = excluded.last_change_at, "
+                        "notified_at = CASE WHEN ? THEN NULL ELSE notified_at END",
+                        (bkey, title, stamp, stamp, int(is_new)),
                     )
                 await self.conn.commit()
             except Exception:
