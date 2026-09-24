@@ -327,6 +327,24 @@ class ScoringService:
         for r in results:
             r.calculated_score = self.calculate_score(r, content_type, preferred_resolution)
 
+        if results and all(r.origin == "arr" for r in results):
+            # Audit 2026-09-23 GRAB-01: *arr's own order. Its decision engine
+            # compares quality (the profile's `qualityWeight`) BEFORE the
+            # custom-format score; sorting CF first made the bot take a 1080p
+            # CF+500 release that Radarr (profile cutoff = 2160p, upgrades on)
+            # then replaced with the 4K anyway — two downloads for one film.
+            # `list.sort` is stable, so equal keys keep *arr's own order; the
+            # bot heuristic no longer re-shuffles *arr results at all.
+            results.sort(
+                key=lambda r: (
+                    r.rejected,  # False sorts first: a rejected release sinks last
+                    -(r.quality_weight or 0),
+                    -r.custom_format_score,
+                )
+            )
+            return results
+
+        # Prowlarr free-text hits carry no verdict — the bot heuristic ranks.
         results.sort(
             key=lambda r: (
                 # False sorts before True, so a rejected release sinks last.
@@ -341,3 +359,28 @@ class ScoringService:
     # caller (only their own tests exercised them). The one thing they were
     # "on the way to" — preferred_resolution actually affecting ranking — is
     # now handled properly inside calculate_score/sort_results above.
+
+
+def grab_best_candidate(
+    results: list[SearchResult], *, auto_grab_enabled: bool, threshold: int,
+) -> Optional[SearchResult]:
+    """The release "⚡ Лучший" may take, or None when the button must not exist.
+
+    Audit 2026-09-23 GRAB-02/GRAB-12: the button used to be gated on the bot's
+    0–150 heuristic against a threshold of 80 — a 1080p WEB-DL alone scores 85,
+    so the gate cut nothing, and a release *arr itself rejected could be taken
+    in one tap. For *arr results the verdict decides: the first result must be
+    accepted and carry a non-negative custom-format score (the user's profile
+    marks unwanted releases with a negative score, e.g. "Russian Dub without
+    English" −1000). The heuristic threshold still applies to verdict-less
+    (Prowlarr) results. Used both when rendering the button and again by the
+    handler, since a keyboard can outlive the list it was drawn for.
+    """
+    if not auto_grab_enabled or not results:
+        return None
+    best = results[0]
+    if best.rejected:
+        return None
+    if best.origin == "arr":
+        return best if best.custom_format_score >= 0 else None
+    return best if best.calculated_score >= threshold else None

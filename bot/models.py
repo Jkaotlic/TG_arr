@@ -165,6 +165,11 @@ class SearchResult(BaseModel):
     rejected: bool = Field(default=False, description="*arr refuses this release")
     rejections: list[str] = Field(default_factory=list, description="Why *arr refuses it, verbatim")
     languages: list[str] = Field(default_factory=list, description="Languages *arr parsed")
+    # Audit 2026-09-23 GRAB-01: *arr ranks by quality first (its profile's
+    # `qualityWeight`), custom-format score second. None on the Prowlarr path,
+    # which never went through a profile.
+    quality_weight: Optional[int] = Field(default=None, description="*arr qualityWeight")
+    custom_formats: list[str] = Field(default_factory=list, description="*arr custom format names")
 
     # Scoring
     prowlarr_score: Optional[int] = Field(default=None, description="Legacy Prowlarr score; unset since the 2026-08-10 *arr rollback")

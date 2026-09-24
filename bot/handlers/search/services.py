@@ -27,7 +27,7 @@ from bot.clients.registry import (  # noqa: F401 -- get_emby re-exported for pat
 from bot.handlers.common import safe_edit
 from bot.models import ContentType, User
 from bot.services.add_service import AddService
-from bot.services.scoring import ScoringService
+from bot.services.scoring import ScoringService, grab_best_candidate
 from bot.services.search_service import SearchService
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import Keyboards
@@ -113,12 +113,22 @@ async def _render_results_page(
     start_idx = page * per_page
     page_results = results[start_idx:start_idx + per_page]
 
-    best_result = results[0] if results else None
-    show_grab_best = bool(
-        best_result
-        and best_result.calculated_score >= settings.auto_grab_score_threshold
-        and db_user.preferences.auto_grab_enabled
+    # Audit 2026-09-23 GRAB-02/12: *arr's verdict gates the button, see
+    # `grab_best_candidate`. The shown score is *arr's own CF score when there
+    # is one — the heuristic number is not what decided the order.
+    best_result = grab_best_candidate(
+        results,
+        auto_grab_enabled=db_user.preferences.auto_grab_enabled,
+        threshold=settings.auto_grab_score_threshold,
     )
+    show_grab_best = best_result is not None
+    best_score = 0
+    if best_result is not None:
+        best_score = (
+            best_result.custom_format_score
+            if best_result.origin == "arr"
+            else best_result.calculated_score
+        )
 
     text = Formatters.format_search_results_page(
         page_results,
@@ -138,7 +148,7 @@ async def _render_results_page(
             total_pages,
             per_page,
             show_grab_best,
-            best_result.calculated_score if best_result else 0,
+            best_score,
         ),
         parse_mode="HTML",
     )

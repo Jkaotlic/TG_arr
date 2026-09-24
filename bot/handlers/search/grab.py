@@ -6,10 +6,12 @@ import structlog
 from aiogram import F
 from aiogram.types import CallbackQuery, Message
 
+from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import accessible_message
 from bot.models import MovieInfo, SearchSession, SeriesInfo, User
 from bot.services.add_service import AddService
+from bot.services.scoring import grab_best_candidate
 from bot.services.search_service import SearchService
 from bot.ui.callbacks import SeasonPresetCB
 from bot.ui.formatters import Formatters
@@ -49,7 +51,21 @@ async def handle_grab_best(callback: CallbackQuery, db_user: User, db: Database)
             await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
             return
 
-        result = session.results[0]  # Best result
+        # Audit 2026-09-23 GRAB-02: the keyboard may predate the list it
+        # points at, so the verdict is re-checked here — never grab a
+        # release *arr rejected (or scored negative) from the one-tap button.
+        settings = get_settings()
+        result = grab_best_candidate(
+            session.results,
+            auto_grab_enabled=db_user.preferences.auto_grab_enabled,
+            threshold=settings.auto_grab_score_threshold,
+        )
+        if result is None:
+            await callback.answer(
+                "Лучший релиз не проходит профиль качества — выберите вручную",
+                show_alert=True,
+            )
+            return
         session.selected_result = result
         await db.save_session(user_id, session)
 

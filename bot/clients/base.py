@@ -836,6 +836,13 @@ class ArrBaseClient(BaseAPIClient):
             if isinstance(lang, dict) and lang.get("name")
         ]
 
+        custom_formats = [
+            cf.get("name")
+            for cf in item.get("customFormats") or []
+            if isinstance(cf, dict) and cf.get("name")
+        ]
+        quality_weight = item.get("qualityWeight")
+
         # Sonarr уже разобрал заголовок сам — это его вердикт, а не вторая копия
         # эвристики бота (Radarr этих полей не отдаёт вовсе, там останется None).
         # 2026-08-12: раньше поля не читались, и на ЭТОМ пути — основном для
@@ -875,6 +882,8 @@ class ArrBaseClient(BaseAPIClient):
             rejected=bool(item.get("rejected")) or bool(item.get("temporarilyRejected")),
             rejections=[str(r) for r in (item.get("rejections") or [])],
             languages=languages,
+            quality_weight=quality_weight if isinstance(quality_weight, int) else None,
+            custom_formats=custom_formats,
             detected_season=season_number if isinstance(season_number, int) else None,
             detected_episode=episode_numbers[0] if len(episode_numbers) == 1 else None,
             is_season_pack=is_season_pack,

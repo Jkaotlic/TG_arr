@@ -279,7 +279,9 @@ async def test_double_tap_grab_best_executes_once():
 
     session = SearchSession(
         user_id=1, query="q", content_type=ContentType.MOVIE,
-        results=[SearchResult(guid="g", title="t")],
+        # Audit 2026-09-23 B1: "⚡ Лучший" now re-checks *arr's verdict, so the
+        # fixture is an accepted *arr release (this test is about the double tap).
+        results=[SearchResult(guid="g", title="t", origin="arr", indexer_id=1)],
     )
     db = AsyncMock()
     db.get_session = AsyncMock(return_value=session)
