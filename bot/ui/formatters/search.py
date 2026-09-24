@@ -3,6 +3,8 @@ generic status/preferences/action-log/message formatters that don't belong
 to a more specific domain (torrent, emby, calendar).
 """
 
+from typing import Optional
+
 from bot.models import (
     ActionLog,
     ArtistInfo,
@@ -85,6 +87,26 @@ def _format_arr_verdict(result: SearchResult, *, compact: bool = False) -> str:
     return "✅ *arr" if compact else "✅ <b>Одобрено *arr</b>"
 
 
+def _profile_line(
+    chosen: Optional[QualityProfile],
+    fallback: Optional[tuple[QualityProfile, str]],
+    env_name: str,
+) -> str:
+    """/settings "Профиль:" line (audit GRAB-06)."""
+    if chosen is not None:
+        return f"  Профиль: {_e(chosen.name)}"
+    if fallback is None:
+        return "  Профиль: Не выбран"
+    profile, source = fallback
+    line = f"  Профиль: Не выбран → по умолчанию «{_e(profile.name)}»"
+    if source == "first":
+        line += (
+            "\n  ⚠️ Берётся первый профиль по списку — выберите профиль "
+            f"или задайте {env_name}"
+        )
+    return line
+
+
 class _SearchFormatters:
     """Search / content-info / status / preferences formatting mixin."""
 
@@ -108,6 +130,10 @@ class _SearchFormatters:
         # строки: пользователь выбрал ОДИН альбом.
         if result.is_season_pack and result.detected_season is None:
             lines.append("📚 дискография целиком")
+        # Audit GRAB-13: in a list narrowed to one episode, a season pack is
+        # the other thing that contains it — say so, it is 10× the size.
+        if result.is_season_pack and result.detected_season is not None:
+            lines.append(f"📦 пак сезона {result.detected_season}")
 
         # Quality info
         quality_parts = []
@@ -443,8 +469,15 @@ class _SearchFormatters:
         radarr_folders: list[RootFolder],
         sonarr_profiles: list[QualityProfile],
         sonarr_folders: list[RootFolder],
+        radarr_default: Optional[tuple[QualityProfile, str]] = None,
+        sonarr_default: Optional[tuple[QualityProfile, str]] = None,
     ) -> str:
         """Format user preferences for settings display.
+
+        ``radarr_default``/``sonarr_default`` are
+        ``AddService.resolve_profile_with_source``'s answer: the profile an add
+        uses when the user picked none, and why (audit GRAB-06). "first"
+        (profiles[0], typically "Any") gets a warning.
 
         Rollback 2026-08-10 (Task 13): Radarr and Sonarr have independent id
         spaces — live measurement, both have root folders 1/2 pointing at
@@ -459,7 +492,7 @@ class _SearchFormatters:
             (p for p in radarr_profiles if str(p.id) == str(prefs.radarr_quality_profile_id)),
             None,
         )
-        lines.append(f"  Профиль: {_e(rp.name) if rp else 'Не выбран'}")
+        lines.append(_profile_line(rp, radarr_default, "RADARR_DEFAULT_PROFILE_ID"))
         rf = next(
             (f for f in radarr_folders if str(f.id) == str(prefs.radarr_root_folder_id)), None
         )
@@ -470,7 +503,7 @@ class _SearchFormatters:
             (p for p in sonarr_profiles if str(p.id) == str(prefs.sonarr_quality_profile_id)),
             None,
         )
-        lines.append(f"  Профиль: {_e(sp.name) if sp else 'Не выбран'}")
+        lines.append(_profile_line(sp, sonarr_default, "SONARR_DEFAULT_PROFILE_ID"))
         sf = next(
             (f for f in sonarr_folders if str(f.id) == str(prefs.sonarr_root_folder_id)), None
         )

@@ -1183,21 +1183,25 @@ async def test_chosen_season_searches_instead_of_asking_again():
 
 @pytest.mark.asyncio
 async def test_whole_series_choice_searches_everything_instead_of_asking_again():
-    """«📺 Весь сериал» — это season=0 в колбэке: ответ дан, спрашивать нечего,
-    а искать надо весь сериал (season=None), а не нулевой сезон (спецвыпуски)."""
+    """«📺 Весь сериал» — это season=0 в колбэке: ответ дан, спрашивать нечего.
+
+    Audit 2026-09-23 GRAB-04: весь сериал больше не список релизов (`GET
+    /release` без сезона у Sonarr — RSS, а не поиск), а команда SeriesSearch.
+    Нулевой сезон (спецвыпуски) по-прежнему не ищется."""
     from bot.handlers import search
 
     search_service, message, status_msg = _season_flow_mocks()
+    add_service = MagicMock()
+    add_service.sonarr.search_series = AsyncMock(return_value={})
 
-    with patch.object(search, "get_services", AsyncMock(return_value=(search_service, MagicMock()))):
+    with patch.object(search, "get_services", AsyncMock(return_value=(search_service, add_service))):
         await search.process_search(
             message, "Тед Лассо 4 сезон", ContentType.SERIES, _make_db_user(), _make_db(),
             chosen_title=_series_with_four_seasons(), season_override=0,
         )
 
-    search_service.search_releases_for_title.assert_awaited_once_with(
-        ContentType.SERIES, 33, season=None, preferred_resolution=None,
-    )
+    search_service.search_releases_for_title.assert_not_awaited()
+    add_service.sonarr.search_series.assert_awaited_once_with(33)
     rendered = " ".join(str(c.args) + str(c.kwargs) for c in status_msg.edit_text.await_args_list)
     assert "Что искать?" not in rendered
 

@@ -15,7 +15,7 @@ from bot.db import Database
 from bot.handlers.common import accessible_message
 from bot.handlers._cache import get_ttl, put_ttl
 from bot.models import MovieInfo, SeriesInfo, User
-from bot.services.add_service import AddService
+from bot.services.add_service import AddService, resolve_profile_with_source
 from bot.services.search_service import SearchService
 from bot.ui.callbacks import AddContentCB, TrendingItemCB
 from bot.ui.formatters import Formatters
@@ -424,11 +424,13 @@ async def _add_movie_from_trending(callback: CallbackQuery, movie: MovieInfo, db
             return
 
         prefs = db_user.preferences
-        profile = AddService.resolve_profile(profiles, prefs.radarr_quality_profile_id)
+        profile, _source = resolve_profile_with_source(
+            profiles, prefs.radarr_quality_profile_id, get_settings().radarr_default_profile_id,
+        )
         folder_path = AddService.resolve_root_folder(folders, prefs.radarr_root_folder_id)
 
         added, action = await add_service.add_movie(
-            movie, quality_profile_id=profile.id, root_folder_path=folder_path,
+            movie, quality_profile_id=int(profile.id), root_folder_path=folder_path,
         )
         action.user_id = db_user.tg_id
         await db.log_action(action)
@@ -504,13 +506,15 @@ async def _add_series_from_trending(callback: CallbackQuery, series: SeriesInfo,
             return
 
         prefs = db_user.preferences
-        profile = AddService.resolve_profile(profiles, prefs.sonarr_quality_profile_id)
+        profile, _source = resolve_profile_with_source(
+            profiles, prefs.sonarr_quality_profile_id, get_settings().sonarr_default_profile_id,
+        )
         folder_path = AddService.resolve_root_folder(folders, prefs.sonarr_root_folder_id)
 
         # New series: every season monitored + search — what the button
         # label "➕ В библиотеку (все сезоны)" promises.
         added, action = await add_service.add_series(
-            resolved, quality_profile_id=profile.id, root_folder_path=folder_path,
+            resolved, quality_profile_id=int(profile.id), root_folder_path=folder_path,
             monitor="all",
         )
         action.user_id = db_user.tg_id

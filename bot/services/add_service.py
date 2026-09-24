@@ -208,6 +208,37 @@ def _log_grab_completed(
     )
 
 
+#: GRAB-06: a profile whose name says 4K/2160 is the sensible default for this
+#: library (live profile 7 "4k/1080p"), unlike profiles[0] ("Any").
+_UHD_PROFILE_MARKERS = ("4k", "2160")
+
+
+def resolve_profile_with_source(
+    profiles: list[QualityProfile],
+    preferred_id,
+    default_id=None,
+) -> tuple[QualityProfile, str]:
+    """Radarr/Sonarr quality profile for an add, and where it came from.
+
+    Audit 2026-09-23 GRAB-06 — fallback order: ``"user"`` (the /settings
+    preference) → ``"config"`` (RADARR/SONARR_DEFAULT_PROFILE_ID) → ``"name"``
+    (first profile whose name contains 4k/2160) → ``"first"`` (profiles[0];
+    /settings warns). Ids compare as strings, like
+    ``AddService.resolve_profile``. A module function so handlers call the
+    real rule even where tests replace the ``AddService`` class.
+    """
+    for wanted, source in ((preferred_id, "user"), (default_id, "config")):
+        if wanted is not None and wanted != "":
+            match = next((p for p in profiles if str(p.id) == str(wanted)), None)
+            if match is not None:
+                return match, source
+    for p in profiles:
+        name = (p.name or "").casefold()
+        if any(m in name for m in _UHD_PROFILE_MARKERS):
+            return p, "name"
+    return profiles[0], "first"
+
+
 class AddService:
     """Grabs release candidates for titles already in Radarr/Sonarr, plus the
     Lidarr artist-add path (unchanged by this rollback).
@@ -284,6 +315,13 @@ class AddService:
             if match is not None:
                 return match
         return profiles[0]
+
+    @staticmethod
+    def resolve_profile_with_source(
+        profiles: list[QualityProfile], preferred_id, default_id=None,
+    ) -> tuple[QualityProfile, str]:
+        """Alias of the module-level :func:`resolve_profile_with_source` (GRAB-06)."""
+        return resolve_profile_with_source(profiles, preferred_id, default_id)
 
     @staticmethod
     def resolve_root_folder(folders: list[RootFolder], preferred_id) -> str:

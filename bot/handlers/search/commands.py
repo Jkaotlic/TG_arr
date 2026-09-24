@@ -17,6 +17,7 @@ from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import strip_command
 from bot.models import ActionLog, ActionType, ContentType, SearchSession, User
+from bot.services.add_service import resolve_profile_with_source
 from bot.services.search_service import SearchService, describe_search_failure
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import Keyboards
@@ -262,7 +263,11 @@ async def _resolve_arr_entry(
         if not profiles or not folders:
             logger.warning("radarr_add_blocked_no_profiles_or_folders")
             raise ValueError("В Radarr не настроены профили качества или папки — обратитесь к администратору")
-        profile = add_service.resolve_profile(profiles, db_user.preferences.radarr_quality_profile_id)
+        # GRAB-06: user pref → RADARR_DEFAULT_PROFILE_ID → 4K-named → first.
+        profile, _source = resolve_profile_with_source(
+            profiles, db_user.preferences.radarr_quality_profile_id,
+            get_settings().radarr_default_profile_id,
+        )
         folder_path = add_service.resolve_root_folder(folders, db_user.preferences.radarr_root_folder_id)
         added, _action = await add_service.add_movie(
             candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
@@ -288,7 +293,10 @@ async def _resolve_arr_entry(
     if not profiles or not folders:
         logger.warning("sonarr_add_blocked_no_profiles_or_folders")
         raise ValueError("В Sonarr не настроены профили качества или папки — обратитесь к администратору")
-    profile = add_service.resolve_profile(profiles, db_user.preferences.sonarr_quality_profile_id)
+    profile, _source = resolve_profile_with_source(
+        profiles, db_user.preferences.sonarr_quality_profile_id,
+        get_settings().sonarr_default_profile_id,
+    )
     folder_path = add_service.resolve_root_folder(folders, db_user.preferences.sonarr_root_folder_id)
     added, _action = await add_service.add_series(
         candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
@@ -320,6 +328,52 @@ def _known_seasons(title, content_type: ContentType) -> list[int]:
         if isinstance(s, dict) and isinstance(s.get("seasonNumber"), int) and s.get("seasonNumber", 0) > 0
     }
     return sorted(numbers)
+
+
+async def _search_whole_series(
+    status_msg: Message,
+    add_service,
+    title,
+    arr_id: int,
+    created: bool,
+    db: Database,
+    user_id: int,
+    content_type: ContentType,
+    query: str,
+) -> None:
+    """"📺 Весь сериал": Sonarr's SeriesSearch command, no release list.
+
+    SeriesSearch skips unmonitored seasons. A series THIS search added is
+    all-off (added with monitor="none"), so every season is monitored first —
+    the user asked for the whole show. A series that was already in the
+    library keeps its owner's monitoring (audit GRAB-05); Sonarr searches the
+    seasons monitored there.
+    """
+    sonarr = add_service.sonarr
+    if created:
+        await sonarr.set_series_monitored(arr_id, True)
+        await sonarr.set_season_monitoring(arr_id, "all")
+    await sonarr.search_series(arr_id)
+
+    text = (
+        f"📺 <b>{html.escape(title.title)}</b>\n\n"
+        "🔍 Sonarr сам ищет все сезоны — релизы выберет профиль."
+    )
+    if not created:
+        text += (
+            "\n\n<i>Сериал уже был в библиотеке — ищутся сезоны, которые в нём "
+            "отслеживаются. Мониторинг: /title</i>"
+        )
+    await status_msg.edit_text(text, parse_mode="HTML")
+    await db.delete_session(user_id)
+    await db.log_action(ActionLog(
+        user_id=user_id,
+        action_type=ActionType.SEARCH,
+        content_type=content_type,
+        query=query,
+        content_title=title.title,
+        details="series_search_command",
+    ))
 
 
 async def process_search(
@@ -571,6 +625,22 @@ async def process_search(
             log.info("search_branch", branch="ask_season", seasons=len(seasons))
             return
 
+        is_episodic = content_type in (ContentType.SERIES, ContentType.ANIME)
+        if is_episodic and season_override == 0:
+            # Audit 2026-09-23 GRAB-04: Sonarr's `GET /release?seriesId`
+            # without a season is an RSS-style query, not a search of the
+            # show — the "list" it returned was noise. "Весь сериал" is
+            # Sonarr's own SeriesSearch instead.
+            await _search_whole_series(
+                status_msg, add_service, title, arr_id, created, db, user_id, content_type, query,
+            )
+            log.info("search_branch", branch="whole_series_command", arr_id=arr_id, created=created)
+            return
+        if is_episodic and season_wanted is None:
+            # GRAB-04: a single-season show (no picker was needed) is still
+            # searched by season — seasonNumber=1 when Sonarr lists none.
+            season_wanted = seasons[0] if seasons else 1
+
         t_search = time.monotonic()
         results = await search_service.search_releases_for_title(
             content_type,
@@ -587,6 +657,16 @@ async def process_search(
             result_count=len(results),
             arr_id=arr_id,
         )
+
+        # Audit GRAB-13: "S01E05" asks for one episode. The season search
+        # returns every episode of the season; keep that episode and the
+        # season packs (flagged "пак сезона" in the list) that contain it.
+        wanted_episode = parsed.get("episode")
+        if is_episodic and wanted_episode is not None and parsed.get("season") is not None:
+            results = [
+                r for r in results
+                if r.is_season_pack or r.detected_episode == wanted_episode
+            ]
 
         if not results:
             # Тот же довод, что и в ветке no_metadata: *arr спрашивает

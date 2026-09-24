@@ -34,7 +34,7 @@ from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import accessible_message
 from bot.models import User
-from bot.services.add_service import AddService
+from bot.services.add_service import AddService, resolve_profile_with_source
 from bot.ui.callbacks import SettingCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -76,8 +76,23 @@ async def _render_settings_menu(db_user: User) -> tuple[str, InlineKeyboardMarku
         add_service.get_sonarr_root_folders(),
     )
 
+    # GRAB-06: show which profile an add would actually use, and warn when
+    # that is only "the first one" (often "Any").
+    settings = get_settings()
+    prefs = db_user.preferences
+    radarr_default = (
+        resolve_profile_with_source(
+            radarr_profiles, prefs.radarr_quality_profile_id, settings.radarr_default_profile_id,
+        ) if radarr_profiles else None
+    )
+    sonarr_default = (
+        resolve_profile_with_source(
+            sonarr_profiles, prefs.sonarr_quality_profile_id, settings.sonarr_default_profile_id,
+        ) if sonarr_profiles else None
+    )
     text = Formatters.format_user_preferences(
-        db_user.preferences, radarr_profiles, radarr_folders, sonarr_profiles, sonarr_folders,
+        prefs, radarr_profiles, radarr_folders, sonarr_profiles, sonarr_folders,
+        radarr_default=radarr_default, sonarr_default=sonarr_default,
     )
     keyboard = Keyboards.settings_menu(
         lidarr_enabled=get_settings().lidarr_enabled, prefs=db_user.preferences

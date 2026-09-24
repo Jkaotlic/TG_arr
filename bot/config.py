@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     sonarr_url: str = Field(..., min_length=1, description="Sonarr base URL")
     sonarr_api_key: str = Field(..., min_length=1, description="Sonarr API key")
 
+    # Audit 2026-09-23 GRAB-06: quality profile for a user who has not picked
+    # one in /settings. Unset → a profile named like 4K/2160, else the first
+    # one (with a warning in /settings — the first is often "Any").
+    radarr_default_profile_id: Optional[int] = Field(
+        default=None, ge=1, description="Radarr quality profile for users without a preference",
+    )
+    sonarr_default_profile_id: Optional[int] = Field(
+        default=None, ge=1, description="Sonarr quality profile for users without a preference",
+    )
+
     # Lidarr (optional, music)
     lidarr_url: Optional[str] = Field(default=None, description="Lidarr base URL")
     lidarr_api_key: Optional[str] = Field(default=None, description="Lidarr API key")
