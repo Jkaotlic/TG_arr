@@ -135,6 +135,19 @@ class Settings(BaseSettings):
     music_notify_stall_seconds: int = Field(
         default=3600, ge=60, description="Quiet time after which a stuck album gets a partial summary (seconds)"
     )
+    # Audit 2026-09-23 (NOTIF-07): qBittorrent categories whose torrents are
+    # imported by Radarr/Sonarr. Their completion is announced once, by
+    # library_watch («в библиотеке»), so the qBit "download finished" message
+    # is skipped for them. The bot itself adds with "radarr"/"tv-sonarr"
+    # (`bot.services.add_service._QBIT_CATEGORIES`).
+    arr_torrent_categories: str = Field(
+        default="radarr,tv-sonarr,sonarr",
+        description="Comma-separated qBittorrent categories owned by Radarr/Sonarr",
+    )
+
+    @property
+    def arr_torrent_category_set(self) -> set[str]:
+        return {c.strip() for c in self.arr_torrent_categories.split(",") if c.strip()}
 
     # Optional
     timezone: str = Field(default="Europe/Moscow", description="Timezone for timestamps")

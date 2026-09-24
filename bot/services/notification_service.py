@@ -320,7 +320,18 @@ class NotificationService:
 
                 if is_complete:
                     if not tracked["notified"]:
-                        await self._notify_completion(torrent)
+                        if (torrent.category or "") in self.settings.arr_torrent_category_set:
+                            # NOTIF-07 (audit 2026-09-23): Radarr/Sonarr
+                            # import this torrent and library_watch announces
+                            # it once it is in the library — a qBit message
+                            # here would be the second one for one film.
+                            logger.debug(
+                                "qbit_completion_left_to_library_watch",
+                                torrent_name=torrent.name,
+                                category=torrent.category,
+                            )
+                        else:
+                            await self._notify_completion(torrent)
                         self._completed_count += 1
                     # Once complete+notified there is no further state to
                     # track — drop it now instead of keeping a growing dict

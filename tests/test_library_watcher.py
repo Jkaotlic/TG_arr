@@ -28,7 +28,7 @@ unchanged:
   a slskd restart makes *everything* vanish at once (BUG-02).
 
 A third, newly relevant for the history-journal source: a (re)start must not
-replay *arr's existing history as if it just landed — `poll_once()` itself
+replay *arr's existing history as if it just landed — `_fetch_imports()` itself
 reports a fresh watcher's first read verbatim (that is the raw detection
 primitive, and what task-14's own brief tests), but `poll()` — what
 `bot.main._library_watch` actually drives — silently seeds on its first cycle
@@ -68,7 +68,13 @@ def _services(radarr_history=None, sonarr_history=None):
     return radarr, sonarr
 
 
-# --------------------------------------------------------------- poll_once
+async def _landed(watcher: LibraryWatcher) -> list[dict]:
+    """Raw detection: unseen import records of one cycle (no priming)."""
+    landed, _ = await watcher._fetch_imports()
+    return [record for _, record in landed]
+
+
+# ---------------------------------------------------------- raw detection
 @pytest.mark.asyncio
 async def test_library_watcher_reports_imported_media():
     """The watcher fires when media actually lands, not when it is queued."""
@@ -77,7 +83,7 @@ async def test_library_watcher_reports_imported_media():
     ])
 
     watcher = LibraryWatcher(radarr, sonarr)
-    landed = await watcher.poll_once()
+    landed = await _landed(watcher)
 
     assert [item["sourceTitle"] for item in landed] == ["Dune 2021 2160p"]
 
@@ -89,8 +95,8 @@ async def test_library_watcher_does_not_re_report_the_same_import():
     ])
 
     watcher = LibraryWatcher(radarr, sonarr)
-    await watcher.poll_once()
-    second = await watcher.poll_once()
+    await _landed(watcher)
+    second = await _landed(watcher)
 
     assert second == []
 
@@ -106,7 +112,7 @@ async def test_seen_ids_are_scoped_per_service():
     )
 
     watcher = LibraryWatcher(radarr, sonarr)
-    landed = await watcher.poll_once()
+    landed = await _landed(watcher)
 
     assert {item["sourceTitle"] for item in landed} == {"Movie", "Episode"}
 
@@ -122,7 +128,7 @@ async def test_a_mixed_burst_is_returned_oldest_first():
     )
 
     watcher = LibraryWatcher(radarr, sonarr)
-    landed = await watcher.poll_once()
+    landed = await _landed(watcher)
 
     assert [item["sourceTitle"] for item in landed] == ["First", "Second"]
 
@@ -133,7 +139,7 @@ async def test_one_service_failing_does_not_stop_the_other():
     radarr.get_history.side_effect = RuntimeError("radarr down")
 
     watcher = LibraryWatcher(radarr, sonarr)
-    landed = await watcher.poll_once()  # must not raise
+    landed = await _landed(watcher)  # must not raise
 
     assert [item["sourceTitle"] for item in landed] == ["Ep"]
 
@@ -142,7 +148,7 @@ async def test_one_service_failing_does_not_stop_the_other():
 @pytest.mark.asyncio
 async def test_poll_does_not_replay_pre_existing_history_on_the_first_cycle():
     """A bot restart must not replay *arr's already-known import history as
-    new landings. `poll_once()` (above) reports a fresh watcher's first read
+    new landings. `_fetch_imports()` (above) reports a fresh watcher's first read
     verbatim by design; the anti-spam-on-restart guarantee therefore lives
     one layer up, at `poll()` — what the real background task drives."""
     sent: list[str] = []

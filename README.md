@@ -161,6 +161,9 @@ nano .env  # Заполнить обязательные переменные
 | `AUTO_GRAB_SCORE_THRESHOLD` | `80` | Порог автозахвата |
 | `NOTIFY_DOWNLOAD_COMPLETE` | `true` | Уведомлять о скачивании |
 | `NOTIFY_CHECK_INTERVAL` | `60` | Интервал проверки (сек) |
+| `MUSIC_NOTIFY_SETTLE_SECONDS` | `300` | Музыка: сводка по альбому после стольких секунд тишины |
+| `MUSIC_NOTIFY_STALL_SECONDS` | `3600` | Музыка: частичная сводка, если альбом застрял |
+| `ARR_TORRENT_CATEGORIES` | `radarr,tv-sonarr,sonarr` | Категории qBittorrent, о которых сообщает «в библиотеке», а не qBit |
 | `RESULTS_PER_PAGE` | `5` | Результатов на страницу |
 
 </details>
