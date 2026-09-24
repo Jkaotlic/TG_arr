@@ -11,6 +11,7 @@ import structlog
 from bot.clients.base import APIError, BaseAPIClient, ServiceConnectionError
 from bot.config import get_settings
 from bot.models import MIN_PACK_EPISODES, ContentType, QualityInfo, SearchResult
+from bot.services.release_parser import parse_title_quality
 
 logger = structlog.get_logger()
 
@@ -297,123 +298,13 @@ class ProwlarrClient(BaseAPIClient):
         )
 
     def _parse_quality(self, title: str) -> QualityInfo:
-        """Parse quality information from release title."""
-        title_lower = title.lower()
+        """Parse quality information from release title.
 
-        # Resolution
-        resolution = None
-        if "2160p" in title_lower or "4k" in title_lower or "uhd" in title_lower:
-            resolution = "2160p"
-        elif "1080p" in title_lower:
-            resolution = "1080p"
-        elif "720p" in title_lower:
-            resolution = "720p"
-        elif "480p" in title_lower:
-            resolution = "480p"
-        elif "576p" in title_lower:
-            resolution = "576p"
-
-        # Source
-        source = None
-        # "BDRemux" / "BD-Remux" is how Russian trackers name a BluRay remux, and
-        # those are a large share of what this stack actually sees — without it
-        # the release card showed "Источник: —" for them (audit 2026-07-30).
-        #
-        # 2026-08-12: that audit's fix landed in
-        # `bot/services/release_parser.parse_quality`, a second copy of this
-        # parser that had no production caller at all — so the bug it fixed was
-        # still live here. The dead copy is gone; the clause belongs where the
-        # code actually runs.
-        if any(
-            marker in title_lower
-            for marker in ("bluray", "blu-ray", "bdrip", "bdremux", "bd-remux", "bdmux")
-        ):
-            source = "BluRay"
-        elif "web-dl" in title_lower or "webdl" in title_lower:
-            source = "WEB-DL"
-        elif "webrip" in title_lower or "web-rip" in title_lower:
-            source = "WEBRip"
-        elif "hdtv" in title_lower:
-            source = "HDTV"
-        elif "dvdrip" in title_lower or "dvd-rip" in title_lower:
-            source = "DVDRip"
-        elif any(x in title_lower for x in ["cam", "camrip", "hdcam"]):
-            source = "CAM"
-        elif any(x in title_lower for x in ["telesync", "hdts"]) or re.search(r"[\.\s\-\[]ts[\.\s\-\]]", title_lower):
-            source = "TS"
-        elif "telecine" in title_lower or re.search(r"[\.\s\-\[]tc[\.\s\-\]]", title_lower):
-            source = "TC"
-
-        # Codec
-        codec = None
-        if "x265" in title_lower or "hevc" in title_lower or "h.265" in title_lower or "h265" in title_lower:
-            codec = "x265"
-        elif "x264" in title_lower or "h.264" in title_lower or "h264" in title_lower:
-            codec = "x264"
-        elif "av1" in title_lower:
-            codec = "AV1"
-        elif "xvid" in title_lower:
-            codec = "XviD"
-        elif "divx" in title_lower:
-            codec = "DivX"
-
-        # HDR
-        hdr = None
-        if "dolby vision" in title_lower or "dolby.vision" in title_lower or re.search(r"[\.\s\-]dv[\.\s\-]|[\.\s\-]dv$", title_lower) or "dovi" in title_lower:
-            hdr = "DV"
-        if "hdr10+" in title_lower:
-            hdr = "HDR10+" if hdr is None else f"{hdr}+HDR10+"
-        elif "hdr10" in title_lower:
-            hdr = "HDR10" if hdr is None else f"{hdr}+HDR10"
-        elif "hdr" in title_lower:
-            hdr = "HDR" if hdr is None else f"{hdr}+HDR"
-
-        # Audio
-        audio = None
-        if "atmos" in title_lower:
-            audio = "Atmos"
-        elif "truehd" in title_lower or "true-hd" in title_lower:
-            audio = "TrueHD"
-        elif "dts-hd" in title_lower or "dtshd" in title_lower:
-            audio = "DTS-HD"
-        elif "dts" in title_lower:
-            audio = "DTS"
-        elif "dd5.1" in title_lower or "dd 5.1" in title_lower or "dd.5.1" in title_lower or "ac3" in title_lower:
-            audio = "DD5.1"
-        elif "aac" in title_lower:
-            audio = "AAC"
-
-        # Subtitles / Russian audio
-        subtitle = None
-        if re.search(r"rus[\.\s\-_]?sub|russian[\.\s\-_]?sub|russub", title_lower):
-            subtitle = "RusSub"
-        elif re.search(r"[\.\s\-_]mvo[\.\s\-_$]", title_lower):
-            subtitle = "MVO"
-        elif re.search(r"[\.\s\-_]dvo[\.\s\-_$]", title_lower):
-            subtitle = "DVO"
-        elif re.search(r"[\.\s\-_]avo[\.\s\-_$]", title_lower):
-            subtitle = "AVO"
-        elif re.search(r"multi[\.\s\-_]?sub", title_lower):
-            subtitle = "MultiSub"
-
-        # Remux
-        is_remux = "remux" in title_lower
-
-        # Repack/Proper
-        is_repack = "repack" in title_lower or "rerip" in title_lower
-        is_proper = "proper" in title_lower
-
-        return QualityInfo(
-            resolution=resolution,
-            source=source,
-            codec=codec,
-            hdr=hdr,
-            audio=audio,
-            subtitle=subtitle,
-            is_remux=is_remux,
-            is_repack=is_repack,
-            is_proper=is_proper,
-        )
+        Audit 2026-09-23 GRAB-10/17: the parser now lives in
+        `bot.services.release_parser.parse_title_quality`, shared with the
+        *arr path (which fills codec/HDR/voice-over from the title too).
+        """
+        return parse_title_quality(title)
 
     def _extract_year(self, title: str) -> Optional[int]:
         """Extract year from title."""

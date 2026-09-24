@@ -20,7 +20,7 @@ from tenacity import (
 
 from bot.config import Settings, get_settings
 from bot.models import MIN_PACK_EPISODES, QualityProfile, RootFolder, SearchResult
-from bot.services.release_parser import parse_quality_name
+from bot.services.release_parser import enrich_from_title, parse_quality_name
 
 logger = structlog.get_logger()
 
@@ -900,7 +900,9 @@ class ArrBaseClient(BaseAPIClient):
             leechers=item.get("leechers") or 0,
             protocol=(item.get("protocol") or "torrent").lower(),
             publish_date=item.get("publishDate"),
-            quality=parse_quality_name(quality_name),
+            # GRAB-10: *arr's name gives resolution/source; codec, HDR/DV,
+            # audio and voice-over come from the title where *arr is silent.
+            quality=enrich_from_title(parse_quality_name(quality_name), title),
             custom_format_score=item.get("customFormatScore") or 0,
             rejected=bool(item.get("rejected")) or bool(item.get("temporarilyRejected")),
             rejections=[str(r) for r in (item.get("rejections") or [])],

@@ -93,3 +93,77 @@ def _safe_truncate(text: str, max_len: int = 3800) -> str:
     if last_open > last_close:
         piece = piece[:last_open]
     return piece + SUFFIX
+
+
+# ---------------------------------------------------------------------------
+# Release list buttons (audit 2026-09-23 GRAB-10/GRAB-11)
+# ---------------------------------------------------------------------------
+
+#: Telegram shows about this many characters of an inline button on a phone.
+LABEL_MAX = 40
+
+#: *arr language names → flags for the list button. Unknown names are left
+#: out of the button (the card lists every language by name).
+_LANGUAGE_FLAGS = {
+    "english": "🇬🇧", "russian": "🇷🇺", "ukrainian": "🇺🇦", "japanese": "🇯🇵",
+    "french": "🇫🇷", "german": "🇩🇪", "spanish": "🇪🇸", "italian": "🇮🇹",
+    "korean": "🇰🇷", "chinese": "🇨🇳", "portuguese": "🇵🇹", "polish": "🇵🇱",
+}
+
+_SOURCE_SHORT = {
+    "BluRay": "BD", "WEB-DL": "WEB", "WEBRip": "WEB", "HDTV": "HDTV",
+    "DVDRip": "DVD", "CAM": "CAM", "TS": "TS", "TC": "TC",
+}
+
+
+def release_button_label(result, idx: int) -> str:
+    """``N. 2160p Remux 🇬🇧💬 ⛔ 58.3 GB S:12`` for one release button.
+
+    The size keeps its unit — ``size_formatted[:6]`` used to render
+    "123.4 MB" and "123.4 GB" identically (GRAB-11). Language flags come
+    from *arr's ``languages``, 💬 from parsed subtitles or a subtitle custom
+    format, ⛔ marks a release *arr rejects (GRAB-10).
+
+    Over ``LABEL_MAX``: seeders go first, then flags one by one, then the
+    head is shortened. Size and ⛔ are never cut.
+    """
+    quality = result.quality
+    head = f"{idx + 1}. {quality.resolution or '?'}"
+    source = "Remux" if quality.is_remux else _SOURCE_SHORT.get(quality.source or "", quality.source or "")
+    if source:
+        head += f" {source}"
+
+    flags = [
+        _LANGUAGE_FLAGS[name.casefold()]
+        for name in (getattr(result, "languages", None) or [])
+        if isinstance(name, str) and name.casefold() in _LANGUAGE_FLAGS
+    ]
+    subs = bool(quality.subtitle) or any(
+        "sub" in cf.casefold() for cf in (getattr(result, "custom_formats", None) or [])
+    )
+
+    tail_parts = []
+    if result.rejected:
+        tail_parts.append("⛔")
+    if result.size > 0:
+        tail_parts.append(result.size_formatted)
+    tail = " ".join(tail_parts)
+    seeders = f"S:{result.seeders}" if result.seeders else ""
+
+    def build(with_seeders: bool) -> str:
+        marks = "".join(flags) + ("💬" if subs else "")
+        parts = [head, marks, tail, seeders if with_seeders else ""]
+        return " ".join(p for p in parts if p)
+
+    label = build(True)
+    if len(label) <= LABEL_MAX:
+        return label
+    label = build(False)
+    while len(label) > LABEL_MAX and flags:
+        flags.pop()
+        label = build(False)
+    if len(label) <= LABEL_MAX:
+        return label
+    room = LABEL_MAX - len(tail) - 1
+    short_head = head[: max(room - 1, 1)].rstrip() + "…"
+    return f"{short_head} {tail}" if tail else short_head

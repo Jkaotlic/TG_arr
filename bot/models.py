@@ -93,7 +93,10 @@ class QualityInfo(BaseModel):
     codec: Optional[str] = None  # x264, x265, HEVC, AV1, etc.
     hdr: Optional[str] = None  # HDR, HDR10, DV (Dolby Vision), etc.
     audio: Optional[str] = None  # DTS, Atmos, TrueHD, etc.
-    subtitle: Optional[str] = None  # RusSub, MVO, DVO, etc.
+    subtitle: Optional[str] = None  # RusSub, MultiSub
+    # Audit 2026-09-23 GRAB-17: MVO/DVO/AVO/Dub are voice-over tracks (audio),
+    # not subtitles — they used to land in `subtitle`.
+    voice: Optional[str] = None  # MVO, DVO, AVO, Dub
     is_remux: bool = False
     is_repack: bool = False
     is_proper: bool = False

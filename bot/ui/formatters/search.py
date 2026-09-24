@@ -145,6 +145,8 @@ class _SearchFormatters:
             quality_parts.append(result.quality.codec)
         if result.quality.hdr:
             quality_parts.append(result.quality.hdr)
+        if result.quality.voice:
+            quality_parts.append(f"🎙{result.quality.voice}")
         if result.quality.subtitle:
             quality_parts.append(f"💬{result.quality.subtitle}")
 
@@ -228,8 +230,16 @@ class _SearchFormatters:
             lines.append("  • 📀 REMUX")
         if result.quality.is_repack:
             lines.append("  • 🔄 REPACK")
+        if result.quality.voice:
+            lines.append(f"  • 🎙 Озвучка: {_e(result.quality.voice)}")
         if result.quality.subtitle:
             lines.append(f"  • 💬 Субтитры: {result.quality.subtitle}")
+        # Audit GRAB-10: what *arr itself parsed and matched — the reasons
+        # behind its order and verdict.
+        if result.languages:
+            lines.append(f"  • 🗣 Языки: {_e(', '.join(result.languages))}")
+        if result.custom_formats:
+            lines.append(f"  • 🏷 Форматы: {_e(', '.join(result.custom_formats))}")
 
         lines.append("")
 

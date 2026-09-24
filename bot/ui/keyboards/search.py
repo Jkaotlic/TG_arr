@@ -24,6 +24,7 @@ from bot.ui.callbacks import (
     ReleaseCB,
     SeasonPresetCB,
 )
+from bot.ui.formatters._common import release_button_label
 from bot.ui.keyboards._constants import CallbackData
 
 
@@ -73,14 +74,8 @@ class _SearchKeyboards:
         start_idx = current_page * per_page
         for i, result in enumerate(results):
             idx = start_idx + i
-            # Show basic info in button
-            quality = result.quality.resolution or "?"
-            seeders = f"S:{result.seeders}" if result.seeders else ""
-            size = result.size_formatted[:6] if result.size > 0 else ""
-
-            label = f"{idx + 1}. {quality} {seeders} {size}".strip()
-            if len(label) > 40:
-                label = label[:37] + "..."
+            # Audit GRAB-10/11: full size with unit, source, languages, ⛔.
+            label = release_button_label(result, idx)
 
             keyboard.append([
                 InlineKeyboardButton(
@@ -260,12 +255,7 @@ class _SearchKeyboards:
         keyboard = []
         for i, result in enumerate(results):
             idx = offset + i
-            quality = result.quality.resolution or "?"
-            seeders = f"S:{result.seeders}" if result.seeders else ""
-            size = result.size_formatted[:6] if result.size > 0 else ""
-            label = f"{idx + 1}. {quality} {seeders} {size}".strip()
-            if len(label) > 40:
-                label = label[:37] + "..."
+            label = release_button_label(result, idx)
             keyboard.append([
                 InlineKeyboardButton(text=label, callback_data=FindReleaseCB(tok=list_token, idx=idx).pack()),
             ])
