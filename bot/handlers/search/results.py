@@ -293,12 +293,15 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
             await callback.answer("Сессия истекла", show_alert=True)
             return
 
-        # Clear selection and go back to results.
+        # Clear the release selection and go back to results.
+        # Review fix round 1 (B1): keep `selected_content` — it is the TITLE the
+        # whole list belongs to (Radarr/Sonarr id), not a per-card selection.
+        # Clearing it made every grab button on the redrawn list read as
+        # "Список устарел" and the next card "Информация о тайтле недоступна".
         # PERF-06: only re-serialize the session when there is actually a selection
         # to clear — pressing Back with nothing selected is a no-op write.
-        if session.selected_result is not None or session.selected_content is not None:
+        if session.selected_result is not None:
             session.selected_result = None
-            session.selected_content = None
             await db.save_session(user_id, session)
 
     # Show results page

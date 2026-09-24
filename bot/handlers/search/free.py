@@ -45,13 +45,10 @@ _NOT_IN_LIBRARY_NOTE = (
 
 _SEARCHING = "🔎 Ищу раздачи напрямую в Prowlarr..."
 
-#: GRAB-09: which *arr a free-search hit is pushed to, by Prowlarr's category.
-#: Anything else (music, unknown) is not pushed at all — see handle_find_grab.
-_ARR_TARGETS = {
-    ContentType.MOVIE: ContentType.MOVIE,
-    ContentType.SERIES: ContentType.SERIES,
-    ContentType.ANIME: ContentType.ANIME,
-}
+#: GRAB-09: detected types a free-search hit is pushed to *arr for (movie →
+#: Radarr, series/anime → Sonarr). Anything else (music, unknown) is not pushed
+#: at all — see handle_find_grab.
+_ARR_TARGETS = frozenset({ContentType.MOVIE, ContentType.SERIES, ContentType.ANIME})
 
 
 def _is_free_session(session) -> bool:
@@ -262,13 +259,13 @@ async def handle_find_grab(
         # GRAB-09: pick *arr by what the release is, not "always Sonarr". A
         # type nobody recognised goes to qBittorrent directly — and says so —
         # instead of being pushed to an *arr that will refuse it.
-        target = _ARR_TARGETS.get(release.detected_type)
-        direct = bool(callback_data.q) or target is None
+        target = release.detected_type
+        direct = bool(callback_data.q) or target not in _ARR_TARGETS
         if direct and add_service.qbittorrent is None:
             await message.edit_text(Formatters.format_error("qBittorrent не настроен"))
             return
 
-        if direct or target is None:
+        if direct:
             success, action = await add_service.grab_release(
                 release, release.detected_type, force_download=True,
             )

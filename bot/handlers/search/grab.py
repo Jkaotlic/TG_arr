@@ -64,6 +64,20 @@ def _selected_index(session: SearchSession) -> int:
     return 0
 
 
+async def _load_pick(db: Database, user_id: int, tok: str, idx: int) -> SearchSession | None:
+    """The session, if ``tok``/``idx`` still name a release of its current
+    catalogue list; None otherwise ("устарел").
+
+    Review fix round 1: called again AFTER ``_claim_grab`` — between the
+    first read and the claim a concurrent action may have replaced or
+    deleted the session, and the grab must act on what is there now.
+    """
+    session = await db.get_session(user_id)
+    if session is None or not _catalogue_list(session, tok) or idx >= len(session.results):
+        return None
+    return session
+
+
 def _arr_name(content_type: ContentType) -> str:
     if content_type is ContentType.MOVIE:
         return "Radarr"
@@ -164,13 +178,8 @@ async def handle_confirm_grab(
         return
 
     user_id = callback.from_user.id
-    session = await db.get_session(user_id)
-
-    if (
-        session is None
-        or not _catalogue_list(session, callback_data.tok)
-        or callback_data.idx >= len(session.results)
-    ):
+    session = await _load_pick(db, user_id, callback_data.tok, callback_data.idx)
+    if session is None:
         await answer_stale(callback)
         return
 
@@ -185,6 +194,10 @@ async def handle_confirm_grab(
         await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
     try:
+        session = await _load_pick(db, user_id, callback_data.tok, callback_data.idx)
+        if session is None:
+            await answer_stale(callback)
+            return
         session.selected_result = session.results[callback_data.idx]
         search_service, add_service = await _search.get_services()
         await callback.answer("Обработка...")
@@ -406,12 +419,7 @@ async def handle_force_grab(
         return
 
     user_id = db_user.tg_id
-    session = await db.get_session(user_id)
-    if (
-        session is None
-        or not _catalogue_list(session, callback_data.tok)
-        or callback_data.idx >= len(session.results)
-    ):
+    if await _load_pick(db, user_id, callback_data.tok, callback_data.idx) is None:
         await answer_stale(callback)
         return
 
@@ -420,6 +428,10 @@ async def handle_force_grab(
         await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
     try:
+        session = await _load_pick(db, user_id, callback_data.tok, callback_data.idx)
+        if session is None:
+            await answer_stale(callback)
+            return
         await callback.answer("Загружаю напрямую...")
         session.selected_result = session.results[callback_data.idx]
 
@@ -566,12 +578,7 @@ async def handle_auto_search(
         return
 
     user_id = callback.from_user.id
-    session = await db.get_session(user_id)
-    if (
-        session is None
-        or not _catalogue_list(session, callback_data.tok)
-        or callback_data.idx >= len(session.results)
-    ):
+    if await _load_pick(db, user_id, callback_data.tok, callback_data.idx) is None:
         await answer_stale(callback)
         return
 
@@ -579,6 +586,10 @@ async def handle_auto_search(
         await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
     try:
+        session = await _load_pick(db, user_id, callback_data.tok, callback_data.idx)
+        if session is None:
+            await answer_stale(callback)
+            return
         session.selected_result = session.results[callback_data.idx]
         search_service, add_service = await _search.get_services()
         await callback.answer("Запускаю поиск...")

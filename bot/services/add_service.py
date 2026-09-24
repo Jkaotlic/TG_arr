@@ -632,13 +632,18 @@ class AddService:
             try:
                 await arr_client.grab_release(fresh.guid, fresh.indexer_id or 0)
             except Exception as e:
-                return self._native_failed(log, action, content_type, e)
-            action.success = True
-            _log_grab_completed(
-                log, success=True, path="native", force_download=False,
-                content_type=content_type, detail="retried_after_404",
-            )
-            return True, action
+                # Review fix round 1: a second 404 means *arr forgot it again —
+                # the release is gone, not "unreachable".
+                if not (isinstance(e, APIError) and e.status_code == 404):
+                    return self._native_failed(log, action, content_type, e)
+                log.warning("release_retry_404", error=str(e))
+            else:
+                action.success = True
+                _log_grab_completed(
+                    log, success=True, path="native", force_download=False,
+                    content_type=content_type, detail="retried_after_404",
+                )
+                return True, action
 
         action.success = False
         action.error_message = RELEASE_GONE_TEXT
