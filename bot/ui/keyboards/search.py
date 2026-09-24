@@ -25,7 +25,7 @@ from bot.ui.callbacks import (
     SeasonPresetCB,
 )
 from bot.ui.formatters._common import release_button_label
-from bot.ui.keyboards._constants import CallbackData
+from bot.ui.keyboards._constants import BTN_BACK, BTN_CLOSE, CallbackData
 
 
 class _SearchKeyboards:
@@ -212,7 +212,7 @@ class _SearchKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
-    def free_grab_failed(list_token: str, idx: int, offer_qbit: bool) -> InlineKeyboardMarkup:
+    def free_grab_failed(list_token: str, idx: int, offer_qbit: bool, page: int = 0) -> InlineKeyboardMarkup:
         """Free search after *arr refused/never saw the push: qBittorrent as an
         explicit choice, never a silent fallback (GRAB-08)."""
         rows = []
@@ -222,7 +222,7 @@ class _SearchKeyboards:
                 callback_data=FindGrabCB(tok=list_token, idx=idx, q=1).pack(),
             )])
         rows.append([
-            InlineKeyboardButton(text="◀️ Назад", callback_data=FindPageCB(page=0).pack()),
+            InlineKeyboardButton(text=BTN_BACK, callback_data=FindPageCB(page=page).pack()),
             InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
         return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -272,13 +272,14 @@ class _SearchKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
-    def free_release(idx: int, list_token: str = "") -> InlineKeyboardMarkup:
+    def free_release(idx: int, list_token: str = "", page: int = 0) -> InlineKeyboardMarkup:
         """One free-search hit. No season-monitoring button: there is no series
-        in Sonarr to monitor."""
+        in Sonarr to monitor. ``page`` — the list page the hit was opened from
+        (audit UI-09: "Назад" used to jump to page 1)."""
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Скачать", callback_data=FindGrabCB(tok=list_token, idx=idx).pack())],
             [
-                InlineKeyboardButton(text="◀️ Назад", callback_data=FindPageCB(page=0).pack()),
+                InlineKeyboardButton(text=BTN_BACK, callback_data=FindPageCB(page=page).pack()),
                 InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
             ],
         ])
@@ -380,7 +381,7 @@ class _SearchKeyboards:
                 text="🗑 Удалить из каталога",
                 callback_data=TitleActionCB(action="delete", kind=kind, title_id=title_id).pack(),
             )],
-            [InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.CANCEL)],
+            [InlineKeyboardButton(text=BTN_CLOSE, callback_data=CallbackData.CLOSE)],
         ])
 
     @staticmethod
@@ -403,7 +404,7 @@ class _SearchKeyboards:
                 text=label[:60],
                 callback_data=TitleActionCB(action="pick", kind=kind, title_id=title_id).pack(),
             )])
-        rows.append([InlineKeyboardButton(text="◀️ Отмена", callback_data=CallbackData.CANCEL)])
+        rows.append([InlineKeyboardButton(text=BTN_CLOSE, callback_data=CallbackData.CLOSE)])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
@@ -416,26 +417,40 @@ class _SearchKeyboards:
                 text="🗑 Да, удалить",
                 callback_data=TitleActionCB(action="delconf", kind=kind, title_id=title_id).pack(),
             )],
-            [InlineKeyboardButton(text="◀️ Отмена", callback_data=CallbackData.CANCEL)],
+            # Audit UI-07: "not now" returns to the title card, it does not
+            # abort a search (there is none here).
+            [InlineKeyboardButton(
+                text=BTN_BACK,
+                callback_data=TitleActionCB(action="pick", kind=kind, title_id=title_id).pack(),
+            )],
         ])
 
+    #: Season buttons per picker page (audit UI-17: the rest used to be cut).
+    SEASONS_PER_PAGE = 12
+
     @staticmethod
-    def season_scope(seasons: list, title_id: str, per_row: int = 4) -> InlineKeyboardMarkup:
+    def season_scope(
+        seasons: list, title_id: str, per_row: int = 4, page: int = 0,
+    ) -> InlineKeyboardMarkup:
         """Pick what to fetch for a series: the whole show or one season.
 
         Searching a 20-season show as one query returns season packs the user
         may not want, and burns indexer quota on episodes they already have.
-        The list is capped — a 30-button wall is not a choice, it's a maze.
+        Newest seasons first, 12 per page; older ones are a ▶️ away (audit
+        UI-17: they used to be unreachable).
         """
-        from bot.ui.callbacks import SeasonScopeCB
+        from bot.ui.callbacks import SeasonPageCB, SeasonScopeCB
 
         rows = [[InlineKeyboardButton(
             text="📺 Весь сериал",
             callback_data=SeasonScopeCB(season=0, title_id=title_id).pack(),
         )]]
 
-        # Newest seasons first: that's what a user is usually after.
-        shown = sorted(seasons, reverse=True)[:12]
+        per_page = _SearchKeyboards.SEASONS_PER_PAGE
+        ordered = sorted(seasons, reverse=True)
+        total_pages = max(1, (len(ordered) + per_page - 1) // per_page)
+        page = max(0, min(page, total_pages - 1))
+        shown = ordered[page * per_page:(page + 1) * per_page]
         for i in range(0, len(shown), per_row):
             rows.append([
                 InlineKeyboardButton(
@@ -444,6 +459,19 @@ class _SearchKeyboards:
                 )
                 for season in shown[i:i + per_row]
             ])
+
+        if total_pages > 1:
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton(
+                    text="◀️", callback_data=SeasonPageCB(page=page - 1, title_id=title_id).pack(),
+                ))
+            nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton(
+                    text="▶️", callback_data=SeasonPageCB(page=page + 1, title_id=title_id).pack(),
+                ))
+            rows.append(nav)
 
         rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)])
         return InlineKeyboardMarkup(inline_keyboard=rows)

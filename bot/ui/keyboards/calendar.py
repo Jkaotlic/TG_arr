@@ -3,7 +3,6 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.ui.callbacks import CalCB
-from bot.ui.keyboards._constants import CallbackData
 
 
 class _CalendarKeyboards:
@@ -25,6 +24,9 @@ class _CalendarKeyboards:
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 buttons,
-                [InlineKeyboardButton(text="🔄 Обновить", callback_data=CallbackData.CALENDAR_REFRESH)],
+                # Audit UI-18: the period travels in the button — the per-user
+                # memory may be gone (restart, eviction) or belong to a newer
+                # calendar message.
+                [InlineKeyboardButton(text="🔄 Обновить", callback_data=CalCB(days=current_days).pack())],
             ]
         )

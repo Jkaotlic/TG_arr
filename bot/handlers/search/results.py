@@ -12,7 +12,7 @@ from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import accessible_message
 from bot.models import ContentType, MovieInfo, SeriesInfo, User
-from bot.ui.callbacks import PageCB, ReleaseCB, SeasonScopeCB, TitleCB
+from bot.ui.callbacks import PageCB, ReleaseCB, SeasonPageCB, SeasonScopeCB, TitleCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.list_token import answer_stale, token_matches
@@ -413,6 +413,35 @@ async def handle_title_selection(
         db,
         chosen_title=chosen,
     )
+
+
+@router.callback_query(SeasonPageCB.filter())
+async def handle_season_page(
+    callback: CallbackQuery, callback_data: SeasonPageCB, db: Database
+) -> None:
+    """Flip the season picker to another page (audit UI-17)."""
+    from bot.handlers.search.commands import _known_seasons
+
+    message = accessible_message(callback)
+    if message is None:
+        return
+
+    session = await db.get_session(callback.from_user.id)
+    title = session.selected_content if session else None
+    title_id = title.sonarr_id if isinstance(title, SeriesInfo) else None
+    if session is None or title_id is None or str(title_id) != callback_data.title_id:
+        await answer_stale(callback)
+        return
+
+    seasons = _known_seasons(title, session.content_type)
+    await callback.answer()
+    try:
+        await message.edit_reply_markup(
+            reply_markup=Keyboards.season_scope(seasons, callback_data.title_id, page=callback_data.page),
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
 
 
 @router.callback_query(SeasonScopeCB.filter())

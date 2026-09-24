@@ -11,6 +11,7 @@ from aiogram.types import CallbackQuery, Message
 
 from bot.clients.qbittorrent import QBittorrentClient, QBittorrentError
 from bot.clients.registry import get_qbittorrent, get_slskd
+from bot.handlers._cache import remember_lru
 from bot.handlers.common import accessible_message, safe_edit, strip_command
 from bot.models import TorrentFilter, TorrentInfo, User, format_speed
 from bot.ui.callbacks import TorrentActionCB, TorrentPageCB
@@ -23,6 +24,26 @@ router = Router()
 
 # Per-page limit for torrent list
 TORRENTS_PER_PAGE = 5
+
+# Audit UI-09: the list view (filter, page) each user last looked at. The
+# card, the filter menu and the speed menu draw their "◀️ Назад" from it, and
+# mutating actions redraw the list there — instead of "all, page 1".
+_views: dict[int, tuple[TorrentFilter, int]] = {}
+_MAX_VIEWS = 100
+
+
+def _remember_view(user_id: int, filter_type: TorrentFilter, page: int) -> None:
+    remember_lru(_views, user_id, (filter_type, page), _MAX_VIEWS)
+
+
+def _view_of(user_id: int) -> tuple[TorrentFilter, int]:
+    return _views.get(user_id, (TorrentFilter.ALL, 0))
+
+
+def _user_id(event: Message | CallbackQuery) -> int:
+    user = getattr(event, "from_user", None)
+    uid = getattr(user, "id", 0)
+    return uid if isinstance(uid, int) else 0
 
 
 async def check_qbt_enabled(message_or_callback: Message | CallbackQuery) -> Optional[QBittorrentClient]:
@@ -114,6 +135,7 @@ async def cmd_downloads(message: Message, db_user: User) -> None:
 
         total_pages = max(1, (total + TORRENTS_PER_PAGE - 1) // TORRENTS_PER_PAGE)
         torrents = all_torrents[:TORRENTS_PER_PAGE]
+        _remember_view(_user_id(message), TorrentFilter.ALL, 0)
 
         text = Formatters.format_torrent_list(torrents, 0, total_pages, TorrentFilter.ALL, total)
 
@@ -230,8 +252,11 @@ async def _render_torrent_list(
     qbt: QBittorrentClient,
     filter_type: TorrentFilter = TorrentFilter.ALL,
     page: int = 0,
+    user_id: int | None = None,
 ) -> None:
     """Render a (optionally filtered) page of the torrent list into ``message``.
+
+    ``user_id`` given → that user's list view is remembered (audit UI-09).
 
     LOGIC-01: accepts ``filter_type``/``page`` so pagination, refresh, and
     "back to list" all redraw the list the user was actually looking at
@@ -252,6 +277,8 @@ async def _render_torrent_list(
     torrents = all_torrents[offset:offset + TORRENTS_PER_PAGE]
 
     text = Formatters.format_torrent_list(torrents, clamped_page, total_pages, filter_type, total)
+    if user_id is not None:
+        _remember_view(user_id, filter_type, clamped_page)
     await safe_edit(
         message,
         text,
@@ -299,6 +326,7 @@ async def handle_torrent_page(callback: CallbackQuery, callback_data: TorrentPag
         offset = requested_page * TORRENTS_PER_PAGE
         torrents = all_torrents[offset:offset + TORRENTS_PER_PAGE]
         text = Formatters.format_torrent_list(torrents, requested_page, total_pages, filter_type, total)
+        _remember_view(_user_id(callback), filter_type, requested_page)
 
         await safe_edit(
             message,
@@ -349,6 +377,7 @@ async def _render_torrent_details(
     message: Message,
     torrent: TorrentInfo,
     current_filter: TorrentFilter = TorrentFilter.ALL,
+    page: int = 0,
 ) -> None:
     """Render torrent details into ``message``.
 
@@ -365,7 +394,7 @@ async def _render_torrent_details(
     await safe_edit(
         message,
         text,
-        reply_markup=Keyboards.torrent_details(torrent, current_filter),
+        reply_markup=Keyboards.torrent_details(torrent, current_filter, page),
         parse_mode="HTML",
     )
 
@@ -391,7 +420,7 @@ async def _do_view(callback: CallbackQuery, qbt: QBittorrentClient, torrent: Tor
     if message is None:
         await callback.answer()
         return
-    await _render_torrent_details(message, torrent)
+    await _render_torrent_details(message, torrent, *_view_of(_user_id(callback)))
     await callback.answer()
 
 
@@ -408,7 +437,7 @@ async def _do_pause(callback: CallbackQuery, qbt: QBittorrentClient, torrent: To
         # pulling and parsing the whole list again. Fall back to a
         # short-hash lookup if the targeted fetch returns nothing.
         refreshed = await _refetch_one(qbt, torrent, h)
-        await _render_torrent_details(message, refreshed or torrent)
+        await _render_torrent_details(message, refreshed or torrent, *_view_of(_user_id(callback)))
 
 
 async def _do_resume(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, h: str) -> None:
@@ -420,7 +449,7 @@ async def _do_resume(callback: CallbackQuery, qbt: QBittorrentClient, torrent: T
     if (message := accessible_message(callback)) is not None:
         # PERF-01: targeted single-torrent re-fetch (see _refetch_one).
         refreshed = await _refetch_one(qbt, torrent, h)
-        await _render_torrent_details(message, refreshed or torrent)
+        await _render_torrent_details(message, refreshed or torrent, *_view_of(_user_id(callback)))
 
 
 async def _do_delete(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str) -> None:
@@ -430,7 +459,7 @@ async def _do_delete(callback: CallbackQuery, qbt: QBittorrentClient, torrent: T
 
     # BUG-15: redraw list directly — do NOT call a callback handler.
     if (message := accessible_message(callback)) is not None:
-        await _render_torrent_list(message, qbt)
+        await _render_torrent_list(message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback))
 
 
 async def _do_delf(callback: CallbackQuery, qbt: QBittorrentClient, torrent: TorrentInfo, _h: str) -> None:
@@ -462,7 +491,7 @@ async def _do_delfc(callback: CallbackQuery, qbt: QBittorrentClient, torrent: To
 
     # BUG-15: redraw list directly — do NOT call a callback handler.
     if (message := accessible_message(callback)) is not None:
-        await _render_torrent_list(message, qbt)
+        await _render_torrent_list(message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback))
 
 
 # r5: was six separate ``F.data.startswith(CallbackData.TORRENT_*)`` handlers
@@ -552,7 +581,9 @@ async def handle_pause_all(callback: CallbackQuery, is_admin: bool = False) -> N
         # LOGIC-02/BUG-04a: render directly — calling handle_refresh here
         # would ack the callback a second time.
         if (message := accessible_message(callback)) is not None:
-            await _render_torrent_list(message, qbt)
+            await _render_torrent_list(
+                message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback),
+            )
 
     except Exception as e:
         logger.error("Failed to pause all", error=str(e), exc_info=True)
@@ -577,7 +608,9 @@ async def handle_resume_all(callback: CallbackQuery, is_admin: bool = False) -> 
 
         # LOGIC-02/BUG-04a: render directly — see handle_pause_all.
         if (message := accessible_message(callback)) is not None:
-            await _render_torrent_list(message, qbt)
+            await _render_torrent_list(
+                message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback),
+            )
 
     except Exception as e:
         logger.error("Failed to resume all", error=str(e), exc_info=True)
@@ -586,9 +619,9 @@ async def handle_resume_all(callback: CallbackQuery, is_admin: bool = False) -> 
 
 @router.callback_query(F.data == CallbackData.TORRENT_BACK)
 async def handle_back_to_list(callback: CallbackQuery) -> None:
-    """Legacy plain "back to list" callback (from ``torrent_filters``/
-    ``speed_limits_menu`` "Назад" buttons, which don't track a filter) —
-    renders the unfiltered first page.
+    """Legacy plain "back to list" callback (``torrent_filters``/
+    ``speed_limits_menu`` "Назад" buttons sent before they carried the view) —
+    renders the user's last list view (audit UI-09).
     """
     message = accessible_message(callback)
     if message is None:
@@ -600,7 +633,7 @@ async def handle_back_to_list(callback: CallbackQuery) -> None:
 
     try:
         await callback.answer()
-        await _render_torrent_list(message, qbt)
+        await _render_torrent_list(message, qbt, *_view_of(_user_id(callback)), user_id=_user_id(callback))
     except Exception as e:
         logger.error("Failed to render torrent list", error=str(e), exc_info=True)
         await callback.answer("Ошибка операции", show_alert=True)
@@ -624,7 +657,7 @@ async def handle_filter_menu(callback: CallbackQuery) -> None:
     await safe_edit(
         message,
         "<b>Выберите фильтр:</b>",
-        reply_markup=Keyboards.torrent_filters(),
+        reply_markup=Keyboards.torrent_filters(*_view_of(_user_id(callback))),
         parse_mode="HTML",
     )
     await callback.answer()
@@ -651,7 +684,7 @@ async def handle_filter_select(callback: CallbackQuery) -> None:
         filter_type = _parse_filter(filter_value)
 
         await callback.answer()
-        await _render_torrent_list(message, qbt, filter_type, 0)
+        await _render_torrent_list(message, qbt, filter_type, 0, user_id=_user_id(callback))
 
     except Exception as e:
         logger.error("Filter error", error=str(e), exc_info=True)
@@ -671,7 +704,7 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
 
     try:
         status = await qbt.get_status()
-        await _render_speed_menu(message, status)
+        await _render_speed_menu(message, status, _user_id(callback))
         await callback.answer()
 
     except Exception as e:
@@ -679,7 +712,7 @@ async def handle_speed_menu(callback: CallbackQuery) -> None:
         await callback.answer("Ошибка операции", show_alert=True)
 
 
-async def _render_speed_menu(message: Message, status) -> None:
+async def _render_speed_menu(message: Message, status, user_id: int = 0) -> None:
     """Render the speed-limits menu into ``message``.
 
     LOGIC-03: passes the qBittorrent-reported current limits into
@@ -704,7 +737,9 @@ async def _render_speed_menu(message: Message, status) -> None:
     await safe_edit(
         message,
         text,
-        reply_markup=Keyboards.speed_limits_menu(status.download_limit, status.upload_limit),
+        reply_markup=Keyboards.speed_limits_menu(
+            status.download_limit, status.upload_limit, *_view_of(user_id),
+        ),
         parse_mode="HTML",
     )
 
@@ -740,7 +775,7 @@ async def handle_speed_set(callback: CallbackQuery) -> None:
         # which would ack the callback a second time.
         if (message := accessible_message(callback)) is not None:
             status = await qbt.get_status()
-            await _render_speed_menu(message, status)
+            await _render_speed_menu(message, status, _user_id(callback))
 
     except Exception as e:
         logger.error("Speed set error", error=str(e), exc_info=True)

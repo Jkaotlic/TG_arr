@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import MetadataProfile, QualityProfile, RootFolder, UserPreferences
 from bot.ui.callbacks import SettingCB
-from bot.ui.keyboards._constants import CallbackData
+from bot.ui.keyboards._constants import BTN_CLOSE, CallbackData
 
 
 class _SettingsKeyboards:
@@ -104,7 +104,7 @@ class _SettingsKeyboards:
             text=f"🎬 «В библиотеке»: {'вкл' if prefs.notify_library else 'выкл'}",
             callback_data=SettingCB(key="notify_library", value="0" if prefs.notify_library else "1").pack(),
         )])
-        rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data=CallbackData.CANCEL)])
+        rows.append([InlineKeyboardButton(text=BTN_CLOSE, callback_data=CallbackData.CLOSE)])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod

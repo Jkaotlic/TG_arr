@@ -87,7 +87,8 @@ async def handle_panel_refresh(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == CallbackData.TS_CLOSE)
 async def handle_close(callback: CallbackQuery) -> None:
-    """Close the panel message."""
+    """Close the panel message — legacy ``ts_close`` from panels sent before
+    the shared ``CallbackData.CLOSE`` (audit UI-07/UI-20)."""
     if (message := accessible_message(callback)) is not None:
         await message.delete()
     await callback.answer()
@@ -203,7 +204,10 @@ async def handle_release(callback: CallbackQuery, callback_data: TsReleaseCB) ->
     await safe_edit(
         message,
         Formatters.format_torrserver_release(release),
-        reply_markup=Keyboards.torrserver_release(absolute, list_token=_tokens.current(user_id)),
+        reply_markup=Keyboards.torrserver_release(
+            absolute, list_token=_tokens.current(user_id),
+            page=absolute // get_settings().results_per_page,
+        ),
         parse_mode="HTML",
     )
     await callback.answer()

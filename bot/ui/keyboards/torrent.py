@@ -6,7 +6,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import TorrentFilter, TorrentInfo
 from bot.ui.callbacks import TorrentActionCB, TorrentPageCB
-from bot.ui.keyboards._constants import CallbackData
+from bot.ui.keyboards._constants import BTN_BACK, CallbackData
 
 
 class _TorrentKeyboards:
@@ -104,6 +104,7 @@ class _TorrentKeyboards:
     def torrent_details(
         torrent: TorrentInfo,
         current_filter: TorrentFilter = TorrentFilter.ALL,
+        page: int = 0,
     ) -> InlineKeyboardMarkup:
         """Create keyboard for torrent details view.
 
@@ -136,16 +137,23 @@ class _TorrentKeyboards:
         # Back button — carries the filter so the list redraw stays filtered.
         keyboard.append([
             InlineKeyboardButton(
-                text="◀️ К списку",
-                callback_data=TorrentPageCB(page=0, flt=current_filter.value).pack(),
+                text=BTN_BACK,
+                # Audit UI-09: the page, not only the filter, survives the card.
+                callback_data=TorrentPageCB(page=page, flt=current_filter.value).pack(),
             ),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod
-    def torrent_filters(current_filter: TorrentFilter = TorrentFilter.ALL) -> InlineKeyboardMarkup:
-        """Create keyboard for selecting torrent filter."""
+    def torrent_filters(
+        current_filter: TorrentFilter = TorrentFilter.ALL, page: int = 0,
+    ) -> InlineKeyboardMarkup:
+        """Create keyboard for selecting torrent filter.
+
+        The current filter is marked with "•"; "◀️ Назад" returns to the list
+        view the menu was opened from (audit UI-09).
+        """
         filters = [
             (TorrentFilter.ALL, "📋 Все"),
             (TorrentFilter.DOWNLOADING, "⬇️ Загрузка"),
@@ -177,7 +185,10 @@ class _TorrentKeyboards:
             keyboard.append(row)
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TORRENT_BACK),
+            InlineKeyboardButton(
+                text=BTN_BACK,
+                callback_data=TorrentPageCB(page=page, flt=current_filter.value).pack(),
+            ),
         ])
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -210,6 +221,8 @@ class _TorrentKeyboards:
     def speed_limits_menu(
         current_dl_limit: int = 0,
         current_ul_limit: int = 0,
+        current_filter: TorrentFilter = TorrentFilter.ALL,
+        page: int = 0,
     ) -> InlineKeyboardMarkup:
         """Create keyboard for speed limit presets.
 
@@ -235,7 +248,10 @@ class _TorrentKeyboards:
             [InlineKeyboardButton(text="⬆️ Лимит отдачи:", callback_data="noop")],
             _TorrentKeyboards._speed_preset_row(presets[:3], "ul", current_ul_limit),
             _TorrentKeyboards._speed_preset_row(presets[3:], "ul", current_ul_limit),
-            [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TORRENT_BACK)],
+            [InlineKeyboardButton(
+                text=BTN_BACK,
+                callback_data=TorrentPageCB(page=page, flt=current_filter.value).pack(),
+            )],
         ]
 
         return InlineKeyboardMarkup(inline_keyboard=keyboard)

@@ -219,7 +219,10 @@ async def handle_find_release(
     await safe_edit(
         message,
         f"{Formatters.format_release_details(release)}\n\n{_NOT_IN_LIBRARY_NOTE}",
-        reply_markup=Keyboards.free_release(callback_data.idx, list_token=session.list_token),
+        reply_markup=Keyboards.free_release(
+            callback_data.idx, list_token=session.list_token,
+            page=callback_data.idx // get_settings().results_per_page,
+        ),
         parse_mode="HTML",
     )
 
@@ -308,6 +311,7 @@ async def handle_find_grab(
                 reply_markup=Keyboards.free_grab_failed(
                     session.list_token, callback_data.idx,
                     offer_qbit=add_service.qbittorrent is not None,
+                    page=callback_data.idx // get_settings().results_per_page,
                 ),
                 parse_mode="HTML",
             )

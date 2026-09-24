@@ -6,7 +6,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from bot.models import TorrServerRelease, TorrServerTorrent
 from bot.ui.callbacks import TsAddCB, TsPageCB, TsReleaseCB, TsTorrentCB
 from bot.ui.formatters.torrserver import TS_LIST_BUTTON_CAP
-from bot.ui.keyboards._constants import CallbackData
+from bot.ui.keyboards._constants import BTN_BACK, BTN_CLOSE, CallbackData
 
 
 class _TorrServerKeyboards:
@@ -22,7 +22,7 @@ class _TorrServerKeyboards:
             ],
             [
                 InlineKeyboardButton(text="🔄 Обновить", callback_data=CallbackData.TS_REFRESH),
-                InlineKeyboardButton(text="✖️ Закрыть", callback_data=CallbackData.TS_CLOSE),
+                InlineKeyboardButton(text=BTN_CLOSE, callback_data=CallbackData.CLOSE),
             ],
         ])
 
@@ -62,7 +62,7 @@ class _TorrServerKeyboards:
         return builder.as_markup()
 
     @staticmethod
-    def torrserver_release(idx: int, list_token: str = "") -> InlineKeyboardMarkup:
+    def torrserver_release(idx: int, list_token: str = "", page: int = 0) -> InlineKeyboardMarkup:
         """Card of one hit: watch it, or go back to the list.
 
         The watch button is its own callback family (`TsAddCB`) rather than a
@@ -71,7 +71,8 @@ class _TorrServerKeyboards:
         """
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="▶️ Смотреть", callback_data=TsAddCB(tok=list_token, idx=idx).pack())],
-            [InlineKeyboardButton(text="⬅️ К результатам", callback_data=TsPageCB(page=0).pack())],
+            # Audit UI-09: back to the page the hit was opened from.
+            [InlineKeyboardButton(text=BTN_BACK, callback_data=TsPageCB(page=page).pack())],
         ])
 
     @staticmethod

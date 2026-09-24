@@ -198,7 +198,10 @@ async def test_render_artist_list_used_by_pagination_and_back():
     music._artist_candidates[user_id] = artists
 
     cb_back = _make_callback(music.CallbackData.MUSIC_BACK, user_id=user_id)
-    await music.handle_music_back(cb_back, db_user=MagicMock(), db=MagicMock())
+    # Audit UI-08: back reads the session to find the page of the picked artist.
+    db = MagicMock()
+    db.get_session = AsyncMock(return_value=None)
+    await music.handle_music_back(cb_back, db_user=MagicMock(), db=db)
 
     cb_page = _make_callback(f"{music.CallbackData.ARTIST_PAGE}0", user_id=user_id)
     await music.handle_artist_pagination(cb_page, db_user=MagicMock(), db=MagicMock())

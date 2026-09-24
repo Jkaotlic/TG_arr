@@ -217,6 +217,15 @@ class SeasonScopeCB(CallbackData, prefix="ss"):
     title_id: str
 
 
+class SeasonPageCB(CallbackData, prefix="ssp"):
+    """Page of the season picker (audit UI-17: only the 12 newest seasons
+    used to be reachable). ``title_id`` ties it to one title, like
+    ``SeasonScopeCB``."""
+
+    page: int = Field(ge=0)
+    title_id: str
+
+
 class TsReleaseCB(CallbackData, prefix="tsr"):
     """Pick one TorrServer search hit. Only the index travels: the release
     itself (title + Prowlarr link) blows past callback_data's 64-byte budget,

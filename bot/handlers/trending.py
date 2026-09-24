@@ -79,6 +79,25 @@ def _cache_get(cache: dict[int, Any], key: int) -> Any | None:
     return get_ttl(cache, timestamps, key, _CACHE_TTL_SECONDS)
 
 
+async def _list_message(message: Message, loading_text: str) -> Message:
+    """The message a trending list is drawn into, showing ``loading_text``.
+
+    Audit UI-04: "◀️ Назад" on a card with a poster used to ``edit_text`` a
+    photo message — Telegram refuses ("there is no text in the message to
+    edit") and the button did nothing. A photo card is deleted and the list
+    arrives as a new message; a text message is edited in place as before.
+    """
+    photo = getattr(message, "photo", None)
+    if isinstance(photo, list) and photo:
+        try:
+            await message.delete()
+        except Exception as e:  # too old to delete — the new list still comes
+            logger.debug("trending_card_delete_failed", error=str(e))
+        return await message.answer(loading_text)
+    await message.edit_text(loading_text)
+    return message
+
+
 @router.message(F.text == MENU_TRENDING)
 async def handle_trending_menu(message: Message) -> None:
     """Show trending/popular content selection menu."""
@@ -147,8 +166,8 @@ async def handle_trending_movies(callback: CallbackQuery) -> None:
         )
         return
 
-    # Show loading message
-    await message.edit_text("⏳ Загружаю популярные фильмы...")
+    # Show loading message (audit UI-04: "◀️ Назад" from a poster card).
+    message = await _list_message(message, "⏳ Загружаю популярные фильмы...")
 
     try:
         # Get trending movies
@@ -199,8 +218,8 @@ async def handle_trending_series(callback: CallbackQuery) -> None:
         )
         return
 
-    # Show loading message
-    await message.edit_text("⏳ Загружаю популярные сериалы...")
+    # Show loading message (audit UI-04: "◀️ Назад" from a poster card).
+    message = await _list_message(message, "⏳ Загружаю популярные сериалы...")
 
     try:
         # Get trending series

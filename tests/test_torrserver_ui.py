@@ -46,7 +46,7 @@ def test_panel_has_search_and_list_buttons():
     data = [b.callback_data for row in Keyboards.torrserver_panel().inline_keyboard for b in row]
     assert CallbackData.TS_SEARCH in data
     assert CallbackData.TS_LIST in data
-    assert CallbackData.TS_CLOSE in data
+    assert CallbackData.CLOSE in data  # audit UI-07: the shared «✖️ Закрыть»
 
 
 def test_results_keyboard_has_one_button_per_release_and_pagination():

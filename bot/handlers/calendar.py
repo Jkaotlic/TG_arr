@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, Message
 from bot.clients.radarr import RadarrClient
 from bot.clients.sonarr import SonarrClient
 from bot.clients.registry import get_lidarr, get_radarr, get_sonarr
+from bot.handlers._cache import remember_lru
 from bot.handlers.common import accessible_message, swallow_not_modified
 from bot.ui.callbacks import CalCB
 from bot.ui.formatters import Formatters
@@ -189,9 +190,8 @@ async def handle_calendar_menu(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
     days = _user_period.get(user_id, 7)
     async with _period_lock:
-        if len(_user_period) >= _MAX_USER_PERIOD_ENTRIES:
-            _user_period.clear()
-        _user_period[user_id] = days
+        # Audit UI-18: evict the oldest user, never wipe everyone's period.
+        remember_lru(_user_period, user_id, days, _MAX_USER_PERIOD_ENTRIES)
 
     await _fetch_and_send_calendar(
         days,
@@ -209,7 +209,7 @@ async def handle_calendar_period(callback: CallbackQuery, callback_data: CalCB) 
     days = callback_data.days
     user_id = callback.from_user.id
     async with _period_lock:
-        _user_period[user_id] = days
+        remember_lru(_user_period, user_id, days, _MAX_USER_PERIOD_ENTRIES)
     await _fetch_and_send_calendar(
         days,
         answer_func=message.edit_text,
@@ -227,7 +227,8 @@ async def handle_legacy_calendar_period(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == CallbackData.CALENDAR_REFRESH)
 async def handle_calendar_refresh(callback: CallbackQuery) -> None:
-    """Refresh calendar without changing period."""
+    """Legacy ``cal_refresh`` from messages sent before the period travelled
+    in the refresh button (audit UI-18: new buttons are ``CalCB(days)``)."""
     await callback.answer("🔄 Обновляю...")
     message = accessible_message(callback)
     if message is None:

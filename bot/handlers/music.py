@@ -621,7 +621,8 @@ async def handle_artist_pagination(callback: CallbackQuery, db_user: User, db: D
 
 @router.callback_query(F.data == CallbackData.MUSIC_BACK)
 async def handle_music_back(callback: CallbackQuery, db_user: User, db: Database) -> None:
-    """LOGIC-24: back from artist_details → return to artist_list."""
+    """LOGIC-24: back from artist_details → return to artist_list — on the
+    page the artist was picked from (audit UI-08/UI-09)."""
     message = accessible_message(callback)
     if message is None:
         return
@@ -631,7 +632,14 @@ async def handle_music_back(callback: CallbackQuery, db_user: User, db: Database
         await callback.answer("Список истёк. Начните новый поиск.", show_alert=True)
         return
 
-    await _render_artist_list(message, artists, page=0)
+    session = await db.get_session(user_id)
+    chosen = session.selected_content if session else None
+    position = next(
+        (i for i, a in enumerate(artists)
+         if isinstance(chosen, ArtistInfo) and a.mb_id == chosen.mb_id),
+        0,
+    )
+    await _render_artist_list(message, artists, page=position // get_settings().results_per_page)
     await callback.answer()
 
 
@@ -725,9 +733,16 @@ async def handle_album_scope(
 
     await callback.answer()
     year = f" · {album.year}" if album.year else ""
+    # Audit UI-08: "Назад" goes to the album page this album sits on.
+    ordered = Keyboards.album_order(_album_candidates.get(user_id) or [])
+    position = next((i for i, a in enumerate(ordered) if a.lidarr_id == album.lidarr_id), 0)
     await message.edit_text(
         f"💿 <b>{html.escape(album.title)}</b>{year}\n\nГде искать?",
-        reply_markup=Keyboards.album_sources(album.lidarr_id),
+        reply_markup=Keyboards.album_sources(
+            album.lidarr_id,
+            artist_id=artist.lidarr_id or callback_data.artist_id,
+            page=position // get_settings().results_per_page,
+        ),
         parse_mode="HTML",
     )
 

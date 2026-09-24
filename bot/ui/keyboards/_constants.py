@@ -8,6 +8,19 @@ constants it needs without pulling in keyboard-building code.
 """
 
 
+from bot.ui.list_token import STALE_LIST_TEXT
+
+# Audit 2026-09-23 UI-07/UI-20: one wording per navigation meaning.
+#: Step back one screen inside the same flow (session untouched).
+BTN_BACK = "◀️ Назад"
+#: Remove this message; never touches the search session.
+BTN_CLOSE = "✖️ Закрыть"
+#: Abort the search flow (drops the search session) — search flow only.
+BTN_CANCEL = "❌ Отмена"
+#: Answer for a button whose list/message is no longer current.
+MSG_STALE = STALE_LIST_TEXT
+
+
 class CallbackData:
     """Callback data prefixes for parsing."""
 
@@ -26,7 +39,8 @@ class CallbackData:
     ARTIST_PAGE = "art_page:"  # art_page:N
     MUSIC_BACK = "music_back"  # LOGIC-24: music-aware back button
     BACK = "back"
-    CANCEL = "cancel"
+    CANCEL = "cancel"  # search flow only: drops the session
+    CLOSE = "close"  # deletes the message, never touches the session (UI-07)
 
     # Release selection
     RELEASE = "rel:"  # rel:0 (index in results)

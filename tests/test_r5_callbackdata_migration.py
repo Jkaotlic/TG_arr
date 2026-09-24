@@ -514,7 +514,8 @@ def test_calendar_controls_keyboard_uses_typed_cb():
 
     kb = Keyboards.calendar_controls(current_days=14)
     cal_cbs = [c for c in _cbs(kb) if c.startswith("cal:")]
-    days = sorted(CalCB.unpack(c).days for c in cal_cbs)
+    # Audit UI-18: "🔄 Обновить" is CalCB(current period) as well.
+    days = sorted({CalCB.unpack(c).days for c in cal_cbs})
     assert days == [7, 14, 30]
 
 

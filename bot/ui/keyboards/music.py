@@ -118,7 +118,7 @@ class _MusicKeyboards:
             callback_data=AlbumScopeCB(album_id=0, artist_id=artist_id).pack(),
         )]]
 
-        ordered = sorted(albums, key=lambda a: a.release_date or "", reverse=True)
+        ordered = _MusicKeyboards.album_order(albums)
         total_pages = max(1, (len(ordered) + per_page - 1) // per_page)
         start = current_page * per_page
         for album in ordered[start:start + per_page]:
@@ -163,8 +163,12 @@ class _MusicKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
-    def album_sources(album_id: int) -> InlineKeyboardMarkup:
-        """Where to look for this album: torrents via Lidarr, or Soulseek."""
+    def album_sources(album_id: int, artist_id: int = 0, page: int = 0) -> InlineKeyboardMarkup:
+        """Where to look for this album: torrents via Lidarr, or Soulseek.
+
+        "◀️ Назад" returns to the album list page the album was picked from
+        (audit UI-08: it used to jump to the artist list, page 1).
+        """
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
                 text="🧲 Торренты",
@@ -175,10 +179,18 @@ class _MusicKeyboards:
                 callback_data=AlbumSourceCB(album_id=album_id, source="sk").pack(),
             )],
             [
-                InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.MUSIC_BACK),
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=AlbumPageCB(page=page, artist_id=artist_id).pack(),
+                ),
                 InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
             ],
         ])
+
+    @staticmethod
+    def album_order(albums: list[AlbumInfo]) -> list[AlbumInfo]:
+        """The order ``album_scope`` lists albums in — newest first."""
+        return sorted(albums, key=lambda a: a.release_date or "", reverse=True)
 
     @staticmethod
     def _page_nav(page: int, total_pages: int, make) -> list:
