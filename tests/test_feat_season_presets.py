@@ -67,6 +67,7 @@ async def test_handle_season_preset_stores_choice_in_session():
     session = SearchSession(
         user_id=1, query="q", content_type=ContentType.SERIES,
         selected_result=SearchResult(guid="g", title="t"),
+        title_created=True,  # audit GRAB-05: presets only for a series this search added
     )
     db = AsyncMock()
     db.get_session = AsyncMock(return_value=session)

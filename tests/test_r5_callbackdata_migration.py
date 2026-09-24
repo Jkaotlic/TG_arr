@@ -189,7 +189,9 @@ async def test_handle_add_movie_from_trending_reads_callback_data():
 
     added = MovieInfo(title="The Matrix", tmdb_id=603, year=1999, radarr_id=42)
     action = MagicMock(success=True, error_message=None)
+    # Audit UI-05: the handler first asks Radarr whether the title exists.
     add_service = MagicMock()
+    add_service.radarr.get_movie_by_tmdb = AsyncMock(return_value=None)
     add_service.get_radarr_profiles = AsyncMock(return_value=[MagicMock(id=1)])
     add_service.get_radarr_root_folders = AsyncMock(return_value=[MagicMock(path="/movies")])
     add_service.add_movie = AsyncMock(return_value=(added, action))
@@ -323,6 +325,7 @@ async def test_handle_season_preset_reads_callback_data():
     session = SearchSession(
         user_id=1, query="q", content_type=ContentType.SERIES,
         selected_result=SearchResult(guid="g", title="t"),
+        title_created=True,  # audit GRAB-05: presets only for a series this search added
     )
     db = AsyncMock()
     db.get_session = AsyncMock(return_value=session)

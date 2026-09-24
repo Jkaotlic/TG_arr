@@ -160,6 +160,9 @@ def _trending_add_service(add_result, kind: str):
     svc.get_radarr_root_folders = AsyncMock(return_value=[folder])
     svc.get_sonarr_profiles = AsyncMock(return_value=[profile])
     svc.get_sonarr_root_folders = AsyncMock(return_value=[folder])
+    # Audit UI-05: the handlers first ask *arr whether the title exists.
+    svc.radarr.get_movie_by_tmdb = AsyncMock(return_value=None)
+    svc.sonarr.get_series_by_tvdb = AsyncMock(return_value=None)
     if kind == "movie":
         svc.add_movie = AsyncMock(return_value=add_result)
     else:

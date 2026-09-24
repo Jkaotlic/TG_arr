@@ -240,6 +240,37 @@ class SonarrClient(ArrBaseClient):
         )
         return True
 
+    async def monitor_season(
+        self, series_id: int, season_number: int, *, monitor_series: bool,
+    ) -> bool:
+        """Monitor ONE season, leaving every other season's flag as it is.
+
+        Audit 2026-09-23 GRAB-05: a season pack for season N must not become
+        "monitor all" (``set_season_monitoring`` is a whole-series preset).
+        *arr's PUT replaces the whole resource, so the current series is
+        fetched first and sent back with only season N (and, when
+        ``monitor_series``, the series flag) changed. Sonarr's series update
+        brings the season's episode flags in line with the season flag.
+
+        Returns False when the series or the season is unknown.
+        """
+        current = await self.get(f"{self._api_prefix}/series/{series_id}")
+        if not isinstance(current, dict):
+            return False
+        found = False
+        for season in current.get("seasons") or []:
+            if isinstance(season, dict) and season.get("seasonNumber") == season_number:
+                season["monitored"] = True
+                found = True
+        if not found:
+            return False
+        if monitor_series:
+            current["monitored"] = True
+        await self._safe_request(
+            "PUT", f"{self._api_prefix}/series/{series_id}", json_data=current,
+        )
+        return True
+
     async def delete_series(self, series_id: int, delete_files: bool = False) -> bool:
         return await self._delete_resource("series", series_id, delete_files)
 
@@ -340,6 +371,8 @@ class SonarrClient(ArrBaseClient):
             season_count=season_count,
             total_episode_count=total_episodes,
             sonarr_id=item.get("id"),
+            # GRAB-19: the card and /title's toggle need the real flag.
+            monitored=bool(item.get("monitored", False)),
             series_type=item.get("seriesType", "standard"),
             quality_profile_id=item.get("qualityProfileId"),
             root_folder_path=item.get("rootFolderPath") or item.get("path"),

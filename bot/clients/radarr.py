@@ -229,6 +229,8 @@ class RadarrClient(ArrBaseClient):
             fanart_url=fanart_url,
             ratings=ratings,
             radarr_id=item.get("id"),
+            # GRAB-19: "в каталоге" and "отслеживается" are different states.
+            monitored=bool(item.get("monitored", False)),
             is_available=item.get("isAvailable", False),
             has_file=item.get("hasFile", False),
             quality_profile_id=item.get("qualityProfileId"),

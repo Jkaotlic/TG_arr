@@ -231,6 +231,8 @@ async def test_trending_add_series_resolves_tvdb_id_via_sonarr_lookup():
     )
     add_service = AsyncMock()
     add_service.radarr = AsyncMock()
+    # Audit UI-05: the handler first asks Sonarr whether the title exists.
+    add_service.sonarr.get_series_by_tvdb = AsyncMock(return_value=None)
     add_service.get_sonarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="HD")])
     add_service.get_sonarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/tv")])
     add_service.add_series = AsyncMock(return_value=(added, action))
@@ -273,7 +275,9 @@ async def test_trending_add_movie_still_works():
     action = ActionLog(
         user_id=1, action_type=ActionType.ADD, content_type=ContentType.MOVIE, success=True
     )
+    # Audit UI-05: the handler first asks Radarr whether the title exists.
     add_service = AsyncMock()
+    add_service.radarr.get_movie_by_tmdb = AsyncMock(return_value=None)
     add_service.get_radarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="HD")])
     add_service.get_radarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/movies")])
     add_service.add_movie = AsyncMock(return_value=(added, action))

@@ -53,7 +53,13 @@ async def _apply_monitor_toggle(client, resource_id: int, monitored: bool, is_mo
     """Flip monitoring through the *arr client matching the title's content type."""
     if is_movie:
         return await client.set_movie_monitored(resource_id, monitored)
-    return await client.set_series_monitored(resource_id, monitored)
+    ok = await client.set_series_monitored(resource_id, monitored)
+    if ok and monitored:
+        # Audit 2026-09-23 UI-06: the series flag alone monitors nothing when
+        # every season is off (the search flow adds with monitor="none") —
+        # "Включить мониторинг" must also catch the seasons still to come.
+        await client.set_season_monitoring(resource_id, "future")
+    return ok
 
 
 async def _apply_delete(client, resource_id: int, is_movie: bool, delete_files: bool = False) -> bool:

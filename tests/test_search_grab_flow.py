@@ -993,6 +993,9 @@ def _series_session(*, monitor_type=None, release=None) -> SearchSession:
         selected_result=release or _series_release(season=3),
         selected_content=SeriesInfo(tvdb_id=1, title="Show", sonarr_id=77),
         monitor_type=monitor_type,
+        # Audit GRAB-05: presets apply only to a series this search added;
+        # an existing one is covered in tests/test_monitoring_side_effects.py.
+        title_created=True,
     )
 
 
@@ -1005,6 +1008,7 @@ def _monitoring_add_service(*, season_monitoring=None) -> MagicMock:
     add_service.sonarr = MagicMock()
     add_service.sonarr.set_series_monitored = AsyncMock(return_value=True)
     add_service.sonarr.set_season_monitoring = season_monitoring or AsyncMock(return_value=True)
+    add_service.sonarr.monitor_season = AsyncMock(return_value=True)
     return add_service
 
 
@@ -1070,7 +1074,8 @@ async def test_grab_without_preset_uses_the_decided_type():
 
 
 @pytest.mark.asyncio
-async def test_season_pack_grab_applies_all():
+async def test_season_pack_grab_monitors_that_season_not_all():
+    """Audit 2026-09-23 GRAB-05: a pack for season 3 used to monitor "all"."""
     from bot.handlers.search import grab as grab_mod
 
     add_service = _monitoring_add_service()
@@ -1079,7 +1084,8 @@ async def test_season_pack_grab_applies_all():
         User(tg_id=5), _grab_db(), MagicMock(), add_service,
     )
 
-    add_service.sonarr.set_season_monitoring.assert_awaited_once_with(77, "all")
+    add_service.sonarr.monitor_season.assert_awaited_once_with(77, 3, monitor_series=True)
+    add_service.sonarr.set_season_monitoring.assert_not_awaited()
 
 
 @pytest.mark.asyncio

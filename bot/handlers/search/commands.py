@@ -330,13 +330,17 @@ async def process_search(
     db: Database,
     chosen_title=None,
     season_override: Optional[int] = None,
+    title_created: bool = False,
 ) -> None:
     """Process a search query.
 
     `chosen_title` is set when the user answered the "which title did you
     mean?" question — it skips both the metadata search and the ambiguity
     check, since the answer is now explicit. `season_override` likewise carries
-    the answer to the season picker.
+    the answer to the season picker, and `title_created` whether the first leg
+    (before the picker) added the title — on the second leg the title already
+    has its *arr id, so `_resolve_arr_entry` alone would say "existed"
+    (audit GRAB-05).
     """
     if len(query) > MAX_QUERY_LENGTH:
         await message.answer(f"❌ Запрос слишком длинный (макс. {MAX_QUERY_LENGTH} символов)")
@@ -498,6 +502,7 @@ async def process_search(
             await status_msg.edit_text(Formatters.format_error(str(ve)))
             log.warning("search_branch", branch="add_config_error", error=str(ve))
             return
+        created = created or title_created
         if title is None or arr_id is None:
             # Каталог знает только то, что несут TMDb/TVDB. Тупик здесь — не
             # тупик для индексеров, и кнопка ниже единственное место, где
@@ -555,6 +560,7 @@ async def process_search(
                 query=query,
                 content_type=content_type,
                 selected_content=title,
+                title_created=created,
             )
             await db.save_session(user_id, session)
             await status_msg.edit_text(
@@ -616,6 +622,8 @@ async def process_search(
             # Audit GRAB-03: a new result set = a new list token; buttons of
             # any earlier list stop matching.
             list_token=new_list_token(),
+            # GRAB-05: only a title this search added gets a season preset.
+            title_created=created,
         )
         await db.save_session(user_id, session)
 

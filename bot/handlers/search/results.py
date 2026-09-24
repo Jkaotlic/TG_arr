@@ -199,6 +199,7 @@ async def handle_release_selection(
                 reply_markup=Keyboards.release_details(
                     result, session.content_type, show_force_grab=has_qbittorrent,
                     list_token=session.list_token, idx=idx,
+                    season_menu=session.title_created,
                 ),
                 parse_mode="HTML",
             )
@@ -217,6 +218,7 @@ async def handle_release_selection(
             reply_markup=Keyboards.release_details(
                 result, session.content_type, show_force_grab=has_qbittorrent, content=content,
                 list_token=session.list_token, idx=idx,
+                season_menu=session.title_created,
             ),
             parse_mode="HTML",
         )
@@ -228,6 +230,7 @@ async def handle_release_selection(
             reply_markup=Keyboards.release_details(
                 result, session.content_type, show_force_grab=has_qbittorrent,
                 list_token=session.list_token, idx=idx,
+                season_menu=session.title_created,
             ),
             parse_mode="HTML",
         )
@@ -450,4 +453,5 @@ async def handle_season_scope(
         # None в `process_search` значит «пользователя ещё не спрашивали» — и
         # тот снова показывал этот же выбор сезона (живой дефект 2026-08-12).
         season_override=callback_data.season,
+        title_created=session.title_created,
     )

@@ -5,6 +5,7 @@ import html
 
 import structlog
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 from typing import Any
 
@@ -365,6 +366,18 @@ async def _resolve_series_for_add(search_service: SearchService, series: SeriesI
     return candidates[0]
 
 
+async def _drop_keyboard(message: Any) -> None:
+    """Remove the card's buttons after the action they offered is done
+    (audit UI-05) — a second "➕" must not repeat it. Best effort: the card
+    may be a photo or already edited."""
+    try:
+        await message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+    except Exception as e:  # never let a cosmetic edit fail a done action
+        logger.debug("trending_keyboard_drop_failed", error=str(e))
+
+
 async def _add_movie_from_trending(callback: CallbackQuery, movie: MovieInfo, db_user: User, db: Database) -> None:
     """Add a trending movie to Radarr, using the user's Radarr profile/folder
     preference (falling back to "first available" — see `AddService.resolve_profile`).
@@ -387,6 +400,29 @@ async def _add_movie_from_trending(callback: CallbackQuery, movie: MovieInfo, db
             )
             return
 
+        # Audit 2026-09-23 UI-05: a title already in Radarr used to be
+        # reported as "добавлен" with nothing changed. Now: monitored → say
+        # so and do nothing; in the catalogue but unmonitored → switch
+        # monitoring on and search, and say exactly that.
+        existing = await add_service.radarr.get_movie_by_tmdb(movie.tmdb_id)
+        if existing is not None and existing.radarr_id:
+            label = html.escape(existing.title)
+            if existing.monitored:
+                await status_msg.edit_text(
+                    f"👁 <b>{label}</b> — Уже в библиотеке и отслеживается",
+                    parse_mode="HTML",
+                )
+                await _drop_keyboard(message)
+                return
+            await add_service.radarr.set_movie_monitored(existing.radarr_id, True)
+            await add_service.radarr.search_movie(existing.radarr_id)
+            await status_msg.edit_text(
+                f"🔍 <b>{label}</b> — Включил отслеживание и поиск",
+                parse_mode="HTML",
+            )
+            await _drop_keyboard(message)
+            return
+
         prefs = db_user.preferences
         profile = AddService.resolve_profile(profiles, prefs.radarr_quality_profile_id)
         folder_path = AddService.resolve_root_folder(folders, prefs.radarr_root_folder_id)
@@ -403,6 +439,7 @@ async def _add_movie_from_trending(callback: CallbackQuery, movie: MovieInfo, db
                 f"✅ <b>{html.escape(added.title)}</b>{year_str} добавлен в Radarr — ищу релиз...",
                 parse_mode="HTML",
             )
+            await _drop_keyboard(message)
         else:
             # BUG-12b: error text can contain raw markup from the upstream
             # service — escape before interpolating into an HTML message.
@@ -451,12 +488,30 @@ async def _add_series_from_trending(callback: CallbackQuery, series: SeriesInfo,
             )
             return
 
+        # Audit 2026-09-23 UI-05: a series already in Sonarr keeps the
+        # monitoring its owner set — "all seasons" is only for a new add.
+        existing = resolved if resolved.sonarr_id else (
+            await add_service.sonarr.get_series_by_tvdb(resolved.tvdb_id)
+            if resolved.tvdb_id else None
+        )
+        if existing is not None and existing.sonarr_id:
+            await status_msg.edit_text(
+                f"📺 <b>{html.escape(existing.title)}</b> — "
+                "Уже в библиотеке — управлять через /title",
+                parse_mode="HTML",
+            )
+            await _drop_keyboard(message)
+            return
+
         prefs = db_user.preferences
         profile = AddService.resolve_profile(profiles, prefs.sonarr_quality_profile_id)
         folder_path = AddService.resolve_root_folder(folders, prefs.sonarr_root_folder_id)
 
+        # New series: every season monitored + search — what the button
+        # label "➕ В библиотеку (все сезоны)" promises.
         added, action = await add_service.add_series(
             resolved, quality_profile_id=profile.id, root_folder_path=folder_path,
+            monitor="all",
         )
         action.user_id = db_user.tg_id
         await db.log_action(action)
@@ -464,9 +519,11 @@ async def _add_series_from_trending(callback: CallbackQuery, series: SeriesInfo,
         if added is not None:
             year_str = f" ({added.year})" if added.year else ""
             await status_msg.edit_text(
-                f"✅ <b>{html.escape(added.title)}</b>{year_str} добавлен в Sonarr — ищу релиз...",
+                f"✅ <b>{html.escape(added.title)}</b>{year_str} добавлен в Sonarr "
+                "(все сезоны) — ищу релизы...",
                 parse_mode="HTML",
             )
+            await _drop_keyboard(message)
         else:
             error_text = action.error_message or "Не удалось добавить сериал"
             await status_msg.edit_text(f"❌ {html.escape(error_text)[:200]}")

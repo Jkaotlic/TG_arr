@@ -36,6 +36,12 @@ logger = structlog.get_logger()
 # to translate to.
 _SEASON_PRESETS = {"all", "future", "latestSeason", "firstSeason", "none"}
 
+#: GRAB-05: a series that was in the library before this search keeps its
+#: monitoring; the grab does not rewrite it.
+_EXISTING_SERIES_NOTE = (
+    "Сериал уже был в библиотеке — мониторинг не меняю. Управлять: /title"
+)
+
 
 def _catalogue_list(session: SearchSession | None, tok: str) -> bool:
     """Whether ``tok`` names the catalogue result list this session holds now.
@@ -246,6 +252,49 @@ def _decide_monitor_type(result, force_download: bool, override: str | None = No
     return "all"
 
 
+async def _apply_series_monitoring(
+    add_service: AddService, arr_id: int, result: SearchResult, session: SearchSession,
+) -> None:
+    """Monitoring after a successful series grab (audit 2026-09-23 GRAB-05).
+
+    - A season pack for season N monitors season N only — never "all". On a
+      series this search added, the series flag goes up with it (the add
+      left everything off); on one already in the library, only that
+      season's flag changes.
+    - Otherwise a preset (the user's, or ``_decide_monitor_type``'s) is
+      applied only to a series THIS search added (``session.title_created``).
+      A series that was already in the library keeps the monitoring its
+      owner set — grabbing one episode used to overwrite it.
+    """
+    sonarr = add_service.sonarr
+    created = session.title_created
+    pack_season = result.detected_season if result.is_season_pack else None
+
+    if pack_season is not None and not (created and session.monitor_type):
+        await sonarr.monitor_season(arr_id, pack_season, monitor_series=created)
+        logger.info("monitor_scope_applied", arr_id=arr_id, season=pack_season, created=created)
+        return
+
+    if not created:
+        logger.info("monitor_scope_kept", arr_id=arr_id, reason="title_existed")
+        return
+
+    # Сериал добавлен с monitor="none", поэтому поднять один флаг сериала
+    # мало: все сезоны остаются немониторимыми, и новые серии не
+    # подхватываются. Область, которую пользователь выбрал в
+    # `handle_season_preset`, лежит в `session.monitor_type`; если меню не
+    # открывали, её решает `_decide_monitor_type`.
+    monitor = _decide_monitor_type(result, False, override=session.monitor_type)
+    await sonarr.set_series_monitored(arr_id, True)
+    await sonarr.set_season_monitoring(arr_id, monitor)
+    logger.info(
+        "monitor_scope_applied",
+        arr_id=arr_id,
+        monitor=monitor,
+        from_user=session.monitor_type is not None,
+    )
+
+
 def _resolve_folder(folders: list, preferred_id) -> str:
     """Resolve root folder path from user preference or first available.
 
@@ -337,29 +386,19 @@ async def _execute_grab(
             # Now that a release has actually been taken, the user does want it
             # tracked — future upgrades and missing episodes included. A failure
             # here must not undo a successful grab, so it is logged, not raised.
-            try:
-                if isinstance(title, MovieInfo):
-                    await add_service.radarr.set_movie_monitored(arr_id, True)
-                else:
-                    # Сериал добавлен с monitor="none", поэтому поднять один
-                    # флаг сериала мало: все сезоны остаются немониторимыми, и
-                    # новые серии не подхватываются. Область, которую
-                    # пользователь выбрал в `handle_season_preset`, лежит в
-                    # `session.monitor_type`; если меню не открывали, её
-                    # решает `_decide_monitor_type`.
-                    monitor = _decide_monitor_type(
-                        result, force_download, override=session.monitor_type,
-                    )
-                    await add_service.sonarr.set_series_monitored(arr_id, True)
-                    await add_service.sonarr.set_season_monitoring(arr_id, monitor)
-                    logger.info(
-                        "monitor_scope_applied",
-                        arr_id=arr_id,
-                        monitor=monitor,
-                        from_user=session.monitor_type is not None,
-                    )
-            except Exception as e:
-                logger.warning("monitor_enable_failed", arr_id=arr_id, error=str(e))
+            #
+            # Audit 2026-09-23 GRAB-07: a force (qBit) grab bypasses *arr
+            # entirely, so it must not change *arr's monitoring either.
+            if not force_download:
+                try:
+                    if isinstance(title, MovieInfo):
+                        await add_service.radarr.set_movie_monitored(arr_id, True)
+                    else:
+                        await _apply_series_monitoring(
+                            add_service, arr_id, result, session,
+                        )
+                except Exception as e:
+                    logger.warning("monitor_enable_failed", arr_id=arr_id, error=str(e))
 
             year_str = f" ({title.year})" if title.year else ""
             if auto_search:
@@ -458,6 +497,10 @@ async def handle_season_menu(callback: CallbackQuery, db_user: User, db: Databas
     if not session or not session.selected_result:
         await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
         return
+    if not session.title_created:
+        # GRAB-05: the preset is applied only to a series this search added.
+        await callback.answer(_EXISTING_SERIES_NOTE, show_alert=True)
+        return
     await callback.answer()
     current = session.monitor_type or "auto"
     await message.edit_text(
@@ -484,6 +527,10 @@ async def handle_season_preset(
             await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
             return
 
+        if not session.title_created:
+            await callback.answer(_EXISTING_SERIES_NOTE, show_alert=True)
+            return
+
         preset = callback_data.preset
         if preset not in _SEASON_PRESETS:
             await callback.answer("Неверный выбор", show_alert=True)
@@ -507,6 +554,7 @@ async def handle_season_preset(
             content=session.selected_content,
             list_token=session.list_token,
             idx=_selected_index(session),
+            season_menu=session.title_created,
         ),
         parse_mode="HTML",
     )
@@ -543,6 +591,7 @@ async def handle_season_back(callback: CallbackQuery, db_user: User, db: Databas
             content=session.selected_content,
             list_token=session.list_token,
             idx=_selected_index(session),
+            season_menu=session.title_created,
         ),
         parse_mode="HTML",
     )

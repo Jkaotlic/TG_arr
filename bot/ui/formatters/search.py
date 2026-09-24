@@ -281,9 +281,9 @@ class _SearchFormatters:
             if movie.has_file:
                 status = "✅ В библиотеке (скачан)"
             elif movie.monitored:
-                status = "👀 В библиотеке, отслеживается"
+                status = "👁 Отслеживается"
             else:
-                status = "📇 Есть в каталоге Radarr"
+                status = "📇 В каталоге, не отслеживается"
             lines.append(f"\n{status}")
 
         return "\n".join(lines)
@@ -338,9 +338,9 @@ class _SearchFormatters:
             if series.has_file:
                 status = "✅ В библиотеке"
             elif series.monitored:
-                status = "👀 В библиотеке, отслеживается"
+                status = "👁 Отслеживается"
             else:
-                status = "📇 Есть в каталоге Sonarr"
+                status = "📇 В каталоге, не отслеживается"
             lines.append(f"\n{status}")
 
         return "\n".join(lines)

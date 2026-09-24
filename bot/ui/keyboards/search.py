@@ -133,8 +133,13 @@ class _SearchKeyboards:
         content: object = None,
         list_token: str = "",
         idx: int = 0,
+        season_menu: bool = True,
     ) -> InlineKeyboardMarkup:
         """Create keyboard for release details view.
+
+        ``season_menu=False`` hides the season-monitoring picker: the series
+        was already in the library before this search, and its monitoring is
+        not the grab's to rewrite (audit GRAB-05).
 
         When the resolved movie/series (``content``) is available, prepend a row
         of external-metadata link buttons (feature #5).
@@ -165,7 +170,7 @@ class _SearchKeyboards:
             ])
 
         # #2: let the user choose which seasons are monitored (series only).
-        if content_type == ContentType.SERIES:
+        if content_type == ContentType.SERIES and season_menu:
             keyboard.append([
                 InlineKeyboardButton(text="📺 Мониторинг сезонов", callback_data=CallbackData.SEASON_MENU),
             ])

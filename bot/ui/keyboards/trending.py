@@ -120,8 +120,9 @@ class _TrendingKeyboards:
             keyboard.append(links)
         keyboard.append([
             InlineKeyboardButton(
-                text="➕ Добавить в библиотеку",
-                callback_data=AddContentCB(kind="series", tmdb_id=series.tmdb_id).pack(),
+                # Audit UI-05: say what the add does — every season is monitored.
+                text="➕ В библиотеку (все сезоны)",
+                callback_data=AddContentCB(kind="series",tmdb_id=series.tmdb_id).pack(),
             )
         ])
         keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_SERIES)])

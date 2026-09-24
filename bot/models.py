@@ -587,6 +587,11 @@ class SearchSession(BaseModel):
     # session saved by an older version) matches nothing, so old buttons read
     # as "Список устарел" instead of acting on a different item.
     list_token: str = ""
+    # Audit 2026-09-23 GRAB-05: True when THIS search added the title to
+    # Radarr/Sonarr. Only then may a grab apply a season-monitoring preset —
+    # a title that was already in the library keeps the monitoring its owner
+    # set. Default False: an older session never rewrites monitoring.
+    title_created: bool = False
     created_at: datetime = Field(default_factory=_utcnow)
 
 

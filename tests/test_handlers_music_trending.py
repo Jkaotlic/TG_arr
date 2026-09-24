@@ -438,7 +438,9 @@ async def test_add_movie_from_trending_escapes_error_message():
         error_message="Radarr rejected: <script>bad</script>",
     )
 
+    # Audit UI-05: the handler first asks Radarr whether the title exists.
     add_service = AsyncMock()
+    add_service.radarr.get_movie_by_tmdb = AsyncMock(return_value=None)
     add_service.get_radarr_profiles = AsyncMock(return_value=[QualityProfile(id=1, name="Any")])
     add_service.get_radarr_root_folders = AsyncMock(return_value=[RootFolder(id=1, path="/movies")])
     add_service.add_movie = AsyncMock(return_value=(None, action))
@@ -495,6 +497,8 @@ async def test_add_series_from_trending_resolves_tvdb_id_then_adds_once():
 
     add_service = AsyncMock()
     add_service.radarr = AsyncMock()
+    # Audit UI-05: the handler first asks Sonarr whether the title exists.
+    add_service.sonarr.get_series_by_tvdb = AsyncMock(return_value=None)
     add_service.get_sonarr_profiles = AsyncMock(return_value=[QualityProfile(id=9, name="HD")])
     add_service.get_sonarr_root_folders = AsyncMock(return_value=[RootFolder(id=2, path="/tv")])
     add_service.add_series = AsyncMock(return_value=(added, action))
