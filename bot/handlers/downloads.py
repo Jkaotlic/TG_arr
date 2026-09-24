@@ -24,6 +24,8 @@ from bot.ui.menu import MENU_DOWNLOADS, MENU_QSTATUS
 logger = structlog.get_logger()
 router = Router()
 
+MSG_ADMIN_ONLY = "⛔ Только для администратора"
+
 # Per-page limit for torrent list
 TORRENTS_PER_PAGE = 5
 
@@ -765,8 +767,11 @@ async def handle_filter_select(callback: CallbackQuery, is_admin: bool = False) 
 
 
 @router.callback_query(F.data == CallbackData.SPEED_MENU)
-async def handle_speed_menu(callback: CallbackQuery) -> None:
-    """Show speed limits menu."""
+async def handle_speed_menu(callback: CallbackQuery, is_admin: bool = False) -> None:
+    """Show speed limits menu (admin-only: the limits are global qBit settings)."""
+    if not is_admin:
+        await callback.answer(MSG_ADMIN_ONLY, show_alert=True)
+        return
     message = accessible_message(callback)
     if message is None:
         return
@@ -818,8 +823,11 @@ async def _render_speed_menu(message: Message, status, user_id: int = 0) -> None
 
 
 @router.callback_query(F.data.startswith(CallbackData.SPEED_LIMIT))
-async def handle_speed_set(callback: CallbackQuery) -> None:
-    """Set speed limits (download or upload)."""
+async def handle_speed_set(callback: CallbackQuery, is_admin: bool = False) -> None:
+    """Set speed limits (download or upload). Admin-only, like the menu."""
+    if not is_admin:
+        await callback.answer(MSG_ADMIN_ONLY, show_alert=True)
+        return
     if not callback.data:
         return
 

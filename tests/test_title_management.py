@@ -104,7 +104,7 @@ async def test_delete_dispatches_to_sonarr_for_a_series():
 def test_manage_menu_offers_monitoring_and_delete():
     from bot.ui.keyboards import Keyboards
 
-    kb = Keyboards.title_actions(_series())
+    kb = Keyboards.title_actions(_series(), is_admin=True)
     labels = [b.text for row in kb.inline_keyboard for b in row]
     assert any("монитор" in label.lower() for label in labels)
     assert any("удал" in label.lower() for label in labels)
@@ -251,7 +251,7 @@ async def test_delete_asks_for_confirmation_first():
     with patch.object(titles_handler, "get_radarr", AsyncMock(return_value=radarr)), \
          patch.object(titles_handler, "get_sonarr", AsyncMock(return_value=sonarr)):
         await titles_handler.handle_title_action(
-            cb, TitleActionCB(action="delete", kind="movie", title_id="15"), MagicMock(tg_id=42), db
+            cb, TitleActionCB(action="delete", kind="movie", title_id="15"), MagicMock(tg_id=42), db, is_admin=True
         )
 
     radarr.delete_movie.assert_not_awaited()
@@ -275,7 +275,7 @@ async def test_confirmed_delete_goes_through_radarr():
     with patch.object(titles_handler, "get_radarr", AsyncMock(return_value=radarr)), \
          patch.object(titles_handler, "get_sonarr", AsyncMock(return_value=sonarr)):
         await titles_handler.handle_title_action(
-            cb, TitleActionCB(action="delconf", kind="movie", title_id="15"), MagicMock(tg_id=42), db
+            cb, TitleActionCB(action="delconf", kind="movie", title_id="15"), MagicMock(tg_id=42), db, is_admin=True
         )
 
     radarr.delete_movie.assert_awaited_once_with(15, delete_files=False)
@@ -298,7 +298,7 @@ async def test_confirmed_delete_goes_through_sonarr():
     with patch.object(titles_handler, "get_radarr", AsyncMock(return_value=radarr)), \
          patch.object(titles_handler, "get_sonarr", AsyncMock(return_value=sonarr)):
         await titles_handler.handle_title_action(
-            cb, TitleActionCB(action="delconf", kind="series", title_id="3"), MagicMock(tg_id=42), db
+            cb, TitleActionCB(action="delconf", kind="series", title_id="3"), MagicMock(tg_id=42), db, is_admin=True
         )
 
     sonarr.delete_series.assert_awaited_once_with(3, delete_files=False)
@@ -410,7 +410,7 @@ async def test_failed_delete_is_logged_as_a_failure_not_a_success():
     with patch.object(titles_handler, "get_radarr", AsyncMock(return_value=radarr)), \
          patch.object(titles_handler, "get_sonarr", AsyncMock(return_value=sonarr)):
         await titles_handler.handle_title_action(
-            cb, TitleActionCB(action="delconf", kind="movie", title_id="15"), MagicMock(tg_id=42), db
+            cb, TitleActionCB(action="delconf", kind="movie", title_id="15"), MagicMock(tg_id=42), db, is_admin=True
         )
 
     logged: ActionLog = db.log_action.await_args.args[0]

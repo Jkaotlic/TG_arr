@@ -94,10 +94,10 @@ class _TorrentKeyboards:
                 InlineKeyboardButton(text="⏸ Пауза всех", callback_data=CallbackData.TORRENT_PAUSE_ALL),
                 InlineKeyboardButton(text="▶️ Возобновить все", callback_data=CallbackData.TORRENT_RESUME_ALL),
             ])
-
-        keyboard.append([
-            InlineKeyboardButton(text="🚀 Лимиты скорости", callback_data=CallbackData.SPEED_MENU),
-        ])
+            # Speed limits are global qBit settings — admin-only (final review 2026-09-24).
+            keyboard.append([
+                InlineKeyboardButton(text="🚀 Лимиты скорости", callback_data=CallbackData.SPEED_MENU),
+            ])
 
         keyboard.append([
             InlineKeyboardButton(text=BTN_CLOSE, callback_data=CallbackData.CLOSE),

@@ -356,11 +356,13 @@ class _SearchKeyboards:
         return "series", str(title.sonarr_id)
 
     @staticmethod
-    def title_actions(title) -> InlineKeyboardMarkup:
+    def title_actions(title, is_admin: bool = False) -> InlineKeyboardMarkup:
         """Manage a library title — monitoring and removal (2026-07-29).
 
         The monitoring button is a toggle: it shows the action, not the state,
-        so the user never has to work out what pressing it will do.
+        so the user never has to work out what pressing it will do. Removal
+        from the catalogue is admin-only (final review 2026-09-24), so 🗑 is
+        shown only when ``is_admin``.
         """
         from bot.ui.callbacks import TitleActionCB
 
@@ -379,14 +381,14 @@ class _SearchKeyboards:
                 callback_data=TitleActionCB(action="mon", kind=kind, title_id=title_id).pack(),
             )
         )
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [toggle],
-            [InlineKeyboardButton(
+        rows = [[toggle]]
+        if is_admin:
+            rows.append([InlineKeyboardButton(
                 text="🗑 Удалить из каталога",
                 callback_data=TitleActionCB(action="delete", kind=kind, title_id=title_id).pack(),
-            )],
-            [InlineKeyboardButton(text=BTN_CLOSE, callback_data=CallbackData.CLOSE)],
-        ])
+            )])
+        rows.append([InlineKeyboardButton(text=BTN_CLOSE, callback_data=CallbackData.CLOSE)])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
     def title_choices(titles: list, limit: int = 5) -> InlineKeyboardMarkup:

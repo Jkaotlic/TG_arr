@@ -86,7 +86,7 @@ def _remember_candidates(user_id: int, titles: list) -> None:
 
 
 @router.message(Command("title"))
-async def cmd_title(message: Message, db_user: User, db: Database) -> None:
+async def cmd_title(message: Message, db_user: User, db: Database, is_admin: bool = False) -> None:
     """`/title <name>` — find a library entry and offer actions on it."""
     if not message.text:
         await message.answer("Укажите название: <code>/title Paw Patrol</code>")
@@ -135,7 +135,7 @@ async def cmd_title(message: Message, db_user: User, db: Database) -> None:
     title = items[0]
     await status_msg.edit_text(
         _render_title_card(title),
-        reply_markup=Keyboards.title_actions(title),
+        reply_markup=Keyboards.title_actions(title, is_admin=is_admin),
         parse_mode="HTML",
     )
 
@@ -157,7 +157,8 @@ def _render_title_card(title: "MovieInfo | SeriesInfo") -> str:
 
 @router.callback_query(TitleActionCB.filter())
 async def handle_title_action(
-    callback: CallbackQuery, callback_data: TitleActionCB, db_user: User, db: Database
+    callback: CallbackQuery, callback_data: TitleActionCB, db_user: User, db: Database,
+    is_admin: bool = False,
 ) -> None:
     """Apply a monitoring/removal action to a title already in the library."""
     message = accessible_message(callback)
@@ -178,6 +179,13 @@ async def handle_title_action(
         await callback.answer("Неверный идентификатор", show_alert=True)
         return
 
+    # Final review 2026-09-24: removal from the catalogue is admin-only. The
+    # keyboard hides 🗑 for everyone else, but an old card (sent before the
+    # user lost admin, or forwarded) still carries the button — refuse here.
+    if action in ("delete", "delconf") and not is_admin:
+        await callback.answer("⛔ Только для администратора", show_alert=True)
+        return
+
     user_id = callback.from_user.id
     client = await get_radarr() if is_movie else await get_sonarr()
     await callback.answer()
@@ -195,7 +203,7 @@ async def handle_title_action(
                 return
             await message.edit_text(
                 _render_title_card(title),
-                reply_markup=Keyboards.title_actions(title),
+                reply_markup=Keyboards.title_actions(title, is_admin=is_admin),
                 parse_mode="HTML",
             )
             return
@@ -230,7 +238,7 @@ async def handle_title_action(
             if title is not None:
                 await message.edit_text(
                     _render_title_card(title),
-                    reply_markup=Keyboards.title_actions(title),
+                    reply_markup=Keyboards.title_actions(title, is_admin=is_admin),
                     parse_mode="HTML",
                 )
             else:

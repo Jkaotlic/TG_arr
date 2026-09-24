@@ -402,7 +402,7 @@ async def test_handle_speed_set_calls_answer_once_and_redraws():
     cb = _make_callback("speed:dl:1024")
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
-        await downloads.handle_speed_set(cb)
+        await downloads.handle_speed_set(cb, is_admin=True)
 
     assert cb.answer.call_count == 1
     qbt.set_download_limit.assert_awaited_once_with(1024 * 1024)
@@ -428,7 +428,7 @@ async def test_handle_speed_menu_passes_current_limits_to_keyboard():
     cb = _make_callback("speed_menu")
 
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
-        await downloads.handle_speed_menu(cb)
+        await downloads.handle_speed_menu(cb, is_admin=True)
 
     cb.message.edit_text.assert_awaited_once()
     _, kwargs = cb.message.edit_text.call_args
