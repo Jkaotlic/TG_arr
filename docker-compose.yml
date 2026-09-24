@@ -27,6 +27,10 @@ services:
       SONARR_API_KEY: ${SONARR_API_KEY:?Set SONARR_API_KEY}
       PROWLARR_URL: ${PROWLARR_URL:?Set PROWLARR_URL}
       PROWLARR_API_KEY: ${PROWLARR_API_KEY:?Set PROWLARR_API_KEY}
+      # Quality profile ids for users with no /settings choice (empty = pick
+      # the 4K/2160 profile by name, else the first one).
+      RADARR_DEFAULT_PROFILE_ID: ${RADARR_DEFAULT_PROFILE_ID:-}
+      SONARR_DEFAULT_PROFILE_ID: ${SONARR_DEFAULT_PROFILE_ID:-}
       # Users
       ALLOWED_TG_IDS: ${ALLOWED_TG_IDS:-}
       ADMIN_TG_IDS: ${ADMIN_TG_IDS:-}
@@ -71,6 +75,13 @@ services:
       NOTIFY_DOWNLOAD_COMPLETE: ${NOTIFY_DOWNLOAD_COMPLETE:-true}
       NOTIFY_CHECK_INTERVAL: ${NOTIFY_CHECK_INTERVAL:-60}
       NOTIFY_ADMINS_ON_START: ${NOTIFY_ADMINS_ON_START:-true}
+      # Album summary: quiet time before it is sent / after which a stuck
+      # album gets a partial one (seconds).
+      MUSIC_NOTIFY_SETTLE_SECONDS: ${MUSIC_NOTIFY_SETTLE_SECONDS:-300}
+      MUSIC_NOTIFY_STALL_SECONDS: ${MUSIC_NOTIFY_STALL_SECONDS:-3600}
+      # qBit categories imported by Radarr/Sonarr — their completion is
+      # announced by the library watcher, not by qBit.
+      ARR_TORRENT_CATEGORIES: ${ARR_TORRENT_CATEGORIES:-radarr,tv-sonarr,sonarr}
       # Tuning
       TIMEZONE: ${TIMEZONE:-Europe/Moscow}
       # DEPLOY-03: TZ feeds glibc; tzdata is installed in the image.

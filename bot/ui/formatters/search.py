@@ -91,19 +91,29 @@ def _profile_line(
     chosen: Optional[QualityProfile],
     fallback: Optional[tuple[QualityProfile, str]],
     env_name: str,
+    profiles: Optional[list[QualityProfile]] = None,
+    config_id: Optional[int] = None,
+    service: str = "",
 ) -> str:
-    """/settings "Профиль:" line (audit GRAB-06)."""
+    """/settings "Профиль:" line (audit GRAB-06).
+
+    Final review 2026-09-24: a configured ``*_DEFAULT_PROFILE_ID`` that is not
+    among the service's profiles is silently skipped by the resolver — say so.
+    """
     if chosen is not None:
-        return f"  Профиль: {_e(chosen.name)}"
-    if fallback is None:
-        return "  Профиль: Не выбран"
-    profile, source = fallback
-    line = f"  Профиль: Не выбран → по умолчанию «{_e(profile.name)}»"
-    if source == "first":
-        line += (
-            "\n  ⚠️ Берётся первый профиль по списку — выберите профиль "
-            f"или задайте {env_name}"
-        )
+        line = f"  Профиль: {_e(chosen.name)}"
+    elif fallback is None:
+        line = "  Профиль: Не выбран"
+    else:
+        profile, source = fallback
+        line = f"  Профиль: Не выбран → по умолчанию «{_e(profile.name)}»"
+        if source == "first":
+            line += (
+                "\n  ⚠️ Берётся первый профиль по списку — выберите профиль "
+                f"или задайте {env_name}"
+            )
+    if config_id is not None and profiles and not any(str(p.id) == str(config_id) for p in profiles):
+        line += f"\n  ⚠️ {env_name}={config_id} — такого id нет среди профилей {service}"
     return line
 
 
@@ -546,6 +556,8 @@ class _SearchFormatters:
         sonarr_folders: list[RootFolder],
         radarr_default: Optional[tuple[QualityProfile, str]] = None,
         sonarr_default: Optional[tuple[QualityProfile, str]] = None,
+        radarr_config_id: Optional[int] = None,
+        sonarr_config_id: Optional[int] = None,
     ) -> str:
         """Format user preferences for settings display.
 
@@ -567,7 +579,10 @@ class _SearchFormatters:
             (p for p in radarr_profiles if str(p.id) == str(prefs.radarr_quality_profile_id)),
             None,
         )
-        lines.append(_profile_line(rp, radarr_default, "RADARR_DEFAULT_PROFILE_ID"))
+        lines.append(_profile_line(
+            rp, radarr_default, "RADARR_DEFAULT_PROFILE_ID",
+            radarr_profiles, radarr_config_id, "Radarr",
+        ))
         rf = next(
             (f for f in radarr_folders if str(f.id) == str(prefs.radarr_root_folder_id)), None
         )
@@ -578,7 +593,10 @@ class _SearchFormatters:
             (p for p in sonarr_profiles if str(p.id) == str(prefs.sonarr_quality_profile_id)),
             None,
         )
-        lines.append(_profile_line(sp, sonarr_default, "SONARR_DEFAULT_PROFILE_ID"))
+        lines.append(_profile_line(
+            sp, sonarr_default, "SONARR_DEFAULT_PROFILE_ID",
+            sonarr_profiles, sonarr_config_id, "Sonarr",
+        ))
         sf = next(
             (f for f in sonarr_folders if str(f.id) == str(prefs.sonarr_root_folder_id)), None
         )

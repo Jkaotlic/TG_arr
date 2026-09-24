@@ -17,7 +17,7 @@ key with no separate prefix to keep in sync.
 """
 
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Literal
+from typing import Awaitable, Callable, Literal, Optional
 
 import structlog
 from aiogram import F, Router
@@ -33,7 +33,7 @@ from bot.clients.registry import (
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import accessible_message
-from bot.models import User
+from bot.models import QualityProfile, User
 from bot.services.add_service import AddService, resolve_profile_with_source
 from bot.ui.callbacks import SettingCB
 from bot.ui.formatters import Formatters
@@ -53,6 +53,27 @@ async def _get_add_service() -> AddService:
         qbittorrent=await get_qbittorrent(),
         lidarr=await get_lidarr(),
     )
+
+
+def warn_unknown_default_profile(
+    profiles: list[QualityProfile], config_id: Optional[int], setting: str,
+) -> bool:
+    """Log a warning when ``*_DEFAULT_PROFILE_ID`` names no existing profile.
+
+    The resolver silently falls through to the 4K-by-name/first profile, so a
+    typo'd id is otherwise invisible (final review 2026-09-24). /settings shows
+    the same fact. Returns True when the id is set, profiles are known and it
+    is missing among them.
+    """
+    if config_id is None or not profiles:
+        return False
+    if any(str(p.id) == str(config_id) for p in profiles):
+        return False
+    logger.warning(
+        "default_profile_id_unknown", setting=setting, profile_id=config_id,
+        known_ids=[p.id for p in profiles],
+    )
+    return True
 
 
 async def _render_settings_menu(db_user: User) -> tuple[str, InlineKeyboardMarkup]:
@@ -91,9 +112,17 @@ async def _render_settings_menu(db_user: User) -> tuple[str, InlineKeyboardMarku
             sonarr_profiles, prefs.sonarr_quality_profile_id, settings.sonarr_default_profile_id,
         ) if sonarr_profiles else None
     )
+    warn_unknown_default_profile(
+        radarr_profiles, settings.radarr_default_profile_id, "RADARR_DEFAULT_PROFILE_ID",
+    )
+    warn_unknown_default_profile(
+        sonarr_profiles, settings.sonarr_default_profile_id, "SONARR_DEFAULT_PROFILE_ID",
+    )
     text = Formatters.format_user_preferences(
         prefs, radarr_profiles, radarr_folders, sonarr_profiles, sonarr_folders,
         radarr_default=radarr_default, sonarr_default=sonarr_default,
+        radarr_config_id=settings.radarr_default_profile_id,
+        sonarr_config_id=settings.sonarr_default_profile_id,
     )
     keyboard = Keyboards.settings_menu(
         lidarr_enabled=get_settings().lidarr_enabled, prefs=db_user.preferences

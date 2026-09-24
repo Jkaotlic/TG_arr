@@ -4,7 +4,7 @@ import warnings
 from functools import lru_cache
 from typing import Annotated, Literal, Optional
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -240,6 +240,30 @@ class Settings(BaseSettings):
         """
         if isinstance(v, str) and not v.strip():
             return None
+        return v
+
+    @field_validator("radarr_default_profile_id", "sonarr_default_profile_id", mode="before")
+    @classmethod
+    def _empty_profile_id_is_unset(cls, v: object) -> object:
+        """Compose passes ``RADARR_DEFAULT_PROFILE_ID: ${RADARR_DEFAULT_PROFILE_ID:-}``
+        — unset on the host, that is an empty string, which ``Optional[int]``
+        would reject and stop the bot. Same idea as ``_empty_ts_field_is_unset``
+        (final review 2026-09-24)."""
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
+    @field_validator(
+        "music_notify_settle_seconds", "music_notify_stall_seconds", "arr_torrent_categories",
+        mode="before",
+    )
+    @classmethod
+    def _empty_tuning_value_is_default(cls, v: object, info: ValidationInfo) -> object:
+        """An empty ``${X:-}`` from Compose means "not set" — use the field's
+        default instead of failing int parsing (or, for the categories,
+        silently turning the NOTIF-07 skip rule off)."""
+        if isinstance(v, str) and not v.strip() and info.field_name is not None:
+            return cls.model_fields[info.field_name].default
         return v
 
     @model_validator(mode="after")
