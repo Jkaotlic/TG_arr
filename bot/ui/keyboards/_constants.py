@@ -19,6 +19,8 @@ BTN_CLOSE = "✖️ Закрыть"
 BTN_CANCEL = "❌ Отмена"
 #: Answer for a button whose list/message is no longer current.
 MSG_STALE = STALE_LIST_TEXT
+#: Answer for a button no handler knows any more (older bot version, UI-19).
+MSG_OLD_BUTTON = "⌛ Кнопка устарела — откройте раздел заново"
 
 
 class CallbackData:

@@ -618,6 +618,7 @@ async def handle_resume_all(callback: CallbackQuery, is_admin: bool = False) -> 
 
 
 @router.callback_query(F.data == CallbackData.TORRENT_BACK)
+@router.callback_query(F.data == CallbackData.TORRENT_REFRESH)  # audit UI-19: had no handler
 async def handle_back_to_list(callback: CallbackQuery) -> None:
     """Legacy plain "back to list" callback (``torrent_filters``/
     ``speed_limits_menu`` "Назад" buttons sent before they carried the view) —

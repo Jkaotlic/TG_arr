@@ -48,7 +48,9 @@ async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Data
         from bot.handlers.music import process_music_search
 
         await db.delete_session(user_id)  # music flow starts its own session
-        await process_music_search(message, session.query, db_user, db)
+        # Audit UI-14: the question message becomes the artist list — its
+        # type buttons must not stay alive under it.
+        await process_music_search(message, session.query, db_user, db, status_msg=message)
         return
 
     content_type = {

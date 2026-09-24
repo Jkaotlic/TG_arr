@@ -6,7 +6,7 @@ from typing import Any, Awaitable, Callable, Dict
 
 import structlog
 from aiogram import BaseMiddleware
-from aiogram.types import Message, CallbackQuery, TelegramObject
+from aiogram.types import CallbackQuery, InaccessibleMessage, Message, TelegramObject
 
 from bot.config import get_settings
 from bot.db import Database
@@ -214,4 +214,32 @@ class RateLimitMiddleware(BaseMiddleware):
             for uid in stale:
                 del self._user_requests[uid]
 
+        return await handler(event, data)
+
+
+#: Answer for a button under a message the bot can no longer edit.
+STALE_MESSAGE_TEXT = "Сообщение устарело — откройте раздел заново"
+
+
+class StaleMessageMiddleware(BaseMiddleware):
+    """Audit 2026-09-23 UI-19: a button under a message older than 48 h.
+
+    Telegram hands such callbacks over with an ``InaccessibleMessage``. Every
+    handler bails out on it (``accessible_message`` → None), mostly without
+    answering — the button then spins until Telegram's timeout. Answering
+    here, once, covers all of them.
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        if isinstance(event, CallbackQuery) and isinstance(event.message, InaccessibleMessage):
+            try:
+                await event.answer(STALE_MESSAGE_TEXT, show_alert=True)
+            except Exception as e:  # the query itself may be too old to answer
+                logger.debug("stale_callback_answer_failed", error=str(e))
+            return None
         return await handler(event, data)

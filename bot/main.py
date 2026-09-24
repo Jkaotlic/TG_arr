@@ -26,7 +26,12 @@ from bot.clients.registry import get_qbittorrent
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers import setup_routers
-from bot.middleware.auth import AuthMiddleware, LoggingMiddleware, RateLimitMiddleware
+from bot.middleware.auth import (
+    AuthMiddleware,
+    LoggingMiddleware,
+    RateLimitMiddleware,
+    StaleMessageMiddleware,
+)
 from bot.services.notification_service import NotificationService
 from bot.ui.commands import bot_commands
 
@@ -804,6 +809,8 @@ async def main() -> None:
     dp.callback_query.middleware(rate_limiter)
     dp.message.middleware(AuthMiddleware(db))
     dp.callback_query.middleware(AuthMiddleware(db))
+    # Audit UI-19: buttons under messages >48 h old get an answer, not a spinner.
+    dp.callback_query.middleware(StaleMessageMiddleware())
 
     # Setup routers
     main_router = setup_routers()

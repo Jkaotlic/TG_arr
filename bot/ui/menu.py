@@ -30,6 +30,10 @@ MENU_TORRSERVER = "▶️ Смотреть"
 #: button labels for the same reason they do: filter and message must not drift.
 TORRSERVER_PROMPT = "▶️ Что найти в TorrServer?"
 
+#: ForceReply prompt of "🎵 Музыка" (audit UI-13): the reply is an artist
+#: search, not a text for content-type auto-detection.
+MUSIC_PROMPT = "🎵 Какого артиста найти?"
+
 # All menu button texts — used by handlers/search.py to decide that a plain
 # text message is NOT a search query but a main-menu button press (routed to
 # its own handler instead).

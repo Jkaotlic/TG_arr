@@ -463,10 +463,10 @@ async def process_search(
 
             # Music auto-detected → hand off to the music flow.
             if content_type == ContentType.MUSIC:
-                await status_msg.delete()
                 from bot.handlers.music import process_music_search
 
-                await process_music_search(message, query, db_user, db)
+                # Audit UI-14: reuse the status message, no second "Ищу…".
+                await process_music_search(message, query, db_user, db, status_msg=status_msg)
                 return
 
             # Unknown OR low/ambiguous confidence → ask the user (BUG-04, LOGIC-28).

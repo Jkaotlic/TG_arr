@@ -7,7 +7,7 @@ from typing import Optional
 import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, ForceReply, Message
 
 from bot.clients.registry import (
     get_deezer,
@@ -52,10 +52,13 @@ from bot.ui.callbacks import (
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.list_token import ListTokenRegistry, answer_stale, new_list_token, token_matches
-from bot.ui.menu import MENU_MUSIC
+from bot.ui.menu import MENU_MUSIC, MUSIC_PROMPT
 
 logger = structlog.get_logger()
 router = Router()
+#: Replies to the "🎵 Музыка" prompt. Its own router so setup_routers can put
+#: it before search_router, whose text handler claims every plain text.
+prompt_router = Router()
 
 # PERF-04: Reuse the same ScoringService instance across music requests.
 # Import here rather than in search.py to avoid a circular import at module load.
@@ -521,7 +524,19 @@ async def handle_menu_music(message: Message) -> None:
             "или SLSKD_URL/SLSKD_API_KEY в .env"
         )
         return
-    await message.answer("🎵 Введите имя артиста (<code>/music &lt;artist&gt;</code> или просто текст):")
+    # Audit UI-13: the answer used to go to content-type auto-detection like
+    # any text; a ForceReply ties it to the artist search (same pattern as
+    # TORRSERVER_PROMPT).
+    await message.answer(
+        MUSIC_PROMPT,
+        reply_markup=ForceReply(input_field_placeholder="Имя артиста"),
+    )
+
+
+@prompt_router.message(F.reply_to_message.text == MUSIC_PROMPT)
+async def handle_music_prompt_reply(message: Message, db_user: User, db: Database) -> None:
+    """The artist name typed in reply to the "🎵 Музыка" prompt."""
+    await process_music_search(message, (message.text or "").strip(), db_user, db)
 
 
 async def process_music_search(
@@ -529,8 +544,14 @@ async def process_music_search(
     query: str,
     db_user: User,
     db: Database,
+    status_msg: Optional[Message] = None,
 ) -> None:
-    """Look up artists in Lidarr and present selection list."""
+    """Look up artists in Lidarr and present selection list.
+
+    ``status_msg`` — a bot message to reuse for progress and results (the
+    type-choice question, the trending list): audit UI-14, the flow used to
+    leave it hanging with live buttons and add a new "Ищу…" message.
+    """
     MAX_QUERY_LENGTH = 200
     if len(query) > MAX_QUERY_LENGTH:
         await message.answer(f"❌ Запрос слишком длинный (макс. {MAX_QUERY_LENGTH} символов)")
@@ -548,7 +569,10 @@ async def process_music_search(
     user_id = db_user.tg_id
     log = logger.bind(user_id=user_id, query=query)
 
-    status_msg = await message.answer("🔍 Ищу артистов в Lidarr...")
+    if status_msg is None:
+        status_msg = await message.answer("🔍 Ищу артистов в Lidarr...")
+    else:
+        await status_msg.edit_text("🔍 Ищу артистов в Lidarr...")
 
     try:
         artists = await search_service.lookup_artist(query)
@@ -1368,9 +1392,8 @@ async def handle_trending_artist_click(
 
     name = artists[idx].get("name", "")
     await callback.answer()
-    if (message := accessible_message(callback)) is not None:
-        await message.edit_text(f"🔍 Ищу <b>{html.escape(name)}</b> в Lidarr...", parse_mode="HTML")
-    await process_music_search(message, name, db_user, db)
+    # Audit UI-14: the results replace the trending list in this message.
+    await process_music_search(message, name, db_user, db, status_msg=message)
 
 
 @router.callback_query(F.data.startswith(CallbackData.TRENDING_ARTIST))

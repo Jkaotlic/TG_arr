@@ -5,7 +5,9 @@ from aiogram import Router
 from bot.handlers.calendar import router as calendar_router
 from bot.handlers.downloads import router as downloads_router
 from bot.handlers.emby import router as emby_router
+from bot.handlers.fallback import router as fallback_router
 from bot.handlers.history import router as history_router
+from bot.handlers.music import prompt_router as music_prompt_router
 from bot.handlers.music import router as music_router
 from bot.handlers.search import router as search_router
 from bot.handlers.settings import router as settings_router
@@ -29,6 +31,8 @@ def setup_routers() -> Router:
     # Before search_router: handle_text_search claims any plain text, and
     # aiogram does not cascade handlers after a routed match.
     main_router.include_router(torrserver_router)
+    # Replies to the "🎵 Музыка" ForceReply prompt (audit UI-13) — same reason.
+    main_router.include_router(music_prompt_router)
     main_router.include_router(search_router)
     main_router.include_router(music_router)
     main_router.include_router(settings_router)
@@ -40,5 +44,7 @@ def setup_routers() -> Router:
     main_router.include_router(trending_router)
     main_router.include_router(calendar_router)
     main_router.include_router(titles_router)
+    # Audit UI-19: must stay last — answers whatever no router above claimed.
+    main_router.include_router(fallback_router)
 
     return main_router
