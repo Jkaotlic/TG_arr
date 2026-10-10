@@ -410,7 +410,9 @@ async def test_handler_starts_search_and_answers(db, monkeypatch):
     from bot.ui.keyboards import Keyboards
 
     lidarr = FakeLidarr()
-    service = _service(db, lidarr)
+    # The handler builds its own MusicRetryService on the real clock, so the
+    # token is issued on it too — a fixed T0 turned stale TOKEN_TTL after T0.
+    service = _service(db, lidarr, now=[datetime.now(timezone.utc)])
     [offer] = await service.offers([(KEY, _summary())])
     monkeypatch.setattr(music_handlers, "get_lidarr", AsyncMock(return_value=lidarr))
 
