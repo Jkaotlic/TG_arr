@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any, NoReturn, Optional
 
 import httpx
@@ -875,6 +876,31 @@ class ArrBaseClient(BaseAPIClient):
             records = result.get("records", [])
             return records if isinstance(records, list) else []
         return []
+
+    async def get_history_since(
+        self, since: datetime, event_type: str = "downloadFolderImported",
+        *, include_details: bool = False,
+    ) -> list[dict[str, Any]]:
+        """History records dated at or after `since`, oldest first (unpaged).
+
+        Log review 2026-10-10: `LibraryWatcher` already keeps a per-service
+        watermark; asking only for what is newer turned a ~205 KB poll into
+        `[]` (live Radarr/Sonarr: same numeric `eventType`, same details flags).
+        """
+        try:
+            code = self._HISTORY_EVENT_TYPE_CODES[event_type]
+        except KeyError:
+            raise ValueError(f"Unsupported history eventType filter: {event_type!r}") from None
+
+        params: dict[str, Any] = {
+            "date": since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "eventType": code,
+        }
+        if include_details:
+            params["includeMovie"] = "true"
+            params["includeSeries"] = "true"
+        result = await self.get(f"{self._api_prefix}/history/since", params=params)
+        return result if isinstance(result, list) else []
 
     async def _get_releases(self, params: dict[str, Any]) -> list["SearchResult"]:
         """Interactive search: releases already judged by the user's profile.

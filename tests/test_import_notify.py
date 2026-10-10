@@ -77,9 +77,10 @@ async def test_restart_announces_only_imports_newer_than_the_persisted_watermark
     await first.poll()
     assert sent == []
 
-    # bot is down; an import lands meanwhile
-    radarr.get_history.return_value = list(OLD_HISTORY) + [
-        _rec(9, "Landed While Down", "2026-09-24T10:00:00Z", "D9")
+    # bot is down; an import lands meanwhile. With a persisted watermark the
+    # restarted watcher reads `/history/since` — records at/after it.
+    radarr.get_history_since.return_value = [
+        OLD_HISTORY[-1], _rec(9, "Landed While Down", "2026-09-24T10:00:00Z", "D9"),
     ]
     restarted = LibraryWatcher(radarr, sonarr, notify=notify, db=db)
     await restarted.poll()
@@ -178,3 +179,50 @@ def test_arr_categories_are_configurable(monkeypatch):
 
     monkeypatch.setenv("ARR_TORRENT_CATEGORIES", "films, series")
     assert Settings().arr_torrent_category_set == {"films", "series"}
+
+
+@pytest.mark.asyncio
+async def test_with_a_watermark_the_watcher_asks_only_for_newer_history(db):
+    """Log review 2026-10-10: every poll re-downloaded 50 records with full
+    movie/series cards (~400 KB a cycle, 1 GB in two weeks). Once a service has
+    a watermark, only `/history/since` is read."""
+    from datetime import datetime, timezone
+
+    sent, notify = _collector()
+    radarr, sonarr = _services()
+    radarr.get_history.return_value = list(OLD_HISTORY)
+    radarr.get_history_since.return_value = []
+    sonarr.get_history_since.return_value = []
+    watcher = LibraryWatcher(radarr, sonarr, notify=notify, db=db)
+    await watcher.poll()  # first ever run: paged read seeds the watermark
+    assert radarr.get_history.await_count == 1
+
+    newest = OLD_HISTORY[-1]
+    radarr.get_history_since.return_value = [
+        newest, _rec(9, "Fresh Import", "2026-09-24T10:00:00Z", "D9"),
+    ]
+    await watcher.poll()
+
+    assert radarr.get_history.await_count == 1  # no second paged read
+    since = radarr.get_history_since.call_args.args[0]
+    assert since == datetime(2026, 9, 5, 10, 0, tzinfo=timezone.utc)
+    assert radarr.get_history_since.call_args.kwargs.get("include_details") is True
+    assert len(sent) == 1 and "Fresh Import" in sent[0]  # boundary record not re-announced
+
+
+@pytest.mark.asyncio
+async def test_since_read_failure_is_survived_like_a_paged_one(db):
+    sent, notify = _collector()
+    radarr, sonarr = _services()
+    radarr.get_history.return_value = list(OLD_HISTORY)
+    sonarr.get_history_since.return_value = []
+    watcher = LibraryWatcher(radarr, sonarr, notify=notify, db=db)
+    await watcher.poll()
+
+    radarr.get_history_since.side_effect = ConnectionError("radarr asleep")
+    await watcher.poll()  # must not raise
+    radarr.get_history_since.side_effect = None
+    radarr.get_history_since.return_value = [_rec(9, "After Nap", "2026-09-24T10:00:00Z", "D9")]
+    await watcher.poll()
+
+    assert len(sent) == 1 and "After Nap" in sent[0]

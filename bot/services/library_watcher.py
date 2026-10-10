@@ -199,11 +199,20 @@ class LibraryWatcher:
             if _breaker_open(client):
                 continue  # NOTIF-08: known down; the breaker logged it already
             try:
-                records = await client.get_history(
-                    event_type="downloadFolderImported", page_size=_HISTORY_PAGE_SIZE,
-                    # E2: the title's provider ids, for the Emby button.
-                    include_details=True,
-                )
+                # Log review 2026-10-10: with a watermark only newer records are
+                # read (`/history/since`); the paged read stays for the first
+                # ever run (silent seed) and for watchers without a database.
+                watermark = await self._import_watermark(label)
+                if watermark is not None:
+                    records = await client.get_history_since(
+                        watermark, event_type="downloadFolderImported", include_details=True,
+                    )
+                else:
+                    records = await client.get_history(
+                        event_type="downloadFolderImported", page_size=_HISTORY_PAGE_SIZE,
+                        # E2: the title's provider ids, for the Emby button.
+                        include_details=True,
+                    )
             except Exception as e:
                 _log_poll_failure("library_watch_imports_failed", e, service=label)
                 continue

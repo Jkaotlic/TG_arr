@@ -437,3 +437,38 @@ async def test_grab_release_posts_guid_and_indexer_id():
     assert ok is True
     assert post.call_args.args[0] == "/api/v3/release"
     assert post.call_args.kwargs["json_data"] == {"guid": "abc-1", "indexerId": 3}
+
+
+@pytest.mark.asyncio
+async def test_get_history_since_reads_the_unpaged_since_endpoint():
+    """Log review 2026-10-10, live-verified against Radarr and Sonarr: the paged
+    `/history?pageSize=50&includeMovie=true` cost ~205 KB per poll with nothing
+    new; `/history/since?date=…&eventType=3&includeMovie=true` answered `[]`
+    (2 bytes) — a bare list, oldest first, with the details still attached."""
+    from datetime import datetime, timezone
+
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    payload = [{"id": 7, "eventType": "downloadFolderImported", "movie": {"title": "Dune"}}]
+    since = datetime(2026, 10, 6, 1, 14, 21, tzinfo=timezone.utc)
+    with patch.object(client, "get", new=AsyncMock(return_value=payload)) as get:
+        records = await client.get_history_since(since, include_details=True)
+
+    assert get.call_args.args[0] == "/api/v3/history/since"
+    params = get.call_args.kwargs["params"]
+    assert params["date"] == "2026-10-06T01:14:21Z"
+    assert params["eventType"] == 3
+    assert params["includeMovie"] == "true" and params["includeSeries"] == "true"
+    assert records == payload
+
+
+@pytest.mark.asyncio
+async def test_get_history_since_tolerates_a_non_list_answer():
+    from datetime import datetime, timezone
+
+    from bot.clients.radarr import RadarrClient
+
+    client = RadarrClient("http://radarr", "key")
+    with patch.object(client, "get", new=AsyncMock(return_value={"unexpected": 1})):
+        assert await client.get_history_since(datetime.now(timezone.utc)) == []
