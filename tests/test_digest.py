@@ -285,3 +285,32 @@ async def test_recipient_preferences_defaults_for_unknown_users(db, monkeypatch)
     monkeypatch.setattr(main, "get_settings", lambda: MagicMock(allowed_tg_ids=[111, 222], admin_tg_ids=[]))
     result = await main.recipient_preferences(db)
     assert [(uid, p.digest_enabled) for uid, p in result] == [(111, False), (222, True)]
+
+
+@pytest.mark.asyncio
+async def test_failed_collect_does_not_burn_the_day(db):
+    """Log review 2026-10-10: the day was marked sent BEFORE collecting, so a
+    collect/recipients failure silently skipped that day's digest."""
+    sent: list = []
+    clock = Clock(_local(9, 1))
+    clients = _clients()
+    clients[0].get_history.return_value = [_import(1, "A", _local(8), movie="Dune")]
+    svc = _service(db, clock, clients, sent)
+    real_collect = svc.collect
+    calls = 0
+
+    async def flaky_collect():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("radarr hiccup")
+        return await real_collect()
+
+    svc.collect = flaky_collect  # type: ignore[method-assign]
+    assert await svc.maybe_send() == 0
+    assert await db.kv_get("digest_last_date") is None
+
+    clock.now = _local(9, 16)  # next _DIGEST_CHECK_S tick
+    assert await svc.maybe_send() == 1
+    assert len(sent) == 1 and "Dune" in sent[0][1]
+    assert await db.kv_get("digest_last_date") == "2026-09-25"

@@ -143,9 +143,12 @@ class DigestService:
         try:
             if await self._db.kv_get(DIGEST_KV_KEY) == today or not self._due_hour(local):
                 return 0
-            await self._db.kv_set(DIGEST_KV_KEY, today)
             data = await self.collect()
             users = await self._recipients()
+            # Marked only once there is something to send (a failed collect is
+            # retried next tick), but before sending — a partial send must not
+            # repeat for the users who already got it.
+            await self._db.kv_set(DIGEST_KV_KEY, today)
         except Exception as e:
             logger.warning("digest_failed", error=describe_error(e))
             return 0
