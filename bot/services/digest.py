@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 
+from bot.logging_utils import describe_error
 from bot.models import TorrentState, UserPreferences
 
 if TYPE_CHECKING:
@@ -146,7 +147,7 @@ class DigestService:
             data = await self.collect()
             users = await self._recipients()
         except Exception as e:
-            logger.warning("digest_failed", error=str(e))
+            logger.warning("digest_failed", error=describe_error(e))
             return 0
         delivered = 0
         for uid, prefs in users:
@@ -159,7 +160,7 @@ class DigestService:
                 await self._send(uid, text)
                 delivered += 1
             except Exception as e:
-                logger.warning("digest_send_failed", user_id=uid, error=str(e))
+                logger.warning("digest_send_failed", user_id=uid, error=describe_error(e))
         logger.info("digest_done", date=today, delivered=delivered)
         return delivered
 
@@ -172,7 +173,7 @@ class DigestService:
         try:
             data.music_albums = await self._db.music_albums_notified_since(since)
         except Exception as e:
-            logger.debug("digest_music_failed", error=str(e))
+            logger.debug("digest_music_failed", error=describe_error(e))
         data.stuck = await self._stuck(now)
         data.airing = await self._airing(now)
         return data
@@ -187,7 +188,7 @@ class DigestService:
                     event_type="downloadFolderImported", page_size=100, include_details=True,
                 )
             except Exception as e:
-                logger.debug("digest_history_failed", service=label, error=str(e))
+                logger.debug("digest_history_failed", service=label, error=describe_error(e))
                 continue
             for record in sorted(records, key=lambda r: str(r.get("date") or "")):
                 when = _parse(record.get("date"))
@@ -219,7 +220,7 @@ class DigestService:
                 if count:
                     lines.append(("library", f"торренты без движения больше суток: {count}"))
             except Exception as e:
-                logger.debug("digest_qbit_failed", error=str(e))
+                logger.debug("digest_qbit_failed", error=describe_error(e))
         if self._get_slskd is not None:
             try:
                 slskd = await self._get_slskd()
@@ -233,14 +234,14 @@ class DigestService:
                     if count:
                         lines.append(("music", f"музыка в очереди у пиров больше суток: {count}"))
             except Exception as e:
-                logger.debug("digest_slskd_failed", error=str(e))
+                logger.debug("digest_slskd_failed", error=describe_error(e))
         for name, client in (("Radarr", self._radarr), ("Sonarr", self._sonarr)):
             if client is None:
                 continue
             try:
                 queue = await client.get_queue()
             except Exception as e:
-                logger.debug("digest_queue_failed", service=name, error=str(e))
+                logger.debug("digest_queue_failed", service=name, error=describe_error(e))
                 continue
             count = sum(
                 1 for r in queue
@@ -263,7 +264,7 @@ class DigestService:
                 days=1, start=midnight.astimezone(timezone.utc),
             )
         except Exception as e:
-            logger.debug("digest_calendar_failed", error=str(e))
+            logger.debug("digest_calendar_failed", error=describe_error(e))
             return []
         today = local.date()
         found: list[tuple[datetime, str]] = []

@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 import structlog
 
 from bot.clients.base import CircuitBreaker, ServiceConnectionError
+from bot.logging_utils import describe_error
 from bot.services import music_notify
 
 if TYPE_CHECKING:
@@ -91,7 +92,7 @@ def _log_poll_failure(event: str, error: Exception, **fields: Any) -> None:
     """Connection failures are already logged once by the client's breaker
     (`service_down`); repeating them every poll was the NOTIF-08 log storm."""
     log_fn = logger.debug if isinstance(error, ServiceConnectionError) else logger.warning
-    log_fn(event, error=str(error), **fields)
+    log_fn(event, error=describe_error(error), error_type=type(error).__name__, **fields)
 
 
 def _episodes(count: int) -> str:
@@ -402,7 +403,7 @@ class LibraryWatcher:
                 try:
                     offers = await self._music_retry(keyed)
                 except Exception as e:
-                    logger.warning("music_retry_offers_failed", error=str(e))
+                    logger.warning("music_retry_offers_failed", error=describe_error(e))
                     offers = []
                 if offers:
                     extra["retry"] = offers
@@ -426,4 +427,4 @@ class LibraryWatcher:
             # when set, so a plain ``notify(text, category)`` keeps working.
             await self.notify(text, category, **extra)
         except Exception as e:
-            logger.warning("library_notify_failed", error=str(e))
+            logger.warning("library_notify_failed", error=describe_error(e))

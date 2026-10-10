@@ -30,17 +30,17 @@ from bot.clients.registry import get_qbittorrent
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers import setup_routers
-from bot.models import UserPreferences
+from bot.logging_utils import TransientPollingFilter, describe_error, process_rss_mb
 from bot.middleware.auth import (
     AuthMiddleware,
     LoggingMiddleware,
     RateLimitMiddleware,
     StaleMessageMiddleware,
 )
+from bot.models import UserPreferences
 from bot.services.live_status import EditOutcome, LiveStatusService, button_base
 from bot.services.notification_service import NotificationService
 from bot.ui.commands import bot_commands
-
 
 # SEC-03: mask Telegram bot tokens in any log event value
 _TOKEN_PATTERN = re.compile(r'bot\d+:[A-Za-z0-9_-]{30,}')
@@ -154,6 +154,12 @@ def setup_logging(log_level: str, log_format: str = "json") -> None:
     for name in _NOISY_STDLIB_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
 
+    # Log review 2026-10-10: Telegram's nightly 502/429 burst on getUpdates is
+    # retried by aiogram itself — WARNING, unless it lasts (see the filter).
+    dispatcher_logger = logging.getLogger("aiogram.dispatcher")
+    if not any(isinstance(f, TransientPollingFilter) for f in dispatcher_logger.filters):
+        dispatcher_logger.addFilter(TransientPollingFilter())
+
     # Configure structlog
     structlog.configure(
         processors=[
@@ -236,7 +242,7 @@ async def publish_bot_commands(bot) -> None:
     try:
         await bot.set_my_commands(commands)
     except Exception as e:
-        logger.warning("bot_commands_publish_failed", error=str(e))
+        logger.warning("bot_commands_publish_failed", error=describe_error(e))
         return
     logger.info("bot_commands_published", count=len(commands))
 
@@ -326,7 +332,7 @@ async def notify_admins_on_start(bot, *, admin_ids: list, allowed_ids: list, war
             # 11-button reply keyboard for the new one.
             await bot.send_message(admin_id, text, parse_mode="HTML", reply_markup=Keyboards.main_menu())
         except Exception as e:
-            logger.warning("startup_notify_failed", user_id=admin_id, error=str(e))
+            logger.warning("startup_notify_failed", user_id=admin_id, error=describe_error(e))
             return False
         return True
 
@@ -417,7 +423,7 @@ async def _health_watch(bot: Bot, admin_ids: list, logger, db: Optional[Database
             try:
                 await send_telegram(bot, admin_id, text)
             except Exception as e:
-                logger.warning("health_alert_send_failed", user_id=admin_id, error=str(e))
+                logger.warning("health_alert_send_failed", user_id=admin_id, error=describe_error(e))
 
     clients = {
         "Radarr": await get_radarr(),
@@ -448,7 +454,7 @@ async def _health_watch(bot: Bot, admin_ids: list, logger, db: Optional[Database
             except Exception as e:
                 # A probe failure is itself worth knowing about, but not worth
                 # a message every 15 minutes — the log carries it.
-                logger.warning("health_watch_failed", error=str(e))
+                logger.warning("health_watch_failed", error=describe_error(e))
     finally:
         structlog.contextvars.unbind_contextvars("component")
 
@@ -492,7 +498,7 @@ async def send_telegram(bot: Bot, chat_id: int, text: str, reply_markup=None):
                 # Batch E fix 1: a rejected button (e.g. BUTTON_URL_INVALID)
                 # must not cost the message itself — send it bare.
                 structlog.get_logger().warning(
-                    "telegram_markup_rejected", user_id=chat_id, error=str(e)
+                    "telegram_markup_rejected", user_id=chat_id, error=describe_error(e)
                 )
                 return await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=None)
             except TelegramRetryAfter as e:
@@ -547,7 +553,7 @@ async def edit_living_message(
                     raise
                 # A rejected button (BUTTON_URL_INVALID) must not cost the
                 # message: edit once more without it.
-                log.warning("live_status_markup_rejected", user_id=chat_id, error=str(e))
+                log.warning("live_status_markup_rejected", user_id=chat_id, error=describe_error(e))
                 await bot.edit_message_text(
                     text=text, chat_id=chat_id, message_id=message_id,
                     parse_mode=ParseMode.HTML, reply_markup=None,
@@ -559,13 +565,13 @@ async def edit_living_message(
         except TelegramBadRequest as e:
             if "not modified" in str(e).lower():
                 return "ok"
-            log.info("live_status_message_lost", user_id=chat_id, error=str(e))
+            log.info("live_status_message_lost", user_id=chat_id, error=describe_error(e))
             return "lost"
         except TelegramForbiddenError as e:
-            log.info("live_status_message_lost", user_id=chat_id, error=str(e))
+            log.info("live_status_message_lost", user_id=chat_id, error=describe_error(e))
             return "lost"
         except Exception as e:
-            log.warning("live_status_edit_failed", user_id=chat_id, error=str(e))
+            log.warning("live_status_edit_failed", user_id=chat_id, error=describe_error(e))
             return "retry"
         finally:
             _last_sent_at[chat_id] = time.monotonic()
@@ -592,13 +598,13 @@ async def send_library_notification(
             delivered += 1
         except Exception as e:
             failed += 1
-            logger.warning("library_notify_send_failed", user_id=uid, error=str(e))
+            logger.warning("library_notify_send_failed", user_id=uid, error=describe_error(e))
             continue
         if on_sent is not None:
             try:
                 await on_sent(uid, sent)
             except Exception as e:
-                logger.warning("library_notify_after_send_failed", user_id=uid, error=str(e))
+                logger.warning("library_notify_after_send_failed", user_id=uid, error=describe_error(e))
 
     logger.info(
         "library_notify_sent",
@@ -735,7 +741,7 @@ async def _live_status_watch(live: LiveStatusService, logger) -> None:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("live_status_watch_failed", error=str(e))
+                logger.warning("live_status_watch_failed", error=describe_error(e))
     finally:
         structlog.contextvars.unbind_contextvars("component")
 
@@ -788,7 +794,7 @@ async def _digest_watch(bot: Bot, db: Database, logger) -> None:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("digest_watch_failed", error=str(e))
+                logger.warning("digest_watch_failed", error=describe_error(e))
     finally:
         structlog.contextvars.unbind_contextvars("component")
 
@@ -838,7 +844,7 @@ async def _library_watch(
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("library_watch_failed", error=str(e))
+                logger.warning("library_watch_failed", error=describe_error(e))
     finally:
         structlog.contextvars.unbind_contextvars("component")
 
@@ -872,8 +878,13 @@ async def _periodic_cleanup(db: Database, logger, notification_service: Optional
                 if any(stats.values()):
                     logger.info("periodic_cleanup", **stats)
 
+                # Log review 2026-10-10: RSS on every cycle, so a slow leak toward
+                # the container's memory limit reads as a trend in the log.
+                rss_mb = process_rss_mb()
                 if notification_service is not None:
-                    logger.info("notification_stats", **notification_service.get_stats())
+                    logger.info("notification_stats", **notification_service.get_stats(), rss_mb=rss_mb)
+                else:
+                    logger.info("process_stats", rss_mb=rss_mb)
 
                 if consecutive_failures:
                     logger.info("periodic_cleanup_recovered", after_failures=consecutive_failures)
@@ -887,12 +898,12 @@ async def _periodic_cleanup(db: Database, logger, notification_service: Optional
                 if consecutive_failures == 1 or consecutive_failures % 10 == 0:
                     logger.error(
                         "periodic_cleanup_failed",
-                        error=str(e),
+                        error=describe_error(e),
                         consecutive_failures=consecutive_failures,
                         exc_info=True,
                     )
                 else:
-                    logger.debug("periodic_cleanup_failed", error=str(e), consecutive_failures=consecutive_failures)
+                    logger.debug("periodic_cleanup_failed", error=describe_error(e), consecutive_failures=consecutive_failures)
     finally:
         structlog.contextvars.unbind_contextvars("component")
 
@@ -941,7 +952,7 @@ async def handle_unexpected_error(event: ErrorEvent) -> None:
     except Exception as e:
         # Пользователь мог заблокировать бота, колбэк — протухнуть. Логируем и
         # выходим: обработчик ошибок, роняющий диспетчер, хуже отсутствующего.
-        logger.warning("error_reply_failed", error=str(e))
+        logger.warning("error_reply_failed", error=describe_error(e))
 
 
 def register_error_handler(dp: Dispatcher) -> None:
@@ -1050,7 +1061,7 @@ async def main() -> None:
                 logger.warning(
                     "Failed to send notification",
                     user_id=user_id,
-                    error=str(e),
+                    error=describe_error(e),
                 )
                 return False
 
@@ -1145,7 +1156,7 @@ async def main() -> None:
             notification_service=notification_service,
         )
     except Exception as e:
-        logger.error("Bot crashed", error=str(e), exc_info=True)
+        logger.error("Bot crashed", error=describe_error(e), exc_info=True)
         raise
     finally:
         # BUG-R6-01: await the cancellation instead of firing and forgetting.

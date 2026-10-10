@@ -8,6 +8,7 @@ import structlog
 
 from bot.clients.qbittorrent import DIRECT_TAG, STATE_MAP, QBittorrentClient
 from bot.config import get_settings
+from bot.logging_utils import describe_error
 from bot.models import TorrentInfo, TorrentState
 from bot.ui.formatters import Formatters
 
@@ -153,14 +154,14 @@ class NotificationService:
                     if consecutive_failures == 1 or consecutive_failures % 10 == 0:
                         logger.error(
                             "notification_monitor_failed",
-                            error=str(e),
+                            error=describe_error(e),
                             consecutive_failures=consecutive_failures,
                             exc_info=True,
                         )
                     else:
                         logger.debug(
                             "notification_monitor_failed",
-                            error=str(e),
+                            error=describe_error(e),
                             consecutive_failures=consecutive_failures,
                         )
                     # Continue monitoring despite errors
@@ -271,7 +272,7 @@ class NotificationService:
             )
 
         except Exception as e:
-            logger.error("Failed to perform initial sync", error=str(e), exc_info=True)
+            logger.error("Failed to perform initial sync", error=describe_error(e), exc_info=True)
 
     async def _check_for_completions(self) -> None:
         """Check for newly completed downloads and send notifications.
@@ -379,7 +380,7 @@ class NotificationService:
             try:
                 skip = await self._exclude_chats(torrent.hash)
             except Exception as e:
-                logger.warning("notification_exclude_failed", error=str(e))
+                logger.warning("notification_exclude_failed", error=describe_error(e))
 
         for user_id in self.get_subscribed_users():
             if user_id in skip:
@@ -392,7 +393,7 @@ class NotificationService:
                     "notification_send_raised",
                     user_id=user_id,
                     torrent_name=torrent.name,
-                    error=str(e),
+                    error=describe_error(e),
                     exc_info=True,
                 )
                 continue

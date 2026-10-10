@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import structlog
 
+from bot.logging_utils import describe_error
 from bot.services import music_notify
 from bot.ui.list_token import new_list_token
 
@@ -174,7 +175,7 @@ class MusicRetryService:
                 return []
             grabs = await lidarr.get_grab_history(page_size=GRAB_HISTORY_PAGE)
         except Exception as e:
-            logger.info("music_retry_lookup_failed", error=str(e))
+            logger.info("music_retry_lookup_failed", error=describe_error(e))
             return []
 
         offers: list[RetryOffer] = []
@@ -192,7 +193,7 @@ class MusicRetryService:
                 if await lidarr.album_in_queue(album_id):
                     continue
             except Exception as e:
-                logger.info("music_retry_check_failed", album_id=album_id, error=str(e))
+                logger.info("music_retry_check_failed", album_id=album_id, error=describe_error(e))
                 continue
             offers.append(await self._issue(album_id, summary.title))
         if offers:
@@ -249,7 +250,7 @@ class MusicRetryService:
         try:
             await lidarr.search_album(album_id)
         except Exception as e:
-            logger.warning("music_retry_search_failed", album_id=album_id, error=str(e))
+            logger.warning("music_retry_search_failed", album_id=album_id, error=describe_error(e))
             return "failed"
         entry["retried_at"] = now.isoformat()
         await self._db.kv_set(KV_PREFIX + token, json.dumps(entry, ensure_ascii=False))

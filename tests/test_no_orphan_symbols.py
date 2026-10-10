@@ -46,6 +46,10 @@ BOT_ROOT = PROJECT_ROOT / "bot"
 #: Полное имя → причина, по которой символ намеренно не вызывается из bot/.
 #: Запись без причины не принимается (см. test_allowlist_entries_have_reasons).
 ORPHAN_ALLOWLIST: dict[str, str] = {
+    "bot.logging_utils.TransientPollingFilter.filter": (
+        "Переопределение logging.Filter.filter: вызывает stdlib logging для каждой "
+        "записи логгера aiogram.dispatcher (фильтр ставит setup_logging), а не код bot/."
+    ),
     "bot.services.add_service.AddService.ensure_title": (
         "Намеренная NotImplementedError-заглушка отката 2026-08-10: композитный "
         "поток прежнего бэкенда, у которого нет эквивалента в *arr. Падает громко "

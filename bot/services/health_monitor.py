@@ -26,6 +26,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 
+from bot.logging_utils import describe_error
+
 if TYPE_CHECKING:
     from bot.db import Database
 
@@ -131,7 +133,7 @@ class HealthMonitor:
                     "response_time_ms": elapsed_ms,
                 }
             except Exception as e:
-                logger.warning("health_check_failed", service=name, error=str(e))
+                logger.warning("health_check_failed", service=name, error=describe_error(e))
                 return name, {
                     "available": False,
                     "version": None,
@@ -190,7 +192,7 @@ class HealthMonitor:
                 for key, item in stored.items()
             }
         except (ValueError, KeyError, TypeError, AttributeError) as e:
-            logger.warning("health_open_problems_unreadable", error=str(e))
+            logger.warning("health_open_problems_unreadable", error=describe_error(e))
 
     async def _save(self) -> None:
         if self._db is None:
@@ -201,7 +203,7 @@ class HealthMonitor:
         try:
             await self._db.kv_set(_OPEN_PROBLEMS_KEY, json.dumps(payload, ensure_ascii=False))
         except Exception as e:
-            logger.warning("health_open_problems_save_failed", error=str(e))
+            logger.warning("health_open_problems_save_failed", error=describe_error(e))
 
     async def _announce(self, text: str) -> None:
         """Send one alert. A delivery failure must not stop the monitor —
@@ -211,7 +213,7 @@ class HealthMonitor:
         try:
             await self.notify(text)
         except Exception as e:
-            logger.warning("health_alert_failed", error=str(e))
+            logger.warning("health_alert_failed", error=describe_error(e))
             return
         # Logged on success too: otherwise "no alert was needed" and "the alert
         # was sent" are indistinguishable afterwards.

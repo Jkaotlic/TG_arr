@@ -37,13 +37,14 @@ that wait for their Emby button (E2) — see ``register_notice``.
 
 import html
 from collections.abc import Awaitable, Callable
-from urllib.parse import urlparse
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, Optional
+from urllib.parse import urlparse
 
 import structlog
 
 from bot.clients.qbittorrent import DIRECT_TAG
+from bot.logging_utils import describe_error
 from bot.models import TorrentInfo, TorrentState
 from bot.ui.formatters.torrent import format_speed_ru
 
@@ -315,7 +316,7 @@ class LiveStatusService:
         try:
             rows = await self._db.live_rows(ACTIVE_STATES)
         except Exception as e:
-            logger.warning("live_status_rows_failed", error=str(e))
+            logger.warning("live_status_rows_failed", error=describe_error(e))
             return
         if not rows:
             return
@@ -329,7 +330,7 @@ class LiveStatusService:
             try:
                 outcome = await self._advance(row)
             except Exception as e:
-                logger.warning("live_status_advance_failed", key=row["key"], error=str(e))
+                logger.warning("live_status_advance_failed", key=row["key"], error=describe_error(e))
                 continue
             if outcome == "retry":
                 flooded.add(int(row["chat_id"]))
@@ -367,7 +368,7 @@ class LiveStatusService:
                 try:
                     records = await client.get_history(event_type=event_type, page_size=50)
                 except Exception as e:
-                    logger.debug("live_status_history_failed", arr=arr, error=str(e))
+                    logger.debug("live_status_history_failed", arr=arr, error=describe_error(e))
             self._history[key] = records if isinstance(records, list) else []
         return self._history[key]
 
@@ -380,7 +381,7 @@ class LiveStatusService:
             try:
                 self._queues[arr] = await client.get_queue()
             except Exception as e:
-                logger.debug("live_status_queue_failed", arr=arr, error=str(e))
+                logger.debug("live_status_queue_failed", arr=arr, error=describe_error(e))
                 return None
         return self._queues[arr]
 
@@ -439,7 +440,7 @@ class LiveStatusService:
         try:
             torrents = await self._qbit.get_torrents()
         except Exception as e:
-            logger.debug("live_status_qbit_failed", error=str(e))
+            logger.debug("live_status_qbit_failed", error=describe_error(e))
             return None
         owned = {
             str(r["download_id"]).upper() for r in await self._db.live_rows()
@@ -472,7 +473,7 @@ class LiveStatusService:
         try:
             torrent = await self._qbit.get_torrent(str(row["download_id"]).lower())
         except Exception as e:
-            logger.debug("live_status_qbit_failed", error=str(e))
+            logger.debug("live_status_qbit_failed", error=describe_error(e))
             return None
         if torrent is None:
             return await self._torrent_gone(row)
@@ -558,7 +559,7 @@ class LiveStatusService:
                         continue
                 chats.add(int(row["chat_id"]))
         except Exception as e:
-            logger.warning("live_status_claim_failed", error=str(e))
+            logger.warning("live_status_claim_failed", error=describe_error(e))
         return chats
 
     async def _mark_imported(self, row: dict[str, Any]) -> EditOutcome:
@@ -580,7 +581,7 @@ class LiveStatusService:
             try:
                 self._emby_cache[provider] = await self._emby_link(provider)
             except Exception as e:
-                logger.debug("live_status_emby_failed", error=str(e))
+                logger.debug("live_status_emby_failed", error=describe_error(e))
                 self._emby_cache[provider] = None
         return self._emby_cache[provider]
 
@@ -627,7 +628,7 @@ class LiveStatusService:
         try:
             return await self._emby_link(provider_id)
         except Exception as e:
-            logger.debug("live_status_emby_failed", error=str(e))
+            logger.debug("live_status_emby_failed", error=describe_error(e))
             return None
 
     def markup_for(self, url: Optional[str]) -> Any:
