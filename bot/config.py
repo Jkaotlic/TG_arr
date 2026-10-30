@@ -238,16 +238,22 @@ class Settings(BaseSettings):
 
     @field_validator(
         "torrserver_url", "torrserver_username", "torrserver_password",
-        "emby_sync_hook_url", "emby_sync_hook_token", "emby_public_url", mode="before",
+        "emby_sync_hook_url", "emby_sync_hook_token", "emby_public_url",
+        "lidarr_url", "lidarr_api_key", "slskd_url", "slskd_api_key",
+        "navidrome_url", "navidrome_username", "navidrome_password",
+        "qbittorrent_url", "qbittorrent_password", "emby_url", "emby_api_key",
+        "tmdb_api_key", "tmdb_proxy_url", mode="before",
     )
     @classmethod
     def _empty_ts_field_is_unset(cls, v: Optional[str]) -> Optional[str]:
         """Compose passes ``TORRSERVER_URL: ${TORRSERVER_URL:-}`` — with the
         var unset in the shell/host env, Compose injects an *empty string*,
         not "absence". DEPLOY-01: с `env_ignore_empty=True` в model_config
-        пустое значение из окружения/.env до валидаторов не доходит вовсе;
-        этот валидатор остаётся для пустых строк, переданных напрямую
-        (`Settings(torrserver_url="")`), и как второй рубеж.
+        пустое значение из окружения/.env до валидаторов не доходит вовсе, но
+        значение из одних пробелов (`LIDARR_URL=" "`) `env_ignore_empty` не
+        ловит — его, как и пустую строку, переданную напрямую
+        (`Settings(torrserver_url="")`), превращает в None этот валидатор.
+        Список — все необязательные URL и ключи интеграций.
         """
         if isinstance(v, str) and not v.strip():
             return None

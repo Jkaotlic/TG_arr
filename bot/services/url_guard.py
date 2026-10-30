@@ -49,10 +49,11 @@ _FORBIDDEN_URL_CHARS_RE = re.compile(r"[\s\x00-\x1f\x7f\\]")
 
 # SEC-01: магнет проверяется целиком, а не по префиксу. Хэш — любые буквы и
 # цифры (hex 40, base32 32, btmh-мультихэш), дальше только пары `&ключ[=значение]`
-# без пробелов: `&dn=`, `&tr=`, процентное кодирование, повторные `xt` проходят.
+# без пробелов: `&dn=`, `&tr=`, процентное кодирование, повторные `xt` проходят;
+# пустые сегменты («&&», хвостовой «&») тоже — их порождают сами клиенты.
 _MAGNET_RE = re.compile(
     r"magnet:\?xt=urn:(?:btih|btmh):[A-Za-z0-9]+"
-    r"(?:&[^\s&=\\]+(?:=[^\s&\\]*)?)*"
+    r"(?:&[^\s&=\\]*(?:=[^\s&\\]*)?)*"
 )
 
 # SEC-03: many private trackers embed the passkey directly as a path segment
@@ -74,15 +75,33 @@ def _mask_path(path: str) -> str:
     return "/".join(masked)
 
 
+def _unquote_fully(value: str, rounds: int = 3) -> str:
+    """Снять процентное кодирование до неизменности (двойное кодирование
+    «%253A» иначе прячет passkey от маскировки пути и query)."""
+    for _ in range(rounds):
+        decoded = urllib.parse.unquote(value)
+        if decoded == value:
+            break
+        value = decoded
+    return value
+
+
 def _mask_magnet(url: str) -> str:
     """SEC-04: хэш и `dn` остаются (по ним раздачу узнают в логе), а URL-значения
-    `tr`/`ws`/`xs`/`as` проходят ту же маскировку, что и обычный URL."""
+    `tr`/`ws`/`xs`/`as` (и нумерованные `tr.1`) проходят ту же маскировку, что и
+    обычный URL. Вложенный магнет в таком значении не разбирается (без рекурсии:
+    иначе глубокая вложенность даёт RecursionError уже после того, как qBit принял
+    торрент) — значение целиком заменяется на `***`."""
     head, _, query = url.partition("?")
     parts = []
     for part in query.split("&"):
         key, eq, value = part.partition("=")
-        if eq and key.lower() in _MAGNET_URL_PARAMS:
-            value = _mask_url(urllib.parse.unquote(value), max_len=len(value) + 64)
+        if eq and key.lower().split(".", 1)[0] in _MAGNET_URL_PARAMS:
+            decoded = _unquote_fully(value)
+            if decoded.startswith("magnet:"):
+                value = "***"
+            else:
+                value = _mask_url(decoded, max_len=len(decoded) + 64)
         parts.append(f"{key}{eq}{value}")
     return f"{head}?{'&'.join(parts)}"
 
@@ -106,7 +125,9 @@ def _mask_url(url: str, max_len: int = 100) -> str:
         base = f"{parsed.scheme}://{netloc}{masked_path}"
         return base[:max_len]
     parts = []
-    for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+    # `;` — второй допустимый разделитель query в старых серверах: без замены
+    # «?a=1;passkey=X» читалось бы одним параметром `a` и уходило в лог открытым.
+    for k, v in urllib.parse.parse_qsl(parsed.query.replace(";", "&"), keep_blank_values=True):
         if k.lower() in _SENSITIVE_QUERY_PARAMS:
             parts.append(f"{k}=***")
         else:
@@ -235,7 +256,9 @@ async def _validate_download_url(
         pass  # hostname, resolve below
     try:
         infos = await asyncio.to_thread(socket.getaddrinfo, hostname, None)
-    except socket.gaierror:
+    except (socket.gaierror, UnicodeError):
+        # UnicodeError: idna-кодек getaddrinfo на пустой метке («a..b», «.b»)
+        # и метке длиннее 63 знаков.
         return False
     for family, _t, _p, _c, sockaddr in infos:
         if family not in (socket.AF_INET, socket.AF_INET6):

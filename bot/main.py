@@ -44,14 +44,27 @@ from bot.ui.commands import bot_commands
 
 # SEC-03: mask Telegram bot tokens in any log event value
 _TOKEN_PATTERN = re.compile(r'bot\d+:[A-Za-z0-9_-]{30,}')
+# Токен без префикса `bot` — так он выглядит в тексте исключения Telegram API
+# и в конфиге. Применяется после `_TOKEN_PATTERN`, поэтому «bot***:***» не трогает.
+_BARE_TOKEN_PATTERN = re.compile(r'\b\d{6,}:[A-Za-z0-9_-]{30,}')
 # SEC-05: mask basic-auth-style credentials embedded in URLs (e.g. a proxy
 # URL like http://user:pass@host leaking into an httpx exception message).
-_USERINFO_PATTERN = re.compile(r'://[^/\s@]+:[^/\s@]+@')
+# Имя пользователя без `:` и пароль, ограниченный `/`: каждый кусок упирается
+# в разделитель, поэтому разбор линеен (прежнее `[^/\s@]+:[^/\s@]+@` на строке
+# «://a:a:a:…» было квадратичным — 18 с на 100 КБ).
+_USERINFO_PATTERN = re.compile(r'://[^/\s@:]+:[^/\s@]+@')
+# Секреты в query текста исключения: httpx кладёт полный URL запроса в сообщение
+# (Radarr/Sonarr/Prowlarr ходят с `?apikey=…`, Prowlarr-прокси — с `link=…`).
+_QUERY_SECRET_PATTERN = re.compile(
+    r'(?i)\b(apikey|api_key|link|token|passkey|torrent_pass)=[^&\s"\']+'
+)
 
 
 def _mask_value(v: str) -> str:
     v = _TOKEN_PATTERN.sub('bot***:***', v)
+    v = _BARE_TOKEN_PATTERN.sub('***:***', v)
     v = _USERINFO_PATTERN.sub('://***:***@', v)
+    v = _QUERY_SECRET_PATTERN.sub(r'\1=***', v)
     return v
 
 

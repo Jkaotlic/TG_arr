@@ -198,6 +198,8 @@ _B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
     f"magnet:?xt=urn:btih:{_HEX40}&xt=urn:btmh:1220{'a' * 64}",
     f"magnet:?xt=urn:btmh:1220{'a' * 64}&dn=x",
     f"magnet:?xt=urn:btih:{_HEX40}&dn=%D0%A4%D0%B8%D0%BB%D1%8C%D0%BC&xl=123456",
+    f"magnet:?xt=urn:btih:{_HEX40}&dn=x&",
+    f"magnet:?xt=urn:btih:{_HEX40}&&tr=udp://tracker.example.com:6969&&",
     "magnet:?xt=urn:btih:aabbccdd",  # прежние тесты считают такой магнет допустимым
 ])
 async def test_legitimate_magnets_still_pass(url):
@@ -285,6 +287,10 @@ async def test_global_public_ip_is_allowed():
     "http://example.com:99999/",
     "http://example.com:abc/",
     "http://[::1/",
+    # UnicodeError из idna-кодека getaddrinfo: пустая метка и метка длиннее 63 знаков
+    "http://a..example.com/x",
+    "http://.example.com/x",
+    "http://" + "a" * 64 + ".example.com/x",
 ])
 async def test_invalid_port_or_netloc_returns_false_not_valueerror(url):
     from bot.services.url_guard import _validate_download_url
@@ -319,6 +325,44 @@ def test_mask_url_hides_passkey_inside_magnet_tracker():
     assert "tracker.example.com" in masked
 
 
+def _nested_magnet(depth: int) -> str:
+    """Магнет, чей tr — закодированный магнет, и так `depth` раз (длина растёт квадратично)."""
+    value = "magnet:?xt=urn:btih:abc&tr=x"
+    for _ in range(depth):
+        inner = value.replace("%", "%25").replace("&", "%26")
+        value = "magnet:?xt=urn:btih:abc&tr=" + inner
+    return value
+
+
+def test_mask_url_does_not_recurse_into_nested_magnets():
+    """Вложенный магнет в tr= не должен давать RecursionError: гард вызывается
+    после того, как qBit уже принял торрент."""
+    from bot.services.url_guard import _mask_url
+
+    masked = _mask_url(_nested_magnet(700), max_len=300)
+    assert masked.startswith("magnet:?xt=urn:btih:abc")
+
+
+def test_mask_url_masks_numbered_and_double_encoded_tracker_keys():
+    from bot.services.url_guard import _mask_url
+
+    numbered = f"magnet:?xt=urn:btih:{_HEX40}&tr.1=http://t.example.com/a?passkey=NUMBEREDSECRET1"
+    assert "NUMBEREDSECRET1" not in _mask_url(numbered, max_len=500)
+    double = (
+        f"magnet:?xt=urn:btih:{_HEX40}"
+        "&tr=http%253A%252F%252Ft.example.com%252Fa%253Fpasskey%253DDOUBLESECRET123"
+    )
+    assert "DOUBLESECRET123" not in _mask_url(double, max_len=500)
+
+
+def test_mask_url_masks_semicolon_separated_query_params():
+    from bot.services.url_guard import _mask_url
+
+    masked = _mask_url("http://t.example.com/dl?id=5;passkey=SEMICOLONSECRET1", max_len=500)
+    assert "SEMICOLONSECRET1" not in masked
+    assert "id=5" in masked
+
+
 # --------------------------------------------------------------------------
 # SEC-05: кубический бэктрекинг в разборе названий
 # --------------------------------------------------------------------------
@@ -332,7 +376,41 @@ def test_release_title_parsing_is_fast_on_whitespace_run():
     started = time.perf_counter()
     client._extract_season_episode(_EVIL)
     client._is_season_pack(_EVIL)
-    assert time.perf_counter() - started < 0.5
+    assert time.perf_counter() - started < 0.1
+
+
+@pytest.mark.parametrize("name", [
+    "_RU_SEASON_BEFORE_RE", "_RU_EPISODE_BEFORE_RE",
+])
+def test_ru_season_regexes_are_linear_on_whitespace_run(name):
+    """Сами регулярки, а не только время на обрезанной строке: кубический
+    вариант на 2000 пробелов считался секундами, линейный — миллисекундами."""
+    from bot.clients import prowlarr
+
+    regex = getattr(prowlarr, name)
+    started = time.perf_counter()
+    assert regex.search("1" + " " * 2000 + "-" * 2000) is None
+    assert time.perf_counter() - started < 0.1
+
+
+def test_is_season_pack_cyrillic_forms_unchanged():
+    from bot.clients.prowlarr import ProwlarrClient
+
+    pack = ProwlarrClient("http://prowlarr", "key")._is_season_pack
+    assert pack("Шоу 3 сезон") is True
+    assert pack("Шоу 3-й сезон") is True
+    assert pack("Шоу 3 - й сезон") is True
+    assert pack("Шоу сезон 3") is True
+    assert pack("Шоу сезон 3 серия 5") is False
+
+
+def test_title_cap_still_sees_marker_in_long_title():
+    """Потолок 2000: длинный, но настоящий заголовок с перечнем дорожек не теряет сезон."""
+    from bot.clients.prowlarr import ProwlarrClient
+
+    title = "Show " + "audio track, " * 120 + "S02E05"
+    assert 512 < len(title) < 2000
+    assert ProwlarrClient("http://prowlarr", "key")._extract_season_episode(title) == (2, 5)
 
 
 def test_parse_query_is_fast_on_whitespace_run():
@@ -520,3 +598,82 @@ def test_requirements_dev_has_tzdata_for_windows_only():
     assert any(s.startswith("tzdata") and "win32" in s for s in extras)
     prod = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     assert "tzdata" not in prod
+
+
+# --------------------------------------------------------------------------
+# Раунд правок 1: маски в логах, пробельные значения конфига
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("text,secret", [
+    ("GET /api?apikey=SECRETAPIKEY123&t=1 failed", "SECRETAPIKEY123"),
+    ("GET /api?api_key=SECRETAPIKEY123 failed", "SECRETAPIKEY123"),
+    ("GET /dl?id=5&link=SECRETLINKVALUE1 failed", "SECRETLINKVALUE1"),
+    ("GET /dl?id=5&torrent_pass=SECRETPASSVALUE1", "SECRETPASSVALUE1"),
+    ("token 123456789:" + "A" * 35 + " rejected", "A" * 35),
+])
+def test_mask_value_hides_query_secrets_and_bare_bot_token(text, secret):
+    from bot.main import _mask_value
+
+    masked = _mask_value(text)
+    assert secret not in masked
+    assert "failed" in masked or "rejected" in masked or "id=5" in masked
+
+
+def test_mask_value_keeps_harmless_text():
+    from bot.main import _mask_value
+
+    assert _mask_value("Failed to add movie id=5 at 12:30:45") == "Failed to add movie id=5 at 12:30:45"
+
+
+def test_userinfo_mask_is_linear_on_colon_run():
+    from bot.main import _mask_value
+
+    started = time.perf_counter()
+    _mask_value("://" + "a:" * 50_000)
+    assert time.perf_counter() - started < 0.5
+
+
+def test_userinfo_mask_still_masks_credentials():
+    from bot.main import _mask_value
+
+    assert "s3cr3t" not in _mask_value("proxy " + _url_with_userinfo("proxy.example.com") + " down")
+
+
+_BLANK_OPTIONAL_ENV = (
+    "LIDARR_URL", "LIDARR_API_KEY", "SLSKD_URL", "SLSKD_API_KEY", "NAVIDROME_URL",
+    "NAVIDROME_USERNAME", "NAVIDROME_PASSWORD", "QBITTORRENT_URL", "QBITTORRENT_PASSWORD",
+    "EMBY_URL", "EMBY_API_KEY", "TMDB_API_KEY", "TMDB_PROXY_URL",
+)
+
+
+def test_whitespace_only_optional_values_count_as_unset(monkeypatch):
+    for name in _BLANK_OPTIONAL_ENV:
+        monkeypatch.setenv(name, "  ")
+    s = _fresh_settings()
+    assert s.lidarr_enabled is False
+    assert s.slskd_enabled is False
+    assert s.qbittorrent_enabled is False
+    assert s.emby_enabled is False
+    assert s.navidrome_enabled is False
+    assert s.tmdb_enabled is False
+    assert s.tmdb_proxy_url is None
+
+
+def test_empty_default_profile_ids_parse_to_none_from_env_and_dotenv(monkeypatch, tmp_path):
+    """Прод: пусты только RADARR_/SONARR_DEFAULT_PROFILE_ID (compose: `${X:-}`)."""
+    monkeypatch.setenv("RADARR_DEFAULT_PROFILE_ID", "")
+    monkeypatch.setenv("SONARR_DEFAULT_PROFILE_ID", "")
+    s = _fresh_settings()
+    assert s.radarr_default_profile_id is None
+    assert s.sonarr_default_profile_id is None
+
+    monkeypatch.delenv("RADARR_DEFAULT_PROFILE_ID")
+    monkeypatch.delenv("SONARR_DEFAULT_PROFILE_ID")
+    env = tmp_path / ".env"
+    env.write_text("RADARR_DEFAULT_PROFILE_ID=\nSONARR_DEFAULT_PROFILE_ID=\n", encoding="utf-8")
+    from bot.config import Settings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        s = Settings(_env_file=str(env))
+    assert s.radarr_default_profile_id is None
+    assert s.sonarr_default_profile_id is None
