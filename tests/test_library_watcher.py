@@ -220,7 +220,7 @@ async def test_one_backend_failing_does_not_stop_the_other(tmp_path):
         radarr, sonarr = _services()
         radarr.get_history.side_effect = RuntimeError("radarr down")
         slskd = AsyncMock()
-        slskd.get_transfers = AsyncMock(return_value=[_transfer(id="t1", directory="x\A - B")])
+        slskd.get_transfers = AsyncMock(return_value=[_transfer(id="t1", directory="x\\A - B")])
         watcher = LibraryWatcher(
             radarr, sonarr, notify=notify, get_slskd=AsyncMock(return_value=slskd),
             db=db, clock=lambda: now[0], music_settle_seconds=0,
@@ -229,10 +229,10 @@ async def test_one_backend_failing_does_not_stop_the_other(tmp_path):
         slskd.get_transfers = AsyncMock(return_value=[])
         await watcher.poll()  # first-ever run: seeds the watermark
         now[0] += timedelta(seconds=60)
-        slskd.get_transfers = AsyncMock(return_value=[_transfer(id="t1", directory="x\A - B")])
+        slskd.get_transfers = AsyncMock(return_value=[_transfer(id="t1", directory="x\\A - B")])
         await watcher.poll()  # must not raise
         slskd.get_transfers = AsyncMock(return_value=[
-            _transfer(id="t1", directory="x\A - B", state="Completed, Succeeded",
+            _transfer(id="t1", directory="x\\A - B", state="Completed, Succeeded",
                       ended_at=now[0] + timedelta(seconds=30)),
         ])
         now[0] += timedelta(seconds=60)

@@ -20,3 +20,8 @@ mypy==1.18.2
 # Lowercase to match the exact-string comparison in the pyproject [dev] guard
 # test below (pip itself is case-insensitive, but that test isn't).
 pyyaml==6.0.3
+# TEST-01: на Windows нет системной базы часовых поясов, и ZoneInfo("Europe/Moscow")
+# падает — 6 тестов test_formatters.py краснеют на чистой машине. Только dev
+# и только win32: образ ставит системный tzdata (Dockerfile), а прод-зависимости
+# не меняются. Пин внутри диапазона pyproject [dev] (проверяет test_r4_C1).
+tzdata==2026.6; sys_platform == "win32"

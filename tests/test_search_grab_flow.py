@@ -936,7 +936,7 @@ async def test_browsing_releases_does_not_enlist_the_title_in_arr_rss():
     add_service.radarr.get_quality_profiles = AsyncMock(return_value=[MagicMock(id=7)])
     add_service.radarr.get_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="G:\f")])
     add_service.sonarr.get_quality_profiles = AsyncMock(return_value=[MagicMock(id=7)])
-    add_service.sonarr.get_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="G:\s")])
+    add_service.sonarr.get_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="G:\\s")])
     add_service.resolve_profile = MagicMock(return_value=MagicMock(id=7))
     add_service.resolve_root_folder = MagicMock(return_value="G:\f")
     add_service.add_movie = AsyncMock(
