@@ -779,7 +779,7 @@ async def process_search(
         # 2026-07-29: say *what* failed when we know — a masked internal
         # error is almost always "every indexer is rate-limited", and the user
         # can act on that (wait it out) but not on "временно недоступен".
-        error_text = Formatters.format_error(html.escape(describe_search_failure(e)))
+        error_text = Formatters.format_error(describe_search_failure(e))  # BUG-17: без второго escape
         if status_msg is not None:
             try:
                 await status_msg.edit_text(error_text)

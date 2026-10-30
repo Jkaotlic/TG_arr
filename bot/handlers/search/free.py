@@ -104,7 +104,7 @@ async def run_free_search(
     except Exception as e:
         log.error("free_search_failed", error=str(e), exc_info=True)
         await status_msg.edit_text(
-            Formatters.format_error(html.escape(describe_search_failure(e)))
+            Formatters.format_error(describe_search_failure(e))  # BUG-17: без второго escape
         )
         return
 

@@ -29,7 +29,7 @@ from aiogram.types import CallbackQuery, Message
 from bot.clients.registry import get_radarr, get_sonarr
 from bot.db import Database
 from bot.handlers._cache import remember_lru
-from bot.handlers.common import accessible_message, strip_command
+from bot.handlers.common import accessible_message, safe_edit, strip_command
 from bot.models import ActionLog, ActionType, ContentType, MovieInfo, SeriesInfo, User
 from bot.services.search_service import SearchService, describe_unreachable
 from bot.ui.callbacks import TitleActionCB
@@ -48,6 +48,13 @@ router = Router()
 # among the interfaces this rollback carries forward.
 _title_candidates: dict[int, dict[str, "MovieInfo | SeriesInfo"]] = {}
 _MAX_TITLE_CANDIDATES = 100
+#: Сколько совпадений /title показывает кнопками (LOGIC-18).
+TITLE_CHOICES_LIMIT = 5
+#: LOGIC-15: «следить» у сериала включает только новые серии (пресет Sonarr "future").
+_FUTURE_ONLY_NOTE = (
+    "ℹ️ «Следить за новыми сериями» берёт на мониторинг только новые серии: "
+    "уже вышедшие недостающие останутся без мониторинга."
+)
 
 
 async def _apply_monitor_toggle(client, resource_id: int, monitored: bool, is_movie: bool) -> bool:
@@ -149,9 +156,15 @@ async def cmd_title(message: Message, db_user: User, db: Database, is_admin: boo
         # More than one entry matches. Do not guess — the card below this offers
         # deletion, and acting on the wrong title is not recoverable from the
         # user's side (audit 2026-07-30, BUG-05).
+        # LOGIC-18: кнопок не больше лимита, и об остальных надо сказать вслух.
+        shown = min(len(items), TITLE_CHOICES_LIMIT)
+        more = (
+            f"\n\nПоказано {shown} из {len(items)} — уточните запрос, чтобы увидеть остальные."
+            if len(items) > shown else ""
+        )
         await status_msg.edit_text(
-            f"🗂 Нашёл несколько совпадений на <b>{html.escape(query)}</b> — какой нужен?{warning}",
-            reply_markup=Keyboards.title_choices(items),
+            f"🗂 Нашёл несколько совпадений на <b>{html.escape(query)}</b> — какой нужен?{more}{warning}",
+            reply_markup=Keyboards.title_choices(items, limit=TITLE_CHOICES_LIMIT),
             parse_mode="HTML",
         )
         return
@@ -172,6 +185,9 @@ def _render_title_card(title: "MovieInfo | SeriesInfo") -> str:
     if isinstance(title, SeriesInfo):
         if title.episodes_total:
             lines.append(f"📥 Серий: {title.episodes_owned}/{title.episodes_total}")
+        if not title.monitored:
+            lines.append("")
+            lines.append(_FUTURE_ONLY_NOTE)
     elif title.has_file:
         lines.append("📥 Файл: есть")
     else:
@@ -221,11 +237,13 @@ async def handle_title_action(
             # The user chose which of several matches they meant; now the card.
             title = cache.get(title_id)
             if title is None:
-                await message.edit_text(
+                await safe_edit(
+                    message,
                     Formatters.format_warning("Тайтл больше не найден — повторите /title")
                 )
                 return
-            await message.edit_text(
+            await safe_edit(
+                message,
                 _render_title_card(title),
                 reply_markup=Keyboards.title_actions(title, is_admin=is_admin),
                 parse_mode="HTML",
@@ -255,18 +273,21 @@ async def handle_title_action(
                 error_message=None if ok else "Radarr/Sonarr declined the monitor-toggle request",
             ))
             if not ok:
-                await message.edit_text(
+                await safe_edit(
+                    message,
                     Formatters.format_error("Не удалось изменить мониторинг — попробуйте ещё раз")
                 )
                 return
             if title is not None:
-                await message.edit_text(
+                await safe_edit(
+                    message,
                     _render_title_card(title),
                     reply_markup=Keyboards.title_actions(title, is_admin=is_admin),
                     parse_mode="HTML",
                 )
             else:
-                await message.edit_text(
+                await safe_edit(
+                    message,
                     Formatters.format_success(
                         "Мониторинг включён" if monitored else "Мониторинг снят"
                     )
@@ -277,7 +298,12 @@ async def handle_title_action(
             # Destructive: show what it touches and require a second tap.
             title = cache.get(title_id)
             label = html.escape(getattr(title, "title", None) or "тайтл")
-            if isinstance(title, MovieInfo):
+            if title is None:
+                # LOGIC-17: кэш пуст (бот перезапускался, список вытеснен) — про
+                # файлы мы ничего не знаем и не утверждаем. Раньше тут стояло
+                # «Файлов на диске нет», хотя они могли быть.
+                warning = ""
+            elif isinstance(title, MovieInfo):
                 warning = (
                     "\n\n⚠️ Файл на диске <b>останется</b> — удаляется только запись в Radarr."
                     if title.has_file
@@ -290,7 +316,8 @@ async def handle_title_action(
                 )
             else:
                 warning = "\n\nФайлов на диске нет."
-            await message.edit_text(
+            await safe_edit(
+                message,
                 f"🗑 Удалить <b>{label}</b> из библиотеки?{warning}",
                 reply_markup=Keyboards.confirm_title_delete(callback_data.kind, callback_data.title_id),
                 parse_mode="HTML",
@@ -314,18 +341,21 @@ async def handle_title_action(
                 error_message=None if ok else "Radarr/Sonarr declined the delete request",
             ))
             if not ok:
-                await message.edit_text(
+                await safe_edit(
+                    message,
                     Formatters.format_error("Не удалось удалить из библиотеки — попробуйте ещё раз")
                 )
                 return
             cache.pop(title_id, None)
-            await message.edit_text(
+            await safe_edit(
+                message,
                 Formatters.format_success("Удалено из библиотеки. Файлы на диске не тронуты.")
             )
             return
 
     except Exception as e:
         logger.error("title_action_failed", action=action, title_id=title_id, error=str(e), exc_info=True)
-        await message.edit_text(
-            Formatters.format_error(f"Не удалось выполнить действие: {html.escape(str(e)[:150])}")
+        await safe_edit(
+            message,
+            Formatters.format_error(f"Не удалось выполнить действие: {str(e)[:150]}")
         )
