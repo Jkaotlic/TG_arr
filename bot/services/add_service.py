@@ -753,8 +753,8 @@ class AddService:
                             publish_date=release.publish_date.isoformat() if release.publish_date else None,
                         )
                     except APIError as e:
-                        # A transport failure is not a verdict — but the push
-                        # may have landed, and "no verdict" offers auto-search.
+                        # Сбой транспорта — ещё не вердикт, но push мог дойти, а
+                        # «нет вердикта» ведёт к предложению автопоиска.
                         log.warning("push_release_failed", error=str(e))
                         if await self._landed_despite_error(
                             log, action, arr_client, release, content_type, e, path="push",

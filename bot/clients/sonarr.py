@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import SLOW_ARR_TIMEOUT, APIError, ArrBaseClient
+from bot.clients.base import APIError, ArrBaseClient
 from bot.models import SearchResult, SeriesInfo
 
 logger = structlog.get_logger()
@@ -55,8 +55,11 @@ class SonarrClient(ArrBaseClient):
         params = {"tvdbId": tvdb_id}
         results = await self.get("/api/v3/series", params=params)
 
-        if isinstance(results, list) and results:
-            return self._parse_series(results[0])
+        # Сверяем id, а не берём первую строку: см. RadarrClient.get_movie_by_tmdb.
+        if isinstance(results, list):
+            for item in results:
+                if isinstance(item, dict) and item.get("tvdbId") == tvdb_id:
+                    return self._parse_series(item)
         return None
 
     async def add_series(
@@ -137,7 +140,7 @@ class SonarrClient(ArrBaseClient):
         # BUG-07: без повторов — второй POST получил бы 400 «already added».
         try:
             result = await self._post_no_retry(
-                "/api/v3/series", json_data=payload, timeout=SLOW_ARR_TIMEOUT,
+                "/api/v3/series", json_data=payload, timeout=self._slow_timeout(),
             )
         except APIError as e:
             existing = await self._find_after_failed_add(
@@ -248,7 +251,7 @@ class SonarrClient(ArrBaseClient):
                 "series": [{"id": series_id}],
                 "monitoringOptions": {"monitor": monitor},
             },
-            timeout=SLOW_ARR_TIMEOUT,
+            timeout=self._slow_timeout(),
         )
         return True
 
@@ -280,7 +283,7 @@ class SonarrClient(ArrBaseClient):
             current["monitored"] = True
         await self._safe_request(
             "PUT", f"{self._api_prefix}/series/{series_id}", json_data=current,
-            timeout=SLOW_ARR_TIMEOUT, retry_after_send=False,
+            timeout=self._slow_timeout(),
         )
         return True
 

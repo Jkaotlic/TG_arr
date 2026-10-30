@@ -15,11 +15,13 @@ from tenacity import (
     RetryCallState,
     retry,
     retry_if_exception_type,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
 
 from bot.config import Settings, get_settings
+from bot.logging_utils import describe_error
 from bot.models import MIN_PACK_EPISODES, QualityProfile, RootFolder, SearchResult
 from bot.services.release_parser import enrich_from_title, parse_episode_numbers, parse_quality_name
 
@@ -29,7 +31,8 @@ logger = structlog.get_logger()
 #: TMDb/TVDB/MusicBrainz, индексатору, клиенту загрузки или собирает большие
 #: выборки. Замеры: Sonarr lookup ~34 с (2026-08-10), /history Radarr до 56 с
 #: (2026-10-10). Такие вызовы раньше проходили лишь потому, что таймаута не было
-#: совсем (NET-01). Повтора по таймауту у них нет: *arr ещё работает над первым.
+#: совсем (NET-01). Повтора по таймауту чтения у них нет: *arr ещё работает над
+#: первым запросом. Обрыв соединения падает быстро и повторяется, как обычно.
 SLOW_ARR_TIMEOUT = 90.0
 
 
@@ -47,7 +50,7 @@ def _log_before_sleep(retry_state: RetryCallState) -> None:
         "request_retry_attempt",
         service=service,
         attempt=retry_state.attempt_number,
-        error=str(exc) if exc else None,
+        error=describe_error(exc) if exc else None,
     )
 
 
@@ -210,7 +213,7 @@ _NOT_SENT_ERRORS: tuple[type[Exception], ...] = (
     httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
 )
 #: Методы, которые можно повторить, даже если первый запрос дошёл до сервера.
-_REPEATABLE_METHODS = frozenset({"GET", "PUT"})
+_REPEATABLE_METHODS = frozenset({"GET"})
 _RETRY_POLICY: dict[str, Any] = {
     "stop": stop_after_attempt(3),
     "wait": wait_exponential(multiplier=1, min=1, max=4),
@@ -264,6 +267,11 @@ class BaseAPIClient:
             value = await fetch()
             self._ttl_cache[key] = (now, value)
             return value
+
+    def _slow_timeout(self) -> float:
+        """Таймаут долгих вызовов: HTTP_TIMEOUT без верхней границы, и «долгий»
+        вызов не должен получить меньше обычного."""
+        return max(SLOW_ARR_TIMEOUT, self._get_http_timeout())
 
     def _resolve_timeout(self, timeout: Optional[float]) -> Any:
         """Значение для `client.request(timeout=...)`.
@@ -332,6 +340,30 @@ class BaseAPIClient:
         headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any] | list[Any]:
         """`_request_once` with tenacity retries (interactive calls only)."""
+        return await self._request_once(
+            method, endpoint, params=params, json_data=json_data, timeout=timeout, headers=headers,
+        )
+
+    # Долгое чтение: запрос безопасно повторить, но таймаут ответа значит, что *arr
+    # ещё работает над ним, и второй запрос только множит нагрузку. Обрыв же падает
+    # быстро: без повтора стухшее keep-alive выглядело бы как «релиза нет в очереди».
+    @retry(
+        retry=(
+            retry_if_exception_type((httpx.TransportError, RetryableAPIError))
+            & retry_if_not_exception_type((httpx.ReadTimeout, httpx.WriteTimeout))
+        ),
+        **_RETRY_POLICY,
+    )
+    async def _request_except_read_timeout(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[dict[str, Any]] = None,
+        json_data: Optional[dict[str, Any] | list[Any]] = None,
+        timeout: Optional[float] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any] | list[Any]:
+        """`_request_once` с повтором на всё, кроме таймаутов чтения и записи."""
         return await self._request_once(
             method, endpoint, params=params, json_data=json_data, timeout=timeout, headers=headers,
         )
@@ -485,6 +517,7 @@ class BaseAPIClient:
         timeout: Optional[float] = None,
         headers: Optional[dict[str, str]] = None,
         retry_after_send: Optional[bool] = None,
+        retry_read_timeouts: bool = True,
     ) -> dict[str, Any] | list[Any]:
         """Wrap _request to convert transport errors after retries are exhausted.
 
@@ -495,8 +528,10 @@ class BaseAPIClient:
         service is healthy and fall back to a single attempt while it is down.
 
         ``retry_after_send``: можно ли повторять запрос, который мог дойти до
-        сервера. По умолчанию — только GET и PUT: второй POST повторит побочный
-        эффект, а второй DELETE получит 404 по уже удалённому.
+        сервера. По умолчанию — только GET: второй POST повторит побочный эффект,
+        а второй DELETE получит 404 по уже удалённому.
+        ``retry_read_timeouts=False``: повторять всё, кроме таймаутов чтения и
+        записи (см. `_request_except_read_timeout`).
         """
         if retry_after_send is None:
             retry_after_send = method in _REPEATABLE_METHODS
@@ -510,7 +545,7 @@ class BaseAPIClient:
             return await self._send_through_breaker(
                 breaker, background, method, endpoint,
                 params=params, json_data=json_data, timeout=timeout, headers=headers,
-                retry_after_send=retry_after_send,
+                retry_after_send=retry_after_send, retry_read_timeouts=retry_read_timeouts,
             )
         finally:
             if probe_token is not None:
@@ -528,20 +563,23 @@ class BaseAPIClient:
         timeout: Optional[float],
         headers: Optional[dict[str, str]],
         retry_after_send: bool,
+        retry_read_timeouts: bool,
     ) -> dict[str, Any] | list[Any]:
         """One request with the breaker's bookkeeping (see the caller)."""
         if background or breaker.is_down:
             send = self._request_once
-        elif retry_after_send:
-            send = self._request
-        else:
+        elif not retry_after_send:
             send = self._request_if_not_sent
+        elif not retry_read_timeouts:
+            send = self._request_except_read_timeout
+        else:
+            send = self._request
         try:
             result = await send(
                 method, endpoint, params=params, json_data=json_data, timeout=timeout, headers=headers,
             )
         except (httpx.TransportError, RetryableAPIError) as e:
-            breaker.record_failure(str(e))
+            breaker.record_failure(describe_error(e))
             if background:
                 if isinstance(e, RetryableAPIError):
                     raise
@@ -570,7 +608,7 @@ class BaseAPIClient:
             service=self.service_name,
             method=method,
             endpoint=endpoint,
-            error=str(error),
+            error=describe_error(error),
         )
         if isinstance(error, httpx.TimeoutException):
             raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}") from error
@@ -586,10 +624,12 @@ class BaseAPIClient:
         params: Optional[dict[str, Any]] = None,
         timeout: Optional[float] = None,
         retry_after_send: bool = True,
+        retry_read_timeouts: bool = True,
     ) -> dict[str, Any] | list[Any]:
         """HTTP GET request."""
         return await self._safe_request(
-            "GET", endpoint, params=params, timeout=timeout, retry_after_send=retry_after_send,
+            "GET", endpoint, params=params, timeout=timeout,
+            retry_after_send=retry_after_send, retry_read_timeouts=retry_read_timeouts,
         )
 
     async def _get_slow(
@@ -597,7 +637,7 @@ class BaseAPIClient:
     ) -> dict[str, Any] | list[Any]:
         """GET, ответ на который *arr готовит долго (см. SLOW_ARR_TIMEOUT)."""
         return await self.get(
-            endpoint, params=params, timeout=SLOW_ARR_TIMEOUT, retry_after_send=False,
+            endpoint, params=params, timeout=self._slow_timeout(), retry_read_timeouts=False,
         )
 
     async def post(
@@ -606,9 +646,14 @@ class BaseAPIClient:
         json_data: Optional[dict[str, Any] | list[Any]] = None,
         params: Optional[dict[str, Any]] = None,
         timeout: Optional[float] = None,
+        retry_after_send: Optional[bool] = None,
     ) -> dict[str, Any] | list[Any]:
-        """HTTP POST request."""
-        return await self._safe_request("POST", endpoint, params=params, json_data=json_data, timeout=timeout)
+        """HTTP POST request. ``retry_after_send=True`` — для POST, который только
+        читает: повторить его безопасно."""
+        return await self._safe_request(
+            "POST", endpoint, params=params, json_data=json_data, timeout=timeout,
+            retry_after_send=retry_after_send,
+        )
 
     # DEAD-11: no HTTP DELETE method — removed (zero callers; Radarr/Sonarr/
     # Lidarr client methods never delete resources, and qBittorrent
@@ -667,9 +712,15 @@ class BaseAPIClient:
                 return response.json()
             except (json.JSONDecodeError, ValueError):
                 return {"raw": response.text}
-        except httpx.TimeoutException as e:
-            raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}") from e
         except httpx.TransportError as e:
+            # Молчание и отказ в соединении — признак, что сервис лежит: следующая
+            # проверка уйдёт одной попыткой, а не 3 × HTTP_TIMEOUT. Разовый обрыв —
+            # нет: это обычно стухшее keep-alive, на GET он лечится повтором и в
+            # breaker не попадает, а здесь отнял бы повтор у проверки очереди.
+            if isinstance(e, (httpx.TimeoutException, httpx.ConnectError)):
+                self.breaker.record_failure(describe_error(e))
+            if isinstance(e, httpx.TimeoutException):
+                raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}") from e
             # BUG-06: обрыв на середине (ReadError и т.п.) — тоже «ответа нет,
             # запрос мог дойти»; вызывающий проверяет очередь или библиотеку.
             raise ServiceConnectionError(
@@ -735,7 +786,7 @@ class ArrBaseClient(BaseAPIClient):
         await self._post_no_retry(
             f"{self._api_prefix}/release",
             json_data={"guid": guid, "indexerId": indexer_id},
-            timeout=SLOW_ARR_TIMEOUT,
+            timeout=self._slow_timeout(),
         )
         return True
 
@@ -768,7 +819,7 @@ class ArrBaseClient(BaseAPIClient):
             payload["publishDate"] = publish_date
 
         result = await self._post_no_retry(
-            f"{self._api_prefix}/release/push", json_data=payload, timeout=SLOW_ARR_TIMEOUT,
+            f"{self._api_prefix}/release/push", json_data=payload, timeout=self._slow_timeout(),
         )
         # BUG-01: POST /release/push returns List<ReleaseResource>, not a
         # single object — unwrap it so callers can read `approved`.
@@ -897,7 +948,7 @@ class ArrBaseClient(BaseAPIClient):
         # _request bare here leaked a raw httpx exception instead.
         await self._safe_request(
             "PUT", f"{self._api_prefix}/{resource}/{resource_id}", json_data=current,
-            timeout=SLOW_ARR_TIMEOUT, retry_after_send=False,
+            timeout=self._slow_timeout(),
         )
         return True
 
@@ -914,7 +965,7 @@ class ArrBaseClient(BaseAPIClient):
             "DELETE",
             f"{self._api_prefix}/{resource}/{resource_id}",
             params={"deleteFiles": delete_files, "addImportListExclusion": False},
-            timeout=SLOW_ARR_TIMEOUT,
+            timeout=self._slow_timeout(),
         )
         return True
 
@@ -1017,9 +1068,10 @@ class ArrBaseClient(BaseAPIClient):
         Unlike a raw Prowlarr query this carries *arr's own verdict —
         `customFormatScore`, `rejected` and the human-readable `rejections` —
         so the bot can tell the user WHY a release will not be taken.
-        Slow: it fans out to every indexer, hence the search timeout and no
-        repeat after it (PERF-01: each repeat spends the indexers' quota again
-        while *arr is still busy with the first one).
+        Slow: it fans out to every indexer, hence the search timeout.
+        PERF-01: повтора нет, если запрос мог дойти до *arr: каждый повтор снова
+        тратит квоту индексаторов, пока *arr ещё занят первым. Строже, чем
+        `_get_slow`: обрыв не значит, что рассылку не начали.
         """
         settings = get_settings()
         results = await self.get(

@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+import structlog.testing
 
 from bot.clients import base
 from bot.clients.base import (
@@ -26,7 +27,7 @@ from bot.clients.base import (
     ServiceConnectionError,
     background_calls,
 )
-from bot.clients.emby import EmbyClient, EmbyError
+from bot.clients.emby import EmbyClient, EmbyConnectionError, EmbyError
 from bot.clients.lidarr import LidarrClient
 from bot.clients.navidrome import NavidromeClient
 from bot.clients.prowlarr import ProwlarrClient
@@ -76,6 +77,16 @@ def _retry_budget(timeout: float) -> tuple[int, float]:
     return attempts, attempts * timeout + backoff
 
 
+_wired: list[httpx.AsyncClient] = []
+
+
+@pytest.fixture(autouse=True)
+async def _close_wired_clients():
+    yield
+    while _wired:
+        await _wired.pop().aclose()
+
+
 def _wire(client, handler, http_timeout: float = 30.0):
     """Настоящий httpx-клиент поверх MockTransport, с таймаутом как у боевого."""
     client._settings = SimpleNamespace(http_timeout=http_timeout)
@@ -84,7 +95,32 @@ def _wire(client, handler, http_timeout: float = 30.0):
         transport=httpx.MockTransport(handler),
         timeout=httpx.Timeout(http_timeout),
     )
+    _wired.append(client._client)
     return client
+
+
+_SEARCH_TIMEOUT = 77.0
+
+
+@pytest.fixture
+def search_settings(monkeypatch):
+    """Настройки поиска без чтения окружения: get_settings здесь только за ними."""
+    settings = SimpleNamespace(prowlarr_search_timeout=_SEARCH_TIMEOUT, prowlarr_search_retries=0)
+    monkeypatch.setattr("bot.clients.base.get_settings", lambda: settings)
+    monkeypatch.setattr("bot.clients.prowlarr.get_settings", lambda: settings)
+
+
+def _drops_once(payload, error: type[Exception] = httpx.RemoteProtocolError):
+    """Первый запрос обрывается, дальше сервер отвечает: стухший keep-alive."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            raise error("сбой", request=request)
+        return httpx.Response(200, json=payload)
+
+    return handler, calls
 
 
 def _raising(error: type[Exception], seen: list[httpx.Request] | None = None):
@@ -92,6 +128,13 @@ def _raising(error: type[Exception], seen: list[httpx.Request] | None = None):
         if seen is not None:
             seen.append(request)
         raise error("сбой", request=request)
+
+    return handler
+
+
+def _raising_empty(error: type[Exception]):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise error("", request=request)
 
     return handler
 
@@ -255,20 +298,42 @@ async def test_slow_endpoints_get_the_slow_timeout(client_cls, call, method, pat
 
 
 @pytest.mark.parametrize(
-    ("client", "call", "read"),
+    ("factory", "call", "read"),
     [
-        (RadarrClient(URL, "key"), lambda c: c.get_releases(1), 45.0),
-        (TorrServerClient(URL, "u", "p", search_timeout=60.0), lambda c: c.search("x"), 60.0),
+        (lambda: RadarrClient(URL, "key"), lambda c: c.get_releases(1), _SEARCH_TIMEOUT),
+        (lambda: TorrServerClient(URL, "u", "p", search_timeout=60.0), lambda c: c.search("x"), 60.0),
     ],
     ids=["release", "torrserver"],
 )
-async def test_explicit_search_timeouts_are_not_shortened(client, call, read):
+async def test_explicit_search_timeouts_are_not_shortened(search_settings, factory, call, read):
     seen: list[httpx.Request] = []
-    _wire(client, _generic_ok(seen))
+    client = _wire(factory(), _generic_ok(seen))
 
     await call(client)
 
     assert seen[0].extensions["timeout"]["read"] == read
+
+
+@pytest.mark.parametrize(
+    ("call", "method"),
+    [
+        (lambda c: c.lookup_movie("x"), "GET"),
+        (lambda c: c.add_movie(_MOVIE, 1, "/m"), "POST"),
+        (lambda c: c.delete_movie(1), "DELETE"),
+    ],
+    ids=["lookup", "add", "delete"],
+)
+async def test_slow_timeout_is_never_shorter_than_http_timeout(call, method):
+    """HTTP_TIMEOUT без верхней границы: при 120 с «долгий» вызов не должен
+    получать меньше обычного."""
+    seen: list[httpx.Request] = []
+    client = _wire(RadarrClient(URL, "key"), _generic_ok(seen), http_timeout=120.0)
+
+    with contextlib.suppress(APIError):
+        await call(client)
+
+    hit = next(r for r in seen if r.method == method)
+    assert hit.extensions["timeout"]["read"] == 120.0
 
 
 # --------------------------------------------------------------- PERF-01
@@ -281,7 +346,7 @@ async def test_explicit_search_timeouts_are_not_shortened(client, call, read):
     ],
     ids=["release", "lookup", "history"],
 )
-async def test_slow_reads_are_not_retried_on_a_read_timeout(no_sleep, call):
+async def test_slow_reads_are_not_retried_on_a_read_timeout(no_sleep, search_settings, call):
     """PERF-01: *arr ещё работает над первым запросом — второй лишь множит
     нагрузку и трату квоты индексаторов."""
     seen: list[httpx.Request] = []
@@ -294,7 +359,7 @@ async def test_slow_reads_are_not_retried_on_a_read_timeout(no_sleep, call):
     assert client.breaker.is_down
 
 
-async def test_slow_read_still_retries_when_the_connection_never_opened(no_sleep):
+async def test_slow_read_still_retries_when_the_connection_never_opened(no_sleep, search_settings):
     """Запрос до сервера не дошёл — повтор ничего не удваивает."""
     seen: list[httpx.Request] = []
     client = _wire(RadarrClient(URL, "key"), _raising(httpx.ConnectError, seen))
@@ -303,6 +368,136 @@ async def test_slow_read_still_retries_when_the_connection_never_opened(no_sleep
         await client.get_releases(1)
 
     assert len(seen) == 3
+
+
+@pytest.mark.parametrize(
+    ("error", "attempts"),
+    [
+        (httpx.ConnectTimeout, 3),
+        (httpx.PoolTimeout, 3),
+        (httpx.ReadError, 3),
+        (httpx.RemoteProtocolError, 3),
+        (httpx.WriteError, 3),
+        (httpx.ReadTimeout, 1),
+        (httpx.WriteTimeout, 1),
+    ],
+)
+async def test_slow_get_retries_everything_but_read_and_write_timeouts(no_sleep, error, attempts):
+    """Обрыв падает быстро, и довод «3 × 90 с» к нему не относится."""
+    seen: list[httpx.Request] = []
+    client = _wire(RadarrClient(URL, "key"), _raising(error, seen))
+
+    with pytest.raises(ServiceConnectionError):
+        await client.get_history()
+
+    assert len(seen) == attempts
+
+
+async def test_one_drop_does_not_lose_the_queue_check(no_sleep):
+    """Стухшее соединение после рестарта Radarr не должно выглядеть как «релиза
+    нет в очереди»: дальше автопоиск и вторая закачка."""
+    handler, calls = _drops_once({"records": [{"title": TITLE}]})
+    client = _wire(RadarrClient(URL, "key"), handler)
+
+    assert await client.find_in_queue(TITLE) is True
+    assert len(calls) == 2
+    assert not client.breaker.is_down
+
+
+@pytest.mark.parametrize(
+    ("client_cls", "call", "row", "id_attr"),
+    [
+        (RadarrClient, lambda c: c.lookup_movie("x"), {"tmdbId": 7, "title": "X"}, "tmdb_id"),
+        (SonarrClient, lambda c: c.lookup_series("x"), {"tvdbId": 7, "title": "X"}, "tvdb_id"),
+        (LidarrClient, lambda c: c.lookup_artist("x"), {"foreignArtistId": "7", "artistName": "X"}, "mb_id"),
+    ],
+    ids=["radarr", "sonarr", "lidarr"],
+)
+async def test_one_drop_does_not_lose_a_lookup(no_sleep, client_cls, call, row, id_attr):
+    handler, _calls = _drops_once([row])
+    client = _wire(client_cls(URL, "key"), handler)
+
+    found = await call(client)
+
+    assert [str(getattr(item, id_attr)) for item in found] == ["7"]
+    assert not client.breaker.is_down
+
+
+@pytest.mark.parametrize("error", [httpx.ReadError, httpx.RemoteProtocolError])
+async def test_fan_out_searches_stay_strict_on_a_drop(no_sleep, search_settings, error):
+    """Обрыв не значит, что рассылку по индексаторам не начали: второй раз не шлём."""
+    release: list[httpx.Request] = []
+    torznab: list[httpx.Request] = []
+
+    with pytest.raises(ServiceConnectionError):
+        await _wire(RadarrClient(URL, "key"), _raising(error, release)).get_releases(1)
+    with pytest.raises(TorrServerError):
+        await _wire(TorrServerClient(URL, "u", "p"), _raising(error, torznab)).search("x")
+
+    assert (len(release), len(torznab)) == (1, 1)
+
+
+async def test_drop_on_grab_post_does_not_cost_the_queue_check_its_retry(no_sleep):
+    """Обрыв на POST и обрыв на проверке очереди — один и тот же стухший пул."""
+    posts: list[httpx.Request] = []
+    gets: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            posts.append(request)
+            raise httpx.ReadError("сбой", request=request)
+        gets.append(request)
+        if len(gets) == 1:
+            raise httpx.RemoteProtocolError("сбой", request=request)
+        return httpx.Response(200, json={"records": [{"title": TITLE}]})
+
+    radarr = _wire(RadarrClient(URL, "key"), handler)
+
+    ok, _action = await AddService(radarr, AsyncMock()).grab_release(
+        _arr_release(), ContentType.MOVIE, arr_id=15,
+    )
+
+    assert ok is True
+    assert (len(posts), len(gets)) == (1, 2)
+    assert not radarr.breaker.is_down
+
+
+@pytest.mark.parametrize(
+    ("payload", "call"),
+    [
+        ({"action": "list"}, lambda c: c.list_torrents()),
+        ({"action": "get", "hash": "h"}, lambda c: c.get_torrent("h")),
+        ({"action": "get"}, lambda c: c.get_server_settings()),
+    ],
+    ids=["list", "get", "settings"],
+)
+async def test_torrserver_read_only_posts_keep_their_timeout_retry(no_sleep, payload, call):
+    seen: list[httpx.Request] = []
+    client = _wire(TorrServerClient(URL, "u", "p"), _raising(httpx.ReadTimeout, seen))
+
+    with pytest.raises(TorrServerError):
+        await call(client)
+
+    assert len(seen) == 3
+    assert json.loads(seen[0].content) == payload
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.add_torrent("magnet:?xt=urn:btih:abc", "X"),
+        lambda c: c.remove_torrent("h"),
+    ],
+    ids=["add", "rem"],
+)
+async def test_torrserver_changing_posts_stay_single_attempt(no_sleep, call):
+    seen: list[httpx.Request] = []
+    client = _wire(TorrServerClient(URL, "u", "p"), _raising(httpx.ReadTimeout, seen))
+
+    with pytest.raises(TorrServerError):
+        await call(client)
+
+    assert len(seen) == 1
 
 
 @pytest.mark.parametrize(("error", "attempts"), [(httpx.ReadTimeout, 1), (httpx.ConnectError, 3)])
@@ -322,19 +517,27 @@ async def test_torrserver_search_is_retried_only_when_not_sent(no_sleep, error, 
     [
         lambda c: c.search_movie(1),
         lambda c: c.delete_movie(1),
+        lambda c: c.set_movie_monitored(1, True),
     ],
-    ids=["command", "delete"],
+    ids=["command", "delete", "put"],
 )
 async def test_mutations_are_not_repeated_after_a_read_timeout(no_sleep, call):
     """С настоящими таймаутами повтор стал достижим: второй POST /command — ещё
     один обход индексаторов, второй DELETE — 404 по удалённому тайтлу."""
-    seen: list[httpx.Request] = []
-    client = _wire(RadarrClient(URL, "key"), _raising(httpx.ReadTimeout, seen))
+    mutations: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"id": 1})
+        mutations.append(request)
+        raise httpx.ReadTimeout("сбой", request=request)
+
+    client = _wire(RadarrClient(URL, "key"), handler)
 
     with pytest.raises(ServiceConnectionError):
         await call(client)
 
-    assert len(seen) == 1
+    assert len(mutations) == 1
 
 
 async def test_post_still_retries_when_the_connection_never_opened(no_sleep):
@@ -476,7 +679,27 @@ async def test_grab_request_error_message_stays_domain():
         await client.grab_release("g", 1)
 
 
-async def test_prowlarr_dropped_connection_is_a_domain_error():
+@pytest.mark.parametrize("background", [False, True], ids=["interactive", "background"])
+async def test_empty_timeout_message_never_reaches_the_logs(no_sleep, background):
+    """У настоящих таймаутов httpx `str(e)` пустой: error='' в service_down."""
+    client = _wire(RadarrClient(URL, "key"), _raising_empty(httpx.ReadTimeout))
+
+    with structlog.testing.capture_logs() as logs, pytest.raises(ServiceConnectionError):
+        if background:
+            with background_calls():
+                await client.get("/api/v3/system/status")
+        else:
+            await client.get("/api/v3/system/status")
+
+    errors = {
+        e["event"]: e["error"] for e in logs
+        if e["event"] in ("service_down", "request_retries_exhausted", "request_retry_attempt")
+    }
+    assert "service_down" in errors
+    assert all(errors.values()), errors
+
+
+async def test_prowlarr_dropped_connection_is_a_domain_error(search_settings):
     """Поиск Prowlarr идёт мимо `_safe_request` и ловит ошибки сам."""
     client = _wire(ProwlarrClient(URL, "key"), _raising(httpx.ReadError))
 
@@ -503,6 +726,7 @@ async def test_torrserver_echo_retries_a_dropped_connection(no_sleep):
 def _qbit(handler, *, authenticated: bool = True) -> QBittorrentClient:
     client = QBittorrentClient(URL, "user", "secret")
     client._client = httpx.AsyncClient(base_url=URL, transport=httpx.MockTransport(handler))
+    _wired.append(client._client)
     client._authenticated = authenticated
     return client
 
@@ -558,6 +782,57 @@ async def test_emby_hung_server_is_bounded(no_sleep):
             await client.close()
 
     assert len(accepted) == 3
+
+
+def _emby(handler) -> EmbyClient:
+    client = EmbyClient(URL, "key")
+    client._client = httpx.AsyncClient(base_url=URL, transport=httpx.MockTransport(handler))
+    _wired.append(client._client)
+    return client
+
+
+@pytest.mark.parametrize("error", [httpx.ReadError, httpx.RemoteProtocolError])
+async def test_emby_dropped_connection_is_a_domain_error_without_retry(no_sleep, error):
+    seen: list[httpx.Request] = []
+
+    with pytest.raises(EmbyError) as caught:
+        await _emby(_raising(error, seen)).get_sessions()
+
+    assert not isinstance(caught.value, EmbyConnectionError)
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize(
+    ("call", "path", "flag"),
+    [
+        (lambda c: c.restart_server(), "/System/Restart", "CanSelfRestart"),
+        (lambda c: c.install_update(), "/System/Update", "CanSelfUpdate"),
+    ],
+    ids=["restart", "update"],
+)
+async def test_emby_system_actions_are_not_repeated_after_a_timeout(no_sleep, call, path, flag):
+    """Сервер мог принять команду: второй POST перезапустит его ещё раз."""
+    posts: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={flag: True, "HasUpdateAvailable": True})
+        posts.append(request)
+        raise httpx.ReadTimeout("сбой", request=request)
+
+    with pytest.raises(EmbyError):
+        await call(_emby(handler))
+
+    assert [r.url.path for r in posts] == [path]
+
+
+async def test_emby_library_refresh_keeps_its_retries(no_sleep):
+    seen: list[httpx.Request] = []
+
+    with pytest.raises(EmbyError):
+        await _emby(_raising(httpx.ReadTimeout, seen)).scan_library()
+
+    assert len(seen) == 3
 
 
 # --------------------------------------------------------------- BUG-07
@@ -621,6 +896,71 @@ async def test_add_recheck_empty_keeps_the_original_error(no_sleep, client_cls, 
         await call(client)
 
     assert len(posts) == 1
+
+
+@pytest.mark.parametrize(("client_cls", "call", "path", "found", "id_attr"), _ADDS, ids=_ADD_IDS)
+async def test_add_recheck_ignores_another_title(no_sleep, client_cls, call, path, found, id_attr):
+    """Сервис, игнорирующий фильтр, не должен выдать чужой тайтл за добавленный."""
+    other = {k: (2 if k in ("tmdbId", "tvdbId") else "other" if k == "foreignArtistId" else v) for k, v in found.items()}
+    posts: list[httpx.Request] = []
+    client = _wire(client_cls(URL, "key"), _add_handler(path, _lost_answer, [other], posts))
+
+    with pytest.raises(ServiceConnectionError):
+        await call(client)
+
+
+@pytest.mark.parametrize(("client_cls", "call", "path", "found", "id_attr"), _ADDS, ids=_ADD_IDS)
+async def test_add_recheck_picks_the_requested_title(no_sleep, client_cls, call, path, found, id_attr):
+    other = {k: (2 if k in ("tmdbId", "tvdbId") else "other" if k == "foreignArtistId" else v) for k, v in found.items()}
+    other["id"] = 99
+    posts: list[httpx.Request] = []
+    client = _wire(client_cls(URL, "key"), _add_handler(path, _lost_answer, [other, found], posts))
+
+    added = await call(client)
+
+    assert getattr(added, id_attr) == 15
+
+
+async def test_hung_add_post_counts_in_breaker_and_recheck_is_one_attempt(no_sleep):
+    """Сервис молчал весь таймаут: перепроверка не тратит ещё 3 × 30 + 3 с."""
+    gets: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            gets.append(request)
+        raise httpx.ReadTimeout("", request=request)
+
+    client = _wire(RadarrClient(URL, "key"), handler)
+
+    with structlog.testing.capture_logs() as logs, pytest.raises(ServiceConnectionError):
+        await client.add_movie(_MOVIE, 1, "/m")
+
+    assert len(gets) == 1
+    assert client.breaker.is_down
+    assert all(e["error"] for e in logs if e["event"] == "service_down")
+
+
+@pytest.mark.parametrize("error", [httpx.ReadTimeout, httpx.ConnectError, httpx.ConnectTimeout])
+async def test_unanswered_grab_counts_in_breaker(error):
+    client = _wire(RadarrClient(URL, "key"), _raising(error))
+
+    with pytest.raises(ServiceConnectionError):
+        await client.grab_release("g", 1)
+
+    assert client.breaker.is_down
+
+
+@pytest.mark.parametrize("error", [httpx.ReadError, httpx.RemoteProtocolError, httpx.WriteError])
+async def test_single_drop_on_a_post_does_not_mark_the_service_down(error):
+    """Разовый обрыв на POST — обычно стухшее keep-alive: на GET он лечится
+    повтором и в breaker не попадает. Сервис жив, а breaker перевёл бы следующую
+    проверку очереди на одну попытку."""
+    client = _wire(RadarrClient(URL, "key"), _raising(error))
+
+    with pytest.raises(ServiceConnectionError):
+        await client.grab_release("g", 1)
+
+    assert not client.breaker.is_down
 
 
 async def test_add_recheck_failure_keeps_the_original_error(no_sleep):

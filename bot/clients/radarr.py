@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import SLOW_ARR_TIMEOUT, APIError, ArrBaseClient
+from bot.clients.base import APIError, ArrBaseClient
 from bot.models import MovieInfo, SearchResult
 
 logger = structlog.get_logger()
@@ -56,8 +56,12 @@ class RadarrClient(ArrBaseClient):
         params = {"tmdbId": tmdb_id}
         results = await self.get("/api/v3/movie", params=params)
 
-        if isinstance(results, list) and results:
-            return self._parse_movie(results[0])
+        # Сверяем id, а не берём первую строку: чужой тайтл здесь выглядел бы как
+        # «уже добавлен» и при проверке, и при перепроверке после сбоя (BUG-07).
+        if isinstance(results, list):
+            for item in results:
+                if isinstance(item, dict) and item.get("tmdbId") == tmdb_id:
+                    return self._parse_movie(item)
         return None
 
     async def add_movie(
@@ -110,7 +114,7 @@ class RadarrClient(ArrBaseClient):
         # BUG-07: без повторов — второй POST получил бы 400 «already added».
         try:
             result = await self._post_no_retry(
-                "/api/v3/movie", json_data=payload, timeout=SLOW_ARR_TIMEOUT,
+                "/api/v3/movie", json_data=payload, timeout=self._slow_timeout(),
             )
         except APIError as e:
             existing = await self._find_after_failed_add(

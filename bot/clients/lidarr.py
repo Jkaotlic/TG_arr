@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import SLOW_ARR_TIMEOUT, APIError, ArrBaseClient
+from bot.clients.base import APIError, ArrBaseClient
 from bot.models import AlbumInfo, ArtistInfo, MetadataProfile, SearchResult
 
 logger = structlog.get_logger()
@@ -43,8 +43,11 @@ class LidarrClient(ArrBaseClient):
     async def get_artist_by_mbid(self, mb_id: str) -> Optional[ArtistInfo]:
         """Get artist from library by MusicBrainz ID."""
         results = await self.get("/api/v1/artist", params={"mbId": mb_id})
-        if isinstance(results, list) and results:
-            return self._parse_artist(results[0])
+        # Сверяем id, а не берём первую строку: см. RadarrClient.get_movie_by_tmdb.
+        if isinstance(results, list):
+            for item in results:
+                if isinstance(item, dict) and mb_id in (item.get("foreignArtistId"), item.get("mbId")):
+                    return self._parse_artist(item)
         return None
 
     async def get_albums(self, artist_id: int) -> list[AlbumInfo]:
@@ -143,7 +146,7 @@ class LidarrClient(ArrBaseClient):
         # BUG-07: без повторов — второй POST получил бы 400 «already added».
         try:
             result = await self._post_no_retry(
-                "/api/v1/artist", json_data=payload, timeout=SLOW_ARR_TIMEOUT,
+                "/api/v1/artist", json_data=payload, timeout=self._slow_timeout(),
             )
         except APIError as e:
             existing = await self._find_after_failed_add(

@@ -75,12 +75,16 @@ class TMDbClient(BaseAPIClient):
         params: Optional[dict] = None,
         timeout: Optional[float] = None,
         retry_after_send: bool = True,
+        retry_read_timeouts: bool = True,
     ):
         """BUG-13: a v3 key must be sent as ?api_key=... on every request."""
         if not self._is_v4_token:
             params = dict(params or {})
             params.setdefault("api_key", self.api_key)
-        return await super().get(endpoint, params=params, timeout=timeout, retry_after_send=retry_after_send)
+        return await super().get(
+            endpoint, params=params, timeout=timeout,
+            retry_after_send=retry_after_send, retry_read_timeouts=retry_read_timeouts,
+        )
 
     async def get_trending_movies(self, time_window: str = "week", page: int = 1) -> list[MovieInfo]:
         """Get trending movies.

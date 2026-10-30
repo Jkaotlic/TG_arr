@@ -50,6 +50,9 @@ _INDEXER_ID_RE = re.compile(r"/(\d+)/download")
 #: TorznabUrls entries end with the same id: http://host:9696/<id>
 _SOURCE_ID_RE = re.compile(r"/(\d+)/?$")
 
+#: Действия POST /torrents, которые только читают: их безопасно повторить.
+_READ_ACTIONS = frozenset({"list", "get"})
+
 
 def _as_int(value: Any, default: Optional[int] = 0) -> Optional[int]:
     """Best-effort int coercion for a single field from the server.
@@ -98,7 +101,10 @@ class TorrServerClient(BaseAPIClient):
     async def _torrents(self, payload: dict[str, Any]) -> Any:
         """POST /torrents, translating transport/auth errors into TorrServerError."""
         try:
-            return await self.post("/torrents", json_data=payload, timeout=self.timeout)
+            return await self.post(
+                "/torrents", json_data=payload, timeout=self.timeout,
+                retry_after_send=payload.get("action") in _READ_ACTIONS,
+            )
         except AuthenticationError as e:
             raise TorrServerError("Неверный логин или пароль TorrServer") from e
         except ServiceConnectionError as e:
@@ -225,7 +231,9 @@ class TorrServerClient(BaseAPIClient):
     async def get_server_settings(self) -> dict[str, Any]:
         """Raw settings object (cache size, torznab sources, ...)."""
         try:
-            result = await self.post("/settings", json_data={"action": "get"}, timeout=self.timeout)
+            result = await self.post(
+                "/settings", json_data={"action": "get"}, timeout=self.timeout, retry_after_send=True,
+            )
         except AuthenticationError as e:
             raise TorrServerError("Неверный логин или пароль TorrServer") from e
         except (ServiceConnectionError, APIError) as e:
