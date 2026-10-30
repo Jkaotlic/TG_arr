@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import APIError, ArrBaseClient
+from bot.clients.base import SLOW_ARR_TIMEOUT, APIError, ArrBaseClient
 from bot.models import AlbumInfo, ArtistInfo, MetadataProfile, SearchResult
 
 logger = structlog.get_logger()
@@ -24,7 +24,7 @@ class LidarrClient(ArrBaseClient):
         log = logger.bind(query=query)
         log.info("Looking up artist in Lidarr")
 
-        results = await self.get("/api/v1/artist/lookup", params={"term": query})
+        results = await self._get_slow("/api/v1/artist/lookup", params={"term": query})
         if not isinstance(results, list):
             return []
 
@@ -55,7 +55,7 @@ class LidarrClient(ArrBaseClient):
         альбома в первых трёх ответах нет. Альбомы берутся только у конкретного
         артиста.
         """
-        results = await self.get("/api/v1/album", params={"artistId": artist_id})
+        results = await self._get_slow("/api/v1/album", params={"artistId": artist_id})
         if not isinstance(results, list):
             return []
 
@@ -140,7 +140,18 @@ class LidarrClient(ArrBaseClient):
         if tags:
             payload["tags"] = tags
 
-        result = await self.post("/api/v1/artist", json_data=payload)
+        # BUG-07: без повторов — второй POST получил бы 400 «already added».
+        try:
+            result = await self._post_no_retry(
+                "/api/v1/artist", json_data=payload, timeout=SLOW_ARR_TIMEOUT,
+            )
+        except APIError as e:
+            existing = await self._find_after_failed_add(
+                e, lambda: self.get_artist_by_mbid(artist.mb_id),
+            )
+            if existing is None:
+                raise
+            return existing
 
         if isinstance(result, dict):
             added = self._parse_artist(result)
@@ -188,7 +199,7 @@ class LidarrClient(ArrBaseClient):
             "eventType": 1, "pageSize": page_size, "sortKey": "date",
             "sortDirection": "descending", "includeAlbum": "true", "includeArtist": "true",
         }
-        result = await self.get("/api/v1/history", params=params)
+        result = await self._get_slow("/api/v1/history", params=params)
         records = result.get("records") if isinstance(result, dict) else None
         return [r for r in records if isinstance(r, dict)] if isinstance(records, list) else []
 
@@ -204,7 +215,7 @@ class LidarrClient(ArrBaseClient):
         still checked here, so a Lidarr that ignores the filter can't make
         another album's download count. Errors propagate.
         """
-        result = await self.get(
+        result = await self._get_slow(
             "/api/v1/queue", params={"albumIds": album_id, "pageSize": 200},
         )
         records = result.get("records") if isinstance(result, dict) else result
@@ -229,7 +240,7 @@ class LidarrClient(ArrBaseClient):
             "end": end,
             "includeArtist": "true",
         }
-        results = await self.get("/api/v1/calendar", params=params)
+        results = await self._get_slow("/api/v1/calendar", params=params)
         if not isinstance(results, list):
             return []
 

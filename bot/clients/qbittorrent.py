@@ -125,7 +125,7 @@ class QBittorrentClient:
                 await self.login()
 
     @retry(
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        retry=retry_if_exception_type(httpx.TransportError),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         reraise=True,
@@ -192,11 +192,13 @@ class QBittorrentClient:
         params: Optional[dict] = None,
     ) -> Any:
         """Make authenticated request to qBittorrent API."""
-        await self._ensure_authenticated()
-
-        client = await self._get_client()
-
         try:
+            # BUG-06: логин тоже внутри try — он сетевой и после своих ретраев
+            # отпускал наружу сырой httpx.
+            await self._ensure_authenticated()
+
+            client = await self._get_client()
+
             response = await client.request(
                 method=method,
                 url=endpoint,
@@ -225,10 +227,10 @@ class QBittorrentClient:
                         data=data,
                         params=params,
                     )
-                except httpx.TimeoutException:
-                    raise QBittorrentError("Таймаут соединения с qBittorrent")
-                except httpx.ConnectError:
-                    raise QBittorrentError(f"Не удалось подключиться к qBittorrent ({self.base_url})")
+                except httpx.TimeoutException as e:
+                    raise QBittorrentError("Таймаут соединения с qBittorrent") from e
+                except httpx.TransportError as e:
+                    raise QBittorrentError(f"Не удалось подключиться к qBittorrent ({self.base_url})") from e
 
             if response.status_code >= 400:
                 raise QBittorrentError(
@@ -246,10 +248,10 @@ class QBittorrentClient:
             except (json.JSONDecodeError, ValueError):
                 return response.text
 
-        except httpx.TimeoutException:
-            raise QBittorrentError("Таймаут соединения с qBittorrent")
-        except httpx.ConnectError:
-            raise QBittorrentError(f"Не удалось подключиться к qBittorrent ({self.base_url})")
+        except httpx.TimeoutException as e:
+            raise QBittorrentError("Таймаут соединения с qBittorrent") from e
+        except httpx.TransportError as e:
+            raise QBittorrentError(f"Не удалось подключиться к qBittorrent ({self.base_url})") from e
 
     async def get_version(self) -> str:
         """Get qBittorrent version."""

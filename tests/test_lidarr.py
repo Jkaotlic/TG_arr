@@ -77,7 +77,7 @@ class TestLidarrClient:
 
         artist = ArtistInfo(mb_id="mb-x", name="Artist X")
 
-        with patch.object(lidarr, "post", new=AsyncMock(side_effect=fake_post)):
+        with patch.object(lidarr, "_post_no_retry", new=AsyncMock(side_effect=fake_post)):
             added = await lidarr.add_artist(
                 artist=artist,
                 quality_profile_id=3,

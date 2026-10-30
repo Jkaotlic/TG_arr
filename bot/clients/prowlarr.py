@@ -100,8 +100,8 @@ class ProwlarrClient(BaseAPIClient):
                     await asyncio.sleep(2.0)
                     continue
                 break
-            except httpx.ConnectError as e:
-                log.warning("Prowlarr connect error")
+            except httpx.TransportError as e:
+                log.warning("Prowlarr connect error", error_type=type(e).__name__)
                 raise ServiceConnectionError("Не удалось подключиться к Prowlarr") from e
             except APIError:
                 raise

@@ -596,15 +596,7 @@ class AddService:
                 return await self._retry_expired_release(
                     log, action, arr_client, release, content_type, arr_id,
                 )
-            if isinstance(e, ServiceConnectionError) and await self._landed_in_queue(
-                arr_client, release,
-            ):
-                log.info("native_grab_found_in_queue_after_error", error=str(e))
-                action.success = True
-                _log_grab_completed(
-                    log, success=True, path="native", force_download=False,
-                    content_type=content_type, detail="queued_despite_error",
-                )
+            if await self._landed_despite_error(log, action, arr_client, release, content_type, e):
                 return True, action
             return self._native_failed(log, action, content_type, e)
         except Exception as e:
@@ -627,6 +619,29 @@ class AddService:
             log, success=False, path="failed", force_download=False, content_type=content_type,
         )
         return False, action
+
+    async def _landed_despite_error(
+        self,
+        log,
+        action: ActionLog,
+        arr_client: ArrBaseClient,
+        release: SearchResult,
+        content_type: ContentType,
+        error: Exception,
+        path: str = "native",
+    ) -> bool:
+        """GRAB-14: ответ потерян, а POST мог дойти — релиз уже в очереди *arr?"""
+        if not isinstance(error, ServiceConnectionError):
+            return False
+        if not await self._landed_in_queue(arr_client, release):
+            return False
+        log.info("grab_found_in_queue_after_error", path=path, error=str(error))
+        action.success = True
+        _log_grab_completed(
+            log, success=True, path=path, force_download=False,
+            content_type=content_type, detail="queued_despite_error",
+        )
+        return True
 
     @staticmethod
     async def _landed_in_queue(arr_client: ArrBaseClient, release: SearchResult) -> bool:
@@ -673,6 +688,10 @@ class AddService:
                 # Review fix round 1: a second 404 means *arr forgot it again —
                 # the release is gone, not "unreachable".
                 if not (isinstance(e, APIError) and e.status_code == 404):
+                    if await self._landed_despite_error(
+                        log, action, arr_client, fresh, content_type, e,
+                    ):
+                        return True, action
                     return self._native_failed(log, action, content_type, e)
                 log.warning("release_retry_404", error=str(e))
             else:
@@ -734,8 +753,13 @@ class AddService:
                             publish_date=release.publish_date.isoformat() if release.publish_date else None,
                         )
                     except APIError as e:
-                        # A transport failure is not a verdict.
+                        # A transport failure is not a verdict — but the push
+                        # may have landed, and "no verdict" offers auto-search.
                         log.warning("push_release_failed", error=str(e))
+                        if await self._landed_despite_error(
+                            log, action, arr_client, release, content_type, e, path="push",
+                        ):
+                            return True, action
                     else:
                         log.info("push_release_result", result=_safe_push_result(result))
                         if result and result.get("approved") is True:
