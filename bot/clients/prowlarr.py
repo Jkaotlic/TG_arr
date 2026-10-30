@@ -28,18 +28,41 @@ MUSIC_CATEGORIES = [3000, 3010, 3020, 3030, 3040, 3050, 3060]
 # Замыкающий lookahead отсекает то, что диапазоном лишь выглядит: «S01E05-720p»
 # (разрешение), «S01E05-4HD» (релиз-группа с цифры) — за числом диапазона может
 # стоять только разделитель, не буква и не ещё одна цифра.
-_EPISODE_RANGE_RE = re.compile(r"s(\d{1,2})\s*e(\d{1,3})\s*-\s*e?(\d{1,3})(?![0-9a-zа-яё])")
+_EPISODE_RANGE_RE = re.compile(r"(?<![0-9a-zа-яё])s(\d{1,2})\s*e(\d{1,3})\s*-\s*e?(\d{1,3})(?![0-9a-zа-яё])")
 
 # SEC-05: настоящие названия раздач — до пары сотен знаков (с перечнем дорожек
 # и субтитров бывает за тысячу); всё, что длиннее, обрезается до разбора
 # регулярками, чтобы длинная «грязная» строка от индексера не держала event loop.
 _MAX_TITLE_PARSE_LEN = 2000
 
+# LOGIC-05: «s» начинает номер сезона, только если перед ней не буква и не цифра.
+# Иначе «DTS5.1» и «Atmos7.1» (звук) читались как сезон 5 и 7, а «Rogue One ...
+# DTS5.1» из /find уходил в Sonarr как пак.
+_S_START = r"(?<![0-9a-zа-яё])s"
+
+# LOGIC-05: «1x05» — серия, а «1920x1080» и «720x576» — разрешение: у настоящей
+# записи по обе стороны от «x» нет лишних цифр.
+_NXM_RE = re.compile(r"(?<![0-9])(\d{1,2})x(\d{1,3})(?![0-9])")
+
 # SEC-05: «N-й сезон» / «N-я серия». Прежний `\s*-?\s*(?:..)?\s*` — три соседних
 # квантификатора на одних пробелах, кубический бэктрекинг; `[\s-]*` с суффиксом
 # внутри группы линеен и принимает всё, что принимал прежний паттерн.
-_RU_SEASON_BEFORE_RE = re.compile(r"(\d{1,2})[\s-]*(?:(?:й|ый|ой)[\s-]*)?сезон")
-_RU_EPISODE_BEFORE_RE = re.compile(r"(\d{1,3})[\s-]*(?:(?:я|ая)[\s-]*)?серия")
+# LOGIC-05: `(?<![0-9])` — «2016 сезон» не сезон 16.
+_RU_SEASON_BEFORE_RE = re.compile(r"(?<![0-9])(\d{1,2})[\s-]*(?:(?:й|ый|ой)[\s-]*)?сезон")
+_RU_EPISODE_BEFORE_RE = re.compile(r"(?<![0-9])(\d{1,3})[\s-]*(?:(?:я|ая)[\s-]*)?серия")
+
+# LOGIC-05: «сезон N» / «серия N» — число сразу за словом. `(?!\d)` отсекает
+# разрешение («сезон 1080p» не сезон 10), а второй lookahead — форму «3 сезон 5 серия»:
+# «5» после «сезон» там номер серии, и сезон надо искать перед словом. Тот же приём
+# в обе стороны для «5 серия 3 сезон».
+# Слово-соседа считается суффиксом, только если за ним нет своего числа: в «Сезон 3
+# Серия 5» число стоит после слова, и «3» это сезон.
+_RU_SEASON_AFTER_RE = re.compile(
+    r"сезон[\s.:]*(\d{1,2})(?!\d)(?![\s-]*(?:(?:я|ая)[\s-]*)?серия(?![\s.:]*\d))"
+)
+_RU_EPISODE_AFTER_RE = re.compile(
+    r"серия[\s.:]*(\d{1,3})(?!\d)(?![\s-]*(?:(?:й|ый|ой)[\s-]*)?сезон(?![\s.:]*\d))"
+)
 
 
 class ProwlarrClient(BaseAPIClient):
@@ -360,24 +383,24 @@ class ProwlarrClient(BaseAPIClient):
             return episode_range[0], None
 
         # S01E01 format
-        match = re.search(r"s(\d{1,2})e(\d{1,3})", title_lower)
+        match = re.search(_S_START + r"(\d{1,2})e(\d{1,3})", title_lower)
         if match:
             return int(match.group(1)), int(match.group(2))
 
         # S01 format (season only)
-        match = re.search(r"s(\d{1,2})(?![e\d])", title_lower)
+        match = re.search(_S_START + r"(\d{1,2})(?![e\d])", title_lower)
         if match:
             return int(match.group(1)), None
 
         # Season 1 Episode 2 format (supports dot/space separators)
-        match = re.search(r"season[\s.]*(\d{1,2})(?:[\s.]*episode[\s.]*(\d{1,3}))?", title_lower)
+        match = re.search(r"season[\s.]*(\d{1,2})(?!\d)(?:[\s.]*episode[\s.]*(\d{1,3}))?", title_lower)
         if match:
             season = int(match.group(1))
             episode = int(match.group(2)) if match.group(2) else None
             return season, episode
 
         # 1x01 format
-        match = re.search(r"(\d{1,2})x(\d{1,3})", title_lower)
+        match = _NXM_RE.search(title_lower)
         if match:
             return int(match.group(1)), int(match.group(2))
 
@@ -386,12 +409,8 @@ class ProwlarrClient(BaseAPIClient):
         # разбирается точнее, чем словесная форма. Кириллические «с»/«е»/«х» —
         # другие кодпоинты, чем латинские s/e/x, поэтому паттерны выше их не
         # видят вовсе.
-        season_ru = re.search(r"сезон[\s.:]*(\d{1,2})", title_lower) or _RU_SEASON_BEFORE_RE.search(
-            title_lower
-        )
-        episode_ru = re.search(r"серия[\s.:]*(\d{1,3})", title_lower) or _RU_EPISODE_BEFORE_RE.search(
-            title_lower
-        )
+        season_ru = _RU_SEASON_AFTER_RE.search(title_lower) or _RU_SEASON_BEFORE_RE.search(title_lower)
+        episode_ru = _RU_EPISODE_AFTER_RE.search(title_lower) or _RU_EPISODE_BEFORE_RE.search(title_lower)
         if season_ru or episode_ru:
             return (
                 int(season_ru.group(1)) if season_ru else None,
@@ -422,19 +441,23 @@ class ProwlarrClient(BaseAPIClient):
             return True
 
         # Has any episode reference at all? If so, not a season pack.
-        if re.search(r"s\d{1,2}e\d|(\d{1,2})x(\d{1,3})|episode[\s.]*\d|серия[\s.:]*\d", title_lower):
+        if (
+            re.search(_S_START + r"\d{1,2}e\d|episode[\s.]*\d|серия[\s.:]*\d", title_lower)
+            or _NXM_RE.search(title_lower)
+            or _RU_EPISODE_BEFORE_RE.search(title_lower)
+        ):
             return False
 
         # S01 format without any episode reference
-        if re.search(r"s\d{1,2}(?:\b|[\.\s\-])", title_lower):
+        if re.search(_S_START + r"\d{1,2}(?:\b|[\.\s\-])", title_lower):
             return True
 
         # "Season X" without episode
-        if re.search(r"season[\s.]*\d{1,2}(?![\s.]*episode)", title_lower):
+        if re.search(r"season[\s.]*\d{1,2}(?!\d)(?![\s.]*episode)", title_lower):
             return True
 
         # «3 сезон» / «Сезон 3» без указания серии
-        if re.search(r"сезон[\s.:]*\d{1,2}", title_lower) or _RU_SEASON_BEFORE_RE.search(title_lower):
+        if _RU_SEASON_AFTER_RE.search(title_lower) or _RU_SEASON_BEFORE_RE.search(title_lower):
             return True
 
         return False

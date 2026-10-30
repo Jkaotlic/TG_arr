@@ -365,9 +365,18 @@ class SearchService:
         series: list = []
         anime: list = []
         for item in series_list:
-            genres = {g.lower() for g in (getattr(item, "genres", None) or [])}
-            (anime if "anime" in genres else series).append(item)
+            (anime if SearchService.series_content_type(item) is ContentType.ANIME else series).append(item)
         return series, anime
+
+    @staticmethod
+    def series_content_type(item: Any) -> ContentType:
+        """ANIME для результата Sonarr с жанром Anime, иначе SERIES.
+
+        Одно правило для автоопределения, `/series` и добавления из трендов:
+        жанр `anime` решает, а `animation` сам по себе обычный мультсериал.
+        """
+        genres = {str(g).lower() for g in (getattr(item, "genres", None) or [])}
+        return ContentType.ANIME if "anime" in genres else ContentType.SERIES
 
     async def detect_content_type(self, query: str) -> DetectionResult:
         """

@@ -602,6 +602,9 @@ async def process_music_search(
         artists = await search_service.lookup_artist(query)
     except Exception as e:
         log.error("Artist lookup failed", error=str(e), exc_info=True)
+        # BUG-32: как и при «Артист не найден», чужая сессия не должна оживать от
+        # кнопок, которые остались в чате.
+        await db.delete_session(user_id)
         await status_msg.edit_text(Formatters.format_error("Не удалось найти артистов (Lidarr недоступен?)"))
         return
 

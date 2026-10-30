@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import APIError, ArrBaseClient
+from bot.clients.base import APIError, ArrBaseClient, WantedList
 from bot.models import MovieInfo, SearchResult
 
 logger = structlog.get_logger()
@@ -141,7 +141,7 @@ class RadarrClient(ArrBaseClient):
         result = await self.post("/api/v3/command", json_data=payload)
         return result if isinstance(result, dict) else {}
 
-    async def get_wanted_movies(self, page_size: int = 50) -> list[dict[str, Any]]:
+    async def get_wanted_movies(self, page_size: int = 50) -> WantedList:
         """Movies that are monitored but have no file."""
         return await self._get_wanted(page_size)
 

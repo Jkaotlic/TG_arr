@@ -22,6 +22,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import quote
 
 import structlog
 
@@ -94,6 +95,16 @@ def rank_candidates(
 _POLL_INTERVAL_S = 2.0
 
 
+def _path_segment(value: str) -> str:
+    """Значение как один сегмент пути URL.
+
+    SEC-02: ник выбирает чужой пир. Без экранирования `a/../../x` уводил POST с
+    ключом API на другой эндпоинт slskd, а `a?b` и `a#b` обрывали путь. Каждый
+    ник и идентификатор, попадающий в путь slskd, проходит через эту функцию.
+    """
+    return quote(str(value), safe="")
+
+
 def _extension_of(filename: str) -> str:
     """Lowercase extension without the dot; slskd's own `extension` field is
     frequently empty, so it is derived from the filename instead."""
@@ -132,9 +143,24 @@ def _parent_path(path: str) -> str:
     return "\\".join(parts[:-1])
 
 
-def _dirname(path: str) -> str:
-    parts = re.split(r"[\\/]", path or "")
-    return parts[-2] if len(parts) > 1 else ""
+#: Папка диска многодискового альбома: «CD1», «Disc 2», «Диск 2». Тот же шаблон,
+#: что у `music_notify._DISC_DIR` (тест сверяет их): уведомления схлопывают диски
+#: в один альбом, и поиск должен считать альбомом то же самое.
+_DISC_DIR = re.compile(r"^(?:cd|disc|disk|dvd|диск)[\s._-]*(\d+)\b.*$", re.IGNORECASE)
+
+
+def _album_folder(path: str) -> tuple[str, str]:
+    """(полный путь папки альбома, её имя) для файла.
+
+    LOGIC-06: ключ группы — весь родительский путь, а не только последняя папка:
+    `Queen/Greatest Hits` и `ABBA/Greatest Hits` — разные альбомы. Папка диска
+    («CD1», «Disc 2») при наличии родителя уходит вверх: два диска одного альбома —
+    один кандидат с полным числом дорожек, а не два «неполных» с именем «CD1».
+    """
+    dirs = re.split(r"[\\/]", path or "")[:-1]
+    if len(dirs) > 1 and _DISC_DIR.match(dirs[-1]):
+        dirs = dirs[:-1]
+    return "\\".join(dirs), (dirs[-1] if dirs else "")
 
 
 class SlskdClient(BaseAPIClient):
@@ -217,7 +243,7 @@ class SlskdClient(BaseAPIClient):
             await asyncio.sleep(max(min(_POLL_INTERVAL_S, remaining), 0.05))
             try:
                 response = await self.get(
-                    f"/api/v0/searches/{search_id}", params={"includeResponses": "true"}
+                    f"/api/v0/searches/{_path_segment(search_id)}", params={"includeResponses": "true"}
                 )
                 payload = response if isinstance(response, dict) else {}
             except Exception as e:
@@ -264,8 +290,8 @@ class SlskdClient(BaseAPIClient):
                 extension = _extension_of(filename) or (raw.get("extension") or "").lower().lstrip(".")
                 if f".{extension}" not in _AUDIO_EXTENSIONS:
                     continue
-                folder = _dirname(filename)
-                key = (username, folder)
+                album_path, folder = _album_folder(filename)
+                key = (username, album_path)
                 entry = grouped.get(key)
                 if entry is None:
                     entry = SlskdSearchResult(
@@ -316,7 +342,7 @@ class SlskdClient(BaseAPIClient):
             return False
         payload = [{"filename": f.filename, "size": f.size} for f in files]
         try:
-            await self.post(f"/api/v0/transfers/downloads/{username}", json_data=payload)
+            await self.post(f"/api/v0/transfers/downloads/{_path_segment(username)}", json_data=payload)
         except Exception as e:
             logger.error("slskd_enqueue_failed", username=username, count=len(files), error=str(e))
             return False

@@ -4,7 +4,7 @@ import asyncio
 import contextvars
 import json
 import time
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, NoReturn, Optional, TypeVar
@@ -52,6 +52,19 @@ def _log_before_sleep(retry_state: RetryCallState) -> None:
         attempt=retry_state.attempt_number,
         error=describe_error(exc) if exc else None,
     )
+
+
+class WantedList(list[dict[str, Any]]):
+    """Одна страница `/wanted/missing` и настоящее число записей в очереди.
+
+    BUG-11: *arr отдаёт страницу и `totalRecords`; считать очередь по длине
+    страницы значит показать «200», когда в очереди 1500. Остаётся списком, чтобы
+    вызывающий, которому нужны только записи, ничего не менял.
+    """
+
+    def __init__(self, records: Iterable[dict[str, Any]] = (), total_records: Optional[int] = None) -> None:
+        super().__init__(records)
+        self.total_records = max(len(self), total_records) if total_records is not None else len(self)
 
 
 class APIError(Exception):
@@ -903,7 +916,7 @@ class ArrBaseClient(BaseAPIClient):
 
     async def _get_wanted(
         self, page_size: int = 50, extra_params: Optional[dict[str, Any]] = None,
-    ) -> list[dict[str, Any]]:
+    ) -> WantedList:
         """Read the "missing" list. Rollback 2026-08-10: /wanted lived on
         the previous backend's catalog query before; *arr paginates it instead.
 
@@ -919,6 +932,9 @@ class ArrBaseClient(BaseAPIClient):
         `SonarrClient.get_wanted_episodes`), Radarr sends nothing, since
         Radarr's movie records have no series to embed and the param would
         be meaningless noise on that call.
+
+        BUG-11: возвращается `WantedList` — страница плюс `totalRecords`, а не
+        голая страница: очередь длиннее `page_size` иначе выглядит обрезанной.
         """
         params: dict[str, Any] = {
             "pageSize": page_size, "sortKey": "title", "sortDirection": "ascending",
@@ -928,8 +944,12 @@ class ArrBaseClient(BaseAPIClient):
         result = await self._get_slow(f"{self._api_prefix}/wanted/missing", params=params)
         if isinstance(result, dict):
             records = result.get("records", [])
-            return records if isinstance(records, list) else []
-        return []
+            total = result.get("totalRecords")
+            return WantedList(
+                records if isinstance(records, list) else [],
+                total if isinstance(total, int) and not isinstance(total, bool) else None,
+            )
+        return WantedList()
 
     async def _set_monitored(self, resource: str, resource_id: int, monitored: bool) -> bool:
         """Flip the monitored flag, preserving every other field.

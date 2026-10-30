@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import APIError, ArrBaseClient
+from bot.clients.base import APIError, ArrBaseClient, WantedList
 from bot.models import SearchResult, SeriesInfo
 
 logger = structlog.get_logger()
@@ -197,7 +197,7 @@ class SonarrClient(ArrBaseClient):
         result = await self.post("/api/v3/command", json_data=payload)
         return result if isinstance(result, dict) else {}
 
-    async def get_wanted_episodes(self, page_size: int = 50) -> list[dict[str, Any]]:
+    async def get_wanted_episodes(self, page_size: int = 50) -> WantedList:
         """Episodes that are monitored but have no file.
 
         Review fix round 1 (2026-08-10, task-13 re-review): `includeSeries=

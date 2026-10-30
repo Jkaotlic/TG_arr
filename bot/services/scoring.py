@@ -24,6 +24,24 @@ from typing import Optional
 from bot.models import ContentType, SearchResult
 
 
+# LOGIC-11: «trailer» штрафуется, когда это пометка раздачи, а не слово названия.
+# «Trailer.Park.Boys.S01» получал −200 и тонул в выдаче. Пометка — это слово,
+# рядом с которым стоит признак трейлера, либо слово, за которым названия уже нет:
+# конец строки, цифра (год, 1080p), скобка или техническая метка релиза. Слово
+# названия (за ним идёт следующее слово названия) под штраф не попадает.
+_TRAILER_TECH = (
+    r"hd|uhd|4k|fhd|bluray|blu-ray|bdrip|web|webrip|web-dl|webdl|hdtv|dvdrip|remux|"
+    r"x26[45]|h\.?26[45]|hevc|av1|mkv|mp4|avi|rus|eng|dub|sub|sample"
+)
+_TRAILER_MARKER_RE = re.compile(
+    r"\b(?:official|final|new|international|theatrical|teaser|hd|uhd|red[\s.\-_]?band|movie|film)"
+    r"[\s.\-_]+trailer\b"
+    r"|[\[(]\s*trailer\s*[\])]"
+    rf"|\btrailer(?=[\s.\-_]*(?:$|[\[(\d]|(?:{_TRAILER_TECH})\b|-[a-z0-9]+$))",
+    re.IGNORECASE,
+)
+
+
 @dataclass
 class ScoringWeights:
     """Configurable scoring weights."""
@@ -120,6 +138,8 @@ class ScoringWeights:
             esc = re.escape(kw)
             if kw in language_kw:
                 pat = re.compile(rf"(?<=[.\-_]){esc}\b", re.IGNORECASE)
+            elif kw == "trailer":
+                pat = _TRAILER_MARKER_RE
             else:
                 pat = re.compile(rf"\b{esc}\b", re.IGNORECASE)
             patterns.append((pat, penalty))
@@ -266,7 +286,10 @@ class ScoringService:
             min_size = self.weights.size_too_small_gb
             max_size = self.weights.size_too_large_gb
 
-            if content_type == ContentType.SERIES:
+            # LOGIC-11: аниме в Sonarr — те же серии и сезонные паки, что у сериала.
+            # Пороги фильма (1 ГБ снизу, 80 ГБ сверху) штрафовали нормальную
+            # серию на 400 МБ и большой пак.
+            if content_type in (ContentType.SERIES, ContentType.ANIME):
                 # Series episodes are typically smaller
                 if result.is_season_pack:
                     min_size = 2.0  # Season pack should be at least 2GB
@@ -373,8 +396,9 @@ def grab_best_candidate(
     accepted and carry a non-negative custom-format score (the user's profile
     marks unwanted releases with a negative score, e.g. "Russian Dub without
     English" −1000). The heuristic threshold still applies to verdict-less
-    (Prowlarr) results. Used both when rendering the button and again by the
-    handler, since a keyboard can outlive the list it was drawn for.
+    (Prowlarr) results, which additionally never pass with 0 seeders. Used both
+    when rendering the button and again by the handler, since a keyboard can
+    outlive the list it was drawn for.
     """
     if not auto_grab_enabled or not results:
         return None
@@ -383,4 +407,10 @@ def grab_best_candidate(
         return None
     if best.origin == "arr":
         return best if best.custom_format_score >= 0 else None
+    # LOGIC-11: торрент без сидов не скачается, сколько бы очков он ни набрал
+    # (1080p WEB-DL с 0 сидов получал 85 и проходил порог). Неизвестное число
+    # сидов (None) не ноль. Вердикт *arr остаётся главным: у его usenet-раздач
+    # сидов нет вовсе, и разбор *arr кладёт туда 0.
+    if best.seeders == 0:
+        return None
     return best if best.calculated_score >= threshold else None

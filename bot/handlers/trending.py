@@ -663,6 +663,9 @@ async def _add_resolved_series(
     # label "➕ В библиотеку (все сезоны)" promises.
     added, action = await add_service.add_series(
         resolved, quality_profile_id=int(profile.id), root_folder_path=folder_path,
+        # Тип по жанрам кандидата Sonarr, как при поиске: без него аниме из трендов
+        # добавлялось с seriesType=standard.
+        content_type=SearchService.series_content_type(resolved),
         monitor="all",
     )
     action.user_id = db_user.tg_id
