@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from bot.ui.callbacks import TsTorrentCB
+from bot.ui.callbacks import TitleActionCB, TsTorrentCB
 from bot.ui.menu import MENU_DOWNLOADS, MENU_MUSIC
 from tests.e2e.fakes import BotEnv, FakeResponse, TgCall, find_button, stock_radarr_movie, texts
 
@@ -373,3 +373,88 @@ async def test_emby_restart_prompt_double_tap_has_no_error(make_bot_env):
     second = await env.tap(ADMIN, restart.call, restart.button)
 
     assert not any("Ошибка" in text for text in _alert_texts(second)), _alert_texts(second)
+
+
+# ------------------------------------------------- /title: LOGIC-15, 17, 18, BUG-13
+
+
+def _library_movie(movie_id: int, title: str = "Dune") -> dict:
+    return {
+        "id": movie_id, "title": title, "year": 2021, "tmdbId": 1000 + movie_id, "monitored": True,
+        "hasFile": True, "qualityProfileId": 1, "images": [],
+    }
+
+
+def _stock_library(env, movies: list[dict], series: list[dict] | None = None) -> None:
+    # `{id}` ловит и «lookup», а последний заданный маршрут важнее: lookup идёт после.
+    env.radarr.route("GET", "/api/v3/movie/{id}", responder=lambda r: next(
+        m for m in movies if f"/{m['id']}" == r.path[r.path.rindex("/"):]
+    ))
+    env.radarr.route("PUT", "/api/v3/movie/{id}", responder=lambda request: request.json)
+    env.radarr.route("GET", "/api/v3/movie/lookup", movies)
+    env.sonarr.route("GET", "/api/v3/series/lookup", series or [])
+
+
+async def test_title_delete_on_a_cache_miss_says_nothing_about_files(bot_env):
+    _stock_library(bot_env, [_library_movie(7)])
+
+    calls = await bot_env.tap(ADMIN, None, TitleActionCB(action="delete", kind="movie", title_id="7").pack())
+
+    text = "\n".join(texts(calls))
+    assert "Удалить" in text
+    assert "на диске нет" not in text
+
+
+async def test_title_delete_with_a_known_title_still_warns_about_files(bot_env):
+    _stock_library(bot_env, [_library_movie(7)])
+    card = await bot_env.say(ADMIN, "/title Dune")
+
+    calls = await bot_env.press(ADMIN, card, "Удалить")
+
+    assert any("останется" in text for text in texts(calls))
+
+
+async def test_title_choices_say_how_many_are_shown(bot_env):
+    _stock_library(bot_env, [_library_movie(i, f"Dune {i}") for i in range(1, 9)])
+
+    calls = await bot_env.say(ADMIN, "/title Dune")
+
+    assert any("Показано 5 из 8" in text for text in texts(calls)), texts(calls)
+
+
+async def test_title_double_tap_on_unmonitor_has_no_error(bot_env):
+    _stock_library(bot_env, [_library_movie(7)])
+    card = await bot_env.say(ADMIN, "/title Dune")
+    unmonitor = find_button(card, "Снять мониторинг")
+
+    await bot_env.tap(ADMIN, unmonitor.call, unmonitor.button)
+    second = await bot_env.tap(ADMIN, unmonitor.call, unmonitor.button)
+
+    assert not any("Не удалось" in text or "Ошибка" in text for text in texts(second)), texts(second)
+
+
+async def test_unmonitored_series_card_warns_that_only_new_episodes_are_followed(bot_env):
+    series = {
+        "id": 3, "title": "Hit Show", "year": 2020, "tvdbId": 55, "monitored": False,
+        "seasons": [{"seasonNumber": 1, "monitored": False}], "images": [],
+    }
+    _stock_library(bot_env, [], [series])
+
+    calls = await bot_env.say(ADMIN, "/title Hit Show")
+
+    text = "\n".join(texts(calls))
+    assert "только новые серии" in text
+
+
+# ------------------------------------------------- музыка без Lidarr: имена в сообщениях
+
+
+async def test_music_search_in_a_slskd_only_setup_does_not_name_lidarr(make_bot_env):
+    env = await make_bot_env(backends=("slskd",), allow_unmatched=True)
+    prompt = (await env.say(ADMIN, MENU_MUSIC))[-1]
+
+    calls = await env.say(ADMIN, "Radiohead", reply_to=prompt)
+
+    shown = "\n".join(texts(calls))
+    assert "Lidarr" not in shown, shown
+    assert "Soulseek" in shown

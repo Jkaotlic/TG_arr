@@ -94,25 +94,26 @@ async def _render_settings_menu(db_user: User) -> tuple[str, InlineKeyboardMarku
     # LOGIC-14: лежащий Sonarr (или Radarr) не должен ронять весь экран и тем
     # более превращать успешную запись настройки в «Ошибка обновления»: берём
     # то, что ответило, а недоступное называем в тексте.
-    outcomes = await asyncio.gather(
+    r_profiles, r_folders, s_profiles, s_folders = await asyncio.gather(
         add_service.get_radarr_profiles(),
         add_service.get_radarr_root_folders(),
         add_service.get_sonarr_profiles(),
         add_service.get_sonarr_root_folders(),
         return_exceptions=True,
     )
-    for outcome in outcomes:
+    for outcome in (r_profiles, r_folders, s_profiles, s_folders):
         if isinstance(outcome, asyncio.CancelledError):
             raise outcome
     unavailable: list[str] = []
-    for service, pair in (("Radarr", outcomes[0:2]), ("Sonarr", outcomes[2:4])):
+    for service, pair in (("Radarr", (r_profiles, r_folders)), ("Sonarr", (s_profiles, s_folders))):
         failed = [o for o in pair if isinstance(o, BaseException)]
         if failed:
             logger.warning("settings_backend_unavailable", service=service, error=str(failed[0]))
             unavailable.append(service)
-    radarr_profiles, radarr_folders, sonarr_profiles, sonarr_folders = (
-        [] if isinstance(o, BaseException) else o for o in outcomes
-    )
+    radarr_profiles = [] if isinstance(r_profiles, BaseException) else r_profiles
+    radarr_folders = [] if isinstance(r_folders, BaseException) else r_folders
+    sonarr_profiles = [] if isinstance(s_profiles, BaseException) else s_profiles
+    sonarr_folders = [] if isinstance(s_folders, BaseException) else s_folders
 
     # GRAB-06: show which profile an add would actually use, and warn when
     # that is only "the first one" (often "Any").

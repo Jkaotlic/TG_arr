@@ -223,6 +223,11 @@ async def _update_same_flow(
         return fresh
 
 
+def _artist_source_name() -> str:
+    """Кто ищет артистов: Lidarr, а без него — Soulseek через slskd."""
+    return "Lidarr" if get_settings().lidarr_enabled else "Soulseek (slskd)"
+
+
 def _album_sources_keyboard(user_id: int, artist: ArtistInfo, album: AlbumInfo, artist_id: int = 0):
     """«Где искать?» для альбома: «Назад» ведёт на страницу списка, где альбом стоит.
 
@@ -642,17 +647,23 @@ async def process_music_search(
 
     services = await _get_music_services()
     if services is None:
-        await message.answer("Lidarr не настроен. Добавьте LIDARR_URL и LIDARR_API_KEY в .env")
+        await message.answer(
+            "Музыкальный контур не настроен. Добавьте LIDARR_URL/LIDARR_API_KEY "
+            "или SLSKD_URL/SLSKD_API_KEY в .env"
+        )
         return
     search_service, _add_service = services
 
     user_id = db_user.tg_id
     log = logger.bind(user_id=user_id, query=query)
 
+    # Сообщения называют то, что настроено на самом деле: при одном slskd
+    # «Lidarr недоступен?» отправляло бы чинить сервис, которого нет.
+    source = _artist_source_name()
     if status_msg is None:
-        status_msg = await message.answer("🔍 Ищу артистов в Lidarr...")
+        status_msg = await message.answer(f"🔍 Ищу артистов в {source}...")
     else:
-        await status_msg.edit_text("🔍 Ищу артистов в Lidarr...")
+        await status_msg.edit_text(f"🔍 Ищу артистов в {source}...")
 
     try:
         artists = await search_service.lookup_artist(query)
@@ -661,7 +672,7 @@ async def process_music_search(
         # BUG-32: как и при «Артист не найден», чужая сессия не должна оживать от
         # кнопок, которые остались в чате.
         await db.delete_session(user_id)
-        await status_msg.edit_text(Formatters.format_error("Не удалось найти артистов (Lidarr недоступен?)"))
+        await status_msg.edit_text(Formatters.format_error(f"Не удалось найти артистов ({source} недоступен?)"))
         return
 
     if not artists:
