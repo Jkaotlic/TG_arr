@@ -32,7 +32,7 @@ from bot.clients.registry import (
 )
 from bot.config import get_settings
 from bot.db import Database
-from bot.handlers.common import accessible_message
+from bot.handlers.common import accessible_message, safe_edit
 from bot.models import QualityProfile, User
 from bot.services.add_service import AddService, resolve_profile_with_source
 from bot.ui.callbacks import SettingCB
@@ -91,11 +91,27 @@ async def _render_settings_menu(db_user: User) -> tuple[str, InlineKeyboardMarku
 
     add_service = await _get_add_service()
 
-    radarr_profiles, radarr_folders, sonarr_profiles, sonarr_folders = await asyncio.gather(
+    # LOGIC-14: лежащий Sonarr (или Radarr) не должен ронять весь экран и тем
+    # более превращать успешную запись настройки в «Ошибка обновления»: берём
+    # то, что ответило, а недоступное называем в тексте.
+    outcomes = await asyncio.gather(
         add_service.get_radarr_profiles(),
         add_service.get_radarr_root_folders(),
         add_service.get_sonarr_profiles(),
         add_service.get_sonarr_root_folders(),
+        return_exceptions=True,
+    )
+    for outcome in outcomes:
+        if isinstance(outcome, asyncio.CancelledError):
+            raise outcome
+    unavailable: list[str] = []
+    for service, pair in (("Radarr", outcomes[0:2]), ("Sonarr", outcomes[2:4])):
+        failed = [o for o in pair if isinstance(o, BaseException)]
+        if failed:
+            logger.warning("settings_backend_unavailable", service=service, error=str(failed[0]))
+            unavailable.append(service)
+    radarr_profiles, radarr_folders, sonarr_profiles, sonarr_folders = (
+        [] if isinstance(o, BaseException) else o for o in outcomes
     )
 
     # GRAB-06: show which profile an add would actually use, and warn when
@@ -124,10 +140,29 @@ async def _render_settings_menu(db_user: User) -> tuple[str, InlineKeyboardMarku
         radarr_config_id=settings.radarr_default_profile_id,
         sonarr_config_id=settings.sonarr_default_profile_id,
     )
+    if unavailable:
+        text += (
+            f"\n\n⚠️ {' и '.join(unavailable)} сейчас недоступен — его профили и папки "
+            "не показаны. Остальные настройки работают."
+        )
     keyboard = Keyboards.settings_menu(
         lidarr_enabled=get_settings().lidarr_enabled, prefs=db_user.preferences
     )
     return text, keyboard
+
+
+async def _redraw_settings(message: Message, db_user: User) -> None:
+    """Перерисовать меню настроек после УЖЕ записанной и подтверждённой настройки.
+
+    LOGIC-14/BUG-13: запись в БД прошла, ответ на колбэк дан; сбой отрисовки
+    (или «message is not modified» при двойном тапе) не должен выглядеть как
+    «Ошибка обновления» — настройка сохранена.
+    """
+    try:
+        text, keyboard = await _render_settings_menu(db_user)
+        await safe_edit(message, text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception as e:
+        logger.warning("settings_redraw_failed", error=str(e), exc_info=True)
 
 
 @router.message(F.text == MENU_SETTINGS)
@@ -151,7 +186,7 @@ async def handle_settings_back(callback: CallbackQuery, db_user: User) -> None:
 
     try:
         text, keyboard = await _render_settings_menu(db_user)
-        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await safe_edit(message, text, reply_markup=keyboard, parse_mode="HTML")
         await callback.answer()
     except Exception as e:
         logger.error("Failed to load settings", error=str(e), exc_info=True)
@@ -278,7 +313,8 @@ async def handle_settings_menu(callback: CallbackQuery) -> None:
             await callback.answer(entry.not_found_msg, show_alert=True)
             return
 
-        await message.edit_text(
+        await safe_edit(
+            message,
             entry.picker_title,
             reply_markup=entry.keyboard_builder(choices, entry.pref_key),
             parse_mode="HTML",
@@ -334,10 +370,6 @@ async def handle_settings_set(
     try:
         await db.update_user_preference(db_user.tg_id, entry.pref_key, value)
         setattr(db_user.preferences, entry.pref_key, value)
-
-        text, keyboard = await _render_settings_menu(db_user)
-        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-
     except Exception as e:
         logger.error(
             "Failed to update setting",
@@ -348,7 +380,9 @@ async def handle_settings_set(
         await callback.answer("Ошибка обновления", show_alert=True)
         return
 
+    # LOGIC-14: отвечаем сразу после записи, перерисовка — уже без права на алерт.
     await callback.answer(entry.success_msg)
+    await _redraw_settings(message, db_user)
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +395,8 @@ async def handle_resolution_menu(callback: CallbackQuery) -> None:
     if message is None:
         return
 
-    await message.edit_text(
+    await safe_edit(
+        message,
         "<b>Выберите предпочитаемое разрешение:</b>",
         reply_markup=Keyboards.resolution_selection(),
         parse_mode="HTML",
@@ -385,16 +420,13 @@ async def handle_set_resolution(
 
         await db.update_user_preference(db_user.tg_id, "preferred_resolution", resolution)
         db_user.preferences.preferred_resolution = resolution
-
-        text, keyboard = await _render_settings_menu(db_user)
-        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-
     except Exception as e:
         logger.error("Failed to update resolution", error=str(e), exc_info=True)
         await callback.answer("Ошибка обновления", show_alert=True)
         return
 
     await callback.answer("Разрешение обновлено!")
+    await _redraw_settings(message, db_user)
 
 
 @router.callback_query(F.data == "settings:auto_grab")
@@ -406,7 +438,8 @@ async def handle_auto_grab_menu(callback: CallbackQuery, db_user: User) -> None:
 
     # Audit UI-12 / GRAB-12: the text states the gate grab_best_candidate()
     # really applies to Radarr/Sonarr results — no longer a score of 80.
-    await message.edit_text(
+    await safe_edit(
+        message,
         "<b>⚡ Кнопка «Скачать лучший»</b>\n\n"
         "Над списком релизов появляется кнопка «⚡ Скачать лучший»: одно "
         "нажатие скачивает первый релиз списка, без карточки.\n\n"
@@ -433,16 +466,13 @@ async def handle_set_auto_grab(
 
         await db.update_user_preference(db_user.tg_id, "auto_grab_enabled", enabled)
         db_user.preferences.auto_grab_enabled = enabled
-
-        text, keyboard = await _render_settings_menu(db_user)
-        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-
     except Exception as e:
         logger.error("Failed to update auto-grab", error=str(e), exc_info=True)
         await callback.answer("Ошибка обновления", show_alert=True)
         return
 
     await callback.answer(f"Кнопка «Скачать лучший» {'включена' if enabled else 'выключена'}")
+    await _redraw_settings(message, db_user)
 
 
 @router.callback_query(SettingCB.filter(F.key.in_({"notify_music", "notify_library", "digest_enabled"})))
@@ -471,15 +501,13 @@ async def handle_set_notify(
             await db.update_user_preference(db_user.tg_id, "notify_library", library)
             db_user.preferences.notify_library = library
             answer = "«В библиотеке»: " + ("вкл" if library else "выкл")
-
-        text, keyboard = await _render_settings_menu(db_user)
-        await message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except Exception as e:
         logger.error("Failed to update notification preference", error=str(e), exc_info=True)
         await callback.answer("Ошибка обновления", show_alert=True)
         return
 
     await callback.answer(answer)
+    await _redraw_settings(message, db_user)
 
 
 @router.callback_query(F.data.startswith("set:"))
