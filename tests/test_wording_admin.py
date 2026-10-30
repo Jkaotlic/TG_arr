@@ -104,7 +104,6 @@ def test_season_preset_names_are_human():
     assert season_preset_name("firstSeason") == "первый сезон"
     assert season_preset_name("future") == "только будущие"
     assert season_preset_name("all") == "все сезоны"
-    assert season_preset_name("none") == "нет"
     assert season_preset_name(None) == "авто (по релизу)"
 
 
@@ -302,13 +301,13 @@ async def test_list_staleness_uses_msg_stale():
     from bot.handlers import torrserver
     from bot.handlers.search import free
     from bot.ui.callbacks import FindPageCB, TsPageCB
-    from bot.ui.keyboards._constants import MSG_STALE
+    from bot.ui.list_token import STALE_LIST_TEXT
 
     cb = _cb()
     await torrserver.handle_page(cb, TsPageCB(page=1))
-    assert cb.answer.await_args.args[0] == MSG_STALE
+    assert cb.answer.await_args.args[0] == STALE_LIST_TEXT
 
     cb2 = _cb()
     db = MagicMock(get_session=AsyncMock(return_value=None))
     await free.handle_find_page(cb2, FindPageCB(page=1), User(tg_id=42), db)
-    assert cb2.answer.await_args.args[0] == MSG_STALE
+    assert cb2.answer.await_args.args[0] == STALE_LIST_TEXT

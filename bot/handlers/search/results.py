@@ -279,26 +279,6 @@ async def _emby_library_note(content) -> str:
         return ""
 
 
-def _pick_by_year(items: list, release_year, query_year):
-    """Pick the candidate whose `year` matches release.detected_year (preferred)
-    or the query year, falling back to the first candidate.
-
-    BUG-08 / LOGIC-07: metadata search returns candidates ordered by
-    popularity, which is *not* necessarily what the user picked. The release
-    the user clicked has its own detected year — prefer the candidate matching
-    that.
-    """
-    if not items:
-        return None
-    target_year = release_year or query_year
-    if target_year:
-        for it in items:
-            cand_year = getattr(it, "year", None)
-            if cand_year and abs(int(cand_year) - int(target_year)) <= 1:
-                return it
-    return items[0]
-
-
 @router.callback_query(BackCB.filter())
 async def handle_back(callback: CallbackQuery, callback_data: BackCB, db_user: User, db: Database) -> None:
     """Handle back button."""

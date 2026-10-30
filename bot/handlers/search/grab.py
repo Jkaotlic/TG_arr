@@ -45,7 +45,7 @@ logger = structlog.get_logger()
 # SonarrClient.add_series) — rollback 2026-08-10 removed the previous
 # backend's translation table this used to feed, since there is nothing left
 # to translate to.
-_SEASON_PRESETS = {"all", "future", "latestSeason", "firstSeason", "none"}
+_SEASON_PRESETS = {"all", "future", "latestSeason", "firstSeason"}
 
 #: GRAB-05: a series that was in the library before this search keeps its
 #: monitoring; the grab does not rewrite it.
@@ -311,16 +311,6 @@ async def _apply_series_monitoring(
     )
 
 
-def _resolve_folder(folders: list, preferred_id) -> str:
-    """Resolve root folder path from user preference or first available.
-
-    LOGIC-11: thin wrapper kept for backward compatibility (tests/callers
-    patch/import this by name) — the real logic now lives in
-    ``AddService.resolve_root_folder``, shared with trending.py/music.py.
-    """
-    return AddService.resolve_root_folder(folders, preferred_id)
-
-
 async def _execute_grab(
     message: Message,
     session: SearchSession,
@@ -346,10 +336,9 @@ async def _execute_grab(
     entry — so this still doesn't re-look-up the content or pick a quality
     profile/root folder (that happened at add time). Grabbing is
     ``AddService.grab_release`` for the ONE release the user selected —
-    unlike the previous backend's ``grab_with_fallback``, *arr's own
+    unlike the previous backend's multi-candidate fallback, *arr's own
     interactive search already excludes releases it cannot act on, so there is no
-    multi-candidate retry loop to drive (no task in this rollback has
-    specified one; see ``AddService.grab_with_fallback``'s docstring).
+    retry loop to drive.
     """
     user_id = session.user_id
     result = session.selected_result

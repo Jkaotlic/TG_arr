@@ -193,14 +193,6 @@ class _TorrentFormatters:
         return "\n".join(lines)
 
     @staticmethod
-    def format_torrent_compact(torrent: TorrentInfo) -> str:
-        """Format compact single-line torrent info."""
-        name = (
-            torrent.name[:30] + "..." if len(torrent.name) > 33 else torrent.name
-        )
-        return f"{torrent.state_emoji} {torrent.progress_percent}% | {_e(name)}"
-
-    @staticmethod
     def format_download_complete_notification(torrent: TorrentInfo) -> str:
         """Format notification message for completed download."""
         lines = ["✅ <b>Загрузка завершена!</b>\n"]
@@ -214,25 +206,6 @@ class _TorrentFormatters:
             )
 
         return "\n".join(lines)
-
-    @staticmethod
-    def format_no_torrents(current_filter: TorrentFilter) -> str:
-        """Format message when no torrents match the filter."""
-        if current_filter == TorrentFilter.ALL:
-            return "📭 Торрентов нет.\n\nИспользуйте /search для поиска контента."
-
-        filter_names = {
-            TorrentFilter.DOWNLOADING: "загружаемых",
-            TorrentFilter.SEEDING: "раздаваемых",
-            TorrentFilter.COMPLETED: "завершённых",
-            TorrentFilter.PAUSED: "приостановленных",
-            TorrentFilter.ACTIVE: "активных",
-            TorrentFilter.STALLED: "застрявших",
-            TorrentFilter.ERRORED: "с ошибками",
-        }
-
-        filter_name = filter_names.get(current_filter, "подходящих")
-        return f"📭 Нет {filter_name} торрентов.\n\nПопробуйте другой фильтр."
 
     @staticmethod
     def format_speed_limit_changed(limit_type: str, speed_kb: int) -> str:
@@ -259,28 +232,6 @@ class _TorrentFormatters:
             f"Сейчас: ⬇️ {format_speed_ru(dl_speed)} · ⬆️ {format_speed_ru(ul_speed)}\n"
             f"🐢 Черепаха: ⬇️ {format_limit_ru(alt_dl)} · ⬆️ {format_limit_ru(alt_ul)}"
         )
-
-    @staticmethod
-    def format_torrent_action(
-        action: str, torrent_name: str, success: bool = True
-    ) -> str:
-        """Format message for torrent action result."""
-        name = (
-            torrent_name[:40] + "..."
-            if len(torrent_name) > 43
-            else torrent_name
-        )
-
-        if success:
-            action_messages = {
-                "pause": f"⏸ Пауза: {_e(name)}",
-                "resume": f"▶️ Возобновлён: {_e(name)}",
-                "delete": f"🗑 Удалён: {_e(name)}",
-                "delete_files": f"🗑 Удалён с файлами: {_e(name)}",
-            }
-            return action_messages.get(action, f"✅ {action}: {_e(name)}")
-        else:
-            return f"❌ Ошибка {action}: {_e(name)}"
 
 
 def format_speed_ru(bytes_per_sec: int | float) -> str:

@@ -4,6 +4,7 @@
 
 ### Telegram-бот для управления медиасервером
 
+[![CI](https://github.com/Jkaotlic/TG_arr/actions/workflows/ci.yml/badge.svg)](https://github.com/Jkaotlic/TG_arr/actions/workflows/ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)](https://python.org)
 [![aiogram 3.x](https://img.shields.io/badge/aiogram-3.x-2CA5E0?logo=telegram&logoColor=white)](https://github.com/aiogram/aiogram)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED?logo=docker&logoColor=white)](https://hub.docker.com)
@@ -94,6 +95,7 @@ TG_arr
 │   └── middleware/
 │       └── auth.py                # Авторизация (whitelist)
 ├── tests/                         # pytest + pytest-asyncio
+│   └── e2e/                       # сценарии на настоящем диспетчере aiogram и подделках сервисов
 ├── Dockerfile                     # Python 3.12-slim, non-root
 ├── docker-compose.yml             # Portainer-ready
 └── .env.example                   # Все переменные с описанием
@@ -159,6 +161,8 @@ nano .env  # Заполнить обязательные переменные
 | `TIMEZONE` | `Europe/Moscow` | Часовой пояс |
 | `LOG_LEVEL` | `INFO` | Уровень логирования |
 | `AUTO_GRAB_SCORE_THRESHOLD` | `80` | Порог автозахвата |
+| `HTTP_TIMEOUT` | `30` | Таймаут обычного HTTP-запроса к сервисам (сек). Долгие вызовы *arr (поиск и lookup, выборки истории, отправка релиза) идут с таймаутом 90 с, а при большем `HTTP_TIMEOUT` — с ним |
+| `DIGEST_HOUR` | `9` | Час утренней сводки по `TIMEZONE`. Если к этому часу сервис не ответил, проверка повторяется до полудня; с полудня сводка уходит с тем, что есть, и называет недоступные источники |
 | `NOTIFY_DOWNLOAD_COMPLETE` | `true` | Уведомлять о скачивании |
 | `NOTIFY_CHECK_INTERVAL` | `60` | Интервал проверки (сек) |
 | `MUSIC_NOTIFY_SETTLE_SECONDS` | `300` | Музыка: сводка по альбому после стольких секунд тишины |
@@ -309,9 +313,15 @@ python -m bot.main
 # Тесты
 pytest -x -q
 
+# Только e2e-сценарии (настоящий диспетчер aiogram, сервисы подделаны)
+pytest tests/e2e -q
+
 # Тесты с покрытием
 pytest --cov=bot --cov-report=html
 ```
+
+CI (`.github/workflows/ci.yml`) гоняет ruff, mypy и pytest на Python 3.12 на каждый push в `master`
+и каждый pull request. Живые тесты в CI пропускаются сами: в окружении нет настоящих адресов.
 
 Дев-инструменты (ruff, mypy, pytest-cov, PyYAML) ставятся одной командой:
 
@@ -324,9 +334,13 @@ make typecheck    # только mypy bot/ (та же проверка, без �
 ### Деплой и откат на Pi
 
 ```bash
-make deploy       # build → tag prev → up -d → ps
-make rollback     # вернуть :prev как :latest → up -d
+make deploy       # tag prev (если контейнер healthy) → build → up -d --wait → ps
+make rollback     # вернуть :prev как :latest → up -d --wait
 ```
+
+`:prev` снимается только с работающего контейнера в состоянии `healthy`. Если прошлый деплой
+не поднялся, повторный `make deploy` оставляет `:prev` как был, то есть последним рабочим образом,
+и пишет об этом строку. На первом деплое, когда контейнера ещё нет, `:prev` не создаётся.
 
 ### Обновление базового образа
 

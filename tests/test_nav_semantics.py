@@ -87,13 +87,12 @@ async def _route(data: str):
 
 # ---------------------------------------------------------------- constants
 def test_navigation_constants():
-    from bot.ui.keyboards._constants import BTN_BACK, BTN_CANCEL, BTN_CLOSE, MSG_STALE, CallbackData
+    from bot.ui.keyboards._constants import BTN_BACK, BTN_CLOSE, CallbackData
     from bot.ui.list_token import STALE_LIST_TEXT
 
     assert BTN_BACK == "◀️ Назад"
     assert BTN_CLOSE == "✖️ Закрыть"
-    assert BTN_CANCEL == "❌ Отмена"
-    assert MSG_STALE == "⌛ Список устарел — повторите поиск" == STALE_LIST_TEXT
+    assert STALE_LIST_TEXT == "⌛ Список устарел — повторите поиск"
     assert CallbackData.CLOSE == "close"
 
 

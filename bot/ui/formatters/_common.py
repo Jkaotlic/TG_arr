@@ -184,7 +184,6 @@ SEASON_PRESET_NAMES = {
     "future": "только будущие",
     "firstSeason": "первый сезон",
     "latestSeason": "последний сезон",
-    "none": "нет",
 }
 
 

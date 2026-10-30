@@ -233,7 +233,7 @@ async def _resolve_arr_entry(
     Rollback 2026-08-10 (Task 12). *arr's interactive release search needs a
     movie/series id already in Radarr/Sonarr's own library — unlike the
     previous backend, which searched releases per catalog title after an
-    explicit "ensure_title" add (unmonitored, purely to get an id).
+    explicit unmonitored add, purely to get an id.
     Radarr/Sonarr have no such "list releases for something not yet added"
     mode, and adding is cheap and is what the user wants anyway if they go on
     to grab something — so this adds the title the moment a candidate is resolved

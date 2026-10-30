@@ -30,7 +30,6 @@ from bot.models import (
     TorrentInfo,
     TorrentState,
     User,
-    UserRole,
 )
 from bot.services.add_service import AddService
 from bot.services.notification_service import NotificationService
@@ -76,7 +75,7 @@ async def test_auth_middleware_allows_known_admin_and_flags_admin():
     db = AsyncMock()
     # Already-existing user → no create_user call needed.
     db.get_user = AsyncMock(
-        return_value=User(tg_id=ALLOWED_ADMIN_ID, role=UserRole.ADMIN)
+        return_value=User(tg_id=ALLOWED_ADMIN_ID)
     )
     db.create_user = AsyncMock()
 
@@ -100,7 +99,7 @@ async def test_auth_middleware_allows_known_user_not_admin():
     """An allowed non-admin id passes through with is_admin False."""
     db = AsyncMock()
     db.get_user = AsyncMock(
-        return_value=User(tg_id=ALLOWED_USER_ID, role=UserRole.USER)
+        return_value=User(tg_id=ALLOWED_USER_ID)
     )
     db.create_user = AsyncMock()
 
@@ -162,7 +161,7 @@ async def test_auth_middleware_rejects_unknown_callback():
 
 @pytest.mark.asyncio
 async def test_auth_middleware_creates_missing_allowed_user():
-    """An allowed user with no DB row gets created with the right role."""
+    """An allowed user with no DB row gets created."""
     db = AsyncMock()
     db.get_user = AsyncMock(return_value=None)  # not in DB yet
     db.create_user = AsyncMock(side_effect=lambda u: u)
@@ -178,7 +177,6 @@ async def test_auth_middleware_creates_missing_allowed_user():
     db.create_user.assert_awaited_once()
     created_user = db.create_user.await_args.args[0]
     assert created_user.tg_id == ALLOWED_ADMIN_ID
-    assert created_user.role == UserRole.ADMIN
 
 
 # ---------------------------------------------------------------------------

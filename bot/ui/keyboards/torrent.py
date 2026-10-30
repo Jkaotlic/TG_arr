@@ -310,10 +310,10 @@ class _TorrentKeyboards:
         BUG-14/DEAD-03: previously generated ``t_delete:confirm:<hash16>`` /
         ``t_delf:confirm:<hash16>``, which the handlers would have parsed as
         a (nonexistent) short-hash "confirm" — this keyboard was unreachable
-        AND broken. Now wired for the "delete with files" flow only (the
-        irreversible one): confirm uses the dedicated ``t_delfc:`` prefix,
-        cancel goes back to the torrent card via ``t:<hash>``. Plain delete
-        (keep files, reversible) still fires immediately without this step.
+        AND broken. Now wired for both delete flows (audit UI-16: no delete
+        fires on the first tap). Delete with files confirms with
+        ``TorrentActionCB(action="delfc")``, plain delete (keep files) with
+        ``action="delc"``; "back" returns to the torrent card (``action="view"``).
         """
         full_hash = torrent_hash
         if with_files:

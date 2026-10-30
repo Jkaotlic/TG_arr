@@ -18,7 +18,6 @@ from bot.models import (
     SearchSession,
     User,
     UserPreferences,
-    UserRole,
 )
 
 logger = structlog.get_logger()
@@ -152,6 +151,8 @@ class Database:
                 tg_id INTEGER PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
+                -- Колонка role не используется кодом (права — из .env), но остаётся
+                -- в схеме: откат на старую версию читает её, DEFAULT закрывает вставки.
                 role TEXT NOT NULL DEFAULT 'user',
                 preferences TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
@@ -843,10 +844,10 @@ class Database:
         async with self._write_lock:
             await self.conn.execute(
                 """
-                INSERT INTO users (tg_id, username, first_name, role, preferences, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO users (tg_id, username, first_name, preferences, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (user.tg_id, user.username, user.first_name, user.role.value, prefs_json, now, now),
+                (user.tg_id, user.username, user.first_name, prefs_json, now, now),
             )
             await self.conn.commit()
 
@@ -904,15 +905,10 @@ class Database:
                 error=str(e),
             )
             prefs = UserPreferences()
-        try:
-            role = UserRole(row["role"])
-        except ValueError:
-            role = UserRole.USER
         return User(
             tg_id=row["tg_id"],
             username=row["username"],
             first_name=row["first_name"],
-            role=role,
             preferences=prefs,
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),

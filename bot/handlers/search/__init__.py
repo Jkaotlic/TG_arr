@@ -52,7 +52,6 @@ from .commands import process_search  # noqa: E402,F401
 from .grab import (  # noqa: E402,F401
     _decide_monitor_type,
     _execute_grab,
-    _resolve_folder,
     _SEASON_PRESETS,
     grab_release,
     handle_auto_search,
@@ -65,7 +64,6 @@ from .grab import (  # noqa: E402,F401
 )
 from .results import (  # noqa: E402,F401
     _emby_library_note,
-    _pick_by_year,
     handle_back,
     handle_cancel,
     handle_legacy_page,

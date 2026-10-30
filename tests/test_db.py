@@ -16,7 +16,6 @@ from bot.models import (
     SearchSession,
     User,
     UserPreferences,
-    UserRole,
 )
 
 
@@ -39,14 +38,12 @@ class TestUserOperations:
             tg_id=123456789,
             username="testuser",
             first_name="Test",
-            role=UserRole.USER,
         )
 
         created = await db.create_user(user)
 
         assert created.tg_id == 123456789
         assert created.username == "testuser"
-        assert created.role == UserRole.USER
 
     async def test_get_user(self, db):
         """Test retrieving a user."""

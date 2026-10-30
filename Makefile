@@ -91,13 +91,32 @@ docker-restart:
 # откатываются. Теперь :prev снимается ДО сборки.
 #
 # Сломанная сборка по-прежнему не трогает работающий контейнер: `docker tag`
-# ничего не запускает, а `up -d` идёт после успешного build. Если build упал,
-# :prev просто равен текущему :latest — то есть откатываться и правда некуда.
+# ничего не запускает, а `up -d` идёт после успешного build.
+#
+# Аудит 2026-10-30 (DEPLOY-02): :prev снимается только с ЗДОРОВОГО контейнера.
+# Иначе после неудачного деплоя (контейнер поднялся, но unhealthy) повторный
+# `make deploy` записывал в :prev именно этот сломанный образ и затирал
+# последний рабочий. Теперь, если контейнера нет, он unhealthy или ещё
+# starting, :prev не трогается и остаётся последним образом, который был
+# здоров. Тегируется образ, на котором контейнер реально работает (.Image), а не
+# :latest. Первый деплой на чистой машине (контейнера нет) проходит как раньше,
+# просто без :prev.
+#
+# Статус читается из HEALTHCHECK образа (Dockerfile); у контейнера без него
+# `.State.Health` пуст — это тоже «не здоров», :prev сохраняется как был.
 IMAGE := tg-arr-bot:latest
 IMAGE_PREV := tg-arr-bot:prev
+CONTAINER := tg-arr-bot
 
 deploy:
-	-docker tag $(IMAGE) $(IMAGE_PREV)
+	@status=$$(docker inspect --format '{{.State.Health.Status}}' $(CONTAINER) 2>/dev/null || true); \
+	if [ "$$status" = healthy ]; then \
+		docker tag "$$(docker inspect --format '{{.Image}}' $(CONTAINER))" $(IMAGE_PREV) \
+			&& echo "deploy: контейнер healthy - $(IMAGE_PREV) снят с работающего образа" \
+			|| echo "deploy: не удалось снять $(IMAGE_PREV), деплой продолжается"; \
+	else \
+		echo "deploy: контейнер $(CONTAINER) не healthy (статус: $${status:-контейнера нет}) - $(IMAGE_PREV) не трогаю"; \
+	fi
 	docker compose build
 	docker compose up -d --wait --wait-timeout 180 || { docker compose logs --tail 100 tg-arr-bot; exit 1; }
 	docker compose ps
