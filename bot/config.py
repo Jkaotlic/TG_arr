@@ -16,6 +16,13 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # DEPLOY-01: Compose передаёт каждую `${X:-}` как пустую строку, а не
+        # как «нет переменной» — без этого пустые LIDARR_URL/SLSKD_URL и т.п.
+        # включали интеграции (`*_enabled` читали `is not None`), и вызовы
+        # падали с UnsupportedProtocol. Пустое значение = «не задано»: у
+        # необязательных полей остаётся умолчание, а у обязательных
+        # (TELEGRAM_BOT_TOKEN, *_URL, *_API_KEY) старт падает с «field required».
+        env_ignore_empty=True,
     )
 
     # Telegram
@@ -237,14 +244,10 @@ class Settings(BaseSettings):
     def _empty_ts_field_is_unset(cls, v: Optional[str]) -> Optional[str]:
         """Compose passes ``TORRSERVER_URL: ${TORRSERVER_URL:-}`` — with the
         var unset in the shell/host env, Compose injects an *empty string*,
-        not "absence". Without this, ``env_ignore_empty`` being off (its
-        repo-wide default, left alone here on purpose — flipping it changes
-        behaviour for every other optional integration too) means the field
-        becomes ``""`` rather than ``None``, so ``torrserver_enabled`` /
-        ``emby_sync_hook_enabled`` read True with a blank URL/password.
-        Scoped to only the fields this feature added — the other optional
-        integrations (Emby, qBittorrent, Lidarr, slskd, Navidrome, TMDb) are
-        deliberately left as-is; that's a separate, repo-wide change.
+        not "absence". DEPLOY-01: с `env_ignore_empty=True` в model_config
+        пустое значение из окружения/.env до валидаторов не доходит вовсе;
+        этот валидатор остаётся для пустых строк, переданных напрямую
+        (`Settings(torrserver_url="")`), и как второй рубеж.
         """
         if isinstance(v, str) and not v.strip():
             return None

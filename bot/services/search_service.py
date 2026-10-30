@@ -70,7 +70,11 @@ _SEASON_WORD_RE = re.compile(r"(?:season|сезон)\s*(\d{1,2})(?!\d)", re.IGNO
 # Обратный порядок — обычный для русского: «4 сезон», «3-й сезон». Живой прогон
 # 2026-08-12: «Тед Лассо 4 сезон» давал season=None, и бот спрашивал сезон,
 # который пользователь уже назвал.
-_SEASON_BEFORE_WORD_RE = re.compile(r"(\d{1,2})\s*-?\s*(?:й|ый|ой)?\s*сезон", re.IGNORECASE)
+# SEC-05: `\s*-?\s*(?:..)?\s*` давал кубический бэктрекинг на длинной цепочке
+# пробелов («1» + 2000 пробелов — секунды при замершем event loop).
+_SEASON_BEFORE_WORD_RE = re.compile(r"(\d{1,2})[\s-]*(?:(?:й|ый|ой)[\s-]*)?сезон", re.IGNORECASE)
+# Запрос длиннее — не поиск, а мусор: до разбора регулярками обрезается.
+_MAX_QUERY_PARSE_LEN = 300
 _QUALITY_TOKENS = ("2160p", "4k", "4к", "uhd", "1080p", "720p", "480p")
 # Each lookup fans out to TMDb/TVDB/MusicBrainz directly now (no more single
 # round-trip to the previous backend). Live measurement 2026-08-10: Radarr
@@ -718,13 +722,14 @@ class SearchService:
         """
         result: dict[str, Any] = {
             "original": query,
-            "title": query,
+            "title": query[:_MAX_QUERY_PARSE_LEN],
             "year": None,
             "season": None,
             "episode": None,
             "quality": None,
         }
 
+        query = query[:_MAX_QUERY_PARSE_LEN]
         query_lower = query.lower()
 
         # Year — bounded with \b to avoid latching on 4-digit substrings (BUG-06).

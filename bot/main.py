@@ -130,6 +130,11 @@ def setup_logging(log_level: str, log_format: str = "json") -> None:
     shared_processors: list[structlog.typing.Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
+        # OBS-01: без этого `exc_info=True` уходил в JSON как `"exc_info": true`
+        # (трейсбека нет), а `exc_info=e` — как repr, мимо маскировки. Здесь
+        # исключение становится строкой `exception`, которую `_mask_tokens`
+        # ниже уже чистит. Тот же список служит foreign_pre_chain для stdlib.
+        structlog.processors.format_exc_info,
         _mask_tokens,
         structlog.processors.TimeStamper(fmt="iso"),
     ]
@@ -935,7 +940,7 @@ async def handle_unexpected_error(event: ErrorEvent) -> None:
     logger.error(
         "unhandled_handler_error",
         update_id=getattr(update, "update_id", None),
-        error=str(event.exception),
+        error=describe_error(event.exception),
         exc_info=event.exception,
     )
 

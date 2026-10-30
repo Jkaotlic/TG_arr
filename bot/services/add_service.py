@@ -131,13 +131,18 @@ def _qbit_category(content_type: ContentType, release: SearchResult) -> str:
 
     Free-text search does not know the facet up front — its `content_type` is
     `UNKNOWN` — but Prowlarr's own category ids usually do, and
-    `ProwlarrClient._normalize_result` puts that in `detected_type`. Falls back
-    to the movie category, which is what these call sites used unconditionally
-    before.
+    `ProwlarrClient._normalize_result` puts that in `detected_type`.
+
+    LOGIC-10: музыка и нераспознанный тип получают пустую категорию (qBit
+    кладёт торрент без категории). Раньше они уходили в `radarr`: Radarr видел
+    чужой торрент в своей категории, а уведомление о завершении подавлялось
+    правилом «этим занимается library_watch» (его обходит только тег
+    `DIRECT_TAG`). Пустая строка нигде ниже не требуется: клиент qBit её просто
+    не отправляет, а `NotificationService` читает `category or ""`.
     """
     if content_type in _QBIT_CATEGORIES:
         return _QBIT_CATEGORIES[content_type]
-    return _QBIT_CATEGORIES.get(release.detected_type, "radarr")
+    return _QBIT_CATEGORIES.get(release.detected_type, "")
 
 
 #: Audit 2026-09-23 (GRAB-08/14): why a grab did not happen, stored as

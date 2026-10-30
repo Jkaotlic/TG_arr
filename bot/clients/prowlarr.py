@@ -30,6 +30,11 @@ MUSIC_CATEGORIES = [3000, 3010, 3020, 3030, 3040, 3050, 3060]
 # стоять только разделитель, не буква и не ещё одна цифра.
 _EPISODE_RANGE_RE = re.compile(r"s(\d{1,2})\s*e(\d{1,3})\s*-\s*e?(\d{1,3})(?![0-9a-zа-яё])")
 
+# SEC-05: настоящие названия раздач — до пары сотен знаков; всё, что длиннее,
+# обрезается до разбора регулярками, чтобы длинная «грязная» строка от
+# индексера не держала event loop.
+_MAX_TITLE_PARSE_LEN = 512
+
 
 class ProwlarrClient(BaseAPIClient):
     """Client for Prowlarr API."""
@@ -338,7 +343,7 @@ class ProwlarrClient(BaseAPIClient):
 
     def _extract_season_episode(self, title: str) -> tuple[Optional[int], Optional[int]]:
         """Extract season and episode numbers from title."""
-        title_lower = title.lower()
+        title_lower = title[:_MAX_TITLE_PARSE_LEN].lower()
 
         # Диапазон серий («S02E01-08 of 08») — это пак: сезон у него есть,
         # а «серия» не определена. Проверяется ДО одиночного s\d+e\d, который
@@ -375,11 +380,15 @@ class ProwlarrClient(BaseAPIClient):
         # разбирается точнее, чем словесная форма. Кириллические «с»/«е»/«х» —
         # другие кодпоинты, чем латинские s/e/x, поэтому паттерны выше их не
         # видят вовсе.
+        # SEC-05: `\s*-?\s*(?:..)?\s*` — три соседних квантификатора на одних
+        # и тех же пробелах: «1» + 2000 пробелов считалось 4 с (кубический
+        # бэктрекинг, event loop стоит). `[\s-]*` и суффикс внутри группы
+        # дают линейный разбор и принимают всё, что принимал прежний паттерн.
         season_ru = re.search(r"сезон[\s.:]*(\d{1,2})", title_lower) or re.search(
-            r"(\d{1,2})\s*-?\s*(?:й|ый|ой)?\s*сезон", title_lower
+            r"(\d{1,2})[\s-]*(?:(?:й|ый|ой)[\s-]*)?сезон", title_lower
         )
         episode_ru = re.search(r"серия[\s.:]*(\d{1,3})", title_lower) or re.search(
-            r"(\d{1,3})\s*-?\s*(?:я|ая)?\s*серия", title_lower
+            r"(\d{1,3})[\s-]*(?:(?:я|ая)[\s-]*)?серия", title_lower
         )
         if season_ru or episode_ru:
             return (
@@ -391,7 +400,7 @@ class ProwlarrClient(BaseAPIClient):
 
     def _is_season_pack(self, title: str) -> bool:
         """Check if release is a season pack."""
-        title_lower = title.lower()
+        title_lower = title[:_MAX_TITLE_PARSE_LEN].lower()
 
         # Explicit season pack markers (check first — most reliable)
         if any(x in title_lower for x in [
