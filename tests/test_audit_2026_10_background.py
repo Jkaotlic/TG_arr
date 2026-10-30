@@ -775,17 +775,15 @@ async def test_clock_skew_does_not_repeat_a_tracked_completion():
     assert sender.await_count == 1
 
 
-async def test_old_or_unknown_completion_first_seen_midrun_stays_silent():
+async def test_first_seen_torrent_with_unknown_completion_stays_silent():
+    """completion_on нет: добавлен с готовыми данными, это не закачка."""
     clock = _Clock()
     service, qbit, sender = _qbit_service(clock)
     qbit.get_maindata.return_value = _maindata(full=True)
     await service._initial_sync()
 
     clock.advance(60)
-    qbit.get_maindata.return_value = _maindata(2, {
-        HASH_A: _done(finished=T0 - timedelta(days=30)),
-        HASH_B: _done(finished=None),
-    })
+    qbit.get_maindata.return_value = _maindata(2, {HASH_B: _done(finished=None)})
     await service._check_for_completions()
     sender.assert_not_awaited()
 
@@ -925,14 +923,14 @@ async def test_grabber_gets_no_second_message_when_the_living_row_is_not_linked_
     )
     service, qbit, sender = _qbit_service(
         clock, subscribers=(111, 222), exclude_chats=live.owner_chats,
-        pending_direct_chats=live.pending_direct_chats,
+        claim_direct_chats=live.claim_direct_chats,
     )
     qbit.get_maindata.return_value = _maindata(full=True)
     await service._initial_sync()
 
     clock.advance(20)
     qbit.get_maindata.return_value = _maindata(2, {
-        HASH_A: _done(finished=clock.now - timedelta(seconds=5), tags=DIRECT_TAG),
+        HASH_A: _done(finished=clock.now - timedelta(seconds=5), tags=DIRECT_TAG, added_on=int(clock.now.timestamp())),
     })
     await service._check_for_completions()
 
@@ -1842,7 +1840,7 @@ class _FirstStart:
         )
         self.qbit = NotificationService(
             qbit, user_notice, exclude_chats=self.live.owner_chats,
-            pending_direct_chats=self.live.pending_direct_chats, clock=clock,
+            claim_direct_chats=self.live.claim_direct_chats, clock=clock,
         )
         self.qbit.subscribe_user(111)
 
@@ -2085,3 +2083,397 @@ async def test_flush_at_shutdown_is_bounded_when_telegram_hangs(monkeypatch):
         await asyncio.wait_for(asyncio.gather(task), 2)
 
     assert any(e["event"] == "library_watch_flush_failed" for e in logs)
+
+
+# ---------------------------------------------------------------- правки ревью, раунд 1
+@pytest.mark.parametrize("finishes", [(3, 8, 13), (3, 9, 15)])
+@pytest.mark.parametrize("slskd_behind", [0, 150, 300])
+async def test_album_gets_one_summary_whatever_the_slskd_clock_says(db, slskd_behind, finishes):
+    """Таблица ревьюера: три трека докачиваются с разрывом около settle. Отставание часов
+    slskd не должно ни дробить сводку, ни терять её: прежде 150 с давали три сообщения,
+    300 с ни одного."""
+    from bot.models import SlskdTransfer
+
+    clock, slskd = _Clock(), _Slskd()
+    watcher, sent = _library_watcher(
+        db, _Arr(), _Arr(), get_slskd=_async_value(slskd), clock=clock, music_settle_seconds=300,
+        music_stall_seconds=3600, poll_interval_seconds=60,
+    )
+    await watcher.poll()  # посев
+    behind = timedelta(seconds=slskd_behind)
+    requested = clock.now - behind
+
+    def track(n: int, finished_at: datetime | None) -> SlskdTransfer:
+        name = f"{n:02d} - Track {n}.flac"
+        return SlskdTransfer(
+            username="peer", filename=name, size=100, id=f"skew-{n}", batch_id="b",
+            state="Completed, Succeeded" if finished_at else "Queued, Remotely",
+            directory=ALBUM, full_filename=f"{ALBUM}\\{name}", requested_at=requested,
+            ended_at=finished_at - behind if finished_at else None,
+        )
+
+    finish_minute = dict(enumerate(finishes, start=1))
+    start = clock.now
+    for minute in range(1, 30):
+        clock.advance(60)
+        slskd.transfers = [
+            track(n, start + timedelta(minutes=m) if minute >= m else None) for n, m in finish_minute.items()
+        ]
+        await watcher.poll()
+
+    assert len(sent) == 1, sent
+    assert "3/3 скачано" in sent[0]
+
+
+def _async_value(value):
+    async def get():
+        return value
+
+    return get
+
+
+async def test_unknown_queued_transfer_younger_than_the_tombstone_limit_counts(db):
+    from bot.models import SlskdTransfer
+
+    clock, slskd = _Clock(), _Slskd()
+    watcher, sent = _music_watcher(db, clock, slskd)
+    await watcher.poll()
+    clock.advance(60)
+    slskd.transfers = [SlskdTransfer(
+        username="peer", filename="01 - T.flac", state="Queued, Remotely", size=100, id="young", batch_id="b",
+        directory=ALBUM, full_filename=f"{ALBUM}\\01 - T.flac", requested_at=clock.now - timedelta(days=89),
+    )]
+    await watcher.poll()
+    assert "young" in await db.music_transfer_states()
+
+
+async def test_maintenance_keeps_a_partial_batch_until_its_final_summary(db):
+    key = "album:partial"
+    old = NOW - timedelta(days=8)
+    await db.music_record([("t1", key, "k", "Completed, Succeeded", "A")], old)
+    await db.music_mark_notified([key], old, partial=[key])
+
+    assert await db.cleanup_music_notify() == 0
+    assert "t1" in await db.music_transfer_states()
+    assert [b["batch_key"] for b in await db.music_partial_batches()] == [key]
+
+
+async def test_maintenance_still_bounds_a_partial_batch_at_90_days(db):
+    key = "album:partial"
+    old = NOW - timedelta(days=91)
+    await db.music_record([("t1", key, "k", "Completed, Succeeded", "A")], old)
+    await db.music_mark_notified([key], old, partial=[key])
+
+    assert await db.cleanup_music_notify() == 1
+
+
+async def _direct_rig(db, clock, *, release: str = "Другое имя", subscribers=(111,)):
+    from bot.services import live_status
+
+    live = await _live_service(db, clock)
+    await live_status.register_grab(
+        db, chat_id=111, message_id=5, kind="movie", title="Film", release=release, arr="qbit",
+        arr_id=None, guid=None, now=clock.now,
+    )
+    service, qbit, sender = _qbit_service(
+        clock, subscribers=subscribers, exclude_chats=live.owner_chats,
+        claim_direct_chats=live.claim_direct_chats,
+    )
+    qbit.get_maindata.return_value = _maindata(full=True)
+    await service._initial_sync()
+    return live, service, qbit, sender
+
+
+async def test_other_torrent_of_a_waiting_chat_is_not_suppressed(db):
+    """Торрент, добавленный задолго до граба, не тот, за которым следит сообщение."""
+    from bot.clients.qbittorrent import DIRECT_TAG
+    from bot.services import live_status
+
+    clock = _Clock()
+    _live, service, qbit, sender = await _direct_rig(db, clock)
+
+    clock.advance(20)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: _done(
+        "Старая закачка", finished=clock.now - timedelta(seconds=5), tags=DIRECT_TAG,
+        added_on=int((clock.now - timedelta(hours=2)).timestamp()),
+    )})
+    await service._check_for_completions()
+
+    assert sender.await_count == 1
+    row = (await db.live_rows())[0]
+    assert row["state"] == live_status.WAITING and row["download_id"] is None
+
+
+async def test_torrent_named_like_the_release_is_suppressed_whatever_its_age(db):
+    """`_link_direct` сначала сверяет имя: добавленное раньше строки тоже её торрент."""
+    from bot.clients.qbittorrent import DIRECT_TAG
+
+    clock = _Clock()
+    _live, service, qbit, sender = await _direct_rig(db, clock, release="Film.2020.1080p")
+
+    clock.advance(20)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: _done(
+        "film.2020.1080P", finished=clock.now - timedelta(seconds=5), tags=DIRECT_TAG,
+        added_on=int((clock.now - timedelta(hours=2)).timestamp()),
+    )})
+    await service._check_for_completions()
+    sender.assert_not_awaited()
+
+
+async def test_suppressed_completion_links_the_row_so_no_broken_promise_follows(db):
+    """Подавили сообщение, значит строка обязана дойти до «скачано», а не до
+    «сообщу, когда будет в библиотеке»: второго сообщения уже не будет."""
+    from unittest.mock import AsyncMock
+
+    from bot.clients.qbittorrent import DIRECT_TAG
+    from bot.models import TorrentInfo, TorrentState
+    from bot.services import live_status
+
+    clock = _Clock()
+    live, service, qbit, sender = await _direct_rig(db, clock, subscribers=(111, 222))
+    clock.advance(20)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: _done(
+        "Иное имя торрента", finished=clock.now - timedelta(seconds=5), tags=DIRECT_TAG,
+        added_on=int(clock.now.timestamp()),
+    )})
+    await service._check_for_completions()
+
+    assert [call.args[0] for call in sender.await_args_list] == [222]
+    row = (await db.live_rows())[0]
+    assert row["download_id"] == HASH_A.upper()
+
+    # Торрент уже найден: прямой список его больше не отдаёт, строка идёт по хэшу.
+    live._qbit = AsyncMock()
+    live._qbit.get_torrent.return_value = TorrentInfo(
+        hash=HASH_A, name="Иное имя торрента", progress=1.0, state=TorrentState.SEEDING,
+    )
+    live._qbit.get_torrents.return_value = []
+    clock.advance(700)  # за пределом link_timeout
+    await live.tick()
+
+    row = (await db.live_rows())[0]
+    assert row["state"] == live_status.FINISHED
+    assert row["detail"] != live_status._LINE_UNTRACKED
+
+
+async def test_one_torrent_claims_one_waiting_row(db):
+    from bot.clients.qbittorrent import DIRECT_TAG
+    from bot.services import live_status
+
+    clock = _Clock()
+    live, service, qbit, sender = await _direct_rig(db, clock, subscribers=(111, 222))
+    await live_status.register_grab(
+        db, chat_id=222, message_id=9, kind="movie", title="Other", release="Иной релиз", arr="qbit",
+        arr_id=None, guid=None, now=clock.now,
+    )
+    clock.advance(20)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: _done(
+        "Безымянный", finished=clock.now - timedelta(seconds=5), tags=DIRECT_TAG,
+        added_on=int(clock.now.timestamp()),
+    )})
+    await service._check_for_completions()
+
+    # Торрент достаётся одной строке; второй чат получает обычное сообщение.
+    assert [call.args[0] for call in sender.await_args_list] == [222]
+    states = {r["chat_id"]: r["state"] for r in await db.live_rows()}
+    assert states == {111: live_status.DOWNLOADING, 222: live_status.WAITING}
+
+
+async def test_torrent_owned_by_a_row_is_not_claimed_by_another(db):
+    from bot.clients.qbittorrent import DIRECT_TAG
+    from bot.services import live_status
+
+    clock = _Clock()
+    live, service, qbit, sender = await _direct_rig(db, clock, subscribers=(111, 222))
+    await live_status.register_grab(
+        db, chat_id=222, message_id=9, kind="movie", title="Other", release="Иной релиз", arr="qbit",
+        arr_id=None, guid=None, now=clock.now,
+    )
+    await db.live_update("222:9", download_id=HASH_A.upper(), state=live_status.DOWNLOADING)
+    clock.advance(20)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: _done(
+        "Безымянный", finished=clock.now - timedelta(seconds=5), tags=DIRECT_TAG,
+        added_on=int(clock.now.timestamp()),
+    )})
+    await service._check_for_completions()
+
+    assert [call.args[0] for call in sender.await_args_list] == [111]
+
+
+async def test_new_torrent_counts_even_when_the_qbit_clock_is_far_behind(db):
+    """Хэша не было в прошлом чтении: он новый, что бы ни говорили часы qBit."""
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    qbit.get_maindata.return_value = _maindata(full=True)
+    await service._initial_sync()
+
+    clock.advance(300)
+    qbit.get_maindata.return_value = _maindata(2, {
+        HASH_A: _done(finished=clock.now - timedelta(minutes=15)),  # часы qBit на 15 минут сзади
+    })
+    await service._check_for_completions()
+    assert sender.await_count == 1
+
+
+async def test_resync_keeps_the_time_check_for_unseen_old_torrents(db):
+    """full_update присылает всё заново: без проверки времени это рассылка раздачи."""
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    qbit.get_maindata.return_value = _maindata(full=True)
+    await service._initial_sync()
+
+    clock.advance(300)
+    qbit.get_maindata.return_value = _maindata(1, {
+        HASH_A: _done(finished=clock.now - timedelta(days=30)),
+    }, full=True)
+    await service._check_for_completions()
+    sender.assert_not_awaited()
+
+
+async def test_torrent_seen_before_and_not_new_keeps_the_time_check(db):
+    """Хэш был в прошлом чтении как завершённый после сбоя initial sync: не новость."""
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    qbit.get_maindata.side_effect = ConnectionError("qbit down")
+    await service._initial_sync()
+
+    qbit.get_maindata.side_effect = None
+    qbit.get_maindata.return_value = _maindata(1, {HASH_A: _done(finished=T0 - timedelta(days=3))}, full=True)
+    clock.advance(60)
+    await service._check_for_completions()
+    clock.advance(60)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: {"upspeed": 5}})
+    await service._check_for_completions()
+    sender.assert_not_awaited()
+
+
+class _BlockingNotice:
+    """notify, застревающий на первом сообщении: отмена приходит посреди отправки."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, text: str, category: str, **extra) -> None:
+        self.started.set()
+        await self.release.wait()
+        self.sent.append(text)
+
+
+async def _watcher_with_two_ready_films(db, notice):
+    from bot.services.library_watcher import LibraryWatcher
+
+    radarr, sonarr = _Arr(), _Arr()
+    watcher = LibraryWatcher(radarr, sonarr, notify=notice, db=db)
+    await watcher.poll()
+    await db.kv_set("import_watermark:radarr", T0.isoformat())
+    await db.kv_set("import_watermark:sonarr", T0.isoformat())
+    radarr.records = [
+        _import_record(1, "Первый", T0 + timedelta(minutes=1), "D1"),
+        _import_record(2, "Второй", T0 + timedelta(minutes=2), "D2"),
+    ]
+    return watcher
+
+
+async def test_cancel_mid_send_loses_nothing_and_repeats_nothing(db):
+    notice = _BlockingNotice()
+    watcher = await _watcher_with_two_ready_films(db, notice)
+
+    poll = asyncio.create_task(watcher.poll())
+    await asyncio.wait_for(notice.started.wait(), 2)
+    poll.cancel()
+    await asyncio.gather(poll, return_exceptions=True)
+    assert poll.cancelled()
+
+    notice.release.set()
+    await asyncio.wait_for(watcher.flush_held(), 2)
+
+    assert len(notice.sent) == 2
+    assert "Первый" in notice.sent[0] and "Второй" in notice.sent[1]
+
+    await watcher.flush_held()
+    assert len(notice.sent) == 2
+
+
+async def test_group_ready_at_cancel_is_flushed_with_held_ones(db):
+    """Удержанный пак и готовые группы объявляются одной остановкой, каждая один раз."""
+    notice = _BlockingNotice()
+    watcher = await _watcher_with_two_ready_films(db, notice)
+    watcher.sonarr.records = [_import_record(5, "Сериал", T0 + timedelta(minutes=3), "PACK")]
+
+    poll = asyncio.create_task(watcher.poll())
+    await asyncio.wait_for(notice.started.wait(), 2)
+    poll.cancel()
+    await asyncio.gather(poll, return_exceptions=True)
+    notice.release.set()
+    await asyncio.wait_for(watcher.flush_held(), 2)
+
+    assert sorted(t.split("</b>")[0] for t in notice.sent) == sorted(
+        f"✅ <b>{name}" for name in ("Первый", "Второй", "Сериал")
+    )
+
+
+async def test_flush_timeout_stops_the_send_in_flight(db):
+    notice = _BlockingNotice()
+    watcher = await _watcher_with_two_ready_films(db, notice)
+    poll = asyncio.create_task(watcher.poll())
+    await asyncio.wait_for(notice.started.wait(), 2)
+    poll.cancel()
+    await asyncio.gather(poll, return_exceptions=True)
+    in_flight = watcher._in_flight
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(watcher.flush_held(), 0.05)
+    await asyncio.sleep(0)
+
+    assert in_flight.done()
+
+
+async def test_undelivered_groups_wait_for_the_next_poll_after_a_failure(db, monkeypatch):
+    """Сбой в отправке одной группы не теряет остальные."""
+    from bot.services.library_watcher import LibraryWatcher
+
+    sent: list[str] = []
+
+    async def notify(text: str, category: str, **extra) -> None:
+        sent.append(text)
+
+    radarr, sonarr = _Arr(), _Arr()
+    watcher = LibraryWatcher(radarr, sonarr, notify=notify, db=db)
+    await watcher.poll()
+    await db.kv_set("import_watermark:radarr", T0.isoformat())
+    await db.kv_set("import_watermark:sonarr", T0.isoformat())
+    radarr.records = [
+        _import_record(1, "Первый", T0 + timedelta(minutes=1), "D1"),
+        _import_record(2, "Второй", T0 + timedelta(minutes=2), "D2"),
+    ]
+    real = watcher._announce_group
+    fail = [True]
+
+    async def flaky(label, records):
+        if fail:
+            fail.clear()
+            raise RuntimeError("баг в сборке сообщения")
+        await real(label, records)
+
+    monkeypatch.setattr(watcher, "_announce_group", flaky)
+    await watcher.poll()  # не падает
+    await watcher.poll()
+    assert [("Второй" in text) for text in sent] == [True]
+
+
+async def test_digest_warns_once_per_source_per_tick(db):
+    from structlog.testing import capture_logs
+
+    rig = _DigestRig(db, _msk(9, 1))
+    rig.radarr.get_history_since.side_effect = ConnectionError("x")
+    rig.radarr.get_queue.side_effect = ConnectionError("x")
+    rig.sonarr.get_queue.side_effect = ConnectionError("x")
+    rig.sonarr.get_calendar.side_effect = ConnectionError("x")
+
+    with capture_logs() as logs:
+        await rig.service.maybe_send()
+
+    failed = [e["source"] for e in logs if e["event"] == "digest_source_failed"]
+    assert sorted(failed) == ["Radarr", "Sonarr"]

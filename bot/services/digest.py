@@ -61,9 +61,10 @@ class DigestData:
     failed: list[tuple[str, str]] = field(default_factory=list)
 
     def source_failed(self, category: str, source: str, error: Exception) -> None:
+        if (category, source) in self.failed:
+            return  # одна строка на источник за проход, сколько бы его вызовов ни упало
         logger.warning("digest_source_failed", source=source, error=describe_error(error))
-        if (category, source) not in self.failed:
-            self.failed.append((category, source))
+        self.failed.append((category, source))
 
 
 def _albums(count: int) -> str:

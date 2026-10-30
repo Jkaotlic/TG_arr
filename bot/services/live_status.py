@@ -89,6 +89,9 @@ _LINE_UNTRACKED = "Статус загрузки не отслеживается
 #: чем бот создаёт строку, и его часы могут расходиться с нашими.
 _HISTORY_MARGIN = timedelta(seconds=300)
 
+#: Прямой торрент может быть добавлен чуть раньше, чем бот создаст строку.
+_DIRECT_ADD_MARGIN = timedelta(seconds=60)
+
 #: qBittorrent reports "unknown" ETA as 8640000 s (100 days).
 _ETA_UNKNOWN = 8_640_000
 
@@ -282,13 +285,32 @@ class LiveStatusService:
             and r["state"] != UNTRACKED
         }
 
-    async def pending_direct_chats(self) -> set[int]:
-        """Чаты, чьё сообщение о прямом добавлении ещё не нашло свой торрент.
+    async def claim_direct_chats(self, torrent: TorrentInfo) -> set[int]:
+        """Привязать докачанный прямой торрент к ждущей строке и вернуть её чат.
 
-        LOGIC-09: торрент, докачанный до привязки, `owner_chats` ещё не узнаёт.
+        LOGIC-09: торрент, докачанный раньше привязки, `owner_chats` ещё не узнаёт.
+        Подходит та же строка, что выбрал бы `_link_direct`: сначала по имени релиза,
+        затем самая старая из созданных не позже минуты до добавления торрента. Чужие
+        торренты чата сюда не попадают. Привязка здесь же, потому что сообщение чату
+        подавляется: строка обязана дойти до «скачано», а не до `_LINE_UNTRACKED` с
+        обещанием сообщить, которое уже некому выполнить.
         """
-        rows = await self._db.live_rows((WAITING,))
-        return {int(r["chat_id"]) for r in rows if r["kind"] != KIND_NOTICE and r["arr"] == "qbit"}
+        wanted = torrent.hash.upper()
+        rows = await self._db.live_rows()
+        if any((r["download_id"] or "") == wanted for r in rows):
+            return set()  # у торрента уже есть строка, `owner_chats` её учёл
+        waiting = [r for r in rows if r["state"] == WAITING and r["kind"] != KIND_NOTICE and r["arr"] == "qbit"]
+        name = torrent.name.strip().casefold()
+        row = next((r for r in waiting if (r.get("release") or "").strip().casefold() == name), None)
+        if row is None and torrent.added_on is not None:
+            row = next(
+                (r for r in waiting if torrent.added_on >= (_parse(r["created_at"]) or self._clock()) - _DIRECT_ADD_MARGIN),
+                None,
+            )
+        if row is None:
+            return set()
+        await self._save(row, download_id=wanted, state=DOWNLOADING, updated_at=self._clock().isoformat())
+        return {int(row["chat_id"])}
 
     # ------------------------------------------------------------ edits
     async def _apply(self, row: dict[str, Any], markup: Any = None, **fields: Any) -> EditOutcome:
@@ -487,7 +509,7 @@ class LiveStatusService:
         created = _parse(row["created_at"]) or self._clock()
         recent = [
             t for t in tagged
-            if t.added_on is not None and t.added_on >= created - timedelta(seconds=60)
+            if t.added_on is not None and t.added_on >= created - _DIRECT_ADD_MARGIN
         ]
         if recent:
             newest = max(recent, key=lambda t: t.added_on or created)

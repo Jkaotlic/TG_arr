@@ -27,6 +27,7 @@ own `date` field rather than per-client return order, so a mixed movie+
 episode burst reads in the order it actually happened.
 """
 
+import asyncio
 import html
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 import structlog
 
 from bot.clients.base import CircuitBreaker, ServiceConnectionError
+from bot.db import MUSIC_TOMBSTONE_DAYS
 from bot.logging_utils import describe_error
 from bot.services import music_notify
 
@@ -203,6 +205,10 @@ class LibraryWatcher:
         #: остановке их объявляет `flush_held`.
         self._held: dict[tuple[str, str], _HeldImport] = {}
         self._poll_number = 0
+        #: Группы, готовые к объявлению и ещё не отправленные, и отправляемая сейчас.
+        #: Отмена посреди рассылки не должна терять первые и повторять вторую.
+        self._ready: list[tuple[str, list[dict[str, Any]]]] = []
+        self._in_flight: Optional["asyncio.Task[None]"] = None
 
     # --------------------------------------------------------------- *arr
     async def _fetch_imports(
@@ -316,8 +322,21 @@ class LibraryWatcher:
                 continue
             accepted.extend((label, record) for record in fresh)
 
-        for label, records in self._collect_groups(accepted, answered):
-            await self._announce_group(label, records)
+        self._ready.extend(self._collect_groups(accepted, answered))
+        await self._send_ready()
+
+    async def _send_ready(self) -> None:
+        """Объявить готовые группы по очереди.
+
+        Отправка идёт отдельной задачей под `shield`: отмена цикла посреди рассылки
+        не обрывает её на половине получателей, поэтому `flush_held` её дожидается
+        и не шлёт заново. Сбой одной группы оставляет остальные до следующего опроса.
+        """
+        while self._ready:
+            label, records = self._ready.pop(0)
+            self._in_flight = asyncio.ensure_future(self._announce_group(label, records))
+            await asyncio.shield(self._in_flight)
+            self._in_flight = None
 
     async def _accept_imports(
         self, label: str, records: list[dict[str, Any]], newest: Optional[datetime],
@@ -377,10 +396,18 @@ class LibraryWatcher:
 
     async def flush_held(self) -> None:
         """Объявить всё удержанное: штатная остановка, следующего опроса не будет."""
-        groups = [(key[0], held.records) for key, held in self._held.items()]
+        self._ready.extend((key[0], held.records) for key, held in self._held.items())
         self._held.clear()
-        for label, records in groups:
-            await self._announce_group(label, records)
+        try:
+            if self._in_flight is not None:
+                await asyncio.wait([self._in_flight])
+                self._in_flight = None
+            await self._send_ready()
+        except asyncio.CancelledError:
+            # Время на остановку вышло: отправку под `shield` никто больше не ждёт.
+            if self._in_flight is not None:
+                self._in_flight.cancel()
+            raise
 
     async def _announce_group(self, label: str, records: list[dict[str, Any]]) -> None:
         title = html.escape(str(records[0].get("sourceTitle") or "Unknown"))
@@ -447,6 +474,7 @@ class LibraryWatcher:
         # `endedAt` just before the watermark. Transfers already recorded are
         # matched by id, so the margin can't make anything count twice.
         cutoff = watermark - timedelta(seconds=_CLOCK_SKEW_MARGIN_S)
+        tombstone_age = poll_started - timedelta(days=MUSIC_TOMBSTONE_DAYS)
 
         # Review round 1: time nobody observed (slskd unreachable, or the bot
         # itself down) is not "quiet time". If the last successful poll is
@@ -471,12 +499,14 @@ class LibraryWatcher:
                 previous is None
                 and not first_run
                 and transfer.requested_at is not None
-                and transfer.requested_at <= cutoff
+                and transfer.requested_at <= tombstone_age
             ):
-                # DB-02: запрошен до прошлого опроса, а базе неизвестен, значит чистка
-                # убрала его надгробие (90 дней), пока slskd его держит. Не новость:
-                # иначе застрявшая очередь объявлялась бы заново. Когда такой файл
-                # докачается, он пройдёт по правилу выше как обычная новость.
+                # DB-02: запрошен раньше предела жизни надгробия, а базе неизвестен,
+                # значит чистка убрала его надгробие, пока slskd его держит. Не новость:
+                # иначе застрявшая очередь объявлялась бы заново. Сравнение с возрастом,
+                # а не с отметкой: часы slskd могут отставать на минуты, и новая
+                # закачка не должна из-за этого выпадать. Когда такой файл докачается,
+                # он пройдёт по правилу выше как обычная новость.
                 continue
             known[tid] = state
             changes.append((

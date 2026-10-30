@@ -23,6 +23,9 @@ from bot.models import (
 
 logger = structlog.get_logger()
 
+#: DB-02: сколько живёт надгробие объявленного батча с незавершёнными файлами.
+MUSIC_TOMBSTONE_DAYS = 90
+
 
 def _as_optional_int(value: Any) -> Optional[int]:
     """Coerce a stored preference id to int, or give up cleanly.
@@ -780,13 +783,14 @@ class Database:
             row = await cursor.fetchone()
         return int(row[0]) if row else 0
 
-    async def cleanup_music_notify(self, days: int = 7, tombstone_days: int = 90) -> int:
+    async def cleanup_music_notify(self, days: int = 7, tombstone_days: int = MUSIC_TOMBSTONE_DAYS) -> int:
         """Drop batches announced more than ``days`` ago, with their transfers.
 
         Only batches whose transfers are all finished (state ``Completed, …``)
         are dropped: a batch still holding a queued/in-progress transfer is
         kept as a tombstone, or the watcher would see that transfer as new
-        and announce the same stuck queue again every week.
+        and announce the same stuck queue again every week. A batch still owed
+        its final summary (``partial_announced``) is kept too.
 
         DB-02 (аудит 2026-10-30): надгробие живёт ``tombstone_days`` с последнего
         изменения и объявления, иначе ``music_transfer`` растёт без предела, а эта
@@ -799,8 +803,9 @@ class Database:
         tombstone_cutoff = (now - timedelta(days=tombstone_days)).isoformat()
         stale = (
             "SELECT b.batch_key FROM music_batch b WHERE b.notified_at IS NOT NULL "
-            "AND b.notified_at < ? AND (NOT EXISTS (SELECT 1 FROM music_transfer t "
-            "WHERE t.batch_key = b.batch_key AND t.state NOT LIKE 'Completed%') "
+            "AND b.notified_at < ? AND ((b.partial_announced = 0 AND NOT EXISTS ("
+            "SELECT 1 FROM music_transfer t "
+            "WHERE t.batch_key = b.batch_key AND t.state NOT LIKE 'Completed%')) "
             "OR (b.notified_at < ? AND b.last_change_at < ?))"
         )
         params = (cutoff, tombstone_cutoff, tombstone_cutoff)

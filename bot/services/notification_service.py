@@ -36,7 +36,7 @@ class NotificationService:
         qbittorrent: QBittorrentClient,
         send_notification: Callable[[int, str], Awaitable[bool] | Awaitable[None]],
         exclude_chats: Optional[Callable[[str], Awaitable[set[int]]]] = None,
-        pending_direct_chats: Optional[Callable[[], Awaitable[set[int]]]] = None,
+        claim_direct_chats: Optional[Callable[[TorrentInfo], Awaitable[set[int]]]] = None,
         clock: Callable[[], datetime] = _utcnow,
     ):
         """
@@ -57,10 +57,10 @@ class NotificationService:
         #: follows this torrent (``LiveStatusService.owner_chats``) — they
         #: get no separate "download complete" message.
         self._exclude_chats = exclude_chats
-        #: LOGIC-09: чаты, чьё живое сообщение ещё ищет свой прямой торрент
-        #: (``LiveStatusService.pending_direct_chats``). Магнет, докачанный до
-        #: привязки, не должен дать хозяину второе сообщение.
-        self._pending_direct_chats = pending_direct_chats
+        #: LOGIC-09: живое сообщение, ещё ищущее свой прямой торрент, забирает его
+        #: (``LiveStatusService.claim_direct_chats``). Магнет, докачанный до привязки,
+        #: не должен дать хозяину второе сообщение.
+        self._claim_direct_chats = claim_direct_chats
         self._clock = clock
         self.settings = get_settings()
 
@@ -319,14 +319,16 @@ class NotificationService:
         work at all, which is the whole point of the delta protocol on a Pi.
         """
         maindata = await self.qbittorrent.get_maindata(self._rid)
+        seen_before = set(self._torrents_raw)
         self._merge_maindata(maindata)
         previous_sync, self._last_sync_at = self._last_sync_at, self._clock()
+        resync = bool(maindata.get("full_update"))
 
         for h in maindata.get("torrents_removed", []):
             self._tracked_torrents.pop(h, None)
             self._completed_hashes.discard(h)
 
-        if maindata.get("full_update"):
+        if resync:
             changed_hashes = list(self._torrents_raw)
         else:
             changed_hashes = list(maindata.get("torrents", {}))
@@ -356,7 +358,9 @@ class NotificationService:
                     }
                 elif torrent_hash not in self._completed_hashes:
                     self._completed_hashes.add(torrent_hash)
-                    if self._finished_since(torrent, previous_sync):
+                    if self._finished_since(
+                        torrent, previous_sync, new=not resync and torrent_hash not in seen_before,
+                    ):
                         await self._completion_reached(torrent)
                 continue
 
@@ -377,11 +381,17 @@ class NotificationService:
             # tracked, re-check next cycle.
 
     @staticmethod
-    def _finished_since(torrent: TorrentInfo, previous_sync: Optional[datetime]) -> bool:
-        """Докачан после прошлого опроса. До первого чтения qBit — никогда."""
+    def _finished_since(torrent: TorrentInfo, previous_sync: Optional[datetime], *, new: bool) -> bool:
+        """Докачан после прошлого опроса. До первого чтения qBit — никогда.
+
+        ``new``: дельта принесла хэш, которого не было в прошлом чтении. Он новый по
+        определению, и часы qBit, отстающие сколько угодно, этого не отменяют. При
+        полном чтении (resync) такого знания нет: там решает время, иначе вся раздача
+        ушла бы рассылкой.
+        """
         if previous_sync is None or torrent.completion_on is None:
             return False
-        return torrent.completion_on > previous_sync - _CLOCK_SKEW_MARGIN
+        return new or torrent.completion_on > previous_sync - _CLOCK_SKEW_MARGIN
 
     async def _completion_reached(self, torrent: TorrentInfo) -> None:
         if (
@@ -423,8 +433,8 @@ class NotificationService:
         if self._exclude_chats is not None:
             try:
                 skip = set(await self._exclude_chats(torrent.hash))
-                if self._pending_direct_chats is not None and DIRECT_TAG in torrent.tags:
-                    skip |= await self._pending_direct_chats()
+                if self._claim_direct_chats is not None and DIRECT_TAG in torrent.tags:
+                    skip |= await self._claim_direct_chats(torrent)
             except Exception as e:
                 logger.warning("notification_exclude_failed", error=describe_error(e))
 

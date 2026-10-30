@@ -1246,7 +1246,7 @@ async def _serve(settings, db: Database, logger) -> None:
             if qbittorrent is not None:
                 notification_service = NotificationService(
                     qbittorrent, send_notification, exclude_chats=live.owner_chats,
-                    pending_direct_chats=live.pending_direct_chats,
+                    claim_direct_chats=live.claim_direct_chats,
                 )
         else:
             logger.info("qBittorrent integration disabled")
