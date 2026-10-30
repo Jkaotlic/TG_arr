@@ -672,3 +672,282 @@ async def test_failed_setup_does_not_kill_the_loop(monkeypatch, loop_name):
     await getattr(main, loop_name)(*args)
 
     assert get_radarr.await_count == 2
+
+
+# ---------------------------------------------------------------- LOGIC-09
+T0 = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+HASH_A = "a" * 40
+HASH_B = "b" * 40
+
+
+class _Clock:
+    def __init__(self, now: datetime = T0) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
+
+
+def _maindata(rid: int = 1, torrents: dict | None = None, *, full: bool = False, removed: list | None = None) -> dict:
+    return {"rid": rid, "torrents": torrents or {}, "torrents_removed": removed or [], "full_update": full}
+
+
+def _done(name: str = "Film", finished: datetime | None = None, **extra) -> dict:
+    return {
+        "name": name, "progress": 1.0, "state": "uploading",
+        "completion_on": int(finished.timestamp()) if finished else -1, **extra,
+    }
+
+
+def _busy(name: str = "Film", **extra) -> dict:
+    return {"name": name, "progress": 0.4, "state": "downloading", **extra}
+
+
+def _qbit_service(clock: _Clock, *, subscribers=(111,), **kwargs):
+    from unittest.mock import AsyncMock
+
+    from bot.services.notification_service import NotificationService
+
+    qbit, sender = AsyncMock(), AsyncMock(return_value=True)
+    service = NotificationService(qbit, sender, clock=clock, **kwargs)
+    for user_id in subscribers:
+        service.subscribe_user(user_id)
+    return service, qbit, sender
+
+
+async def test_torrent_in_progress_at_restart_notifies_when_it_finishes():
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    qbit.get_maindata.return_value = _maindata(torrents={HASH_A: _busy()}, full=True)
+    await service._initial_sync()
+    sender.assert_not_awaited()
+
+    clock.advance(60)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: {"progress": 1.0, "state": "uploading"}})
+    await service._check_for_completions()
+    assert sender.await_count == 1
+
+    clock.advance(60)
+    qbit.get_maindata.return_value = _maindata(3, {HASH_A: {"upspeed": 5}})
+    await service._check_for_completions()
+    assert sender.await_count == 1  # раздача в каждой дельте не повторяет сообщение
+
+
+async def test_torrent_added_and_finished_between_polls_notifies_once():
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    qbit.get_maindata.return_value = _maindata(full=True)
+    await service._initial_sync()
+
+    clock.advance(300)  # простой: опрос раз в 5 минут
+    finished = clock.now - timedelta(seconds=30)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: _done(finished=finished)})
+    await service._check_for_completions()
+    assert sender.await_count == 1
+
+    clock.advance(60)
+    qbit.get_maindata.return_value = _maindata(3, {HASH_A: {"upspeed": 5}})
+    await service._check_for_completions()
+    clock.advance(60)
+    qbit.get_maindata.return_value = _maindata(4, {HASH_A: _done(finished=finished)}, full=True)
+    await service._check_for_completions()
+    assert sender.await_count == 1
+
+
+async def test_clock_skew_does_not_repeat_a_tracked_completion():
+    """Часы qBit впереди: completion_on позже прошлого опроса уже после уведомления."""
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    qbit.get_maindata.return_value = _maindata(torrents={HASH_A: _busy()}, full=True)
+    await service._initial_sync()
+
+    clock.advance(60)
+    ahead = clock.now + timedelta(seconds=90)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: _done(finished=ahead)})
+    await service._check_for_completions()
+    clock.advance(60)
+    qbit.get_maindata.return_value = _maindata(3, {HASH_A: _done(finished=ahead)})
+    await service._check_for_completions()
+
+    assert sender.await_count == 1
+
+
+async def test_old_or_unknown_completion_first_seen_midrun_stays_silent():
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    qbit.get_maindata.return_value = _maindata(full=True)
+    await service._initial_sync()
+
+    clock.advance(60)
+    qbit.get_maindata.return_value = _maindata(2, {
+        HASH_A: _done(finished=T0 - timedelta(days=30)),
+        HASH_B: _done(finished=None),
+    })
+    await service._check_for_completions()
+    sender.assert_not_awaited()
+
+
+async def test_no_flood_at_first_sync_even_for_a_torrent_finished_a_moment_ago():
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    torrents = {f"{n:040x}": _done(f"Film {n}", finished=clock.now - timedelta(seconds=n)) for n in range(50)}
+    qbit.get_maindata.return_value = _maindata(torrents=torrents, full=True)
+    await service._initial_sync()
+    clock.advance(60)
+    qbit.get_maindata.return_value = _maindata(2, full=True, torrents=torrents)
+    await service._check_for_completions()
+    sender.assert_not_awaited()
+
+
+async def test_no_flood_when_the_first_successful_sync_is_a_later_poll():
+    """qBit лежал при старте: первым успешным чтением становится обычный опрос."""
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    qbit.get_maindata.side_effect = ConnectionError("qbit down")
+    await service._initial_sync()
+
+    clock.advance(600)
+    qbit.get_maindata.side_effect = None
+    qbit.get_maindata.return_value = _maindata(torrents={
+        HASH_A: _done(finished=clock.now - timedelta(seconds=5)),
+        HASH_B: _busy(),
+    }, full=True)
+    await service._check_for_completions()
+    sender.assert_not_awaited()
+
+    clock.advance(60)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_B: {"progress": 1.0, "state": "uploading"}})
+    await service._check_for_completions()
+    assert sender.await_count == 1
+
+
+async def test_torrent_finished_during_a_qbit_outage_notifies_after_resync():
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    old = T0 - timedelta(days=3)
+    qbit.get_maindata.return_value = _maindata(torrents={HASH_A: _done(finished=old)}, full=True)
+    await service._initial_sync()
+
+    clock.advance(1800)
+    qbit.get_maindata.return_value = _maindata(1, {
+        HASH_A: _done(finished=old),
+        HASH_B: _done("Новый", finished=clock.now - timedelta(seconds=600)),
+    }, full=True)
+    await service._check_for_completions()
+
+    assert sender.await_count == 1
+    assert "Новый" in sender.await_args.args[1]
+
+
+async def test_first_seen_arr_download_is_left_to_library_watch():
+    from unittest.mock import MagicMock, patch
+
+    clock = _Clock()
+    with patch("bot.services.notification_service.get_settings") as settings:
+        settings.return_value = MagicMock(arr_torrent_category_set={"radarr"})
+        service, qbit, sender = _qbit_service(clock)
+    qbit.get_maindata.return_value = _maindata(full=True)
+    await service._initial_sync()
+
+    clock.advance(60)
+    qbit.get_maindata.return_value = _maindata(2, {
+        HASH_A: _done(finished=clock.now, category="radarr"),
+    })
+    await service._check_for_completions()
+    sender.assert_not_awaited()
+
+
+async def _live_service(db, clock):
+    from bot.services.live_status import LiveStatusService
+
+    async def editor(*_args) -> str:
+        return "ok"
+
+    return LiveStatusService(db, editor, clock=clock)
+
+
+async def test_grabber_gets_no_second_message_after_restart(db):
+    """Живое сообщение следит за торрентом: хозяин граба отдельного не получает."""
+    from bot.services import live_status
+
+    clock = _Clock()
+    live = await _live_service(db, clock)
+    await live_status.register_grab(
+        db, chat_id=111, message_id=5, kind="movie", title="Film", release="Film", arr="qbit",
+        arr_id=None, guid=None, now=clock.now,
+    )
+    await db.live_update("111:5", download_id=HASH_A.upper(), state=live_status.DOWNLOADING)
+    service, qbit, sender = _qbit_service(clock, subscribers=(111, 222), exclude_chats=live.owner_chats)
+    qbit.get_maindata.return_value = _maindata(torrents={HASH_A: _busy()}, full=True)
+    await service._initial_sync()
+
+    clock.advance(60)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: {"progress": 1.0, "state": "uploading"}})
+    await service._check_for_completions()
+
+    assert [call.args[0] for call in sender.await_args_list] == [222]
+
+
+async def test_grabber_gets_no_second_message_for_a_first_seen_linked_torrent(db):
+    from bot.services import live_status
+
+    clock = _Clock()
+    live = await _live_service(db, clock)
+    await live_status.register_grab(
+        db, chat_id=111, message_id=5, kind="movie", title="Film", release="Film", arr="qbit",
+        arr_id=None, guid=None, now=clock.now,
+    )
+    await db.live_update("111:5", download_id=HASH_A.upper(), state=live_status.DOWNLOADING)
+    service, qbit, sender = _qbit_service(clock, subscribers=(111, 222), exclude_chats=live.owner_chats)
+    qbit.get_maindata.return_value = _maindata(full=True)
+    await service._initial_sync()
+
+    clock.advance(300)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: _done(finished=clock.now - timedelta(seconds=10))})
+    await service._check_for_completions()
+
+    assert [call.args[0] for call in sender.await_args_list] == [222]
+
+
+async def test_grabber_gets_no_second_message_when_the_living_row_is_not_linked_yet(db):
+    """Мгновенный магнет: опрос qBit раньше, чем живое сообщение нашло свой торрент."""
+    from bot.clients.qbittorrent import DIRECT_TAG
+    from bot.services import live_status
+
+    clock = _Clock()
+    live = await _live_service(db, clock)
+    await live_status.register_grab(
+        db, chat_id=111, message_id=5, kind="movie", title="Film", release="Другое имя", arr="qbit",
+        arr_id=None, guid=None, now=clock.now,
+    )
+    service, qbit, sender = _qbit_service(
+        clock, subscribers=(111, 222), exclude_chats=live.owner_chats,
+        pending_direct_chats=live.pending_direct_chats,
+    )
+    qbit.get_maindata.return_value = _maindata(full=True)
+    await service._initial_sync()
+
+    clock.advance(20)
+    qbit.get_maindata.return_value = _maindata(2, {
+        HASH_A: _done(finished=clock.now - timedelta(seconds=5), tags=DIRECT_TAG),
+    })
+    await service._check_for_completions()
+
+    assert [call.args[0] for call in sender.await_args_list] == [222]
+
+
+async def test_notification_monitor_task_death_is_logged():
+    from unittest.mock import AsyncMock, patch
+
+    from structlog.testing import capture_logs
+
+    clock = _Clock()
+    service, _qbit, _sender = _qbit_service(clock)
+    with capture_logs() as logs, patch.object(service, "_monitor_loop", AsyncMock(side_effect=RuntimeError("boom"))):
+        await service.start()
+        await asyncio.wait([service._monitor_task])
+        await asyncio.sleep(0)
+    assert any(e["event"] == "background_task_died" for e in logs)

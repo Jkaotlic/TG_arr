@@ -2,17 +2,26 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import structlog
 
 from bot.clients.qbittorrent import DIRECT_TAG, STATE_MAP, QBittorrentClient
 from bot.config import get_settings
-from bot.logging_utils import describe_error
+from bot.logging_utils import describe_error, log_background_task_end
 from bot.models import TorrentInfo, TorrentState
 from bot.ui.formatters import Formatters
 
 logger = structlog.get_logger()
+
+#: Часы qBittorrent и бота могут расходиться: допуск к «завершён после прошлого
+#: опроса». Повтора он не даст: завершённые хэши помнит `_completed_hashes`.
+_CLOCK_SKEW_MARGIN = timedelta(seconds=120)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class NotificationService:
@@ -27,6 +36,8 @@ class NotificationService:
         qbittorrent: QBittorrentClient,
         send_notification: Callable[[int, str], Awaitable[bool] | Awaitable[None]],
         exclude_chats: Optional[Callable[[str], Awaitable[set[int]]]] = None,
+        pending_direct_chats: Optional[Callable[[], Awaitable[set[int]]]] = None,
+        clock: Callable[[], datetime] = _utcnow,
     ):
         """
         Initialize notification service.
@@ -46,6 +57,11 @@ class NotificationService:
         #: follows this torrent (``LiveStatusService.owner_chats``) — they
         #: get no separate "download complete" message.
         self._exclude_chats = exclude_chats
+        #: LOGIC-09: чаты, чьё живое сообщение ещё ищет свой прямой торрент
+        #: (``LiveStatusService.pending_direct_chats``). Магнет, докачанный до
+        #: привязки, не должен дать хозяину второе сообщение.
+        self._pending_direct_chats = pending_direct_chats
+        self._clock = clock
         self.settings = get_settings()
 
         # Track known torrents and their completion state
@@ -61,6 +77,13 @@ class NotificationService:
         # after a full_update resync).
         self._torrents_raw: dict[str, dict[str, Any]] = {}
         self._rid = 0
+
+        # LOGIC-09: время прошлого успешного чтения qBit (None до первого) и хэши,
+        # уже виденные завершёнными. Новый завершённый торрент объявляется, только
+        # если докачан после прошлого опроса; при первом чтении не объявляется
+        # ничего, иначе каждый рестарт рассылал бы всю раздачу.
+        self._last_sync_at: Optional[datetime] = None
+        self._completed_hashes: set[str] = set()
 
         # Users subscribed to notifications
         self._subscribed_users: set[int] = set()
@@ -100,7 +123,8 @@ class NotificationService:
             return
 
         self._running = True
-        self._monitor_task = asyncio.create_task(self._monitor_loop())
+        self._monitor_task = asyncio.create_task(self._monitor_loop(), name="notification_monitor")
+        self._monitor_task.add_done_callback(log_background_task_end)
         logger.info(
             "Notification service started",
             check_interval=self.settings.notify_check_interval,
@@ -257,13 +281,17 @@ class NotificationService:
                 if is_complete:
                     # Nothing left to watch — not tracked at all (NOTIF-10).
                     completed += 1
+                    self._completed_hashes.add(torrent_hash)
                     continue
+                # LOGIC-09: качался во время рестарта или деплоя. Он докачается уже
+                # при нас и получит своё уведомление, как любой другой.
                 self._tracked_torrents[torrent.hash] = {
                     "completed": False,
-                    "notified": True,  # Don't notify for existing torrents
+                    "notified": False,
                     "name": torrent.name,
                     "added_on": torrent.added_on,
                 }
+            self._last_sync_at = self._clock()
 
             logger.info(
                 "Initial torrent sync completed",
@@ -292,9 +320,11 @@ class NotificationService:
         """
         maindata = await self.qbittorrent.get_maindata(self._rid)
         self._merge_maindata(maindata)
+        previous_sync, self._last_sync_at = self._last_sync_at, self._clock()
 
         for h in maindata.get("torrents_removed", []):
             self._tracked_torrents.pop(h, None)
+            self._completed_hashes.discard(h)
 
         if maindata.get("full_update"):
             changed_hashes = list(self._torrents_raw)
@@ -310,21 +340,24 @@ class NotificationService:
             tracked = self._tracked_torrents.get(torrent_hash)
 
             if tracked is None:
-                # New torrent observed mid-run. If it's already complete
-                # the moment we see it (e.g. instantly-finished magnet),
-                # treat it like _initial_sync would — suppress the
-                # notification rather than fire one for a download we
-                # never actually watched progress on — and do not track it
-                # at all: a seeding torrent shows up in every delta, and
-                # keeping it would grow the dict for nothing (audit
-                # 2026-09-23, NOTIF-10 "prune completed entries").
+                # New torrent observed mid-run. Already complete the moment we
+                # see it: it finished between two polls (LOGIC-09, the idle
+                # interval is 5 minutes) or is old news — `completion_on` tells
+                # which. Either way it is not tracked: a seeding torrent shows up
+                # in every delta, and keeping it would grow the dict for nothing
+                # (audit 2026-09-23, NOTIF-10 "prune completed entries").
                 if not is_complete:
+                    self._completed_hashes.discard(torrent_hash)
                     self._tracked_torrents[torrent_hash] = {
                         "completed": False,
                         "notified": False,
                         "name": torrent.name,
                         "added_on": torrent.added_on,
                     }
+                elif torrent_hash not in self._completed_hashes:
+                    self._completed_hashes.add(torrent_hash)
+                    if self._finished_since(torrent, previous_sync):
+                        await self._completion_reached(torrent)
                 continue
 
             if tracked["completed"]:
@@ -333,32 +366,43 @@ class NotificationService:
                 continue
 
             if is_complete:
+                self._completed_hashes.add(torrent_hash)
                 if not tracked["notified"]:
-                    if (
-                        (torrent.category or "") in self.settings.arr_torrent_category_set
-                        # Final review 2026-09-24: the bot pushed this one
-                        # straight into qBit — no *arr grabbed it, so
-                        # library_watch never will announce it.
-                        and DIRECT_TAG not in torrent.tags
-                    ):
-                        # NOTIF-07 (audit 2026-09-23): Radarr/Sonarr
-                        # import this torrent and library_watch announces
-                        # it once it is in the library — a qBit message
-                        # here would be the second one for one film.
-                        logger.debug(
-                            "qbit_completion_left_to_library_watch",
-                            torrent_name=torrent.name,
-                            category=torrent.category,
-                        )
-                    else:
-                        await self._notify_completion(torrent)
-                    self._completed_count += 1
+                    await self._completion_reached(torrent)
                 # Once complete+notified there is no further state to
                 # track — drop it now instead of keeping a growing dict
                 # of finished torrents alive for the process lifetime.
                 del self._tracked_torrents[torrent_hash]
             # else: still downloading/paused/stalled/errored — leave
             # tracked, re-check next cycle.
+
+    @staticmethod
+    def _finished_since(torrent: TorrentInfo, previous_sync: Optional[datetime]) -> bool:
+        """Докачан после прошлого опроса. До первого чтения qBit — никогда."""
+        if previous_sync is None or torrent.completion_on is None:
+            return False
+        return torrent.completion_on > previous_sync - _CLOCK_SKEW_MARGIN
+
+    async def _completion_reached(self, torrent: TorrentInfo) -> None:
+        if (
+            (torrent.category or "") in self.settings.arr_torrent_category_set
+            # Final review 2026-09-24: the bot pushed this one
+            # straight into qBit — no *arr grabbed it, so
+            # library_watch never will announce it.
+            and DIRECT_TAG not in torrent.tags
+        ):
+            # NOTIF-07 (audit 2026-09-23): Radarr/Sonarr
+            # import this torrent and library_watch announces
+            # it once it is in the library — a qBit message
+            # here would be the second one for one film.
+            logger.debug(
+                "qbit_completion_left_to_library_watch",
+                torrent_name=torrent.name,
+                category=torrent.category,
+            )
+        else:
+            await self._notify_completion(torrent)
+        self._completed_count += 1
 
     async def _notify_completion(self, torrent: TorrentInfo) -> None:
         """Send completion notification to all subscribed users.
@@ -378,7 +422,9 @@ class NotificationService:
         skip: set[int] = set()
         if self._exclude_chats is not None:
             try:
-                skip = await self._exclude_chats(torrent.hash)
+                skip = set(await self._exclude_chats(torrent.hash))
+                if self._pending_direct_chats is not None and DIRECT_TAG in torrent.tags:
+                    skip |= await self._pending_direct_chats()
             except Exception as e:
                 logger.warning("notification_exclude_failed", error=describe_error(e))
 

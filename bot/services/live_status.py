@@ -277,6 +277,14 @@ class LiveStatusService:
             and r["state"] != UNTRACKED
         }
 
+    async def pending_direct_chats(self) -> set[int]:
+        """Чаты, чьё сообщение о прямом добавлении ещё не нашло свой торрент.
+
+        LOGIC-09: торрент, докачанный до привязки, `owner_chats` ещё не узнаёт.
+        """
+        rows = await self._db.live_rows((WAITING,))
+        return {int(r["chat_id"]) for r in rows if r["kind"] != KIND_NOTICE and r["arr"] == "qbit"}
+
     # ------------------------------------------------------------ edits
     async def _apply(self, row: dict[str, Any], markup: Any = None, **fields: Any) -> EditOutcome:
         """Edit the message to the row's new state, then persist it.
