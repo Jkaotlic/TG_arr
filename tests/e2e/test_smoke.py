@@ -50,8 +50,12 @@ async def test_movie_flow_grabs_the_release_the_user_saw(bot_env):
     )
 
     card = await _open_release_card(bot_env)
-    await bot_env.press(ADMIN, card, "Скачать")
+    result = await bot_env.press(ADMIN, card, "Скачать")
 
+    final = result[-1]
+    assert final.name == "EditMessageText"
+    assert "Dune (2021)" in final.text
+    assert "Жду загрузку" in final.text
     posts = bot_env.radarr.calls("POST", "/api/v3/release")
     assert len(posts) == 1
     assert posts[0].json["guid"] == "wanted-guid"

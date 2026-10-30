@@ -25,7 +25,6 @@ class _PollingTelegram(FakeTelegram):
         super().__init__()
         self._on_first_poll = on_first_poll
         self.on_method(methods.GetUpdates, self._get_updates)
-        self.on_method(methods.DeleteWebhook, lambda bot, method: True)
 
     def _get_updates(self, bot: Any, method: Any) -> list[Update]:
         self._on_first_poll()
@@ -95,6 +94,7 @@ async def _run_main(monkeypatch, make_e2e_stack) -> dict[str, Any]:
 
     async def start_polling(self: Dispatcher, *bots: Any, **kwargs: Any) -> None:
         seen["polled_dispatcher"] = self
+        seen["polling_kwargs"] = kwargs
         await real_start_polling(self, *bots, **kwargs, handle_signals=False)
 
     monkeypatch.setattr(Dispatcher, "start_polling", start_polling)
@@ -137,4 +137,18 @@ async def test_main_uses_build_dispatcher(monkeypatch, make_e2e_stack):
     assert seen["polled_dispatcher"] is seen["dispatcher"]
     assert seen["notification_service"] is None
     assert seen["dispatcher"]["notification_service"] is None
+    assert seen["tg"].violations == []
+
+
+async def test_polling_asks_only_for_handled_updates_and_keeps_queued_ones(monkeypatch, make_e2e_stack):
+    """Очередь на время деплоя обрабатывается намеренно. У `start_polling` нет
+    `drop_pending_updates`: такой аргумент молча уходит в workflow data и обещает
+    то, чего не делает. deleteWebhook не вызывается, иначе FakeTelegram упал бы."""
+    seen = await _run_main(monkeypatch, make_e2e_stack)
+
+    assert "drop_pending_updates" not in seen["polling_kwargs"]
+    assert "drop_pending_updates" not in seen["dispatcher"].workflow_data
+    polls = [call for call in seen["tg"].calls if isinstance(call.method, methods.GetUpdates)]
+    assert polls
+    assert all(call.method.allowed_updates == ["message", "callback_query"] for call in polls)
     assert seen["tg"].violations == []

@@ -23,6 +23,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Awaitable, Callable, Iterable, Iterator, Optional
+from urllib.parse import urlsplit
 
 import pytest
 from aiogram import Bot, Dispatcher, methods
@@ -37,6 +38,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
     PhotoSize,
+    ReplyKeyboardMarkup,
     Update,
     User,
 )
@@ -51,6 +53,7 @@ MAX_TEXT_LENGTH = 4096
 MAX_CAPTION_LENGTH = 1024
 MAX_CALLBACK_DATA_BYTES = 64
 MAX_CALLBACK_ANSWER_LENGTH = 200
+MAX_INLINE_BUTTONS = 100
 
 NOT_MODIFIED = (
     "Bad Request: message is not modified: specified new message content and "
@@ -70,6 +73,8 @@ _BUTTON_ACTIONS = (
     "callback_game",
     "pay",
 )
+
+_BUTTON_URL_SCHEMES = frozenset({"http", "https", "tg"})
 
 _TAG_ATTRIBUTES: dict[str, frozenset[str]] = {
     "b": frozenset(),
@@ -165,9 +170,22 @@ def _check_tag(tag: str, raw_attributes: str) -> None:
 
 
 def validate_keyboard(markup: Any) -> None:
-    """Инлайн-клавиатура: `callback_data` до 64 байт, у кнопки ровно одно действие."""
+    """Клавиатура как её проверяет Bot API.
+
+    Инлайн: до 100 кнопок, `callback_data` до 64 байт, у кнопки ровно одно действие,
+    `url` со схемой http, https или tg. Обычная: непустые ряды с непустым текстом.
+    """
+    if isinstance(markup, ReplyKeyboardMarkup):
+        if not markup.keyboard or not all(markup.keyboard):
+            raise TelegramContractViolation(f"пустая клавиатура или ряд: {markup.keyboard!r}")
+        if not all(button.text for row in markup.keyboard for button in row):
+            raise TelegramContractViolation("кнопка обычной клавиатуры без текста")
+        return
     if not isinstance(markup, InlineKeyboardMarkup):
         return
+    total = sum(len(row) for row in markup.inline_keyboard)
+    if total > MAX_INLINE_BUTTONS:
+        raise TelegramContractViolation(f"{total} кнопок при лимите {MAX_INLINE_BUTTONS}")
     for row in markup.inline_keyboard:
         for button in row:
             actions = [name for name in _BUTTON_ACTIONS if getattr(button, name) is not None]
@@ -183,6 +201,10 @@ def validate_keyboard(markup: Any) -> None:
                     raise TelegramContractViolation(
                         f"кнопка {button.text!r}: callback_data {size} байт: {button.callback_data!r}"
                     )
+            if button.url is not None:
+                parts = urlsplit(button.url)
+                if parts.scheme not in _BUTTON_URL_SCHEMES or not parts.netloc:
+                    raise TelegramContractViolation(f"кнопка {button.text!r}: недопустимый url {button.url!r}")
 
 
 #: Какому апдейту принадлежит вызов Bot API. Контекст, а не срез журнала: при
@@ -325,10 +347,29 @@ class FakeTelegram(BaseSession):
             **fields,
         ).as_(bot)
 
+    def _check_reply_target(self, bot: Bot, method: Any) -> None:
+        """Ответ на несуществующее сообщение: 400, если не разрешено явно.
+
+        Обе формы запроса: `reply_parameters` и устаревшая `reply_to_message_id`.
+        """
+        parameters = method.reply_parameters
+        target = parameters.message_id if parameters else method.reply_to_message_id
+        if target is None:
+            return
+        allowed = parameters.allow_sending_without_reply if parameters else method.allow_sending_without_reply
+        if isinstance(allowed, Default):
+            allowed = bot.default[allowed.name]
+        chat_id = parameters.chat_id if parameters and parameters.chat_id is not None else method.chat_id
+        if not allowed and (chat_id, target) not in self._messages:
+            raise TelegramBadRequest(method=method, message="Bad Request: message to be replied not found")
+
     def _stored_for_edit(self, method: Any) -> _StoredMessage:
         stored = self._messages.get((method.chat_id, method.message_id))
         if stored is None:
             raise TelegramBadRequest(method=method, message="Bad Request: message to edit not found")
+        author = stored.message.from_user
+        if author is None or author.id != BOT_ID:
+            raise TelegramBadRequest(method=method, message="Bad Request: message can't be edited")
         return stored
 
     # --- методы --------------------------------------------------------------
@@ -338,11 +379,13 @@ class FakeTelegram(BaseSession):
         if not plain.strip():
             raise TelegramContractViolation("пустой текст после разбора")
         validate_keyboard(method.reply_markup)
+        self._check_reply_target(bot, method)
         return self._remember(bot, method.chat_id, self.new_message_id(), plain, method.text, method.reply_markup)
 
     def _send_photo(self, bot: Bot, method: methods.SendPhoto) -> Message:
         caption = self._plain_text(bot, method, method.caption, MAX_CAPTION_LENGTH)
         validate_keyboard(method.reply_markup)
+        self._check_reply_target(bot, method)
         message_id = self.new_message_id()
         markup = method.reply_markup if isinstance(method.reply_markup, InlineKeyboardMarkup) else None
         message = self._bot_message(
@@ -462,6 +505,8 @@ class BotEnv:
         self.db = db
         self.backends = backends
         self.handler_errors: list[BaseException] = []
+        #: Сценарий про реакцию бота на 404 ставит True, иначе разбор фикстуры упадёт.
+        self.allow_unmatched = False
         self._crash_expected = False
         self._update_id = 0
         dp.errors.outer_middleware(self._record_handler_error)
@@ -503,6 +548,23 @@ class BotEnv:
         if self.handler_errors and not self._crash_expected:
             details = "".join(traceback.format_exception(self.handler_errors[0]))
             pytest.fail(f"Хендлер упал ({len(self.handler_errors)}):\n{details}")
+
+    def check_unmatched(self) -> None:
+        """Уронить тест, если бот ходил на маршрут, которого нет: молчаливый 404 прячет
+        и опечатку в пути, и несозданный маршрут. Зовётся при разборе фикстуры."""
+        if self.allow_unmatched:
+            return
+        unmatched = [
+            f"{service}: {request.method} {request.path}"
+            for service, backend in self.backends.items()
+            for request in backend.unmatched
+        ]
+        if unmatched:
+            pytest.fail(
+                "Бот ходил на незаданные маршруты (ответ 404):\n"
+                + "\n".join(unmatched)
+                + "\nЗадайте маршрут или поставьте env.allow_unmatched = True"
+            )
 
     def _next_update_id(self) -> int:
         self._update_id += 1
@@ -547,7 +609,9 @@ class BotEnv:
 
         Сообщение в колбэке берётся таким, каким его сейчас помнит Telegram.
         `sent=None` годится для подделанного колбэка: сообщения как будто нет в
-        журнале. `inaccessible=True` эмулирует кнопку старше 48 часов.
+        журнале. Под уже удалённым сообщением колбэк несёт его старую копию, а правка
+        получит «message to edit not found». `inaccessible=True` эмулирует кнопку
+        старше 48 часов.
         """
         callback_data = _callback_data_of(data)
         message = self._callback_message(uid, sent, inaccessible)
@@ -570,6 +634,8 @@ class BotEnv:
         self, uid: int, sent: "TgCall | Message | None", inaccessible: bool
     ) -> "Message | InaccessibleMessage":
         original = sent.message if isinstance(sent, TgCall) else sent
+        if sent is not None and original is None:
+            pytest.fail(f"Вызов {sent.name} не вернул сообщение: нажимать нечего")
         chat_id = original.chat.id if original else uid
         message_id = original.message_id if original else self.tg.new_message_id()
         if inaccessible:
@@ -577,6 +643,8 @@ class BotEnv:
         known = self.tg.known_message(chat_id, message_id)
         if known is not None:
             return known.as_(self.bot)
+        if original is not None:
+            return original.as_(self.bot)
         message = Message(
             message_id=message_id,
             date=datetime.now(timezone.utc),
@@ -707,9 +775,11 @@ class FakeBackend:
         self._mode_status = status
 
     def recover(self) -> None:
-        """Снять `hang_all` и `fail_all`."""
+        """Снять `hang_all` и `fail_all`. Зависшие запросы получат обычный ответ."""
         self._mode_hang = False
         self._mode_status = None
+        self._release_hung.set()
+        self._release_hung = asyncio.Event()
 
     # --- проверки из теста ---------------------------------------------------
 
@@ -749,13 +819,13 @@ class FakeBackend:
             json=parsed,
             body=body,
             headers=dict(request.headers),
-            matched=route is not None,
+            # При fail_all и hang_all бэкенд отвечает не 404: маршрут тут ни при чём.
+            matched=route is not None or self._mode_hang or self._mode_status is not None,
         )
         self.requests.append(record)
 
         if self._mode_hang or (route is not None and route.hang):
             await self._release_hung.wait()
-            return web.Response(status=503)
         if self._mode_status is not None:
             return web.json_response({"message": "e2e: fixed status"}, status=self._mode_status)
         if route is None:

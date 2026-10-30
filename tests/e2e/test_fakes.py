@@ -7,7 +7,15 @@ import httpx
 import pytest
 from aiogram import F, methods
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    ForceReply,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    ReplyParameters,
+)
 
 from bot.middleware.auth import AuthMiddleware, LoggingMiddleware, RateLimitMiddleware, StaleMessageMiddleware
 from tests.e2e.conftest import reset_process_state
@@ -77,6 +85,44 @@ def test_invalid_html_is_rejected(markup):
 def test_bad_keyboards_are_rejected(button):
     with pytest.raises(TelegramContractViolation):
         validate_keyboard(InlineKeyboardMarkup(inline_keyboard=[[button]]))
+
+
+@pytest.mark.parametrize("url", ["example.com", "ftp://example.com", "https://", "javascript:alert(1)", "tg:"])
+def test_invalid_button_urls_are_rejected(url):
+    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="x", url=url)]])
+    with pytest.raises(TelegramContractViolation, match="url"):
+        validate_keyboard(markup)
+
+
+@pytest.mark.parametrize("url", ["https://example.com/a?b=1", "http://example.com", "tg://resolve?domain=example"])
+def test_valid_button_urls_are_accepted(url):
+    validate_keyboard(InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="x", url=url)]]))
+
+
+def test_keyboard_of_more_than_100_buttons_is_rejected():
+    row = [InlineKeyboardButton(text="x", callback_data="x")]
+    validate_keyboard(InlineKeyboardMarkup(inline_keyboard=[row] * 100))
+    with pytest.raises(TelegramContractViolation, match="101"):
+        validate_keyboard(InlineKeyboardMarkup(inline_keyboard=[row] * 101))
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [],
+        [[]],
+        [[KeyboardButton(text="")]],
+    ],
+)
+def test_bad_reply_keyboards_are_rejected(rows):
+    with pytest.raises(TelegramContractViolation):
+        validate_keyboard(ReplyKeyboardMarkup(keyboard=rows))
+
+
+def test_good_reply_keyboard_and_service_markups_are_accepted():
+    validate_keyboard(ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="ok")]]))
+    validate_keyboard(ForceReply())
+    validate_keyboard(ReplyKeyboardRemove())
 
 
 def test_longest_valid_callback_data_is_accepted():
@@ -187,6 +233,76 @@ async def test_edit_and_delete_of_a_missing_message_fail_like_telegram(bot_env):
         await bot_env.bot.delete_message(ADMIN, sent.message_id)
 
 
+async def test_bot_cannot_edit_a_users_message(bot_env):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="a", callback_data="a")]])
+    seen = []
+
+    async def edits_own_input(message):
+        for edit in (
+            message.edit_text("x"),
+            message.edit_reply_markup(reply_markup=keyboard),
+        ):
+            try:
+                await edit
+            except TelegramBadRequest as error:
+                seen.append(error.message)
+        await message.answer("ok")
+
+    bot_env.dp.message.register(edits_own_input, F.text == "edit me")
+    await bot_env.say(ADMIN, "edit me")
+
+    assert len(seen) == 2
+    assert all("can't be edited" in message for message in seen)
+
+
+async def test_reply_to_a_missing_message_fails_unless_allowed(bot_env):
+    missing = ReplyParameters(message_id=1)
+    with pytest.raises(TelegramBadRequest, match="to be replied not found"):
+        await _send(bot_env, "x", reply_parameters=missing)
+    with pytest.raises(TelegramBadRequest, match="to be replied not found"):
+        await bot_env.bot.send_photo(ADMIN, "https://example.com/p.jpg", reply_parameters=missing)
+
+    allowed = ReplyParameters(message_id=1, allow_sending_without_reply=True)
+    assert (await _send(bot_env, "x", reply_parameters=allowed)).text == "x"
+    known = await _send(bot_env, "старое")
+    assert (await _send(bot_env, "x", reply_parameters=ReplyParameters(message_id=known.message_id))).text == "x"
+
+
+async def test_tap_under_a_deleted_message_does_not_recreate_it(bot_env):
+    errors = []
+
+    async def probe(callback):
+        await callback.answer()
+        try:
+            await callback.message.edit_text("новый")
+        except TelegramBadRequest as error:
+            errors.append(error.message)
+
+    bot_env.dp.callback_query.register(probe, F.data == "probe")
+    sent = await _send(bot_env, "текст")
+    await bot_env.bot.delete_message(ADMIN, sent.message_id)
+
+    await bot_env.tap(ADMIN, sent, "probe")
+
+    assert len(errors) == 1 and "to edit not found" in errors[0]
+    assert bot_env.tg.known_message(ADMIN, sent.message_id) is None
+
+
+async def test_tap_without_a_message_gets_an_off_journal_one(bot_env):
+    seen = []
+
+    async def probe(callback):
+        await callback.message.edit_text("новый")
+        seen.append(callback.message.message_id)
+        await callback.answer()
+
+    bot_env.dp.callback_query.register(probe, F.data == "probe")
+
+    await bot_env.tap(ADMIN, None, "probe")
+
+    assert bot_env.tg.known_message(ADMIN, seen[0]).text == "новый"
+
+
 async def test_photo_has_a_caption_and_cannot_be_edited_as_text(bot_env):
     sent = await bot_env.bot.send_photo(ADMIN, "https://example.com/poster.jpg", caption="<b>подпись</b>")
     assert sent.caption == "подпись"
@@ -274,6 +390,54 @@ async def test_backend_modes_and_per_test_routes():
         await asyncio.wait_for(backend.stop(), timeout=5)
 
 
+async def test_recover_answers_hanging_requests():
+    backend = FakeBackend("radarr")
+    await backend.start()
+    try:
+        async with httpx.AsyncClient(base_url=backend.url) as client:
+            backend.hang_all()
+            pending = asyncio.create_task(client.get("/api/v3/qualityprofile", timeout=5))
+            while not backend.requests:
+                await asyncio.sleep(0.01)
+            assert not pending.done()
+
+            backend.recover()
+
+            response = await asyncio.wait_for(pending, timeout=2)
+            assert response.status_code == 200
+
+            # После recover режим можно включить снова.
+            backend.hang_all()
+            with pytest.raises(httpx.ReadTimeout):
+                await client.get("/api/v3/qualityprofile", timeout=0.1)
+    finally:
+        await asyncio.wait_for(backend.stop(), timeout=5)
+
+
+async def test_fixed_status_is_not_counted_as_unmatched():
+    backend = FakeBackend("radarr")
+    await backend.start()
+    try:
+        async with httpx.AsyncClient(base_url=backend.url) as client:
+            backend.fail_all(500)
+            await client.get("/api/v3/nope")
+    finally:
+        await backend.stop()
+
+    assert backend.unmatched == []
+
+
+async def test_unmatched_request_fails_teardown_check_unless_opted_out(bot_env):
+    async with httpx.AsyncClient(base_url=bot_env.radarr.url) as client:
+        await client.get("/api/v3/nope")
+
+    with pytest.raises(pytest.fail.Exception, match="radarr.*GET /api/v3/nope"):
+        bot_env.check_unmatched()
+
+    bot_env.allow_unmatched = True
+    bot_env.check_unmatched()
+
+
 # ---------------------------------------------------------------------- Изоляция
 
 
@@ -337,6 +501,24 @@ def test_reset_clears_state_and_keeps_constants():
     assert _chat_send_locks == {}
     assert _tokens.current(1) == ""
     assert presets and grab._SEASON_PRESETS == presets
+    # Служебные атрибуты модуля под именами `__x__` живы: иначе функции, созданные
+    # в его глобалах, падают на builtins.
+    assert registry.__name__ == "bot.clients.registry"
+    assert registry.__spec__ is not None
+    assert registry.__builtins__ is not None
+
+
+async def test_reset_restores_semaphore_capacity():
+    from bot.services import search_service
+
+    semaphore = search_service._DETECTION_SEMAPHORE
+    capacity = semaphore._value
+    await semaphore.acquire()
+    assert semaphore._value == capacity - 1
+
+    reset_process_state()
+
+    assert semaphore._value == capacity
 
 
 async def test_contended_module_lock_does_not_poison_the_next_loop():

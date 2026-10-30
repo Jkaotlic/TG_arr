@@ -1196,8 +1196,9 @@ async def main() -> None:
         logger.info("Starting polling...")
         await dp.start_polling(
             bot,
+            # Накопившиеся за простой апдейты обрабатываются намеренно: запрос,
+            # отправленный во время 40-секундного деплоя, не должен пропасть.
             allowed_updates=["message", "callback_query"],
-            drop_pending_updates=True,
         )
     except Exception as e:
         logger.error("Bot crashed", error=describe_error(e), exc_info=True)

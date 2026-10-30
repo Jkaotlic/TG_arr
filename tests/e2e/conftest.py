@@ -79,6 +79,31 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.e2e)
 
 
+#: Ёмкость семафоров модулей. Снимается при сборе тестов, пока ни один тест не успел
+#: занять семафор и оставить его занятым: у `asyncio.Semaphore` начального значения нет.
+_SEMAPHORE_CAPACITY: dict[asyncio.Semaphore, int] = {}
+
+
+def _bot_modules() -> list[Any]:
+    return [
+        module
+        for name, module in list(sys.modules.items())
+        if module is not None and (name == "bot" or name.startswith("bot."))
+    ]
+
+
+def _snapshot_semaphores() -> None:
+    import bot.main  # noqa: F401 -- подтягивает хендлеры и сервисы со всеми семафорами
+
+    for module in _bot_modules():
+        for value in list(vars(module).values()):
+            if isinstance(value, asyncio.Semaphore):
+                _SEMAPHORE_CAPACITY.setdefault(value, value._value)
+
+
+_snapshot_semaphores()
+
+
 def reset_process_state() -> None:
     """Обнулить всё процессное состояние бота.
 
@@ -95,12 +120,10 @@ def reset_process_state() -> None:
     search_service._reset_module_state()
 
     for name in list(vars(registry)):
-        if re.fullmatch(r"_[a-z_]+", name) and not name.endswith("_lock"):
+        if re.fullmatch(r"_[a-z][a-z0-9_]*", name) and not name.endswith("_lock"):
             setattr(registry, name, None)
 
-    for module_name, module in list(sys.modules.items()):
-        if module is None or not (module_name == "bot" or module_name.startswith("bot.")):
-            continue
+    for module in _bot_modules():
         for name, value in list(vars(module).items()):
             if isinstance(value, (asyncio.Lock, asyncio.Semaphore)):
                 _unbind_primitive(value)
@@ -122,6 +145,8 @@ def _unbind_primitive(primitive: Any) -> None:
     primitive._waiters = None
     if isinstance(primitive, asyncio.Lock):
         primitive._locked = False
+    else:
+        primitive._value = _SEMAPHORE_CAPACITY.setdefault(primitive, primitive._value)
 
 
 @pytest.fixture
@@ -261,6 +286,7 @@ async def make_bot_env(
         backends: tuple[str, ...] = (),
         env: dict[str, str] | None = None,
         notification_service: Any = None,
+        allow_unmatched: bool = False,
     ) -> BotEnv:
         stack = await make_e2e_stack(backends, env)
         db = Database(str(stack.db_path))
@@ -274,6 +300,7 @@ async def make_bot_env(
         tg = FakeTelegram()
         bot = Bot(BOT_TOKEN, session=tg, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         bot_env_instance = BotEnv(dispatcher, bot, tg, db, stack.backends)
+        bot_env_instance.allow_unmatched = allow_unmatched
         created.append(bot_env_instance)
         return bot_env_instance
 
@@ -282,7 +309,9 @@ async def make_bot_env(
     for instance in created:
         await instance.db.close()
         await instance.bot.session.close()
+    for instance in created:
         instance.check_contract()
+        instance.check_unmatched()
 
 
 @pytest.fixture
