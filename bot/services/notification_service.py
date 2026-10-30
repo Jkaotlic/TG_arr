@@ -352,6 +352,14 @@ class NotificationService:
                 # in every delta, and keeping it would grow the dict for nothing
                 # (audit 2026-09-23, NOTIF-10 "prune completed entries").
                 if not is_complete:
+                    if torrent.state == TorrentState.CHECKING and torrent_hash in self._completed_hashes:
+                        # Перепроверка уже объявленной раздачи: прогресс на время
+                        # проверки падает, но это не новая загрузка. Хэш остаётся
+                        # в `_completed_hashes`, иначе 50 раздач в checkingUP
+                        # объявились бы второй раз. Если проверка найдёт
+                        # недостающее, состояние сменится на downloading, и тогда
+                        # раздача отслеживается заново, как положено.
+                        continue
                     self._completed_hashes.discard(torrent_hash)
                     self._tracked_torrents[torrent_hash] = {
                         "completed": False,

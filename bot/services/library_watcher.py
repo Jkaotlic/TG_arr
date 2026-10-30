@@ -209,6 +209,9 @@ class LibraryWatcher:
         #: Отмена посреди рассылки не должна терять первые и повторять вторую.
         self._ready: list[tuple[str, list[dict[str, Any]]]] = []
         self._in_flight: Optional["asyncio.Task[None]"] = None
+        #: Идёт остановка: на неё отведено несколько секунд, а поиск в Emby за
+        #: кнопкой «Смотреть» может зависнуть и съесть их все. Пак важнее кнопки.
+        self._flushing = False
 
     # --------------------------------------------------------------- *arr
     async def _fetch_imports(
@@ -396,6 +399,7 @@ class LibraryWatcher:
 
     async def flush_held(self) -> None:
         """Объявить всё удержанное: штатная остановка, следующего опроса не будет."""
+        self._flushing = True
         self._ready.extend((key[0], held.records) for key, held in self._held.items())
         self._held.clear()
         try:
@@ -436,7 +440,9 @@ class LibraryWatcher:
             exclude = await self._live.claim_import(label, str(download_id), records)
             if exclude:
                 extra["exclude"] = frozenset(exclude)
-        provider = provider_id(records[0])
+        # На остановке провайдера не передаём: без него доставка не ходит в Emby
+        # ни за ссылкой, ни за повторной попыткой после рестарта.
+        provider = None if self._flushing else provider_id(records[0])
         if provider:
             extra["provider"] = provider
         await self._announce(text, "library", **extra)

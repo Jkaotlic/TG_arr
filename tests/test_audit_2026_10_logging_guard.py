@@ -229,20 +229,20 @@ async def test_prowlarr_proxied_download_on_private_ip_still_passes(monkeypatch)
     from bot.config import get_settings
     from bot.services.url_guard import _validate_download_url
 
-    monkeypatch.setenv("PROWLARR_URL", "http://192.168.0.95:9696")
+    monkeypatch.setenv("PROWLARR_URL", "http://10.20.30.40:9696")
     monkeypatch.setenv("QBITTORRENT_URL", "http://10.0.0.7:8080")
     monkeypatch.setenv("QBITTORRENT_PASSWORD", "pw")
     monkeypatch.setenv("RADARR_URL", f"http://{_cgnat(64, 0, 9)}:7878")  # CGNAT/Tailscale
     get_settings.cache_clear()
     try:
         assert await _validate_download_url(
-            "http://192.168.0.95:9696/3/download?apikey=k&link=abc&file=Some.Release"
+            "http://10.20.30.40:9696/3/download?apikey=k&link=abc&file=Some.Release"
         ) is True
         assert await _validate_download_url("http://10.0.0.7:8080/x.torrent") is True
         # Доверенный сервис в CGNAT-диапазоне тоже проходит: `is_global` — только для чужих хостов.
         assert await _validate_download_url(f"http://{_cgnat(64, 0, 9)}:7878/dl") is True
         # Тот же адрес, чужой порт — по-прежнему нет.
-        assert await _validate_download_url("http://192.168.0.95:22/x") is False
+        assert await _validate_download_url("http://10.20.30.40:22/x") is False
     finally:
         get_settings.cache_clear()
 

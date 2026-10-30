@@ -399,7 +399,9 @@ async def _warm_up_clients(logger) -> dict:
                 ok, version, ms = await asyncio.wait_for(client.check_connection(), timeout=15.0)
                 return name, (ok, ms, version)
             except Exception as e:
-                return name, ("error", str(e))
+                # У `TimeoutError` от `wait_for` текста нет: карточка админа читалась «Radarr: ❌ »
+                # без причины.
+                return name, ("error", describe_error(e))
 
         results = await asyncio.gather(
             _check("radarr", get_radarr),
