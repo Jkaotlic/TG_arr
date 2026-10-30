@@ -16,9 +16,11 @@ from aiogram.types import Message
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import strip_command
+from bot.clients.base import APIError
 from bot.models import ActionLog, ActionType, ContentType, SearchSession, User
 from bot.services.add_service import resolve_profile_with_source
 from bot.services.search_service import (
+    CatalogLookupError,
     SearchService,
     describe_search_failure,
     describe_unreachable,
@@ -222,6 +224,35 @@ async def _lookup_metadata_candidates(search_service, term: str, content_type: C
     return []
 
 
+class ArrAddError(ValueError):
+    """Тайтл найден, но Radarr/Sonarr не смог его добавить (5xx, таймаут).
+
+    Наследует `ValueError`, чтобы вызывающий показал причину как есть, а не
+    «Ничего не найдено»: тайтл только что нашёлся, и предложение искать свободно
+    по нему было бы ложью.
+    """
+
+
+async def _profiles_and_folders(client, service: str):
+    """Профили качества и корневые папки; сбой называет `service`.
+
+    Без обёртки `ServiceConnectionError` отсюда доходил до обработчика как
+    «Индексеры не ответили вовремя» и обвинял не тот сервис.
+    """
+    try:
+        return await client.get_quality_profiles(), await client.get_root_folders()
+    except APIError as e:
+        raise CatalogLookupError(service, e) from e
+
+
+def _add_failure(arr_name: str, candidate, action) -> ArrAddError:
+    reason = (getattr(action, "error_message", None) or "").strip()
+    text = f"{arr_name} не смог добавить «{candidate.title}»"
+    if reason:
+        text += f": {reason}"
+    return ArrAddError(text)
+
+
 async def _resolve_arr_entry(
     add_service,
     content_type: ContentType,
@@ -246,8 +277,10 @@ async def _resolve_arr_entry(
     round-trip.
 
     Returns `(title_info, arr_id, created)`; `(None, None, False)` when
-    there is genuinely nothing to resolve (no candidate) or the add call
-    itself failed against a *reachable, configured* Radarr/Sonarr. Raises
+    there is genuinely nothing to resolve (no candidate). Провал самого
+    добавления (5xx, таймаут) бросает `ArrAddError` с причиной от сервиса, а
+    сбой запроса профилей и папок — `CatalogLookupError` с именем сервиса.
+    Raises
     `ValueError` when Radarr/Sonarr has no quality profiles or no root
     folders configured at all — that is a setup problem, not "this title
     doesn't exist", and the caller renders it as a distinct message instead
@@ -269,8 +302,7 @@ async def _resolve_arr_entry(
         if candidate.radarr_id:
             return candidate, candidate.radarr_id, False
         client = add_service.radarr
-        profiles = await client.get_quality_profiles()
-        folders = await client.get_root_folders()
+        profiles, folders = await _profiles_and_folders(client, "radarr")
         if not profiles or not folders:
             logger.warning("radarr_add_blocked_no_profiles_or_folders")
             raise ValueError("В Radarr не настроены профили качества или папки — обратитесь к администратору")
@@ -280,7 +312,7 @@ async def _resolve_arr_entry(
             get_settings().radarr_default_profile_id,
         )
         folder_path = add_service.resolve_root_folder(folders, db_user.preferences.radarr_root_folder_id)
-        added, _action = await add_service.add_movie(
+        added, action = await add_service.add_movie(
             candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
             search_for_movie=False,
             # Added UNMONITORED: this add exists only to obtain a Radarr id so
@@ -292,6 +324,8 @@ async def _resolve_arr_entry(
             monitored=False,
         )
         if added is None or not added.radarr_id:
+            if action is not None and action.success is False:
+                raise _add_failure("Radarr", candidate, action)
             return None, None, False
         return added, added.radarr_id, True
 
@@ -299,8 +333,7 @@ async def _resolve_arr_entry(
     if candidate.sonarr_id:
         return candidate, candidate.sonarr_id, False
     client = add_service.sonarr
-    profiles = await client.get_quality_profiles()
-    folders = await client.get_root_folders()
+    profiles, folders = await _profiles_and_folders(client, "sonarr")
     if not profiles or not folders:
         logger.warning("sonarr_add_blocked_no_profiles_or_folders")
         raise ValueError("В Sonarr не настроены профили качества или папки — обратитесь к администратору")
@@ -309,7 +342,7 @@ async def _resolve_arr_entry(
         get_settings().sonarr_default_profile_id,
     )
     folder_path = add_service.resolve_root_folder(folders, db_user.preferences.sonarr_root_folder_id)
-    added, _action = await add_service.add_series(
+    added, action = await add_service.add_series(
         candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
         content_type=content_type, search_for_missing=False,
         # Same reasoning as the movie branch, and worse if ignored: the client
@@ -318,6 +351,8 @@ async def _resolve_arr_entry(
         monitored=False, monitor="none",
     )
     if added is None or not added.sonarr_id:
+        if action is not None and action.success is False:
+            raise _add_failure("Sonarr", candidate, action)
         return None, None, False
     return added, added.sonarr_id, True
 
@@ -590,7 +625,10 @@ async def process_search(
             # "no_metadata" message below. This is a setup problem, distinct
             # from a genuine no-match, so it gets its own message.
             await status_msg.edit_text(Formatters.format_error(str(ve)))
-            log.warning("search_branch", branch="add_config_error", error=str(ve))
+            log.warning(
+                "search_branch", branch="add_failed" if isinstance(ve, ArrAddError) else "add_config_error",
+                error=str(ve),
+            )
             return
         created = created or title_created
         if title is None or arr_id is None:

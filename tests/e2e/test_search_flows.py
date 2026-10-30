@@ -416,6 +416,72 @@ async def test_radarr_down_is_reported_honestly(bot_env):
     assert "Ничего не найдено" not in joined
 
 
+async def test_failed_add_after_a_successful_lookup_says_so(bot_env):
+    """Тайтл найден, Radarr отказал в добавлении: «Ничего не найдено» тут ложь."""
+    stock_radarr_movie(bot_env.radarr)
+    bot_env.radarr.route("POST", "/api/v3/movie", {"message": "boom"}, status=500)
+    bot_env.radarr.route("GET", "/api/v3/movie", [])
+
+    calls = await bot_env.say(ADMIN, "/movie Дюна")
+
+    joined = "\n".join(texts(calls))
+    assert "Radarr не смог добавить" in joined
+    assert "Dune" in joined
+    assert "Ничего не найдено" not in joined
+    assert bot_env.radarr.calls("POST", "/api/v3/movie")
+
+
+async def test_failed_add_of_a_series_names_sonarr(bot_env):
+    stock_sonarr(bot_env, {"Alpha": [show("Alpha", 11)]})
+    bot_env.sonarr.route("POST", "/api/v3/series", {"message": "boom"}, status=500)
+
+    calls = await bot_env.say(ADMIN, "/series Alpha")
+
+    joined = "\n".join(texts(calls))
+    assert "Sonarr не смог добавить" in joined
+    assert "Ничего не найдено" not in joined
+
+
+@pytest.mark.parametrize("service", ["quality", "folders"])
+async def test_profile_or_folder_failure_after_lookup_names_radarr_not_indexers(bot_env, service):
+    stock_radarr_movie(bot_env.radarr)
+    path = "/api/v3/qualityprofile" if service == "quality" else "/api/v3/rootfolder"
+    bot_env.radarr.route("GET", path, {"message": "boom"}, status=500)
+
+    calls = await bot_env.say(ADMIN, "/movie Дюна")
+
+    joined = "\n".join(texts(calls))
+    assert "Radarr" in joined
+    assert "Индексеры" not in joined
+    assert "Ничего не найдено" not in joined
+
+
+async def test_hung_profiles_after_lookup_name_radarr_not_indexers(make_bot_env, monkeypatch):
+    """Таймаут (ServiceConnectionError) читался «Индексеры не ответили вовремя»."""
+    env = await make_bot_env(env={"HTTP_TIMEOUT": "0.2"})
+    monkeypatch.setattr("bot.clients.base.SLOW_ARR_TIMEOUT", 0.2)
+    stock_radarr_movie(env.radarr)
+    env.radarr.route("GET", "/api/v3/qualityprofile", hang=True)
+
+    calls = await env.say(ADMIN, "/movie Дюна")
+
+    joined = "\n".join(texts(calls))
+    assert "Radarr не отвечает" in joined
+    assert "Индексеры" not in joined
+    env.radarr.recover()
+
+
+async def test_profile_failure_for_a_series_names_sonarr_not_indexers(bot_env):
+    stock_sonarr(bot_env, {"Alpha": [show("Alpha", 11)]})
+    bot_env.sonarr.route("GET", "/api/v3/qualityprofile", {"message": "boom"}, status=500)
+
+    calls = await bot_env.say(ADMIN, "/series Alpha")
+
+    joined = "\n".join(texts(calls))
+    assert "Sonarr" in joined
+    assert "Индексеры" not in joined
+
+
 async def test_hung_radarr_is_reported_honestly_and_in_bounded_time(make_bot_env, monkeypatch):
     env = await make_bot_env(env={"HTTP_TIMEOUT": "0.2"})
     monkeypatch.setattr("bot.clients.base.SLOW_ARR_TIMEOUT", 0.2)
