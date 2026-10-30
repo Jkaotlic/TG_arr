@@ -29,6 +29,7 @@ episode burst reads in the order it actually happened.
 
 import html
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
@@ -128,6 +129,22 @@ _HISTORY_PAGE_SIZE = 50
 #: forgotten while it is still being returned by the history endpoint.
 _SEEN_IMPORTS_CAP = 500
 
+#: LOGIC-21: только Sonarr импортирует один downloadId по частям (пак сезона).
+#: Фильм Radarr одним файлом, и ждать ради него минуту незачем.
+_HELD_SERVICES = frozenset({"sonarr"})
+
+#: Потолок удержания: столько опросов после первого файла. Без него пак, который
+#: растёт на каждом опросе, не был бы объявлен никогда.
+_HOLD_MAX_POLLS = 3
+
+
+@dataclass
+class _HeldImport:
+    """Файлы одного downloadId, ждущие конца импорта."""
+
+    first_poll: int
+    records: list[dict[str, Any]] = field(default_factory=list)
+
 
 class LibraryWatcher:
     """Polls Radarr/Sonarr's import history and slskd's transfers, announcing outcomes."""
@@ -180,6 +197,12 @@ class LibraryWatcher:
         #: M1 (improvements round 2): ``MusicRetryService.offers`` — retry
         #: buttons for a music summary, passed on as ``retry=``.
         self._music_retry = music_retry
+        #: LOGIC-21: (service, downloadId) -> файлы, ждущие конца импорта. Только в
+        #: памяти: идентификаторы запомнены и отметка уже впереди, так что после
+        #: падения эти файлы не объявляются (и не повторяются). При штатной
+        #: остановке их объявляет `flush_held`.
+        self._held: dict[tuple[str, str], _HeldImport] = {}
+        self._poll_number = 0
 
     # --------------------------------------------------------------- *arr
     async def _fetch_imports(
@@ -192,6 +215,8 @@ class LibraryWatcher:
         happened), plus — for every service whose history call *succeeded* —
         the newest record date it returned (None when its history was empty).
         Never raises — an outage on one service must not stop the other.
+        Remembers nothing (BUG-19): that is `_accept_imports`' job, once the
+        watermark is written.
         """
         landed: list[tuple[str, dict[str, Any]]] = []
         answered: dict[str, Optional[datetime]] = {}
@@ -225,10 +250,8 @@ class LibraryWatcher:
                 record_id = record.get("id")
                 if record_id is None:
                     continue
-                key = (label, record_id)
-                if key in self._seen_imports:
+                if (label, record_id) in self._seen_imports:
                     continue
-                self._remember(key)
                 landed.append((label, record))
             answered[label] = newest
 
@@ -242,9 +265,19 @@ class LibraryWatcher:
 
     async def poll(self) -> None:
         """One full cycle: announce newly-landed *arr imports, then slskd
-        transfers. Never raises — a backend outage must not kill the loop."""
-        await self._poll_imports()
-        await self._poll_transfers()
+        transfers. Never raises — a backend outage must not kill the loop.
+
+        BUG-19: то же про ошибки БД. Шаги независимы, и сбой первого не отменяет
+        второй. Что не записано, перечитается на следующем опросе.
+        """
+        for step, name in ((self._poll_imports, "imports"), (self._poll_transfers, "transfers")):
+            try:
+                await step()
+            except Exception as e:
+                logger.warning(
+                    "library_watch_step_failed", step=name,
+                    error=describe_error(e), error_type=type(e).__name__,
+                )
 
     async def _poll_imports(self) -> None:
         """Announce new *arr imports, one message per download.
@@ -260,43 +293,111 @@ class LibraryWatcher:
           is a silent seed.
         - NOTIF-07: records of one poll are grouped by `downloadId` (fallback
           `sourceTitle`), so a season pack is one message, not ten.
+
+        Audit 2026-10-30:
+        - LOGIC-21: пак, импортируемый дольше одного опроса, остаётся одним
+          сообщением (`_collect_groups`).
+        - LOGIC-08: порядок намеренный: отметка, потом отправка. Падение между ними
+          стоит одного сообщения, а не повтора всей пачки после рестарта; от сбоев
+          Telegram защищают повторы в `send_telegram`.
         """
         landed, answered = await self._fetch_imports()
-        to_announce: list[tuple[str, dict[str, Any]]] = []
+        accepted: list[tuple[str, dict[str, Any]]] = []
         for label, newest in answered.items():
-            watermark = await self._import_watermark(label)
             records = [record for service, record in landed if service == label]
-            if label not in self._primed_services:
-                self._primed_services.add(label)
-                if watermark is None:
-                    records = []  # silent seed
-                else:
-                    records = [r for r in records if (_record_date(r) or watermark) > watermark]
-            to_announce.extend((label, r) for r in records)
-            if newest is not None and (watermark is None or newest > watermark):
-                await self._set_import_watermark(label, newest)
+            try:
+                fresh = await self._accept_imports(label, records, newest)
+            except Exception as e:
+                # BUG-19: ничего не запомнено, значит следующий опрос прочитает их снова.
+                logger.warning(
+                    "library_watch_state_failed", service=label,
+                    error=describe_error(e), error_type=type(e).__name__,
+                )
+                continue
+            accepted.extend((label, record) for record in fresh)
 
-        to_announce.sort(key=lambda pair: pair[1].get("date") or "")
-        groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for label, record in to_announce:
-            key = str(record.get("downloadId") or record.get("sourceTitle") or record.get("id"))
-            groups.setdefault((label, key), []).append(record)
-        for (label, _key), records in groups.items():
-            title = html.escape(str(records[0].get("sourceTitle") or "Unknown"))
-            if len(records) > 1:
-                text = f"✅ <b>{title}</b> — в библиотеке ({_episodes(len(records))})."
+        for label, records in self._collect_groups(accepted, answered):
+            await self._announce_group(label, records)
+
+    async def _accept_imports(
+        self, label: str, records: list[dict[str, Any]], newest: Optional[datetime],
+    ) -> list[dict[str, Any]]:
+        """Записать состояние и вернуть записи, которые стоит объявить.
+
+        BUG-19: идентификаторы запоминаются последними. Раньше они запоминались при
+        чтении, и ошибка БД между чтением и отправкой теряла импорт навсегда.
+        """
+        watermark = await self._import_watermark(label)
+        fresh = records
+        if label not in self._primed_services:
+            if watermark is None:
+                fresh = []  # silent seed
             else:
-                text = f"✅ <b>{title}</b> — в библиотеке."
-            extra: dict[str, Any] = {}
-            download_id = records[0].get("downloadId")
-            if self._live is not None and download_id:
-                exclude = await self._live.claim_import(label, str(download_id), records)
-                if exclude:
-                    extra["exclude"] = frozenset(exclude)
-            provider = provider_id(records[0])
-            if provider:
-                extra["provider"] = provider
-            await self._announce(text, "library", **extra)
+                fresh = [r for r in records if (_record_date(r) or watermark) > watermark]
+        if newest is not None and (watermark is None or newest > watermark):
+            await self._set_import_watermark(label, newest)
+        self._primed_services.add(label)
+        for record in records:
+            self._remember((label, record["id"]))
+        return fresh
+
+    def _collect_groups(
+        self,
+        accepted: list[tuple[str, dict[str, Any]]],
+        answered: dict[str, Optional[datetime]],
+    ) -> list[tuple[str, list[dict[str, Any]]]]:
+        """Группы, готовые к объявлению на этом опросе (LOGIC-21).
+
+        Группа Sonarr с downloadId ждёт опроса без новых файлов, но не дольше
+        `_HOLD_MAX_POLLS`. Сервис, который не ответил, о тишине ничего не говорит.
+        Остальное группируется в пределах опроса и объявляется сразу.
+        """
+        self._poll_number += 1
+        accepted = sorted(accepted, key=lambda pair: pair[1].get("date") or "")
+        ready: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        grew: set[tuple[str, str]] = set()
+        for label, record in accepted:
+            download_id = record.get("downloadId")
+            if label in _HELD_SERVICES and download_id:
+                key = (label, str(download_id))
+                held = self._held.setdefault(key, _HeldImport(first_poll=self._poll_number))
+                held.records.append(record)
+                grew.add(key)
+            else:
+                key = (label, str(download_id or record.get("sourceTitle") or record.get("id")))
+                ready.setdefault(key, []).append(record)
+        for key, held in list(self._held.items()):
+            quiet = key not in grew and key[0] in answered
+            if quiet or self._poll_number - held.first_poll >= _HOLD_MAX_POLLS:
+                ready[key] = held.records
+                del self._held[key]
+        groups = [(key[0], records) for key, records in ready.items()]
+        groups.sort(key=lambda group: group[1][0].get("date") or "")
+        return groups
+
+    async def flush_held(self) -> None:
+        """Объявить всё удержанное: штатная остановка, следующего опроса не будет."""
+        groups = [(key[0], held.records) for key, held in self._held.items()]
+        self._held.clear()
+        for label, records in groups:
+            await self._announce_group(label, records)
+
+    async def _announce_group(self, label: str, records: list[dict[str, Any]]) -> None:
+        title = html.escape(str(records[0].get("sourceTitle") or "Unknown"))
+        if len(records) > 1:
+            text = f"✅ <b>{title}</b> — в библиотеке ({_episodes(len(records))})."
+        else:
+            text = f"✅ <b>{title}</b> — в библиотеке."
+        extra: dict[str, Any] = {}
+        download_id = records[0].get("downloadId")
+        if self._live is not None and download_id:
+            exclude = await self._live.claim_import(label, str(download_id), records)
+            if exclude:
+                extra["exclude"] = frozenset(exclude)
+        provider = provider_id(records[0])
+        if provider:
+            extra["provider"] = provider
+        await self._announce(text, "library", **extra)
 
     async def _import_watermark(self, label: str) -> Optional[datetime]:
         if self._db is None:
@@ -379,15 +480,24 @@ class LibraryWatcher:
             # Review round 1: the very first run seeds whatever slskd already
             # holds (e.g. remote queues that never move) as announced —
             # otherwise the stall rule would report them an hour later.
-            await db.music_mark_notified(sorted({c[1] for c in changes}), poll_started)
+            # Все неотмеченные, а не только изменения этого опроса: если отметка
+            # упала в прошлый раз, изменений уже нет, а засеять их всё равно надо.
+            pending = await db.music_pending_batches()
+            await db.music_mark_notified(sorted({b["batch_key"] for b in pending}), poll_started)
 
         await self._announce_ready_batches(poll_started)
         await db.kv_set(_SLSKD_WATERMARK_KEY, poll_started.isoformat())
 
     async def _announce_ready_batches(self, now: datetime) -> None:
-        """Send one message for every batch that settled (or stalled)."""
+        """Send one message for every batch that settled (or stalled).
+
+        LOGIC-20: батч, объявленный с незавершёнными треками, получает ещё одну,
+        итоговую сводку, когда очередь дойдёт до нуля и успокоится. Засеянные батчи
+        молчат: у них нет `partial_announced`.
+        """
         assert self._db is not None
         ready: list[str] = []
+        partial: list[str] = []
         summaries: list[music_notify.BatchSummary] = []
         keyed: list[tuple[str, music_notify.BatchSummary]] = []
         for batch in await self._db.music_pending_batches():
@@ -398,13 +508,24 @@ class LibraryWatcher:
             if not (settled or stalled):
                 continue
             ready.append(batch["batch_key"])
+            if summary.active:
+                partial.append(batch["batch_key"])
+            if not summary.all_cancelled:
+                summaries.append(summary)
+                keyed.append((batch["batch_key"], summary))
+        for batch in await self._db.music_partial_batches():
+            summary = music_notify.summarize(batch["title"], batch["tracks"])
+            quiet = (now - batch["last_change_at"]).total_seconds()
+            if summary.active or quiet < self._music_settle_seconds:
+                continue
+            ready.append(batch["batch_key"])
             if not summary.all_cancelled:
                 summaries.append(summary)
                 keyed.append((batch["batch_key"], summary))
 
         # Marked before sending: a Telegram blip costs one summary, never a
         # repeat loop.
-        await self._db.music_mark_notified(ready, now)
+        await self._db.music_mark_notified(ready, now, partial=partial)
         text = music_notify.format_message(summaries)
         if text:
             extra: dict[str, Any] = {}

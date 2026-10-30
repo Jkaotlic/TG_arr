@@ -951,3 +951,486 @@ async def test_notification_monitor_task_death_is_logged():
         await asyncio.wait([service._monitor_task])
         await asyncio.sleep(0)
     assert any(e["event"] == "background_task_died" for e in logs)
+
+
+# ---------------------------------------------------------------- BUG-19
+class _Arr:
+    """*arr с настоящим различием между первым чтением и чтением по отметке."""
+
+    def __init__(self) -> None:
+        self.records: list[dict] = []
+        self.fail: Exception | None = None
+
+    async def get_history(self, **_kwargs) -> list[dict]:
+        if self.fail:
+            raise self.fail
+        return list(self.records)
+
+    async def get_history_since(self, since: datetime, **_kwargs) -> list[dict]:
+        if self.fail:
+            raise self.fail
+        floor = since.replace(microsecond=0)
+        return [r for r in self.records if datetime.fromisoformat(r["date"].replace("Z", "+00:00")) >= floor]
+
+
+def _import_record(rid: int, title: str, when: datetime, download_id: str | None = "D1", **extra) -> dict:
+    record = {
+        "id": rid, "sourceTitle": title, "downloadId": download_id,
+        "date": when.isoformat().replace("+00:00", "Z"), **extra,
+    }
+    return record
+
+
+def _library_watcher(db, radarr, sonarr, **kwargs):
+    from bot.services.library_watcher import LibraryWatcher
+
+    sent: list[str] = []
+
+    async def notify(text: str, category: str, **extra) -> None:
+        sent.append(text)
+
+    return LibraryWatcher(radarr, sonarr, notify=notify, db=db, **kwargs), sent
+
+
+class _FlakyKv:
+    """Сбой записи отметки: БД занята или карта отказала ровно в этот момент."""
+
+    def __init__(self, db: Database, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.failing: set[str] = set()
+        real = db.kv_set
+
+        async def kv_set(key: str, value: str) -> None:
+            if key in self.failing:
+                raise sqlite3.OperationalError("database is locked")
+            await real(key, value)
+
+        monkeypatch.setattr(db, "kv_set", kv_set)
+
+
+async def test_db_error_at_watermark_write_neither_raises_nor_loses_the_import(db, monkeypatch):
+    radarr, sonarr = _Arr(), _Arr()
+    watcher, sent = _library_watcher(db, radarr, sonarr)
+    await watcher.poll()  # посев
+    await db.kv_set("import_watermark:radarr", T0.isoformat())
+    await db.kv_set("import_watermark:sonarr", T0.isoformat())
+
+    kv = _FlakyKv(db, monkeypatch)
+    kv.failing.add("import_watermark:radarr")
+    radarr.records = [_import_record(1, "Film", T0 + timedelta(minutes=5))]
+    await watcher.poll()  # не падает
+    assert sent == []
+
+    kv.failing.clear()
+    await watcher.poll()
+    assert len(sent) == 1 and "Film" in sent[0]
+    await watcher.poll()
+    assert len(sent) == 1
+
+
+async def test_db_error_on_one_service_does_not_hold_up_the_other(db, monkeypatch):
+    radarr, sonarr = _Arr(), _Arr()
+    watcher, sent = _library_watcher(db, radarr, sonarr)
+    await watcher.poll()
+    await db.kv_set("import_watermark:radarr", T0.isoformat())
+    await db.kv_set("import_watermark:sonarr", T0.isoformat())
+
+    kv = _FlakyKv(db, monkeypatch)
+    kv.failing.add("import_watermark:sonarr")
+    radarr.records = [_import_record(1, "Film", T0 + timedelta(minutes=5))]
+    sonarr.records = [_import_record(1, "Show", T0 + timedelta(minutes=5), "D2")]
+    await watcher.poll()
+    assert len(sent) == 1 and "Film" in sent[0]
+
+
+async def test_db_error_reading_the_watermark_does_not_raise(db, monkeypatch):
+    radarr, sonarr = _Arr(), _Arr()
+    watcher, sent = _library_watcher(db, radarr, sonarr)
+
+    async def broken(_key: str):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(db, "kv_get", broken)
+    await watcher.poll()
+    assert sent == []
+
+
+async def test_failed_import_step_does_not_stop_the_music_step(db, monkeypatch):
+    from bot.services.library_watcher import LibraryWatcher
+
+    calls: list[str] = []
+
+    async def imports(self) -> None:
+        calls.append("imports")
+        raise sqlite3.OperationalError("database is locked")
+
+    async def transfers(self) -> None:
+        calls.append("transfers")
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(LibraryWatcher, "_poll_imports", imports)
+    monkeypatch.setattr(LibraryWatcher, "_poll_transfers", transfers)
+    watcher, _sent = _library_watcher(db, _Arr(), _Arr())
+
+    await watcher.poll()
+    assert calls == ["imports", "transfers"]
+
+
+class _Slskd:
+    def __init__(self) -> None:
+        self.transfers: list = []
+
+    async def get_transfers(self, *, include_completed: bool = False) -> list:
+        return list(self.transfers)
+
+
+ALBUM = "music\\Artist - Album (2023) [FLAC]"
+
+
+def _track(n: int, state: str, ended: datetime | None = None):
+    from bot.models import SlskdTransfer
+
+    name = f"{n:02d} - Track {n}.flac"
+    return SlskdTransfer(
+        username="peer", filename=name, state=state, size=100, id=f"{ALBUM}-{n}", batch_id="b",
+        directory=ALBUM, full_filename=f"{ALBUM}\\{name}",
+        ended_at=ended if ended is not None else (T0 if "Completed" in state else None),
+    )
+
+
+def _music_watcher(db, clock, slskd):
+    async def get_slskd():
+        return slskd
+
+    return _library_watcher(
+        db, _Arr(), _Arr(), get_slskd=get_slskd, clock=clock, music_settle_seconds=300,
+        music_stall_seconds=3600, poll_interval_seconds=3600,
+    )
+
+
+async def test_db_error_before_the_music_mark_retries_and_sends_once(db, monkeypatch):
+    clock, slskd = _Clock(), _Slskd()
+    watcher, sent = _music_watcher(db, clock, slskd)
+    await watcher.poll()
+
+    clock.advance(60)
+    slskd.transfers = [_track(1, "Completed, Succeeded", clock.now)]
+    await watcher.poll()
+    clock.advance(301)
+
+    real_mark = db.music_mark_notified
+
+    async def broken(*_args, **_kwargs) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db, "music_mark_notified", broken)
+    await watcher.poll()  # не падает и не шлёт: отметка раньше отправки
+    assert sent == []
+
+    monkeypatch.setattr(db, "music_mark_notified", real_mark)
+    clock.advance(60)
+    await watcher.poll()
+    clock.advance(60)
+    await watcher.poll()
+    assert len(sent) == 1
+
+
+async def test_db_error_at_the_seeding_mark_still_seeds_silently(db, monkeypatch):
+    clock, slskd = _Clock(), _Slskd()
+    watcher, sent = _music_watcher(db, clock, slskd)
+    slskd.transfers = [_track(1, "Queued, Remotely")]
+    real_mark = db.music_mark_notified
+
+    async def broken(*_args, **_kwargs) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db, "music_mark_notified", broken)
+    await watcher.poll()
+    monkeypatch.setattr(db, "music_mark_notified", real_mark)
+    await watcher.poll()
+
+    clock.advance(4000)
+    await watcher.poll()
+    assert sent == []
+
+
+# ---------------------------------------------------------------- LOGIC-21
+async def _seeded_season_watcher(db, *, live=None):
+    radarr, sonarr = _Arr(), _Arr()
+    watcher, sent = _library_watcher(db, radarr, sonarr, live=live)
+    await watcher.poll()
+    await db.kv_set("import_watermark:sonarr", T0.isoformat())
+    return watcher, sonarr, sent
+
+
+def _episode(n: int, *, download_id: str | None = "PACK") -> dict:
+    return _import_record(100 + n, "Show.S01.1080p", T0 + timedelta(seconds=n), download_id)
+
+
+async def test_a_pack_imported_across_polls_is_one_message(db):
+    watcher, sonarr, sent = await _seeded_season_watcher(db)
+
+    sonarr.records = [_episode(1), _episode(2)]
+    await watcher.poll()
+    assert sent == []  # пак ещё может расти
+
+    sonarr.records += [_episode(3), _episode(4), _episode(5)]
+    await watcher.poll()
+    assert sent == []
+
+    await watcher.poll()  # опрос без новых файлов
+    assert len(sent) == 1 and "5 серий" in sent[0]
+
+    await watcher.poll()
+    assert len(sent) == 1
+
+
+async def test_a_single_episode_waits_one_poll_only(db):
+    watcher, sonarr, sent = await _seeded_season_watcher(db)
+    sonarr.records = [_episode(1)]
+    await watcher.poll()
+    assert sent == []
+    await watcher.poll()
+    assert len(sent) == 1 and "серий" not in sent[0] and "серии" not in sent[0]
+
+
+async def test_a_pack_that_keeps_growing_is_released_by_the_deadline(db):
+    watcher, sonarr, sent = await _seeded_season_watcher(db)
+
+    for n in range(1, 5):  # файл на каждом опросе: первый опрос + 3
+        sonarr.records = [*sonarr.records, _episode(n)]
+        await watcher.poll()
+    assert len(sent) == 1 and "4 серии" in sent[0]
+
+    sonarr.records = [*sonarr.records, _episode(5)]
+    await watcher.poll()
+    await watcher.poll()
+    assert len(sent) == 2  # остаток своим сообщением, те же файлы не считаются дважды
+    assert "серий" not in sent[1] and "серии" not in sent[1]
+
+
+async def test_a_silent_sonarr_outage_is_not_read_as_a_quiet_poll(db):
+    watcher, sonarr, sent = await _seeded_season_watcher(db)
+    sonarr.records = [_episode(1)]
+    await watcher.poll()
+
+    sonarr.fail = ConnectionError("sonarr asleep")
+    await watcher.poll()
+    await watcher.poll()
+    assert sent == []  # неизвестно, рос ли пак
+
+    await watcher.poll()
+    assert len(sent) == 1  # потолок ожидания держит и при лежащем сервисе
+
+
+async def test_radarr_and_records_without_download_id_are_not_held(db):
+    radarr, sonarr = _Arr(), _Arr()
+    watcher, sent = _library_watcher(db, radarr, sonarr)
+    await watcher.poll()
+    await db.kv_set("import_watermark:radarr", T0.isoformat())
+    await db.kv_set("import_watermark:sonarr", T0.isoformat())
+
+    radarr.records = [_import_record(1, "Film", T0 + timedelta(minutes=1))]
+    sonarr.records = [_episode(1, download_id=None)]
+    await watcher.poll()
+    assert len(sent) == 2
+
+
+async def test_held_group_reaches_the_living_message_with_all_its_records(db):
+    class _Live:
+        def __init__(self) -> None:
+            self.claims: list[tuple[str, str, int]] = []
+
+        async def claim_import(self, service: str, download_id: str, records: list[dict]) -> set[int]:
+            self.claims.append((service, download_id, len(records)))
+            return {111}
+
+    live = _Live()
+    watcher, sonarr, sent = await _seeded_season_watcher(db, live=live)
+    sonarr.records = [_episode(1)]
+    await watcher.poll()
+    sonarr.records += [_episode(2)]
+    await watcher.poll()
+    assert live.claims == []
+    await watcher.poll()
+    assert live.claims == [("sonarr", "PACK", 2)]
+
+
+async def test_graceful_stop_announces_held_groups_and_restart_does_not_repeat_them(db):
+    watcher, sonarr, sent = await _seeded_season_watcher(db)
+    sonarr.records = [_episode(1), _episode(2)]
+    await watcher.poll()
+    assert sent == []
+
+    await watcher.flush_held()
+    assert len(sent) == 1 and "2 серии" in sent[0]
+    await watcher.flush_held()
+    assert len(sent) == 1
+
+    restarted, later = _library_watcher(db, _Arr(), sonarr)
+    await restarted.poll()
+    await restarted.poll()
+    assert later == []
+
+
+async def test_crash_while_holding_knowingly_drops_the_group_without_duplicates(db):
+    """Удержание в памяти, отметка уже впереди: после падения эти файлы не объявляются
+    (решение задачи 7), а следующие файлы пака идут своим сообщением."""
+    watcher, sonarr, sent = await _seeded_season_watcher(db)
+    sonarr.records = [_episode(1), _episode(2)]
+    await watcher.poll()
+
+    restarted, later = _library_watcher(db, _Arr(), sonarr)  # без flush_held: падение
+    await restarted.poll()
+    await restarted.poll()
+    assert later == []
+
+    sonarr.records = [*sonarr.records, _episode(3)]
+    await restarted.poll()
+    await restarted.poll()
+    assert len(later) == 1 and "серии" not in later[0] and "серий" not in later[0]
+
+
+async def test_library_watch_flushes_held_groups_when_cancelled(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot import main
+    from bot.clients import registry
+    from bot.services import library_watcher
+
+    for name in ("get_radarr", "get_sonarr", "get_lidarr", "get_slskd"):
+        monkeypatch.setattr(registry, name, AsyncMock(return_value=None))
+    settings = MagicMock(notify_check_interval=60, music_notify_settle_seconds=300, music_notify_stall_seconds=3600)
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    watcher = MagicMock(poll=AsyncMock(), flush_held=AsyncMock())
+    monkeypatch.setattr(library_watcher, "LibraryWatcher", MagicMock(return_value=watcher))
+    sleeps = 0
+
+    async def fake_sleep(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    await main._library_watch(MagicMock(), MagicMock(), MagicMock())
+
+    watcher.flush_held.assert_awaited_once()
+
+
+# ---------------------------------------------------------------- LOGIC-20
+async def _partial_announced(db, clock, slskd):
+    """Альбом объявлен частично: 2 скачано, 1 застрял в очереди."""
+    watcher, sent = _music_watcher(db, clock, slskd)
+    await watcher.poll()
+    clock.advance(60)
+    slskd.transfers = [
+        _track(1, "Completed, Succeeded", clock.now),
+        _track(2, "Completed, Succeeded", clock.now),
+        _track(3, "Queued, Remotely"),
+    ]
+    await watcher.poll()
+    clock.advance(3700)
+    await watcher.poll()
+    assert len(sent) == 1 and "2/3 скачано" in sent[0] and "ещё 1 в очереди" in sent[0]
+    return watcher, sent
+
+
+async def test_partial_album_gets_one_final_summary_when_it_finishes(db):
+    clock, slskd = _Clock(), _Slskd()
+    watcher, sent = await _partial_announced(db, clock, slskd)
+
+    clock.advance(600)
+    await watcher.poll()
+    assert len(sent) == 1  # очередь стоит: повторов нет
+
+    clock.advance(60)
+    slskd.transfers[2] = _track(3, "Completed, Succeeded", clock.now)
+    await watcher.poll()
+    assert len(sent) == 1  # только что изменилось: ждём успокоения
+
+    clock.advance(301)
+    await watcher.poll()
+    assert len(sent) == 2 and "3/3 скачано" in sent[1] and "очереди" not in sent[1]
+
+    clock.advance(4000)
+    await watcher.poll()
+    assert len(sent) == 2
+
+
+async def test_final_summary_survives_a_restart(db):
+    clock, slskd = _Clock(), _Slskd()
+    await _partial_announced(db, clock, slskd)
+
+    restarted, later = _music_watcher(db, clock, slskd)
+    clock.advance(60)
+    slskd.transfers[2] = _track(3, "Completed, Errored", clock.now)
+    await restarted.poll()
+    clock.advance(301)
+    await restarted.poll()
+    assert len(later) == 1 and "2/3 скачано" in later[0] and "1 не удалось" in later[0]
+
+
+async def test_seeded_stuck_batch_stays_silent_when_it_finishes(db):
+    clock, slskd = _Clock(), _Slskd()
+    watcher, sent = _music_watcher(db, clock, slskd)
+    slskd.transfers = [_track(1, "Queued, Remotely")]
+    await watcher.poll()  # посев
+
+    clock.advance(4000)
+    await watcher.poll()
+    clock.advance(60)
+    slskd.transfers = [_track(1, "Completed, Succeeded", clock.now)]
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+    assert sent == []
+
+
+async def test_album_announced_partially_before_this_version_stays_silent(db):
+    """Старая строка: notified_at стоит, флага нет. Итог не приходит: не рассылка на старте."""
+    clock, slskd = _Clock(), _Slskd()
+    watcher, sent = _music_watcher(db, clock, slskd)
+    await watcher.poll()
+    clock.advance(60)
+    slskd.transfers = [_track(1, "Completed, Succeeded", clock.now), _track(2, "Queued, Remotely")]
+    await watcher.poll()
+    await db.music_mark_notified([_batch_key(slskd.transfers[0])], clock.now)  # как писала прошлая версия
+
+    clock.advance(60)
+    slskd.transfers[1] = _track(2, "Completed, Succeeded", clock.now)
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+    assert sent == []
+
+
+def _batch_key(transfer) -> str:
+    from bot.services import music_notify
+
+    return music_notify.batch_key(transfer)
+
+
+async def test_partial_album_whose_rest_was_cancelled_gets_its_final_line(db):
+    clock, slskd = _Clock(), _Slskd()
+    watcher, sent = await _partial_announced(db, clock, slskd)
+    clock.advance(60)
+    slskd.transfers[2] = _track(3, "Completed, Cancelled", clock.now)
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+    assert len(sent) == 2 and "2/2 скачано" in sent[1]
+
+
+async def test_partial_album_regrabbed_ends_with_one_more_summary(db):
+    """Новый файл снимает отметку: дальше обычный путь, без лишней итоговой сводки."""
+    clock, slskd = _Clock(), _Slskd()
+    watcher, sent = await _partial_announced(db, clock, slskd)
+    clock.advance(60)
+    slskd.transfers[2] = _track(3, "Completed, Succeeded", clock.now)
+    slskd.transfers.append(_track(4, "Completed, Succeeded", clock.now))
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+    clock.advance(301)
+    await watcher.poll()
+    assert len(sent) == 2 and "4/4 скачано" in sent[1]

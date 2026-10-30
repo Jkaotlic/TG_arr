@@ -871,6 +871,10 @@ async def _digest_watch(bot: Bot, db: Database, logger) -> None:
         structlog.contextvars.unbind_contextvars("component")
 
 
+#: Сколько остановка ждёт объявления удержанных импортов (секунды).
+_LIBRARY_FLUSH_TIMEOUT_S = 5
+
+
 async def _library_watch(
     bot: Bot, db: Database, logger, live: Optional[LiveStatusService] = None,
 ) -> None:
@@ -920,6 +924,16 @@ async def _library_watch(
                 break
             except Exception as e:
                 logger.warning("library_watch_failed", error=describe_error(e))
+        if watcher is not None:
+            # LOGIC-21: на деплое удержанный пак объявляется сейчас: отметка уже
+            # впереди, после рестарта его никто не перечитает. Сроком ограничено,
+            # чтобы лежащий Telegram не съел остаток времени на остановку.
+            try:
+                await asyncio.wait_for(watcher.flush_held(), timeout=_LIBRARY_FLUSH_TIMEOUT_S)
+            except Exception as e:
+                logger.warning(
+                    "library_watch_flush_failed", error=describe_error(e), error_type=type(e).__name__,
+                )
     finally:
         structlog.contextvars.unbind_contextvars("component")
 

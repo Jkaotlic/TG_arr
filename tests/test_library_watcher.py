@@ -95,7 +95,7 @@ async def test_library_watcher_does_not_re_report_the_same_import():
     ])
 
     watcher = LibraryWatcher(radarr, sonarr)
-    await _landed(watcher)
+    await watcher.poll()  # BUG-19: запоминает шаг опроса, а не чтение
     second = await _landed(watcher)
 
     assert second == []

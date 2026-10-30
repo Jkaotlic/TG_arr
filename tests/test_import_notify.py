@@ -114,6 +114,8 @@ async def test_a_season_pack_is_one_message():
         for e in range(1, 11)
     ]
     await watcher.poll()
+    assert sent == []  # LOGIC-21: пак может расти
+    await watcher.poll()
 
     assert len(sent) == 1
     assert "Show.S01.1080p.WEB-DL" in sent[0]
