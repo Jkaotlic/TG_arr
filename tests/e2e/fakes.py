@@ -690,6 +690,7 @@ class _Route:
     payload: Any
     status: int
     hang: bool
+    headers: dict[str, str] | None = None
 
 
 def _path_pattern(path: str) -> "re.Pattern[str]":
@@ -729,6 +730,16 @@ class FakeBackend:
             self.route("GET", f"{prefix}/system/status", {"version": "6.0.0", "appName": service})
         for path, payload in defaults.items():
             self.route("GET", prefix + path, payload)
+        if service == "qbittorrent":
+            self._stock_qbittorrent()
+
+    def _stock_qbittorrent(self) -> None:
+        """Вход с сессионной кукой и пустая сводка: без них не открыть ни один список."""
+        self.route("POST", "/api/v2/auth/login", "Ok.", headers={"Set-Cookie": "SID=e2e; Path=/"})
+        self.route("GET", "/api/v2/app/version", "v5.0.0")
+        self.route("GET", "/api/v2/transfer/info", {"connection_status": "connected"})
+        self.route("GET", "/api/v2/sync/maindata", {"rid": 1, "server_state": {}})
+        self.route("GET", "/api/v2/torrents/info", [])
 
     async def start(self) -> None:
         app = web.Application()
@@ -758,13 +769,17 @@ class FakeBackend:
         status: int = 200,
         hang: bool = False,
         responder: Callable[[RecordedRequest], Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         """Задать ответ. Последний заданный маршрут важнее: тест перекрывает умолчания.
 
         `responder(request)` считает тело по запросу, `hang=True` принимает запрос и
-        не отвечает, `status` задаёт код. `{id}` в пути ловит один сегмент.
+        не отвечает, `status` задаёт код, `headers` добавляет заголовки ответа (так
+        qBittorrent выдаёт сессионную куку). `{id}` в пути ловит один сегмент.
         """
-        self._routes.insert(0, _Route(method.upper(), _path_pattern(path), responder, payload, status, hang))
+        self._routes.insert(
+            0, _Route(method.upper(), _path_pattern(path), responder, payload, status, hang, headers)
+        )
 
     def hang_all(self) -> None:
         """Все запросы приняты, ни на один нет ответа."""
@@ -831,7 +846,7 @@ class FakeBackend:
         if route is None:
             return web.json_response({"message": f"e2e: нет маршрута {request.method} {request.path}"}, status=404)
         payload = route.responder(record) if route.responder is not None else route.payload
-        return web.json_response(payload, status=route.status)
+        return web.json_response(payload, status=route.status, headers=route.headers)
 
 
 # ------------------------------------------------------------------------ Данные

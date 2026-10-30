@@ -5,7 +5,7 @@ speed-limit menu and delete confirmation.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import TorrentFilter, TorrentInfo
-from bot.ui.callbacks import TorrentActionCB, TorrentMoreCB, TorrentPageCB
+from bot.ui.callbacks import TorrentActionCB, TorrentMoreCB, TorrentPageCB, TorrentStepCB
 from bot.ui.keyboards._constants import BTN_BACK, BTN_CLOSE, CallbackData
 
 
@@ -80,7 +80,7 @@ class _TorrentKeyboards:
                 nav_buttons.append(
                     InlineKeyboardButton(
                         text="◀️",
-                        callback_data=TorrentPageCB(page=current_page - 1, flt=current_filter.value).pack(),
+                        callback_data=TorrentStepCB(page=current_page - 1, flt=current_filter.value).pack(),
                     )
                 )
             nav_buttons.append(
@@ -90,7 +90,7 @@ class _TorrentKeyboards:
                 nav_buttons.append(
                     InlineKeyboardButton(
                         text="▶️",
-                        callback_data=TorrentPageCB(page=current_page + 1, flt=current_filter.value).pack(),
+                        callback_data=TorrentStepCB(page=current_page + 1, flt=current_filter.value).pack(),
                     )
                 )
             keyboard.append(nav_buttons)

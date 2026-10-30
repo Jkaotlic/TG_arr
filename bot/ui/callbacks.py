@@ -60,6 +60,19 @@ class TorrentPageCB(CallbackData, prefix="tpg"):
     flt: str
 
 
+class TorrentStepCB(CallbackData, prefix="tstep"):
+    """Явное листание ◀️/▶️ в списке загрузок (BUG-03).
+
+    Отдельное семейство от ``TorrentPageCB``: «Обновить» и «Назад» просят
+    «перерисуй список» и при сократившемся списке получают последнюю страницу,
+    а листание за край — это настоящая ошибка и остаётся алертом (TEST-08a).
+    Старые кнопки ``tpg:`` в чатах живы: они теперь всегда зажимают страницу.
+    """
+
+    page: int
+    flt: str
+
+
 class TorrentMoreCB(CallbackData, prefix="tmore"):
     """The "⋯ Ещё" button under the torrent list (round 2 / D2): opens the secondary
     actions panel on the same message. Carries the list view (``page``,
