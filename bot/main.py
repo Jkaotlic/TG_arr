@@ -979,6 +979,47 @@ def register_error_handler(dp: Dispatcher) -> None:
     dp.errors.register(handle_unexpected_error)
 
 
+def build_dispatcher(
+    db: Database,
+    notification_service: Optional[NotificationService] = None,
+) -> Dispatcher:
+    """Вся проводка диспетчера: middleware, роутеры, обработчик ошибок.
+
+    Отдельной функцией, чтобы e2e-тесты гоняли ту же проводку, что и `main()`,
+    а не её копию. Жизненный цикл (startup/shutdown, фоновые задачи) остаётся в
+    `main()`: здесь только то, что обрабатывает апдейты.
+    """
+    dp = Dispatcher()
+
+    # Setup middleware (order matters: logging -> rate limit -> auth)
+    dp.message.middleware(LoggingMiddleware())
+    dp.callback_query.middleware(LoggingMiddleware())
+    rate_limiter = RateLimitMiddleware()
+    dp.message.middleware(rate_limiter)
+    dp.callback_query.middleware(rate_limiter)
+    dp.message.middleware(AuthMiddleware(db))
+    dp.callback_query.middleware(AuthMiddleware(db))
+    # Audit UI-19: buttons under messages >48 h old get an answer, not a spinner.
+    dp.callback_query.middleware(StaleMessageMiddleware())
+
+    # Setup routers
+    dp.include_router(setup_routers())
+
+    # Последний рубеж: упавший хендлер не должен оставлять пользователя без
+    # ответа (аудит 2026-08-13).
+    register_error_handler(dp)
+
+    # DB-04/BUG-15: exposed to handlers (bot/handlers/users.py) as the
+    # `notification_service` kwarg so /adduser and /deluser can
+    # subscribe/unsubscribe at runtime, matching on_startup's env+DB
+    # subscription. None when qBittorrent isn't configured — handlers
+    # must treat that as "no-op, not an error". Workflow data доходит до
+    # хендлеров и из start_polling, и из feed_update.
+    dp["notification_service"] = notification_service
+
+    return dp
+
+
 async def _cancel_background_tasks(tasks) -> None:
     """BUG-R6-01: cancel background tasks and WAIT for them to unwind.
 
@@ -1003,10 +1044,16 @@ async def on_shutdown(
     bot: Bot,
     db: Database,
     notification_service: Optional[NotificationService],
+    background_tasks: Iterable[Optional[asyncio.Task]] = (),
 ) -> None:
     """Shutdown handler."""
     logger = structlog.get_logger()
     logger.info("Bot shutting down...")
+
+    # BUG-09: сначала задачи, потом всё, чем они пользуются. aiogram вызывает этот
+    # обработчик внутри start_polling, то есть раньше `finally` в main(): иначе
+    # фоновый цикл на каждом деплое бьётся в закрытые БД и клиенты.
+    await _cancel_background_tasks(background_tasks)
 
     # Stop notification service. OBS-07 (2026-07-30): `stop()` already logs
     # "Notification service stopped" — the same duplicate that was removed from
@@ -1091,33 +1138,17 @@ async def main() -> None:
         logger.info("qBittorrent integration disabled")
 
     # Initialize dispatcher
-    dp = Dispatcher()
-
-    # Setup middleware (order matters: logging -> rate limit -> auth)
-    dp.message.middleware(LoggingMiddleware())
-    dp.callback_query.middleware(LoggingMiddleware())
-    rate_limiter = RateLimitMiddleware()
-    dp.message.middleware(rate_limiter)
-    dp.callback_query.middleware(rate_limiter)
-    dp.message.middleware(AuthMiddleware(db))
-    dp.callback_query.middleware(AuthMiddleware(db))
-    # Audit UI-19: buttons under messages >48 h old get an answer, not a spinner.
-    dp.callback_query.middleware(StaleMessageMiddleware())
-
-    # Setup routers
-    main_router = setup_routers()
-    dp.include_router(main_router)
-
-    # Последний рубеж: упавший хендлер не должен оставлять пользователя без
-    # ответа (аудит 2026-08-13).
-    register_error_handler(dp)
+    dp = build_dispatcher(db, notification_service)
 
     # Register startup/shutdown handlers
     async def _on_startup(*_: object, **__: object) -> None:
         await on_startup(bot, db, notification_service)
 
+    # Заполняется ниже, когда задачи созданы; обработчик сработает только после этого.
+    background_tasks: list[asyncio.Task] = []
+
     async def _on_shutdown(*_: object, **__: object) -> None:
-        await on_shutdown(bot, db, notification_service)
+        await on_shutdown(bot, db, notification_service, background_tasks)
 
     dp.startup.register(_on_startup)
     dp.shutdown.register(_on_shutdown)
@@ -1150,6 +1181,7 @@ async def main() -> None:
     logger.info("background_task_started", task="live_status")
     digest_task = asyncio.create_task(_digest_watch(bot, db, logger))
     logger.info("background_task_started", task="digest")
+    background_tasks.extend([liveness_task, cleanup_task, health_task, library_task, live_task, digest_task])
 
     faulthandler.enable()
     threading.Thread(
@@ -1166,21 +1198,15 @@ async def main() -> None:
             bot,
             allowed_updates=["message", "callback_query"],
             drop_pending_updates=True,
-            # DB-04/BUG-15: exposed to handlers (bot/handlers/users.py) as the
-            # `notification_service` kwarg so /adduser and /deluser can
-            # subscribe/unsubscribe at runtime, matching on_startup's env+DB
-            # subscription. None when qBittorrent isn't configured — handlers
-            # must treat that as "no-op, not an error".
-            notification_service=notification_service,
         )
     except Exception as e:
         logger.error("Bot crashed", error=describe_error(e), exc_info=True)
         raise
     finally:
         # BUG-R6-01: await the cancellation instead of firing and forgetting.
-        await _cancel_background_tasks(
-            [liveness_task, cleanup_task, health_task, library_task, live_task, digest_task]
-        )
+        # Обычно задачи уже отменены в on_shutdown (BUG-09). Это страховка на случай,
+        # когда start_polling упал до emit_shutdown; повторная отмена безвредна.
+        await _cancel_background_tasks(background_tasks)
         await bot.session.close()
 
 

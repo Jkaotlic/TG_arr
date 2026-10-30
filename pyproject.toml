@@ -52,6 +52,9 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "e2e: бот целиком в одном процессе, Telegram и *arr подделаны (tests/e2e); идёт в обычном прогоне",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
