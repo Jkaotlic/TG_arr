@@ -57,7 +57,7 @@ from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.keyboards._constants import MSG_OLD_BUTTON
 from bot.ui.list_token import ListTokenRegistry, answer_stale, new_list_token, token_matches
-from bot.ui.menu import MENU_MUSIC, MUSIC_PROMPT
+from bot.ui.menu import MENU_BUTTONS, MENU_MUSIC, MUSIC_PROMPT
 
 logger = structlog.get_logger()
 router = Router()
@@ -609,7 +609,11 @@ async def handle_menu_music(message: Message) -> None:
 
 # A command typed as the reply ("/downloads") is a command, not an artist
 # name — let it fall through to its own router (final review 2026-09-24).
-@prompt_router.message(F.reply_to_message.text == MUSIC_PROMPT, ~F.text.startswith("/"))
+@prompt_router.message(
+    F.reply_to_message.text == MUSIC_PROMPT,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_BUTTONS),  # BUG-14: нажатая кнопка меню — не имя артиста
+)
 async def handle_music_prompt_reply(message: Message, db_user: User, db: Database) -> None:
     """The artist name typed in reply to the "🎵 Музыка" prompt."""
     await process_music_search(message, (message.text or "").strip(), db_user, db)

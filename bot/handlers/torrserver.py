@@ -22,7 +22,7 @@ from bot.ui.callbacks import TsAddCB, TsPageCB, TsReleaseCB, TsTorrentCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.list_token import ListTokenRegistry, answer_stale
-from bot.ui.menu import MENU_TORRSERVER, TORRSERVER_PROMPT
+from bot.ui.menu import MENU_BUTTONS, MENU_TORRSERVER, TORRSERVER_PROMPT
 
 logger = structlog.get_logger()
 router = Router(name="torrserver")
@@ -128,7 +128,13 @@ async def _render_results(message: Message, user_id: int, page: int) -> None:
     )
 
 
-@router.message(F.reply_to_message.text == TORRSERVER_PROMPT)
+# BUG-14: команда или кнопка меню, набранная в ответ на запрос, — это команда
+# или кнопка, а не название раздачи; пусть дойдут до своего роутера (как у музыки).
+@router.message(
+    F.reply_to_message.text == TORRSERVER_PROMPT,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_BUTTONS),
+)
 async def handle_search_reply(message: Message) -> None:
     """Search TorrServer for the text the user replied with."""
     query = (message.text or "").strip()
@@ -148,7 +154,8 @@ async def handle_search_reply(message: Message) -> None:
     try:
         releases = await client.search(query, limit=SEARCH_LIMIT)
     except TorrServerError as e:
-        await status_msg.edit_text(Formatters.format_error(html.escape(str(e))))
+        # BUG-17: format_error экранирует сам; второй html.escape давал «&amp;amp;».
+        await status_msg.edit_text(Formatters.format_error(str(e)))
         return
     except Exception as e:
         logger.error("torrserver_search_failed", error=str(e), exc_info=True)
@@ -246,7 +253,7 @@ async def handle_add(callback: CallbackQuery, callback_data: TsAddCB) -> None:
         try:
             result = await service.add_and_publish(release.link, release.title, "")
         except TorrServerError as e:
-            await message.edit_text(Formatters.format_error(html.escape(str(e))))
+            await message.edit_text(Formatters.format_error(str(e)))
             return
         except Exception as e:
             logger.error("torrserver_add_failed", error=str(e), exc_info=True)
@@ -352,17 +359,26 @@ async def handle_delete_confirm(
     logger.info("torrserver_remove", torrent_hash=callback_data.h, user_id=callback.from_user.id)
     await callback.answer("Раздача удалена")
 
+    # LOGIC-19: сбой списка после удаления — это «список недоступен», а не
+    # «Список пуст». Ловится любое исключение: разбор ответа тоже может упасть.
+    torrents: list | None
     try:
         torrents = await client.list_torrents()
-    except TorrServerError:
-        torrents = []
+    except Exception as e:
+        logger.warning("torrserver_list_after_delete_failed", error=str(e))
+        torrents = None
 
+    listing = (
+        Formatters.format_torrserver_torrents(torrents, is_admin)
+        if torrents is not None
+        else "📋 <b>Раздачи TorrServer</b>\n\n⚠️ Список недоступен — TorrServer не ответил. "
+        "Нажмите «Назад» и откройте «Раздачи» ещё раз."
+    )
     try:
         await safe_edit(
             message,
-            "🗑 <b>Раздача удалена.</b> Из Emby пропадёт в течение 10 минут.\n\n"
-            + Formatters.format_torrserver_torrents(torrents, is_admin),
-            reply_markup=Keyboards.torrserver_list(torrents, is_admin),
+            "🗑 <b>Раздача удалена.</b> Из Emby пропадёт в течение 10 минут.\n\n" + listing,
+            reply_markup=Keyboards.torrserver_list(torrents or [], is_admin),
             parse_mode="HTML",
         )
     except Exception as e:
