@@ -18,6 +18,15 @@ logger = structlog.get_logger()
 router = Router()
 
 
+def _failure_keyboard() -> InlineKeyboardMarkup:
+    """BUG-16: при сбое статуса остаются «Обновить» и «Закрыть», иначе экран тупик.
+
+    Админские действия (скан, перезагрузка, обновление) не показываются: их
+    допустимость зависит от флагов сервера, которые узнать не удалось.
+    """
+    return Keyboards.emby_main(is_admin=False)
+
+
 async def _render_status_text(is_admin: bool = False) -> tuple[str, InlineKeyboardMarkup | None]:
     """LOGIC-20: fetch Emby status and build (text, keyboard) — no I/O side
     effects on Telegram, so both cmd_emby and handle_refresh can call it and
@@ -58,11 +67,11 @@ async def _render_status_text(is_admin: bool = False) -> tuple[str, InlineKeyboa
 
     except EmbyError as e:
         logger.error("Emby status error", error=str(e.message), exc_info=True)
-        return Formatters.format_error("Не удалось получить статус Emby"), None
+        return Formatters.format_error("Не удалось получить статус Emby"), _failure_keyboard()
 
     except Exception as e:
         logger.error("Failed to get Emby status", error=str(e), exc_info=True)
-        return "❌ Ошибка получения статуса Emby", None
+        return "❌ Ошибка получения статуса Emby", _failure_keyboard()
 
 
 async def _edit_status(callback: CallbackQuery, is_admin: bool = True) -> None:
@@ -206,7 +215,8 @@ async def handle_restart_prompt(callback: CallbackQuery, is_admin: bool = False)
     if message is None:
         return
 
-    await message.edit_text(
+    await safe_edit(
+        message,
         "⚠️ <b>Перезагрузить Emby сервер?</b>\n\n"
         "Все активные сессии будут прерваны.",
         reply_markup=Keyboards.emby_confirm_restart(),
@@ -231,7 +241,8 @@ async def handle_restart_confirm(callback: CallbackQuery, is_admin: bool = False
         await emby.restart_server()
 
         if (message := accessible_message(callback)) is not None:
-            await message.edit_text(
+            await safe_edit(
+                message,
                 "🔁 <b>Сервер перезагружается...</b>\n\n"
                 "Подождите 30-60 секунд, затем используйте /emby для проверки.",
                 parse_mode="HTML",
@@ -260,7 +271,8 @@ async def handle_update_prompt(callback: CallbackQuery, is_admin: bool = False) 
     if message is None:
         return
 
-    await message.edit_text(
+    await safe_edit(
+        message,
         "⚠️ <b>Установить обновление Emby?</b>\n\n"
         "Сервер будет перезагружен после установки.",
         reply_markup=Keyboards.emby_confirm_update(),
@@ -285,7 +297,8 @@ async def handle_update_confirm(callback: CallbackQuery, is_admin: bool = False)
         await emby.install_update()
 
         if (message := accessible_message(callback)) is not None:
-            await message.edit_text(
+            await safe_edit(
+                message,
                 "⬆️ <b>Обновление устанавливается...</b>\n\n"
                 "Сервер перезагрузится автоматически. "
                 "Подождите несколько минут, затем используйте /emby для проверки.",
