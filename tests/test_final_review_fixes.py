@@ -173,3 +173,160 @@ async def test_torrent_redownloaded_after_a_failed_recheck_notifies_again():
     await _step(service, qbit, clock, 4, {"progress": 1.0, "state": "uploading"})
 
     assert sender.await_count == 1
+
+
+# --------------------------------------------------- перепроверка при старте бота
+def _hashes(count: int) -> list[str]:
+    return [f"{i:040x}" for i in range(1, count + 1)]
+
+
+def _raw(state: str, progress: float, completed_on: datetime | None, name: str = "t") -> dict:
+    return {
+        "name": name, "state": state, "progress": progress, "category": "movies-web", "tags": "",
+        "completion_on": int(completed_on.timestamp()) if completed_on else -1,
+    }
+
+
+def _snapshot(torrents: dict, rid: int = 1) -> dict:
+    return {"rid": rid, "torrents": torrents, "torrents_removed": [], "full_update": True}
+
+
+async def _start_in_recheck(state: str, progress: float, completed_on: datetime | None, *, count: int = 3):
+    clock = _Clock()
+    service, qbit, sender = _service(clock)
+    hashes = _hashes(count)
+    qbit.get_maindata.return_value = _snapshot({h: _raw(state, progress, completed_on) for h in hashes})
+    await service._initial_sync()
+    clock.now += timedelta(seconds=60)
+    qbit.get_maindata.return_value = {
+        "rid": 2, "full_update": False, "torrents_removed": [],
+        "torrents": {h: {"state": "uploading", "progress": 1.0} for h in hashes},
+    }
+    await service._check_for_completions()
+    return service, sender
+
+
+@pytest.mark.parametrize(("state", "progress"), [("checkingResumeData", 0.0), ("checkingUP", 0.5)])
+async def test_bot_started_during_a_recheck_does_not_announce_old_torrents(state, progress):
+    """Старт бота вместе с qBit: раздачи в проверке уже заканчивались раньше."""
+    _service_, sender = await _start_in_recheck(state, progress, T0 - timedelta(days=30), count=50)
+
+    sender.assert_not_awaited()
+
+
+async def test_never_finished_torrent_in_recheck_at_start_still_notifies():
+    _service_, sender = await _start_in_recheck("checkingDL", 0.2, None)
+
+    assert sender.await_count == 3
+
+
+async def test_first_poll_after_failed_initial_sync_in_recheck_stays_silent():
+    clock = _Clock()
+    service, qbit, sender = _service(clock)
+    qbit.get_maindata.side_effect = ConnectionError("qbit down")
+    await service._initial_sync()
+    hashes = _hashes(4)
+    qbit.get_maindata.side_effect = None
+    qbit.get_maindata.return_value = _snapshot(
+        {h: _raw("checkingUP", 0.5, T0 - timedelta(days=30)) for h in hashes}
+    )
+    clock.now += timedelta(seconds=60)
+    await service._check_for_completions()
+    qbit.get_maindata.return_value = {
+        "rid": 3, "full_update": False, "torrents_removed": [],
+        "torrents": {h: {"state": "uploading", "progress": 1.0} for h in hashes},
+    }
+    await service._check_for_completions()
+
+    sender.assert_not_awaited()
+
+
+# --------------------------------------------------- потолок: сводка вместо потока сообщений
+async def _cycle_with_completions(count: int, *, names=None, subscribers=(111,), exclude=None, send=None):
+    from bot.services.notification_service import NotificationService
+
+    clock = _Clock()
+    qbit = AsyncMock()
+    sender = send if send is not None else AsyncMock(return_value=True)
+    service = NotificationService(qbit, sender, clock=clock, exclude_chats=exclude)
+    for user_id in subscribers:
+        service.subscribe_user(user_id)
+    hashes = _hashes(count)
+    names = names or [f"Film {i}" for i in range(count)]
+    qbit.get_maindata.return_value = _snapshot(
+        {h: {**_raw("downloading", 0.5, None), "name": n} for h, n in zip(hashes, names)}
+    )
+    await service._initial_sync()
+    clock.now += timedelta(seconds=60)
+    qbit.get_maindata.return_value = {
+        "rid": 2, "full_update": False, "torrents_removed": [],
+        "torrents": {h: {"state": "uploading", "progress": 1.0} for h in hashes},
+    }
+    await service._check_for_completions()
+    return sender
+
+
+async def test_five_completions_in_a_cycle_go_one_by_one():
+    sender = await _cycle_with_completions(5)
+
+    assert sender.await_count == 5
+    assert all("Загрузка завершена" in call.args[1] for call in sender.await_args_list)
+
+
+async def test_six_completions_in_a_cycle_become_one_summary():
+    sender = await _cycle_with_completions(6)
+
+    assert sender.await_count == 1
+    chat, text = sender.await_args.args
+    assert chat == 111
+    assert text.startswith("✅ Завершено 6 загрузок: ")
+    assert "Film 0, Film 1, Film 2 и ещё 3" in text
+
+
+async def test_summary_escapes_names_and_stays_within_telegram_limit():
+    names = ["<b>" + "x" * 500 + "</b>"] * 50
+    sender = await _cycle_with_completions(50, names=names)
+
+    text = sender.await_args.args[1]
+    assert sender.await_count == 1
+    assert "<b>x" not in text and "&lt;b&gt;" in text
+    assert len(text) < 1000
+
+
+async def test_living_message_exclusions_apply_before_counting():
+    """Чат 111 уже ведёт 3 живых сообщения: ему остаются 4 отдельных, чату 222 сводка."""
+    hashes = _hashes(7)
+    live = set(hashes[:3])
+
+    async def exclude(torrent_hash: str) -> set[int]:
+        return {111} if torrent_hash in live else set()
+
+    sender = await _cycle_with_completions(7, subscribers=(111, 222), exclude=exclude)
+
+    by_chat: dict[int, list[str]] = {}
+    for call in sender.await_args_list:
+        by_chat.setdefault(call.args[0], []).append(call.args[1])
+    assert len(by_chat[111]) == 4 and all("Загрузка завершена" in t for t in by_chat[111])
+    assert len(by_chat[222]) == 1 and by_chat[222][0].startswith("✅ Завершено 7 загрузок")
+
+
+async def test_summary_delivery_failure_is_logged_and_does_not_block_other_chats():
+    from structlog.testing import capture_logs
+
+    calls: list[int] = []
+
+    async def send(chat: int, text: str):
+        calls.append(chat)
+        if chat == 111:
+            raise RuntimeError("telegram down")
+        return True
+
+    with capture_logs() as logs:
+        await _cycle_with_completions(6, subscribers=(111, 222), send=send)
+
+    assert calls == [111, 222]
+    assert any(e["event"] == "notification_send_raised" for e in logs)
+
+    with capture_logs() as logs:
+        await _cycle_with_completions(6, send=AsyncMock(return_value=False))
+    assert any(e["event"] == "notification_not_delivered" for e in logs)
