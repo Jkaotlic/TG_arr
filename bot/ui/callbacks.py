@@ -15,10 +15,34 @@ from pydantic import Field, field_validator
 
 
 class PageCB(CallbackData, prefix="pg"):
-    """Pagination callback. ``scope`` distinguishes e.g. 'search' vs 'artist'."""
+    """Pagination callback. ``scope`` distinguishes e.g. 'search' vs 'artist'.
+
+    ``tok`` — токен списка (BUG-18): страница старого списка не перерисовывает новый.
+    Старая кнопка ``pg:search:N`` не распаковывается (другое число полей) и попадает
+    в ``handlers/fallback.py``.
+    """
 
     scope: str
     page: int
+    tok: str
+
+
+class BackCB(CallbackData, prefix="bk"):
+    """"◀️ Назад" с карточки релиза к её списку (был ``back``, BUG-18)."""
+
+    tok: str
+
+
+class ContentTypeCB(CallbackData, prefix="ct"):
+    """Ответ на вопрос «фильм, сериал, аниме или музыка?» (были ``type:*``, BUG-02).
+
+    ``kind`` — значение ``ContentType``. ``tok`` привязывает кнопку к запросу, о
+    котором спрашивали: иначе «Фильм» под старым вопросом уводил бы как фильм запрос,
+    набранный позже.
+    """
+
+    kind: str
+    tok: str
 
 
 class TorrentPageCB(CallbackData, prefix="tpg"):
@@ -119,10 +143,12 @@ class ArtistCB(CallbackData, prefix="art"):
     """Artist selection from a Lidarr lookup list (was ``artist:N``).
 
     Distinct prefix from the (still string-based, out of scope) ``art_page:``
-    pagination family — no collision risk.
+    pagination family — no collision risk. ``tok`` — BUG-18: индекс относится к
+    одному списку; старая ``art:N`` не распаковывается и получает «устарела».
     """
 
-    idx: int
+    tok: str
+    idx: int = Field(ge=0)
 
 
 class AddContentCB(CallbackData, prefix="addc"):
@@ -149,19 +175,53 @@ class SettingCB(CallbackData, prefix="set"):
 class SeasonPresetCB(CallbackData, prefix="ssn"):
     """Season-monitoring preset pick on a series release card (was
     ``season_set:preset``).
+
+    ``tok`` — BUG-18: пресет молча менял мониторинг того сериала, что в сессии
+    сейчас, ошибка не видна до самого граба. Старая ``ssn:preset`` не распаковывается.
     """
 
+    tok: str
     preset: str
 
 
+class SeasonMenuCB(CallbackData, prefix="smn"):
+    """"📺 Мониторинг сезонов" на карточке релиза (был ``season_menu``, BUG-18)."""
+
+    tok: str
+
+
+class SeasonBackCB(CallbackData, prefix="sbk"):
+    """"◀️ Назад" из выбора пресета к карточке (был ``season_back``, BUG-18)."""
+
+    tok: str
+
+
 class TrendingItemCB(CallbackData, prefix="tri"):
-    """Open a trending item's details (was ``trend_m:ID`` / ``trend_s:ID`` /
-    ``trend_a:IDX``). ``kind`` keeps movie/series/artist ids from colliding
-    the way the three previously-independent string prefixes never could.
+    """Open a trending item's details (was ``trend_m:ID`` / ``trend_s:ID``).
+    ``kind`` keeps movie/series ids from colliding the way the previously
+    independent string prefixes never could.
+
+    Токена нет намеренно: ``item_id`` здесь TMDb id, и старая кнопка открывает
+    ровно свой тайтл, а не «элемент N текущего списка». ``kind="artist"`` с индексом
+    жил здесь до BUG-18, такие кнопки в чатах отвечают «устарел» (см. ``TrendingArtistCB``).
     """
 
-    kind: str  # "movie" | "series" | "artist"
+    kind: str  # "movie" | "series"; "artist" только у старых кнопок
     item_id: str
+
+
+class TrendingArtistCB(CallbackData, prefix="tra"):
+    """Артист из чарта Deezer (BUG-18): индекс в личном кэше, поэтому нужен токен."""
+
+    tok: str
+    idx: int = Field(ge=0)
+
+
+class TrendingSeriesPickCB(CallbackData, prefix="trp"):
+    """Выбор сериала из выдачи Sonarr, когда тайтл из трендов не совпал (LOGIC-03)."""
+
+    tok: str
+    idx: int = Field(ge=0)
 
 
 class TorrentActionCB(CallbackData, prefix="ta"):
@@ -200,9 +260,13 @@ class TitleCB(CallbackData, prefix="ti"):
 
     Only the index is carried: the candidates live in the user's session, and
     the metadata id alone wouldn't tell the handler which facet to add under.
+
+    ``tok`` — BUG-01: старая кнопка иначе добавляла кандидата того же номера из
+    более нового выбора. Старая ``ti:N`` не распаковывается и получает «устарела».
     """
 
-    idx: int
+    tok: str
+    idx: int = Field(ge=0)
 
 
 class TitleActionCB(CallbackData, prefix="tm"):

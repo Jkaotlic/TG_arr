@@ -143,9 +143,12 @@ def _series_session(**kw) -> SearchSession:
 @pytest.mark.asyncio
 async def test_season_menu_shows_human_current_preset():
     from bot.handlers.search import grab
+    from bot.ui.callbacks import SeasonMenuCB
 
     cb = _cb()
-    await grab.handle_season_menu(cb, User(tg_id=42), _db(_series_session(monitor_type="latestSeason")))
+    await grab.handle_season_menu(
+        cb, SeasonMenuCB(tok="tok"), User(tg_id=42), _db(_series_session(monitor_type="latestSeason")),
+    )
     text = cb.message.edit_text.await_args.args[0]
     assert "последний сезон" in text and "latestSeason" not in text
 
@@ -158,7 +161,7 @@ async def test_season_preset_answer_and_card_are_human_and_full():
     cb = _cb()
     services = (MagicMock(), MagicMock(qbittorrent=None))
     with patch.object(grab._search, "get_services", AsyncMock(return_value=services)):
-        await grab.handle_season_preset(cb, SeasonPresetCB(preset="firstSeason"), User(tg_id=42),
+        await grab.handle_season_preset(cb, SeasonPresetCB(tok="tok", preset="firstSeason"), User(tg_id=42),
                                         _db(_series_session()))
     assert "первый сезон" in cb.answer.await_args.args[0]
     text = cb.message.edit_text.await_args.args[0]
@@ -169,11 +172,12 @@ async def test_season_preset_answer_and_card_are_human_and_full():
 @pytest.mark.asyncio
 async def test_season_back_renders_full_card():
     from bot.handlers.search import grab
+    from bot.ui.callbacks import SeasonBackCB
 
     cb = _cb()
     services = (MagicMock(), MagicMock(qbittorrent=None))
     with patch.object(grab._search, "get_services", AsyncMock(return_value=services)):
-        await grab.handle_season_back(cb, User(tg_id=42), _db(_series_session()))
+        await grab.handle_season_back(cb, SeasonBackCB(tok="tok"), User(tg_id=42), _db(_series_session()))
     text = cb.message.edit_text.await_args.args[0]
     assert "---" in text and "Show" in text
 

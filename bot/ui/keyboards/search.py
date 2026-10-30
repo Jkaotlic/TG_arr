@@ -14,6 +14,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from bot.models import ContentType, MovieInfo, SearchResult, SeriesInfo
 from bot.ui.callbacks import (
     AutoSearchCB,
+    BackCB,
+    ContentTypeCB,
     FindGrabCB,
     FindPageCB,
     FindReleaseCB,
@@ -22,6 +24,8 @@ from bot.ui.callbacks import (
     GrabCB,
     PageCB,
     ReleaseCB,
+    SeasonBackCB,
+    SeasonMenuCB,
     SeasonPresetCB,
 )
 from bot.ui.formatters._common import release_button_label
@@ -32,17 +36,20 @@ class _SearchKeyboards:
     """Search-result / release-details keyboard mixin."""
 
     @staticmethod
-    def content_type_selection(show_music: bool = False) -> InlineKeyboardMarkup:
-        """Create keyboard for selecting content type (movie/series/anime/music)."""
-        first_row = [
-            InlineKeyboardButton(text="🎬 Фильм", callback_data=CallbackData.TYPE_MOVIE),
-            InlineKeyboardButton(text="📺 Сериал", callback_data=CallbackData.TYPE_SERIES),
-        ]
-        rows = [first_row, [
-            InlineKeyboardButton(text="🎌 Аниме", callback_data=CallbackData.TYPE_ANIME),
-        ]]
+    def content_type_selection(show_music: bool = False, list_token: str = "") -> InlineKeyboardMarkup:
+        """Create keyboard for selecting content type (movie/series/anime/music).
+
+        ``list_token`` ties the question to its query (BUG-02)."""
+
+        def button(text: str, kind: ContentType) -> InlineKeyboardButton:
+            return InlineKeyboardButton(
+                text=text, callback_data=ContentTypeCB(kind=kind.value, tok=list_token).pack(),
+            )
+
+        first_row = [button("🎬 Фильм", ContentType.MOVIE), button("📺 Сериал", ContentType.SERIES)]
+        rows = [first_row, [button("🎌 Аниме", ContentType.ANIME)]]
         if show_music:
-            rows.append([InlineKeyboardButton(text="🎵 Музыка", callback_data=CallbackData.TYPE_MUSIC)])
+            rows.append([button("🎵 Музыка", ContentType.MUSIC)])
         rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL)])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -97,7 +104,9 @@ class _SearchKeyboards:
         nav_buttons = []
         if current_page > 0:
             nav_buttons.append(
-                InlineKeyboardButton(text="◀️", callback_data=PageCB(scope="search", page=current_page - 1).pack())
+                InlineKeyboardButton(
+                    text="◀️", callback_data=PageCB(scope="search", page=current_page - 1, tok=list_token).pack(),
+                )
             )
 
         nav_buttons.append(
@@ -106,7 +115,9 @@ class _SearchKeyboards:
 
         if current_page < total_pages - 1:
             nav_buttons.append(
-                InlineKeyboardButton(text="▶️", callback_data=PageCB(scope="search", page=current_page + 1).pack())
+                InlineKeyboardButton(
+                    text="▶️", callback_data=PageCB(scope="search", page=current_page + 1, tok=list_token).pack(),
+                )
             )
 
         if nav_buttons:
@@ -169,11 +180,11 @@ class _SearchKeyboards:
         # Sonarr series as well (audit UI-15).
         if content_type in (ContentType.SERIES, ContentType.ANIME) and season_menu:
             keyboard.append([
-                InlineKeyboardButton(text="📺 Мониторинг сезонов", callback_data=CallbackData.SEASON_MENU),
+                InlineKeyboardButton(text="📺 Мониторинг сезонов", callback_data=SeasonMenuCB(tok=list_token).pack()),
             ])
 
         keyboard.append([
-            InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.BACK),
+            InlineKeyboardButton(text="◀️ Назад", callback_data=BackCB(tok=list_token).pack()),
             InlineKeyboardButton(text="❌ Отмена", callback_data=CallbackData.CANCEL),
         ])
 
@@ -287,19 +298,25 @@ class _SearchKeyboards:
         ])
 
     @staticmethod
-    def season_presets() -> InlineKeyboardMarkup:
+    def season_presets(list_token: str = "") -> InlineKeyboardMarkup:
         """Feature #2: season-monitoring preset picker.
 
-        BUG-16: "Назад" uses the dedicated SEASON_BACK callback, not the
-        generic BACK — the latter clears the release selection and returns to
-        the results list, which is not what a user expects from a submenu.
+        BUG-16: "Назад" uses the dedicated SeasonBackCB, not the generic BackCB —
+        the latter clears the release selection and returns to the results list,
+        which is not what a user expects from a submenu. ``list_token`` — BUG-18.
         """
+
+        def preset(text: str, value: str) -> list[InlineKeyboardButton]:
+            return [InlineKeyboardButton(
+                text=text, callback_data=SeasonPresetCB(tok=list_token, preset=value).pack(),
+            )]
+
         rows = [
-            [InlineKeyboardButton(text="📺 Все сезоны", callback_data=SeasonPresetCB(preset="all").pack())],
-            [InlineKeyboardButton(text="🔮 Только будущие", callback_data=SeasonPresetCB(preset="future").pack())],
-            [InlineKeyboardButton(text="1️⃣ Первый сезон", callback_data=SeasonPresetCB(preset="firstSeason").pack())],
-            [InlineKeyboardButton(text="🔚 Последний сезон", callback_data=SeasonPresetCB(preset="latestSeason").pack())],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.SEASON_BACK)],
+            preset("📺 Все сезоны", "all"),
+            preset("🔮 Только будущие", "future"),
+            preset("1️⃣ Первый сезон", "firstSeason"),
+            preset("🔚 Последний сезон", "latestSeason"),
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=SeasonBackCB(tok=list_token).pack())],
         ]
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -325,8 +342,8 @@ class _SearchKeyboards:
         return buttons
 
     @staticmethod
-    def title_candidates(candidates: list) -> InlineKeyboardMarkup:
-        """Ask which title the user meant (see `needs_title_confirmation`)."""
+    def title_candidates(candidates: list, list_token: str = "") -> InlineKeyboardMarkup:
+        """Ask which title the user meant (see `resolve_title_candidate`)."""
         from bot.ui.callbacks import TitleCB
 
         keyboard = []
@@ -336,7 +353,7 @@ class _SearchKeyboards:
             if len(label) > 60:
                 label = label[:57] + "..."
             keyboard.append([
-                InlineKeyboardButton(text=label, callback_data=TitleCB(idx=idx).pack())
+                InlineKeyboardButton(text=label, callback_data=TitleCB(tok=list_token, idx=idx).pack())
             ])
 
         keyboard.append([

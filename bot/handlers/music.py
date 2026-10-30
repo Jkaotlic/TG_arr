@@ -49,6 +49,7 @@ from bot.ui.callbacks import (
     SlskdCardCB,
     SlskdCB,
     SlskdPageCB,
+    TrendingArtistCB,
     TrendingItemCB,
 )
 from bot.ui.formatters import Formatters
@@ -92,6 +93,10 @@ _trending_artists_cache: dict[int, list[dict]] = {}
 # бы миграции сохранённых сессий. Цена — «список истёк» после рестарта бота,
 # ровно как у артистов выше.
 _album_candidates: dict[int, list[AlbumInfo]] = {}
+# BUG-18: кнопки этих двух списков несут индекс, поэтому и токен: иначе старая кнопка
+# открывает элемент с тем же номером из более нового списка.
+_artist_tokens = ListTokenRegistry()
+_trending_artist_tokens = ListTokenRegistry()
 
 
 def _artist_list_text(artists: list[ArtistInfo], page_artists: list[ArtistInfo], start_idx: int) -> str:
@@ -105,7 +110,9 @@ def _artist_list_text(artists: list[ArtistInfo], page_artists: list[ArtistInfo],
     return "\n".join(lines)
 
 
-async def _render_artist_list(message: Message, artists: list[ArtistInfo], page: int = 0) -> None:
+async def _render_artist_list(
+    message: Message, artists: list[ArtistInfo], page: int = 0, list_token: str = "",
+) -> None:
     """LOGIC-14a: shared renderer for the artist-list keyboard — dedups the
     three previously-copied render blocks (initial search, art_page:, music_back).
 
@@ -122,7 +129,7 @@ async def _render_artist_list(message: Message, artists: list[ArtistInfo], page:
     await safe_edit(
         message,
         text,
-        reply_markup=Keyboards.artist_list(artists, current_page=page, per_page=per_page),
+        reply_markup=Keyboards.artist_list(artists, current_page=page, per_page=per_page, list_token=list_token),
         parse_mode="HTML",
     )
 
@@ -628,7 +635,9 @@ async def process_music_search(
     )
     await db.log_action(action)
 
-    await _render_artist_list(status_msg, _artist_candidates[user_id], page=0)
+    await _render_artist_list(
+        status_msg, _artist_candidates[user_id], page=0, list_token=_artist_tokens.issue(user_id),
+    )
 
 
 @router.callback_query(F.data.startswith(CallbackData.ARTIST_PAGE))
@@ -656,7 +665,7 @@ async def handle_artist_pagination(callback: CallbackQuery, db_user: User, db: D
         await callback.answer("Неверная страница", show_alert=True)
         return
 
-    await _render_artist_list(message, artists, page=page)
+    await _render_artist_list(message, artists, page=page, list_token=_artist_tokens.current(user_id))
     await callback.answer()
 
 
@@ -680,7 +689,11 @@ async def handle_music_back(callback: CallbackQuery, db_user: User, db: Database
          if isinstance(chosen, ArtistInfo) and a.mb_id == chosen.mb_id),
         0,
     )
-    await _render_artist_list(message, artists, page=position // get_settings().results_per_page)
+    await _render_artist_list(
+        message, artists,
+        page=position // get_settings().results_per_page,
+        list_token=_artist_tokens.current(user_id),
+    )
     await callback.answer()
 
 
@@ -697,8 +710,8 @@ async def handle_artist_selection(
     idx = callback_data.idx
 
     artists = _artist_candidates.get(user_id) or []
-    if idx < 0 or idx >= len(artists):
-        await callback.answer("Выбор истёк. Начните новый поиск.", show_alert=True)
+    if not _artist_tokens.check(user_id, callback_data.tok) or idx >= len(artists):
+        await answer_stale(callback)
         return
 
     artist = artists[idx]
@@ -1406,36 +1419,37 @@ async def handle_trending_music(callback: CallbackQuery) -> None:
 
     await message.edit_text(
         Formatters.format_trending_artists(artists),
-        reply_markup=Keyboards.trending_artists(artists),
+        reply_markup=Keyboards.trending_artists(artists, list_token=_trending_artist_tokens.issue(user_id)),
         parse_mode="HTML",
     )
 
 
-@router.callback_query(TrendingItemCB.filter(F.kind == "artist"))
+@router.callback_query(TrendingArtistCB.filter())
 async def handle_trending_artist_click(
-    callback: CallbackQuery, callback_data: TrendingItemCB, db_user: User, db: Database,
+    callback: CallbackQuery, callback_data: TrendingArtistCB, db_user: User, db: Database,
 ) -> None:
     """Click a trending artist → lookup in Lidarr and show details."""
     message = accessible_message(callback)
     if message is None:
         return
 
-    try:
-        idx = int(callback_data.item_id)
-    except ValueError:
-        await callback.answer("Неверный выбор", show_alert=True)
-        return
-
+    idx = callback_data.idx
     user_id = callback.from_user.id
     artists = _trending_artists_cache.get(user_id) or []
-    if idx < 0 or idx >= len(artists):
-        await callback.answer("Выбор истёк", show_alert=True)
+    if not _trending_artist_tokens.check(user_id, callback_data.tok) or idx >= len(artists):
+        await answer_stale(callback)
         return
 
     name = artists[idx].get("name", "")
     await callback.answer()
     # Audit UI-14: the results replace the trending list in this message.
     await process_music_search(message, name, db_user, db, status_msg=message)
+
+
+@router.callback_query(TrendingItemCB.filter(F.kind == "artist"))
+async def handle_legacy_indexed_trending_artist(callback: CallbackQuery) -> None:
+    """BUG-18: ``tri:artist:N`` без токена не знает, из какого чарта этот номер."""
+    await answer_stale(callback)
 
 
 @router.callback_query(F.data.startswith(CallbackData.TRENDING_ARTIST))

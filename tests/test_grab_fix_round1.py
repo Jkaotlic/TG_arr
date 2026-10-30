@@ -14,6 +14,7 @@ import pytest
 
 from bot.clients.base import APIError
 from bot.models import ContentType, MovieInfo, SearchResult, SearchSession, User, UserPreferences
+from bot.ui.callbacks import BackCB
 from bot.ui.list_token import STALE_LIST_TEXT
 
 TOK = "tok123"
@@ -90,7 +91,7 @@ async def test_back_then_another_release_still_grabs():
 
     db = _StatefulDb(_session())
     with patch.object(search, "_render_results_page", AsyncMock()):
-        await search.handle_back(_cb(), _user(), db)
+        await search.handle_back(_cb(), BackCB(tok=TOK), _user(), db)
 
     assert db.session.selected_content is not None
     assert db.session.selected_result is None
@@ -112,7 +113,7 @@ async def test_back_then_grab_best_still_works():
 
     db = _StatefulDb(_session())
     with patch.object(search, "_render_results_page", AsyncMock()):
-        await search.handle_back(_cb(), _user(), db)
+        await search.handle_back(_cb(), BackCB(tok=TOK), _user(), db)
 
     cb = _cb()
     with patch.object(search, "get_services", AsyncMock(return_value=(MagicMock(), MagicMock()))), \

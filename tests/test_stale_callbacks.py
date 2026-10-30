@@ -199,28 +199,28 @@ async def test_music_search_edits_given_status_message_instead_of_new_one():
 @pytest.mark.asyncio
 async def test_type_choice_music_reuses_the_question_message():
     from bot.handlers.search import results as results_mod
-    from bot.ui.keyboards import CallbackData
+    from bot.ui.callbacks import ContentTypeCB
 
-    session = SearchSession(user_id=42, query="Metallica", content_type=ContentType.UNKNOWN)
+    session = SearchSession(user_id=42, query="Metallica", content_type=ContentType.UNKNOWN, list_token="abc123")
     db = MagicMock(get_session=AsyncMock(return_value=session), delete_session=AsyncMock())
     cb = _cb()
-    cb.data = CallbackData.TYPE_MUSIC
     with patch("bot.handlers.music.process_music_search", AsyncMock()) as search:
-        await results_mod.handle_type_selection(cb, User(tg_id=42), db)
+        await results_mod.handle_type_selection(cb, ContentTypeCB(kind="music", tok="abc123"), User(tg_id=42), db)
     assert search.await_args.kwargs.get("status_msg") is cb.message
 
 
 @pytest.mark.asyncio
 async def test_trending_artist_click_edits_the_same_message():
     from bot.handlers import music
-    from bot.ui.callbacks import TrendingItemCB
+    from bot.ui.callbacks import TrendingArtistCB
 
     music._trending_artists_cache[42] = [{"name": "Artist"}]
+    token = music._trending_artist_tokens.issue(42)
     cb = _cb()
     try:
         with patch.object(music, "process_music_search", AsyncMock()) as search:
             await music.handle_trending_artist_click(
-                cb, TrendingItemCB(kind="artist", item_id="0"), User(tg_id=42), MagicMock(),
+                cb, TrendingArtistCB(tok=token, idx=0), User(tg_id=42), MagicMock(),
             )
     finally:
         music._trending_artists_cache.pop(42, None)

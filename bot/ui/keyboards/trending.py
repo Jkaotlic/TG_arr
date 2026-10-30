@@ -10,7 +10,7 @@ circular import between this module and the package ``__init__.py``.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import MovieInfo, SeriesInfo
-from bot.ui.callbacks import AddContentCB, TrendingItemCB
+from bot.ui.callbacks import AddContentCB, TrendingArtistCB, TrendingItemCB, TrendingSeriesPickCB
 from bot.ui.keyboards._constants import CallbackData
 from bot.ui.keyboards.search import _SearchKeyboards
 
@@ -32,7 +32,7 @@ class _TrendingKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
-    def trending_artists(artists: list[dict]) -> InlineKeyboardMarkup:
+    def trending_artists(artists: list[dict], list_token: str = "") -> InlineKeyboardMarkup:
         """Create keyboard for trending artists (Deezer chart)."""
         keyboard = []
         for i, a in enumerate(artists[:10]):
@@ -43,7 +43,7 @@ class _TrendingKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=label,
-                    callback_data=TrendingItemCB(kind="artist", item_id=str(i)).pack(),
+                    callback_data=TrendingArtistCB(tok=list_token, idx=i).pack(),
                 )
             ])
         keyboard.append([
@@ -93,6 +93,21 @@ class _TrendingKeyboards:
             InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_BACK),
         ])
 
+        return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    @staticmethod
+    def trending_series_choices(candidates: list[SeriesInfo], list_token: str) -> InlineKeyboardMarkup:
+        """LOGIC-03: Sonarr не нашёл то же название с тем же годом, выбирает пользователь."""
+        keyboard = []
+        for i, candidate in enumerate(candidates):
+            year = f" ({candidate.year})" if candidate.year else ""
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{i + 1}. {candidate.title}{year}"[:60],
+                    callback_data=TrendingSeriesPickCB(tok=list_token, idx=i).pack(),
+                )
+            ])
+        keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data=CallbackData.TRENDING_BACK)])
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
     @staticmethod

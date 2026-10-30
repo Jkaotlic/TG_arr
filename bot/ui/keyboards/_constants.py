@@ -26,13 +26,9 @@ MSG_OLD_BUTTON = "⌛ Кнопка устарела — откройте раз�
 class CallbackData:
     """Callback data prefixes for parsing."""
 
-    # Content type selection
-    TYPE_MOVIE = "type:movie"
-    TYPE_SERIES = "type:series"
-    # Anime maps onto Sonarr's own seriesType ("anime" vs "standard") rather
-    # than a separate library — see ContentType.sonarr_series_type.
-    TYPE_ANIME = "type:anime"
-    TYPE_MUSIC = "type:music"
+    # Content type selection. Только у старых кнопок: теперь ContentTypeCB с токеном
+    # запроса (BUG-02), а эти строки получают «устарел».
+    TYPE_PREFIX = "type:"
 
     # Pagination
     # #1: search pagination migrated to the typed PageCB factory
@@ -40,7 +36,7 @@ class CallbackData:
     # "art_page:" (LOGIC-14). Music pagination below is not yet migrated.
     ARTIST_PAGE = "art_page:"  # art_page:N
     MUSIC_BACK = "music_back"  # LOGIC-24: music-aware back button
-    BACK = "back"
+    BACK = "back"  # legacy only (→ BackCB, BUG-18); answers "устарел"
     CANCEL = "cancel"  # search flow only: drops the session
     CLOSE = "close"  # deletes the message, never touches the session (UI-07)
 
@@ -65,12 +61,9 @@ class CallbackData:
     FORCE_GRAB = "force_grab"
 
     # Season monitoring (#2)
-    SEASON_MENU = "season_menu"     # open the season-monitoring preset picker
+    # Только у старых кнопок (→ SeasonMenuCB, SeasonBackCB с токеном, BUG-18).
+    SEASON_MENU = "season_menu"
     SEASON_PRESET = "season_set:"   # season_set:all / future / firstSeason / latestSeason
-    # BUG-16: dedicated back button from the season-preset picker — re-renders
-    # the release card (like handle_season_preset does) instead of falling
-    # through to the generic CallbackData.BACK, which clears selected_result/
-    # selected_content and returns to the results list.
     SEASON_BACK = "season_back"
 
     # Settings

@@ -141,7 +141,11 @@ def test_reset_module_state_clears_cache_and_breaker():
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_detection_survives_one_dead_service():
-    """Sonarr being down must not blank out a movie search."""
+    """Sonarr being down must not blank out a movie search: the match stays visible.
+
+    LOGIC-02: но и фильмом запрос не становится, совпадение из Radarr победило бы
+    за неявкой соперника. Пользователь получает вопрос и подсказку.
+    """
     radarr = AsyncMock()
     radarr.lookup_movie.return_value = [MovieInfo(tmdb_id=1, title="Dune", year=2021)]
     sonarr = AsyncMock()
@@ -150,7 +154,9 @@ async def test_detection_survives_one_dead_service():
     service = SearchService(radarr, sonarr)
     result = await service.detect_content_type("Dune")
 
-    assert result.content_type is ContentType.MOVIE
+    assert result.content_type is ContentType.UNKNOWN
+    assert result.candidates["movie"] == ["Dune"]
+    assert result.failed_services == ("sonarr",)
 
 
 @pytest.mark.asyncio
@@ -232,14 +238,15 @@ async def test_cancelled_error_propagates_not_swallowed():
 # (_ANIME_OVER_SERIES_MARGIN) is unchanged, only the candidate source is new.
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_animation_genre_series_is_classified_as_anime():
-    """*arr has no anime facet: an 'Animation' genre on a lookup result is
-    the only evidence before the title is added to the catalog."""
+async def test_anime_genre_series_is_classified_as_anime():
+    """*arr has no anime facet: an 'Anime' genre on a lookup result is the only
+    evidence before the title is added to the catalog (LOGIC-04: 'Animation'
+    alone is a plain cartoon)."""
     frieren = SeriesInfo(
         title="Frieren: Beyond Journey's End",
         tvdb_id=1,
         year=2023,
-        genres=["Animation", "Drama", "Fantasy"],
+        genres=["Anime", "Animation", "Drama", "Fantasy"],
     )
     svc = _svc(series=[frieren])
     result = await svc.detect_content_type("Frieren")
@@ -399,14 +406,19 @@ async def test_metadata_failure_returns_unknown_not_a_wrong_guess():
 
 
 @pytest.mark.asyncio
-async def test_partial_failure_music_backend_down_movie_still_wins():
-    """Lidarr raises, Radarr matches strongly → MOVIE, not UNKNOWN."""
+async def test_partial_failure_music_backend_down_asks_instead_of_movie():
+    """Lidarr raises, Radarr matches strongly → вопрос, а не MOVIE (LOGIC-02).
+
+    Артист мог совпасть не хуже, и ответа Lidarr никто не видел.
+    """
     svc = _svc(
         movies=[MovieInfo(title="Interstellar", tmdb_id=157336, year=2014)],
         lidarr_fail=Exception("Lidarr 503"),
     )
     result = await svc.detect_content_type("Interstellar")
-    assert result.content_type == ContentType.MOVIE
+    assert result.content_type == ContentType.UNKNOWN
+    assert result.failed_services == ("lidarr",)
+    assert result.candidates["movie"] == ["Interstellar"]
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,7 @@ from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import accessible_message
 from bot.models import ContentType, SearchSession, SeriesInfo, User
-from bot.ui.callbacks import PageCB, ReleaseCB, SeasonPageCB, SeasonScopeCB, TitleCB
+from bot.ui.callbacks import BackCB, ContentTypeCB, PageCB, ReleaseCB, SeasonPageCB, SeasonScopeCB, TitleCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.list_token import answer_stale, token_matches
@@ -23,65 +23,88 @@ from .services import router
 logger = structlog.get_logger()
 
 
-@router.callback_query(
-    F.data.startswith(CallbackData.TYPE_MOVIE)
-    | F.data.startswith(CallbackData.TYPE_SERIES)
-    | F.data.startswith(CallbackData.TYPE_ANIME)
-    | F.data.startswith(CallbackData.TYPE_MUSIC)
-)
-async def handle_type_selection(callback: CallbackQuery, db_user: User, db: Database) -> None:
-    """Handle content type selection."""
+@router.callback_query(ContentTypeCB.filter())
+async def handle_type_selection(
+    callback: CallbackQuery, callback_data: ContentTypeCB, db_user: User, db: Database,
+) -> None:
+    """Handle content type selection.
+
+    BUG-02: кнопка привязана к своему запросу токеном, иначе «Фильм» под старым
+    вопросом уводил как фильм запрос, набранный позже. BUG-12: двойной тап не
+    запускает два поиска; токен проверяется ещё раз после захвата, потому что первый
+    тап мог уже заменить сессию.
+    """
     message = accessible_message(callback)
-    if message is None or not callback.data:
+    if message is None:
         return
 
     user_id = callback.from_user.id
-    session = await db.get_session(user_id)
-
-    if not session:
-        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+    if not await _question_is_current(db, user_id, callback_data.tok):
+        await answer_stale(callback)
         return
 
-    # Music → hand off to the artist flow (different UX than release search)
-    if callback.data == CallbackData.TYPE_MUSIC:
-        await callback.answer()
-        from bot.handlers.music import process_music_search
-
-        await db.delete_session(user_id)  # music flow starts its own session
-        # Audit UI-14: the question message becomes the artist list — its
-        # type buttons must not stay alive under it.
-        await process_music_search(message, session.query, db_user, db, status_msg=message)
+    if not await _search._claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
-
-    content_type = {
-        CallbackData.TYPE_MOVIE: ContentType.MOVIE,
-        CallbackData.TYPE_SERIES: ContentType.SERIES,
-        CallbackData.TYPE_ANIME: ContentType.ANIME,
-    }.get(callback.data, ContentType.SERIES)
-
-    # Update session and continue search
-    session.content_type = content_type
-    await db.save_session(user_id, session)
-
-    await callback.answer()
-
-    # LOGIC-23: remove the type-selection buttons from the question message —
-    # otherwise it stays clickable and a repeat tap re-launches a second
-    # parallel search while the first one is still in flight.
     try:
-        await message.edit_reply_markup(reply_markup=None)
-    except TelegramBadRequest as e:
-        if "message is not modified" not in str(e):
-            raise
+        session = await db.get_session(user_id)
+        if session is None or not token_matches(session.list_token, callback_data.tok):
+            await answer_stale(callback)
+            return
 
-    # Use message.answer() to send results to same chat
-    await _search.process_search(
-        message,
-        session.query,
-        content_type,
-        db_user,
-        db,
-    )
+        # Music → hand off to the artist flow (different UX than release search)
+        if callback_data.kind == ContentType.MUSIC.value:
+            await callback.answer()
+            from bot.handlers.music import process_music_search
+
+            await db.delete_session(user_id)  # music flow starts its own session
+            # Audit UI-14: the question message becomes the artist list — its
+            # type buttons must not stay alive under it.
+            await process_music_search(message, session.query, db_user, db, status_msg=message)
+            return
+
+        try:
+            content_type = ContentType(callback_data.kind)
+        except ValueError:
+            await answer_stale(callback)
+            return
+
+        # Update session and continue search
+        session.content_type = content_type
+        await db.save_session(user_id, session)
+
+        await callback.answer()
+
+        # LOGIC-23: remove the type-selection buttons from the question message —
+        # otherwise it stays clickable.
+        try:
+            await message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+
+        # Use message.answer() to send results to same chat
+        await _search.process_search(
+            message,
+            session.query,
+            content_type,
+            db_user,
+            db,
+        )
+    finally:
+        _search._release_grab(user_id)
+
+
+async def _question_is_current(db: Database, user_id: int, tok: str) -> bool:
+    """Первая проверка до захвата слота: старой кнопке незачем его ждать."""
+    session = await db.get_session(user_id)
+    return session is not None and token_matches(session.list_token, tok)
+
+
+@router.callback_query(F.data.startswith(CallbackData.TYPE_PREFIX))
+async def handle_legacy_type_selection(callback: CallbackQuery) -> None:
+    """BUG-02: кнопки ``type:*`` без токена не знают, о каком запросе спрашивали."""
+    await answer_stale(callback)
 
 
 @router.callback_query(PageCB.filter(F.scope == "search"))
@@ -101,8 +124,9 @@ async def handle_pagination(
     async with db.session_lock(user_id):
         session = await db.get_session(user_id)
 
-        if not session or not session.results:
-            await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+        # BUG-18: страница старого списка не перерисовывает новый.
+        if not session or not session.results or not token_matches(session.list_token, callback_data.tok):
+            await answer_stale(callback)
             return
 
         page = callback_data.page
@@ -275,8 +299,8 @@ def _pick_by_year(items: list, release_year, query_year):
     return items[0]
 
 
-@router.callback_query(F.data == CallbackData.BACK)
-async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> None:
+@router.callback_query(BackCB.filter())
+async def handle_back(callback: CallbackQuery, callback_data: BackCB, db_user: User, db: Database) -> None:
     """Handle back button."""
     message = accessible_message(callback)
     if message is None:
@@ -289,8 +313,9 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
     async with db.session_lock(user_id):
         session = await db.get_session(user_id)
 
-        if not session or not session.results:
-            await callback.answer("Сессия истекла", show_alert=True)
+        # BUG-18: «Назад» со старой карточки не сбрасывает выбор в новом списке.
+        if not session or not session.results or not token_matches(session.list_token, callback_data.tok):
+            await answer_stale(callback)
             return
 
         # Clear the release selection and go back to results.
@@ -325,6 +350,12 @@ async def handle_back(callback: CallbackQuery, db_user: User, db: Database) -> N
     )
 
     await callback.answer()
+
+
+@router.callback_query(F.data == CallbackData.BACK)
+async def handle_legacy_back(callback: CallbackQuery) -> None:
+    """BUG-18: кнопка ``back`` без токена не знает, к какому списку ведёт."""
+    await answer_stale(callback)
 
 
 @router.callback_query(F.data == CallbackData.CANCEL)
@@ -373,43 +404,64 @@ async def handle_title_selection(
 ) -> None:
     """Continue the search with the title the user picked (2026-07-29).
 
-    Reached only when `needs_title_confirmation` decided the metadata list was
+    Reached only when `resolve_title_candidate` decided the metadata list was
     ambiguous — see the prod incident where "Холодное сердце" silently resolved
     to an unrelated German film.
+
+    BUG-01: токен привязывает кнопку к её выбору. BUG-12: двойной тап не запускает
+    два добавления; после захвата сессия читается заново, первый тап мог её заменить.
     """
     message = accessible_message(callback)
     if message is None:
         return
 
     user_id = callback.from_user.id
-    session = await db.get_session(user_id)
-    if not session or not session.lookup_candidates:
-        await callback.answer("Сессия истекла. Начните новый поиск.", show_alert=True)
+    if await _load_title_choice(db, user_id, callback_data) is None:
+        await answer_stale(callback)
         return
 
-    idx = callback_data.idx
-    if idx < 0 or idx >= len(session.lookup_candidates):
-        await callback.answer("Неверный выбор", show_alert=True)
+    if not await _search._claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
-
-    chosen = session.lookup_candidates[idx]
-    await callback.answer()
-
-    # Drop the buttons so a second tap can't start a parallel search (LOGIC-23).
     try:
-        await message.edit_reply_markup(reply_markup=None)
-    except TelegramBadRequest as e:
-        if "message is not modified" not in str(e):
-            raise
+        session = await _load_title_choice(db, user_id, callback_data)
+        if session is None or session.lookup_candidates is None:
+            await answer_stale(callback)
+            return
 
-    await _search.process_search(
-        message,
-        session.query,
-        session.content_type,
-        db_user,
-        db,
-        chosen_title=chosen,
-    )
+        chosen = session.lookup_candidates[callback_data.idx]
+        await callback.answer()
+
+        # Drop the buttons so a later tap can't start another search (LOGIC-23).
+        try:
+            await message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+
+        await _search.process_search(
+            message,
+            session.query,
+            session.content_type,
+            db_user,
+            db,
+            chosen_title=chosen,
+        )
+    finally:
+        _search._release_grab(user_id)
+
+
+async def _load_title_choice(db: Database, user_id: int, callback_data: TitleCB) -> SearchSession | None:
+    """Сессия, если кнопка всё ещё называет кандидата текущего выбора."""
+    session = await db.get_session(user_id)
+    if (
+        session is None
+        or not session.lookup_candidates
+        or not token_matches(session.list_token, callback_data.tok)
+        or callback_data.idx >= len(session.lookup_candidates)
+    ):
+        return None
+    return session
 
 
 @router.callback_query(SeasonPageCB.filter())

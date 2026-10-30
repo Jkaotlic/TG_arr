@@ -18,6 +18,7 @@ Delete never touches files on disk (`delete_files=False`, matching the *arr
 client defaults) — a catalog cleanup must never take the media with it.
 """
 
+import asyncio
 import html
 
 import structlog
@@ -30,7 +31,7 @@ from bot.db import Database
 from bot.handlers._cache import remember_lru
 from bot.handlers.common import accessible_message, strip_command
 from bot.models import ActionLog, ActionType, ContentType, MovieInfo, SeriesInfo, User
-from bot.services.search_service import SearchService
+from bot.services.search_service import SearchService, describe_unreachable
 from bot.ui.callbacks import TitleActionCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import Keyboards
@@ -100,22 +101,45 @@ async def cmd_title(message: Message, db_user: User, db: Database, is_admin: boo
     status_msg = await message.answer("🔍 Ищу в библиотеке...")
     search_service = SearchService(await get_radarr(), await get_sonarr())
 
-    try:
-        movies = await search_service.lookup_movies(query)
-        series_list = await search_service.lookup_series(query)
-    except Exception as e:
-        logger.error("title_lookup_failed", error=str(e), exc_info=True)
-        await status_msg.edit_text(Formatters.format_error("Не удалось получить библиотеку"))
+    # LOGIC-02: сбой одного сервиса не прячет тайтлы другого и не превращается в «нет».
+    outcomes = await asyncio.gather(
+        search_service.lookup_movies(query), search_service.lookup_series(query), return_exceptions=True,
+    )
+    items: list = []
+    failed: list[str] = []
+    for service, outcome in zip(("radarr", "sonarr"), outcomes):
+        if isinstance(outcome, asyncio.CancelledError):
+            raise outcome
+        if isinstance(outcome, BaseException):
+            logger.error("title_lookup_failed", service=service, error=str(outcome))
+            failed.append(service)
+        else:
+            id_field = f"{service}_id"
+            items += [title for title in outcome if getattr(title, id_field, None)]
+
+    if len(failed) == 2:
+        await status_msg.edit_text(
+            Formatters.format_error(f"Не удалось получить библиотеку: {describe_unreachable(failed)}")
+        )
         return
 
-    items: list = [m for m in movies if m.radarr_id]
-    items += [s for s in series_list if s.sonarr_id]
+    # Предупреждение идёт и в список, и в карточку: без него тайтл недоступного
+    # сервиса выглядит как отсутствующий.
+    warning = (
+        f"\n\n⚠️ {describe_unreachable(failed)} — его тайтлов здесь нет, проверить их не удалось."
+        if failed else ""
+    )
 
     if not items:
-        await status_msg.edit_text(
-            Formatters.format_warning(f"В библиотеке нет: <b>{html.escape(query)}</b>"),
-            parse_mode="HTML",
+        text = (
+            Formatters.format_warning(
+                f"{describe_unreachable(failed)}, поэтому проверить всю библиотеку не удалось. "
+                f"В {'Sonarr' if failed == ['radarr'] else 'Radarr'} нет: <b>{html.escape(query)}</b>"
+            )
+            if failed
+            else Formatters.format_warning(f"В библиотеке нет: <b>{html.escape(query)}</b>")
         )
+        await status_msg.edit_text(text, parse_mode="HTML")
         return
 
     user_id = message.from_user.id if message.from_user else 0
@@ -126,7 +150,7 @@ async def cmd_title(message: Message, db_user: User, db: Database, is_admin: boo
         # deletion, and acting on the wrong title is not recoverable from the
         # user's side (audit 2026-07-30, BUG-05).
         await status_msg.edit_text(
-            f"🗂 Нашёл несколько совпадений на <b>{html.escape(query)}</b> — какой нужен?",
+            f"🗂 Нашёл несколько совпадений на <b>{html.escape(query)}</b> — какой нужен?{warning}",
             reply_markup=Keyboards.title_choices(items),
             parse_mode="HTML",
         )
@@ -134,7 +158,7 @@ async def cmd_title(message: Message, db_user: User, db: Database, is_admin: boo
 
     title = items[0]
     await status_msg.edit_text(
-        _render_title_card(title),
+        f"{_render_title_card(title)}{warning}",
         reply_markup=Keyboards.title_actions(title, is_admin=is_admin),
         parse_mode="HTML",
     )

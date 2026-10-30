@@ -77,7 +77,6 @@ from .results import (  # noqa: E402,F401
 from .commands import (  # noqa: E402,F401
     _known_seasons,
     _lookup_metadata_candidates,
-    _pick_metadata_candidate,
     _resolve_arr_entry,
     cmd_anime,
     cmd_movie,

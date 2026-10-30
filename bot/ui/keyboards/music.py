@@ -36,6 +36,7 @@ class _MusicKeyboards:
         artists: list[ArtistInfo],
         current_page: int = 0,
         per_page: int = 5,
+        list_token: str = "",
     ) -> InlineKeyboardMarkup:
         """Create keyboard for artist selection from lookup results."""
         total_pages = max(1, (len(artists) + per_page - 1) // per_page)
@@ -52,7 +53,7 @@ class _MusicKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=label,
-                    callback_data=ArtistCB(idx=idx).pack(),
+                    callback_data=ArtistCB(tok=list_token, idx=idx).pack(),
                 )
             ])
 

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from bot.models import ContentType, SearchResult, SearchSession, UserPreferences, User
+from bot.ui.callbacks import BackCB
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,7 @@ async def test_pagination_skips_save_when_page_unchanged():
     from bot.handlers import search
 
     session = _make_session(page=1)
+    session.list_token = "abc123"
     db = MagicMock()
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
@@ -111,7 +113,7 @@ async def test_pagination_skips_save_when_page_unchanged():
 
     callback = _make_callback("")
 
-    await search.handle_pagination(callback, PageCB(scope="search", page=1), _make_db_user(), db)  # same page
+    await search.handle_pagination(callback, PageCB(scope="search", page=1, tok="abc123"), _make_db_user(), db)  # same page
 
     db.save_session.assert_not_called()
     callback.answer.assert_awaited()
@@ -123,6 +125,7 @@ async def test_pagination_saves_when_page_changes():
     from bot.handlers import search
 
     session = _make_session(page=0)
+    session.list_token = "abc123"
     db = MagicMock()
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
@@ -131,7 +134,7 @@ async def test_pagination_saves_when_page_changes():
 
     callback = _make_callback("")
 
-    await search.handle_pagination(callback, PageCB(scope="search", page=1), _make_db_user(), db)  # different page
+    await search.handle_pagination(callback, PageCB(scope="search", page=1, tok="abc123"), _make_db_user(), db)  # different page
 
     db.save_session.assert_awaited_once()
     assert session.current_page == 1
@@ -143,13 +146,14 @@ async def test_back_skips_save_when_no_selection_to_clear():
     from bot.handlers import search
 
     session = _make_session(page=0, with_selection=False)
+    session.list_token = "abc123"
     db = MagicMock()
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
 
-    callback = _make_callback(search.CallbackData.BACK)
+    callback = _make_callback("")
 
-    await search.handle_back(callback, _make_db_user(), db)
+    await search.handle_back(callback, BackCB(tok="abc123"), _make_db_user(), db)
 
     db.save_session.assert_not_called()
     callback.answer.assert_awaited()
@@ -161,13 +165,14 @@ async def test_back_saves_when_clearing_selection():
     from bot.handlers import search
 
     session = _make_session(page=0, with_selection=True)
+    session.list_token = "abc123"
     db = MagicMock()
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
 
-    callback = _make_callback(search.CallbackData.BACK)
+    callback = _make_callback("")
 
-    await search.handle_back(callback, _make_db_user(), db)
+    await search.handle_back(callback, BackCB(tok="abc123"), _make_db_user(), db)
 
     db.save_session.assert_awaited_once()
     assert session.selected_result is None
