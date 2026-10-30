@@ -204,7 +204,7 @@ async def _lookup_metadata_candidates(search_service, term: str, content_type: C
 
     LOGIC-04: жанр здесь подсказка, а не фильтр: тип назвал сам пользователь. /series
     не выбрасывает никого. /anime ставит вперёд тайтлы с жанром Anime, а если таких
-    нет, показывает всех: у TVDB аниме нередко помечено одним Animation.
+    нет, показывает всех: жанры TVDB для аниме на живом Sonarr не проверялись.
 
     LOGIC-02: сбой Radarr или Sonarr доходит сюда как `CatalogLookupError`.
     """
