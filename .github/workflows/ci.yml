@@ -1,0 +1,38 @@
+# TEST-03: сюита на версии прода (3.12) на каждый push и pull request.
+# Живые тесты пропускаются сами: в окружении нет настоящих адресов.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TELEGRAM_BOT_TOKEN: test
+      ALLOWED_TG_IDS: "1"
+      PROWLARR_URL: http://x
+      PROWLARR_API_KEY: x
+      RADARR_URL: http://x
+      RADARR_API_KEY: x
+      SONARR_URL: http://x
+      SONARR_API_KEY: x
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.txt
+      - name: Зависимости
+        run: pip install -r requirements.lock -r requirements-dev.txt
+      - name: Ruff
+        run: ruff check bot tests
+      - name: Mypy
+        run: mypy bot
+      - name: Pytest
+        run: pytest tests -q
