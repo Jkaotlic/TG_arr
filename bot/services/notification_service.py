@@ -18,6 +18,9 @@ logger = structlog.get_logger()
 #: Часы qBittorrent и бота могут расходиться: допуск к «завершён после прошлого
 #: опроса». Повтора он не даст: завершённые хэши помнит `_completed_hashes`.
 _CLOCK_SKEW_MARGIN = timedelta(seconds=120)
+#: Допуск для хэша, которого не было в прошлом чтении. Он новый, поэтому расхождение
+#: часов здесь не важно, но старая библиотека, принесённая дельтой, рассылкой не станет.
+_NEW_HASH_MARGIN = timedelta(hours=24)
 
 
 def _utcnow() -> datetime:
@@ -385,13 +388,13 @@ class NotificationService:
         """Докачан после прошлого опроса. До первого чтения qBit — никогда.
 
         ``new``: дельта принесла хэш, которого не было в прошлом чтении. Он новый по
-        определению, и часы qBit, отстающие сколько угодно, этого не отменяют. При
-        полном чтении (resync) такого знания нет: там решает время, иначе вся раздача
-        ушла бы рассылкой.
+        определению, поэтому часы qBit могут отставать сильно: допуск сутки. Полное
+        чтение (resync) такого не знает, и там допуск обычный, иначе вся раздача ушла
+        бы рассылкой.
         """
         if previous_sync is None or torrent.completion_on is None:
             return False
-        return new or torrent.completion_on > previous_sync - _CLOCK_SKEW_MARGIN
+        return torrent.completion_on > previous_sync - (_NEW_HASH_MARGIN if new else _CLOCK_SKEW_MARGIN)
 
     async def _completion_reached(self, torrent: TorrentInfo) -> None:
         if (

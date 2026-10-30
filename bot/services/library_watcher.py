@@ -400,14 +400,29 @@ class LibraryWatcher:
         self._held.clear()
         try:
             if self._in_flight is not None:
-                await asyncio.wait([self._in_flight])
+                in_flight = self._in_flight
+                await asyncio.wait([in_flight])
                 self._in_flight = None
-            await self._send_ready()
+                error = None if in_flight.cancelled() else in_flight.exception()
+                if error is not None:
+                    self._log_flush_failure(error)
+            # Следующего опроса не будет: сбой одной группы не отменяет остальные.
+            while self._ready:
+                try:
+                    await self._send_ready()
+                except Exception as e:
+                    self._log_flush_failure(e)
         except asyncio.CancelledError:
             # Время на остановку вышло: отправку под `shield` никто больше не ждёт.
             if self._in_flight is not None:
                 self._in_flight.cancel()
             raise
+
+    @staticmethod
+    def _log_flush_failure(error: BaseException) -> None:
+        logger.warning(
+            "library_watch_flush_group_failed", error=describe_error(error), error_type=type(error).__name__,
+        )
 
     async def _announce_group(self, label: str, records: list[dict[str, Any]]) -> None:
         title = html.escape(str(records[0].get("sourceTitle") or "Unknown"))

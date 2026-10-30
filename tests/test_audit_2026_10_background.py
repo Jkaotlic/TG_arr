@@ -2477,3 +2477,145 @@ async def test_digest_warns_once_per_source_per_tick(db):
 
     failed = [e["source"] for e in logs if e["event"] == "digest_source_failed"]
     assert sorted(failed) == ["Radarr", "Sonarr"]
+
+
+# ---------------------------------------------------------------- правки ревью, раунд 2
+@pytest.mark.parametrize(
+    ("completed_ago", "notified"),
+    [
+        (timedelta(hours=23), True),  # часы qBit сильно сзади
+        (timedelta(hours=25), False),
+        (timedelta(days=30), False),  # старая библиотека, принесённая дельтой
+    ],
+)
+async def test_new_hash_in_a_delta_has_a_24_hour_limit(completed_ago, notified):
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    qbit.get_maindata.return_value = _maindata(full=True)
+    await service._initial_sync()
+
+    clock.advance(60)
+    previous_sync = clock.now - timedelta(seconds=60)
+    qbit.get_maindata.return_value = _maindata(2, {HASH_A: _done(finished=previous_sync - completed_ago)})
+    await service._check_for_completions()
+
+    assert sender.await_count == (1 if notified else 0)
+
+
+async def test_old_library_arriving_in_a_delta_does_not_flood():
+    clock = _Clock()
+    service, qbit, sender = _qbit_service(clock)
+    qbit.get_maindata.return_value = _maindata(full=True)
+    await service._initial_sync()
+
+    clock.advance(60)
+    old = clock.now - timedelta(days=30)
+    qbit.get_maindata.return_value = _maindata(2, {f"{n:040x}": _done(f"Film {n}", finished=old) for n in range(50)})
+    await service._check_for_completions()
+    sender.assert_not_awaited()
+
+
+async def test_failing_group_at_flush_does_not_drop_the_others(db, monkeypatch):
+    from structlog.testing import capture_logs
+
+    from bot.services.library_watcher import LibraryWatcher
+
+    sent: list[str] = []
+
+    async def notify(text: str, category: str, **extra) -> None:
+        sent.append(text)
+
+    sonarr = _Arr()
+    watcher = LibraryWatcher(_Arr(), sonarr, notify=notify, db=db)
+    await watcher.poll()
+    await db.kv_set("import_watermark:sonarr", T0.isoformat())
+    sonarr.records = [
+        _import_record(1, "Первый", T0 + timedelta(minutes=1), "P1"),
+        _import_record(2, "Второй", T0 + timedelta(minutes=2), "P2"),
+        _import_record(3, "Третий", T0 + timedelta(minutes=3), "P3"),
+    ]
+    await watcher.poll()  # все три удержаны
+    assert sent == []
+
+    real = watcher._announce_group
+
+    async def flaky(label, records):
+        if "Первый" in str(records[0].get("sourceTitle")):
+            raise RuntimeError("баг в сборке сообщения")
+        await real(label, records)
+
+    monkeypatch.setattr(watcher, "_announce_group", flaky)
+    with capture_logs() as logs:
+        await watcher.flush_held()
+
+    assert len(sent) == 2 and "Второй" in sent[0] and "Третий" in sent[1]
+    failures = [e for e in logs if e["event"] == "library_watch_flush_group_failed"]
+    assert len(failures) == 1 and failures[0]["log_level"] == "warning"
+    assert failures[0]["error_type"] == "RuntimeError"
+
+
+async def test_failure_of_the_send_in_flight_at_flush_is_logged_and_the_rest_goes(db, monkeypatch):
+    from structlog.testing import capture_logs
+
+    from bot.services.library_watcher import LibraryWatcher
+
+    sent: list[str] = []
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def notify(text: str, category: str, **extra) -> None:
+        sent.append(text)
+
+    radarr = _Arr()
+    watcher = LibraryWatcher(radarr, _Arr(), notify=notify, db=db)
+    await watcher.poll()
+    await db.kv_set("import_watermark:radarr", T0.isoformat())
+    radarr.records = [
+        _import_record(1, "Первый", T0 + timedelta(minutes=1), "D1"),
+        _import_record(2, "Второй", T0 + timedelta(minutes=2), "D2"),
+    ]
+    real = watcher._announce_group
+
+    async def flaky(label, records):
+        if "Первый" in str(records[0].get("sourceTitle")):
+            started.set()
+            await release.wait()
+            raise RuntimeError("упала отправляемая группа")
+        await real(label, records)
+
+    monkeypatch.setattr(watcher, "_announce_group", flaky)
+    poll = asyncio.create_task(watcher.poll())
+    await asyncio.wait_for(started.wait(), 2)
+    poll.cancel()
+    await asyncio.gather(poll, return_exceptions=True)
+    release.set()
+
+    with capture_logs() as logs:
+        await asyncio.wait_for(watcher.flush_held(), 2)
+
+    assert len(sent) == 1 and "Второй" in sent[0]
+    assert any(e["event"] == "library_watch_flush_group_failed" for e in logs)
+
+
+async def test_cancel_still_stops_a_flush_between_groups(db, monkeypatch):
+    """Перехват на группу не должен глотать отмену: срок остановки важнее остатка."""
+    from bot.services.library_watcher import LibraryWatcher
+
+    sonarr = _Arr()
+    sent: list[str] = []
+
+    async def notify(text: str, category: str, **extra) -> None:
+        sent.append(text)
+        await asyncio.sleep(30)
+
+    watcher = LibraryWatcher(_Arr(), sonarr, notify=notify, db=db)
+    await watcher.poll()
+    await db.kv_set("import_watermark:sonarr", T0.isoformat())
+    sonarr.records = [
+        _import_record(1, "Первый", T0 + timedelta(minutes=1), "P1"),
+        _import_record(2, "Второй", T0 + timedelta(minutes=2), "P2"),
+    ]
+    await watcher.poll()
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(watcher.flush_held(), 0.05)
+    assert len(sent) == 1
