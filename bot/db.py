@@ -3,8 +3,6 @@
 import asyncio
 import json
 import os
-import time
-from collections import OrderedDict
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -70,21 +68,6 @@ class Database:
         # Lock per user_id, kept for the process lifetime (bounded by the
         # small number of distinct Telegram users this bot serves).
         self._session_locks: dict[int, asyncio.Lock] = {}
-        # PERF-04: in-process write-through cache of active sessions. The bot
-        # is a single process, so the on-disk `sessions` row is only ever
-        # mutated through this Database instance — a hot session (pagination
-        # clicks, release selection) skips the expensive JSON parse/pydantic
-        # validation of the full payload on every click. Keyed by
-        # user_id -> (session, last-known session_data JSON text, cached_at
-        # monotonic timestamp). Bounded LRU (oldest entry evicted once the
-        # cap is exceeded) with a TTL matching the 24h staleness window
-        # already enforced by `cleanup_old_sessions`. Consistency with
-        # SQLite is maintained by only ever mutating this dict from inside
-        # `_write_lock` (writes) — reads don't need the lock since dict
-        # access is atomic under asyncio's single-threaded event loop.
-        self._session_cache: OrderedDict[int, tuple[SearchSession, str, float]] = OrderedDict()
-        self._session_cache_cap = 50
-        self._session_cache_ttl = 24 * 60 * 60  # seconds
 
     def session_lock(self, user_id: int) -> asyncio.Lock:
         """Return the per-user lock guarding session read-modify-write cycles.
@@ -98,67 +81,6 @@ class Database:
             lock = asyncio.Lock()
             self._session_locks[user_id] = lock
         return lock
-
-    # ------------------------------------------------------------------
-    # PERF-04: session cache helpers
-    #
-    # Cache entries are keyed by user_id -> (session, session_json,
-    # cached_at monotonic timestamp). ``session_json`` is the exact
-    # serialized text this Database instance last wrote/read for that user
-    # and is used to cheaply confirm the cached copy still matches what's on
-    # disk before trusting it — so a session row modified/corrupted by
-    # something other than this Database instance's own write path (e.g.
-    # direct SQL, as the corrupt-row regression tests do) is still detected
-    # instead of being masked by a stale-but-valid cache entry. This still
-    # avoids the expensive part of a full read — json.loads + pydantic
-    # model_validate of ~100 nested SearchResult models — by comparing raw
-    # text; only a mismatch falls through to a real parse.
-    # ------------------------------------------------------------------
-    def _cache_put_session(self, user_id: int, session: SearchSession, session_json: str) -> None:
-        """Store a deep copy of ``session`` in the cache (write-through).
-
-        Must be called while holding ``_write_lock`` (or before any other
-        writer could observe a torn state) so the cache never briefly
-        disagrees with what's about to be committed. Evicts the oldest entry
-        once the cap is exceeded.
-        """
-        self._session_cache[user_id] = (
-            session.model_copy(deep=True),
-            session_json,
-            time.monotonic(),
-        )
-        self._session_cache.move_to_end(user_id)
-        while len(self._session_cache) > self._session_cache_cap:
-            self._session_cache.popitem(last=False)
-
-    async def _cache_get_session(self, user_id: int) -> Optional[SearchSession]:
-        """Return a deep copy of the cached session, or None on miss/expiry/staleness."""
-        entry = self._session_cache.get(user_id)
-        if entry is None:
-            return None
-        session, cached_json, cached_at = entry
-        if time.monotonic() - cached_at > self._session_cache_ttl:
-            del self._session_cache[user_id]
-            return None
-
-        # Cheap freshness check: compare the raw stored text against what we
-        # cached. This transfers the JSON blob but skips the expensive part
-        # (json.loads + pydantic model_validate), which is what PERF-04
-        # actually targets.
-        async with self.conn.execute(
-            "SELECT session_data FROM sessions WHERE user_id = ?", (user_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-        if row is None or row["session_data"] != cached_json:
-            del self._session_cache[user_id]
-            return None
-
-        self._session_cache.move_to_end(user_id)
-        return session.model_copy(deep=True)
-
-    def _cache_invalidate_session(self, user_id: int) -> None:
-        """Drop a user's cached session, if present."""
-        self._session_cache.pop(user_id, None)
 
     async def connect(self) -> None:
         """Connect to the database and initialize tables."""
@@ -189,6 +111,7 @@ class Database:
 
             await self._create_tables()
             await self._run_migrations()
+            self._remove_stale_backup_tmp()
             logger.info("Database connected", path=self.db_path)
 
     async def close(self) -> None:
@@ -331,6 +254,8 @@ class Database:
             await self._migrate_to_v6()
         if version < 7:
             await self._migrate_to_v7()
+        if version < 8:
+            await self._migrate_to_v8()
 
     async def _migrate_to_v1(self) -> None:
         """
@@ -622,6 +547,27 @@ class Database:
         await self.conn.commit()
         await self._set_schema_version(7)
 
+    async def _migrate_to_v8(self) -> None:
+        """LOGIC-20 (аудит 2026-10-30): батч, объявленный с незавершёнными треками.
+
+        ``partial_announced = 1``: альбому ушла частичная сводка, и он получит ещё
+        одну, итоговую, когда очередь дойдёт до нуля. Только так его можно отличить
+        от батча, засеянного молча при первом запуске: у обоих стоит ``notified_at``.
+        Умолчание 0 значит, что ничего объявленного до этой версии итога не получит:
+        первый старт на живой базе не разошлёт сводки по старым застрявшим альбомам.
+
+        ALTER с константным умолчанием таблицу не переписывает. Идемпотентна:
+        колонку добавляет, только если её нет (сбой между ALTER и записью версии).
+        """
+        async with self.conn.execute("PRAGMA table_info(music_batch)") as cursor:
+            cols = {row[1] for row in await cursor.fetchall()}
+        if "partial_announced" not in cols:
+            await self.conn.execute(
+                "ALTER TABLE music_batch ADD COLUMN partial_announced INTEGER NOT NULL DEFAULT 0"
+            )
+            await self.conn.commit()
+        await self._set_schema_version(8)
+
     # ------------------------------------------------------------------
     # Living status messages (schema v7)
     # ------------------------------------------------------------------
@@ -766,11 +712,11 @@ class Database:
                 await self.conn.rollback()
                 raise
 
-    async def music_pending_batches(self) -> list[dict[str, Any]]:
-        """Batches not yet announced, each with its ``(track_key, state)`` rows."""
+    async def _music_batches(self, where: str) -> list[dict[str, Any]]:
+        """Батчи по условию, каждый со своими строками ``(track_key, state)``."""
         async with self.conn.execute(
             "SELECT batch_key, title, first_seen_at, last_change_at FROM music_batch "
-            "WHERE notified_at IS NULL ORDER BY first_seen_at"
+            f"WHERE {where} ORDER BY first_seen_at"
         ) as cursor:
             batches = [dict(row) for row in await cursor.fetchall()]
         for batch in batches:
@@ -782,14 +728,26 @@ class Database:
             batch["last_change_at"] = datetime.fromisoformat(batch["last_change_at"])
         return batches
 
-    async def music_mark_notified(self, batch_keys: list[str], now: datetime) -> None:
+    async def music_pending_batches(self) -> list[dict[str, Any]]:
+        """Batches not yet announced, each with its ``(track_key, state)`` rows."""
+        return await self._music_batches("notified_at IS NULL")
+
+    async def music_partial_batches(self) -> list[dict[str, Any]]:
+        """LOGIC-20: батчи, которым ушла частичная сводка и ещё должна уйти итоговая."""
+        return await self._music_batches("notified_at IS NOT NULL AND partial_announced = 1")
+
+    async def music_mark_notified(
+        self, batch_keys: list[str], now: datetime, *, partial: Iterable[str] = (),
+    ) -> None:
+        """Отметить батчи объявленными. Ключи из ``partial`` ждут итоговой сводки."""
         if not batch_keys:
             return
         stamp = now.isoformat()
+        waiting_final = set(partial)
         async with self._write_lock:
             await self.conn.executemany(
-                "UPDATE music_batch SET notified_at = ? WHERE batch_key = ?",
-                [(stamp, key) for key in batch_keys],
+                "UPDATE music_batch SET notified_at = ?, partial_announced = ? WHERE batch_key = ?",
+                [(stamp, int(key in waiting_final), key) for key in batch_keys],
             )
             await self.conn.commit()
 
@@ -818,28 +776,37 @@ class Database:
             row = await cursor.fetchone()
         return int(row[0]) if row else 0
 
-    async def cleanup_music_notify(self, days: int = 7) -> int:
+    async def cleanup_music_notify(self, days: int = 7, tombstone_days: int = 90) -> int:
         """Drop batches announced more than ``days`` ago, with their transfers.
 
         Only batches whose transfers are all finished (state ``Completed, …``)
         are dropped: a batch still holding a queued/in-progress transfer is
         kept as a tombstone, or the watcher would see that transfer as new
         and announce the same stuck queue again every week.
+
+        DB-02 (аудит 2026-10-30): надгробие живёт ``tombstone_days`` с последнего
+        изменения и объявления, иначе ``music_transfer`` растёт без предела, а эта
+        таблица читается целиком на каждом опросе. Очередь, которую slskd держит
+        дольше, может быть объявлена заново: одно сообщение раз в 90 дней.
         """
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(days=days)).isoformat()
+        tombstone_cutoff = (now - timedelta(days=tombstone_days)).isoformat()
         stale = (
             "SELECT b.batch_key FROM music_batch b WHERE b.notified_at IS NOT NULL "
-            "AND b.notified_at < ? AND NOT EXISTS (SELECT 1 FROM music_transfer t "
-            "WHERE t.batch_key = b.batch_key AND t.state NOT LIKE 'Completed%')"
+            "AND b.notified_at < ? AND (NOT EXISTS (SELECT 1 FROM music_transfer t "
+            "WHERE t.batch_key = b.batch_key AND t.state NOT LIKE 'Completed%') "
+            "OR (b.notified_at < ? AND b.last_change_at < ?))"
         )
+        params = (cutoff, tombstone_cutoff, tombstone_cutoff)
         async with self._write_lock:
             await self.conn.execute("BEGIN")
             try:
                 await self.conn.execute(
-                    f"DELETE FROM music_transfer WHERE batch_key IN ({stale})", (cutoff,)
+                    f"DELETE FROM music_transfer WHERE batch_key IN ({stale})", params
                 )
                 cursor = await self.conn.execute(
-                    f"DELETE FROM music_batch WHERE batch_key IN ({stale})", (cutoff,)
+                    f"DELETE FROM music_batch WHERE batch_key IN ({stale})", params
                 )
                 await self.conn.commit()
             except Exception:
@@ -966,7 +933,6 @@ class Database:
             await self.conn.execute("DELETE FROM allowed_users WHERE tg_id = ?", (tg_id,))
             await self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (tg_id,))
             await self.conn.commit()
-            self._cache_invalidate_session(tg_id)  # PERF-04
 
     async def is_allowed_in_db(self, tg_id: int) -> bool:
         """Whether a user was granted access at runtime (DB allowlist)."""
@@ -1019,9 +985,6 @@ class Database:
                 (user_id, session_json, now, now),
             )
             await self.conn.commit()
-            # PERF-04: write-through — keep the cache in sync with what was
-            # just committed, under the same lock that serializes the write.
-            self._cache_put_session(user_id, session, session_json)
         logger.debug("Session saved", user_id=user_id, results_count=len(session.results))
 
     async def update_session(self, user_id: int, session: SearchSession) -> bool:
@@ -1048,28 +1011,16 @@ class Database:
                 (session_json, now, user_id),
             )
             await self.conn.commit()
-            updated = cursor.rowcount > 0
-            if updated:
-                # PERF-04: write-through, but only if the row still existed —
-                # a rowcount of 0 means a concurrent delete/cancel already
-                # removed the session (RACE-04); don't resurrect it in cache.
-                self._cache_put_session(user_id, session, session_json)
-            return updated
+            return cursor.rowcount > 0
 
     async def get_session(self, user_id: int) -> Optional[SearchSession]:
         """Get user session.
 
-        PERF-04: served from the in-process cache when possible. A cache hit
-        still does one cheap SELECT to confirm the stored text still matches
-        what was cached — skipping the expensive part (json.loads + pydantic
-        validation of the full payload), which is what this cache targets.
-        Falls back to a normal full read (and (re)populates the cache) on a
-        miss/staleness.
+        PERF-04, BUG-08 (аудит 2026-10-30): кэша нет. Глубокая копия модели на
+        каждое попадание обходилась дороже разбора JSON, а `await` между чтением
+        записи и `del` давал KeyError при двойном тапе. Каждый вызов возвращает
+        новый объект; цикл чтение-правка-запись защищает `session_lock`, как и раньше.
         """
-        cached = await self._cache_get_session(user_id)
-        if cached is not None:
-            return cached
-
         row_data = None
         async with self.conn.execute(
             "SELECT session_data FROM sessions WHERE user_id = ?", (user_id,)
@@ -1089,8 +1040,6 @@ class Database:
                     results_count=len(session.results),
                     has_selected=session.selected_result is not None,
                 )
-                # PERF-04: populate the cache so subsequent clicks hit it.
-                self._cache_put_session(user_id, session, row_data)
                 return session
             except Exception as e:
                 logger.error(
@@ -1110,7 +1059,6 @@ class Database:
         async with self._write_lock:
             await self.conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
             await self.conn.commit()
-            self._cache_invalidate_session(user_id)  # PERF-04
 
     # Action log methods
     async def log_action(self, action: ActionLog) -> int:
@@ -1215,11 +1163,6 @@ class Database:
                 "DELETE FROM sessions WHERE updated_at < ?", (cutoff,)
             )
             await self.conn.commit()
-            # PERF-04: the DELETE is a bulk sweep with no per-user_id list, so
-            # rather than tracking which rows it hit, just drop the whole
-            # cache — cheap (<=50 entries) and correctness-preserving; a
-            # freshly-cleaned entry gets reloaded from SQLite on next access.
-            self._session_cache.clear()
             return cursor.rowcount
 
     async def cleanup_old_actions(self, days: int = 90) -> int:
@@ -1284,9 +1227,10 @@ class Database:
         - Deletes old sessions (24h)/searches (7d)/actions (90d).
         - ``PRAGMA optimize`` — cheap, SQLite-recommended after bulk deletes;
           updates query planner stats without a full ANALYZE.
-        - When ``backup=True``: ``VACUUM INTO`` an atomic, defragmented copy
-          under ``<db_dir>/backup/bot-YYYYMMDD.db`` (safe to run against a live
-          WAL database). Skipped if today's backup already exists (idempotent
+        - When ``backup=True``: ``VACUUM INTO`` a defragmented copy under
+          ``<db_dir>/backup/bot-YYYYMMDD.db``, written to ``.tmp`` and moved into
+          place (safe to run against a live WAL database; DB-01: an interrupted
+          run can't pass for a backup). Skipped if today's backup already exists (idempotent
           — safe to call more than once on the same day). Keeps only the
           ``_BACKUP_KEEP`` most recent backup files, deleting older ones.
 
@@ -1327,18 +1271,35 @@ class Database:
         logger.info("run_maintenance_completed", **result)
         return result
 
+    def _backup_dir(self) -> Path:
+        return Path(os.path.dirname(self.db_path) or ".") / "backup"
+
+    def _remove_stale_backup_tmp(self) -> None:
+        """DB-01: недописанные копии после обрыва питания или полной карты. Не бэкапы."""
+        if self.db_path == ":memory:":
+            return
+        for leftover in self._backup_dir().glob("bot-*.db.tmp"):
+            try:
+                leftover.unlink()
+                logger.warning("Removed interrupted backup", path=str(leftover))
+            except OSError as e:
+                logger.warning("Failed to remove interrupted backup", path=str(leftover), error=str(e))
+
     async def _backup(self, _keep: int = 3) -> int:
         """VACUUM INTO today's backup file (if not already present) + rotate.
 
         Returns 1 if a new backup file was created this call, 0 if today's
         backup already existed (no-op, still counts rotation).
+
+        DB-01: сначала ``bot-YYYYMMDD.db.tmp``, затем ``os.replace``. Файл без
+        ``.tmp`` появляется только целиком, поэтому проверка ``exists()`` ему верит,
+        а маска ротации ``bot-*.db`` недописанных копий не видит.
         """
         if self.db_path == ":memory:":
             # Nothing to back up for an in-memory database (tests).
             return 0
 
-        db_dir = os.path.dirname(self.db_path) or "."
-        backup_dir = Path(db_dir) / "backup"
+        backup_dir = self._backup_dir()
         backup_dir.mkdir(parents=True, exist_ok=True)
 
         today = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -1348,17 +1309,26 @@ class Database:
         if backup_path.exists():
             logger.debug("Backup for today already exists, skipping", path=str(backup_path))
         else:
-            # VACUUM INTO requires the target not to exist and works against a
-            # live WAL database without blocking writers for long.
+            # VACUUM INTO не пишет поверх существующего файла: прошлая неудача в этом
+            # же процессе иначе ломала бы все следующие попытки.
+            self._remove_stale_backup_tmp()
+            tmp_path = backup_dir / f"bot-{today}.db.tmp"
+            # VACUUM INTO works against a live WAL database without blocking
+            # writers for long.
             #
             # SEC-R6-02: VACUUM INTO does not accept a bound parameter, so the
             # path must be inlined — but a bare f-string breaks (and would let
             # the tail of the path be read as SQL) as soon as the resolved
             # DATABASE_PATH contains a single quote. Escape it the SQL way by
             # doubling every quote inside the literal.
-            target = backup_path.as_posix().replace("'", "''")
-            async with self._write_lock:
-                await self.conn.execute(f"VACUUM INTO '{target}'")
+            target = tmp_path.as_posix().replace("'", "''")
+            try:
+                async with self._write_lock:
+                    await self.conn.execute(f"VACUUM INTO '{target}'")
+                os.replace(tmp_path, backup_path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
             created = 1
             logger.info("Database backup created", path=str(backup_path))
 
