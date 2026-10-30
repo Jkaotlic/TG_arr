@@ -6,10 +6,16 @@ Polling настоящий: порядок `emit_shutdown` и нашей убо�
 """
 
 import asyncio
+import os
 import signal
+import subprocess
+import sys
+import threading
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from aiogram import Dispatcher, methods
 from aiogram.types import Update
 
@@ -152,3 +158,142 @@ async def test_polling_asks_only_for_handled_updates_and_keeps_queued_ones(monke
     assert polls
     assert all(call.method.allowed_updates == ["message", "callback_query"] for call in polls)
     assert seen["tg"].violations == []
+
+
+async def _main_failing_at_startup(monkeypatch, make_e2e_stack) -> list[Database]:
+    """Подготовить `main()` к старту с подменой только побочек процесса."""
+    await make_e2e_stack()
+    monkeypatch.setattr(bot_main, "_liveness_watchdog", lambda: None)
+    monkeypatch.setattr(bot_main, "setup_logging", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bot_main, "faulthandler", MagicMock())
+    real_connect = Database.connect
+    opened: list[Database] = []
+
+    async def connect_db(self: Database) -> None:
+        opened.append(self)
+        await real_connect(self)
+
+    monkeypatch.setattr(Database, "connect", connect_db)
+    return opened
+
+
+def _non_daemon_threads() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if not t.daemon and t is not threading.main_thread()]
+
+
+async def _assert_no_thread_keeps_the_process() -> None:
+    for _ in range(100):
+        if not _non_daemon_threads():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"процесс не выйдет, живы потоки: {_non_daemon_threads()}")
+
+
+async def test_failure_after_db_connect_closes_the_db_and_propagates(monkeypatch, make_e2e_stack):
+    opened = await _main_failing_at_startup(monkeypatch, make_e2e_stack)
+
+    async def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("сборка живых сообщений упала")
+
+    monkeypatch.setattr(bot_main, "_build_live_status", boom)
+
+    try:
+        with pytest.raises(RuntimeError, match="сборка живых сообщений"):
+            await asyncio.wait_for(bot_main.main(), timeout=10)
+        assert opened and opened[0]._connection is None
+        await _assert_no_thread_keeps_the_process()
+    finally:
+        for database in opened:
+            await database.close()
+
+
+def _bot_with_fake_session(real_bot: Any) -> Any:
+    def make_bot(*args: Any, **kwargs: Any) -> Any:
+        return real_bot(*args, session=FakeTelegram(), **kwargs)
+
+    return make_bot
+
+
+async def test_failure_in_on_startup_stops_tasks_and_closes_everything(monkeypatch, make_e2e_stack):
+    """aiogram зовёт startup вне своего try: при сбое shutdown не срабатывает."""
+    opened = await _main_failing_at_startup(monkeypatch, make_e2e_stack)
+    cancelled: list[str] = []
+
+    def recording_loop(name: str):
+        async def loop(*args: Any, **kwargs: Any) -> None:
+            try:
+                await asyncio.sleep(3600)
+            finally:
+                cancelled.append(name)
+
+        return loop
+
+    for name in ("_periodic_cleanup", "_health_watch", "_library_watch", "_live_status_watch", "_digest_watch"):
+        monkeypatch.setattr(bot_main, name, recording_loop(name))
+
+    async def boom(*args: Any, **kwargs: Any) -> None:
+        await asyncio.sleep(0)  # циклы успевают стартовать
+        raise RuntimeError("startup упал")
+
+    monkeypatch.setattr(bot_main, "on_startup", boom)
+    monkeypatch.setattr(bot_main, "Bot", _bot_with_fake_session(bot_main.Bot))
+
+    try:
+        with pytest.raises(RuntimeError, match="startup упал"):
+            await asyncio.wait_for(bot_main.main(), timeout=10)
+        assert len(cancelled) == 5
+        assert opened and opened[0]._connection is None
+        await _assert_no_thread_keeps_the_process()
+    finally:
+        for database in opened:
+            await database.close()
+
+
+async def test_failed_migration_closes_the_connection(monkeypatch, make_e2e_stack):
+    opened = await _main_failing_at_startup(monkeypatch, make_e2e_stack)
+
+    async def boom(self: Database) -> None:
+        raise RuntimeError("миграция упала")
+
+    monkeypatch.setattr(Database, "_run_migrations", boom)
+
+    try:
+        with pytest.raises(RuntimeError, match="миграция упала"):
+            await asyncio.wait_for(bot_main.main(), timeout=10)
+        assert opened and opened[0]._connection is None
+        await _assert_no_thread_keeps_the_process()
+    finally:
+        for database in opened:
+            await database.close()
+
+
+def test_process_exits_with_an_error_when_startup_fails(tmp_path):
+    """Сам процесс, а не корутина: контейнер должен перезапуститься, а не висеть."""
+    script = "\n".join([
+        "import asyncio",
+        "import bot.main as m",
+        "async def boom(*a, **k):",
+        "    raise RuntimeError(chr(33))",
+        "m._build_live_status = boom",
+        "asyncio.run(m.main())",
+    ])
+    inherited = ("PATH", "SYSTEMROOT", "TEMP", "TMP")
+    env = {
+        **{k: v for k, v in os.environ.items() if k.upper() in inherited},
+        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+        "TELEGRAM_BOT_TOKEN": "123456:e2e-test-token",
+        "ADMIN_TG_IDS": "1",
+        "DATABASE_PATH": str(tmp_path / "bot.db"),
+        "RADARR_URL": "http://127.0.0.1:9",
+        "RADARR_API_KEY": "x",
+        "SONARR_URL": "http://127.0.0.1:9",
+        "SONARR_API_KEY": "x",
+        "PROWLARR_URL": "http://127.0.0.1:9",
+        "PROWLARR_API_KEY": "x",
+        "NOTIFY_DOWNLOAD_COMPLETE": "false",
+        "DEEZER_ENABLED": "false",
+    }
+    done = subprocess.run(
+        [sys.executable, "-c", script], cwd=tmp_path, env=env, capture_output=True, timeout=30,
+    )
+    assert done.returncode == 1, done.stderr.decode(errors="replace")[-2000:]

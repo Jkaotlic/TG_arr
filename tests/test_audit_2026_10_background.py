@@ -259,3 +259,416 @@ async def test_old_notification_but_recent_change_keeps_the_batch(db):
 
     assert await db.cleanup_music_notify() == 0
     assert "album:a-t" in await db.music_transfer_states()
+
+
+# ---------------------------------------------------------------- LOGIC-08
+def _server_error(message: str = "Bad Gateway"):
+    from aiogram.exceptions import TelegramServerError
+    from aiogram.methods import SendMessage
+
+    return TelegramServerError(SendMessage(chat_id=1, text="x"), message)
+
+
+def _network_error():
+    from aiogram.exceptions import TelegramNetworkError
+    from aiogram.methods import SendMessage
+
+    return TelegramNetworkError(SendMessage(chat_id=1, text="x"), "Connection reset")
+
+
+def _forbidden():
+    from aiogram.exceptions import TelegramForbiddenError
+    from aiogram.methods import SendMessage
+
+    return TelegramForbiddenError(SendMessage(chat_id=1, text="x"), "bot was blocked")
+
+
+class _RecordedSleep:
+    """Подмена asyncio.sleep в bot.main: паузы пишутся, времени не занимают."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import bot.main as main
+
+        self.calls: list[float] = []
+        self._real = asyncio.sleep
+        monkeypatch.setattr(main.asyncio, "sleep", self)
+        monkeypatch.setattr(main, "_last_sent_at", {})
+
+    async def __call__(self, seconds: float) -> None:
+        self.calls.append(seconds)
+        await self._real(0)
+
+
+@pytest.mark.parametrize("make_error", [_server_error, _network_error])
+async def test_send_telegram_retries_transient_errors(monkeypatch, make_error):
+    from unittest.mock import AsyncMock
+
+    from bot import main
+
+    sleep = _RecordedSleep(monkeypatch)
+    bot = AsyncMock()
+    bot.send_message.side_effect = [make_error(), make_error(), "delivered"]
+
+    assert await main.send_telegram(bot, 1, "text") == "delivered"
+    assert bot.send_message.await_count == 3
+    assert sleep.calls == [2, 5]
+
+
+@pytest.mark.parametrize("make_error", [_server_error, _network_error])
+async def test_send_telegram_gives_up_after_three_attempts_and_says_why(monkeypatch, make_error):
+    from unittest.mock import AsyncMock
+
+    from structlog.testing import capture_logs
+
+    from bot import main
+
+    sleep = _RecordedSleep(monkeypatch)
+    bot = AsyncMock()
+    error = make_error()
+    bot.send_message.side_effect = error
+
+    with capture_logs() as logs, pytest.raises(type(error)):
+        await main.send_telegram(bot, 1, "text")
+
+    assert bot.send_message.await_count == 3
+    assert sleep.calls == [2, 5]  # потолок добавленной паузы: 7 с на сообщение
+    failures = [e for e in logs if e["event"] == "telegram_send_failed"]
+    assert len(failures) == 1
+    assert failures[0]["log_level"] == "warning"
+    assert failures[0]["error_type"] == type(error).__name__
+
+
+async def test_send_telegram_does_not_retry_a_final_refusal(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from aiogram.exceptions import TelegramForbiddenError
+
+    from bot import main
+
+    sleep = _RecordedSleep(monkeypatch)
+    bot = AsyncMock()
+    bot.send_message.side_effect = _forbidden()
+
+    with pytest.raises(TelegramForbiddenError):
+        await main.send_telegram(bot, 1, "text")
+    assert bot.send_message.await_count == 1
+    assert sleep.calls == []
+
+
+async def test_send_telegram_keeps_its_retry_after_handling(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from aiogram.exceptions import TelegramRetryAfter
+    from aiogram.methods import SendMessage
+
+    from bot import main
+
+    sleep = _RecordedSleep(monkeypatch)
+    bot = AsyncMock()
+    bot.send_message.side_effect = [
+        TelegramRetryAfter(SendMessage(chat_id=1, text="x"), "flood", retry_after=11),
+        "delivered",
+    ]
+
+    assert await main.send_telegram(bot, 1, "text") == "delivered"
+    assert sleep.calls == [11]
+
+
+# ---------------------------------------------------------------- OBS-02
+class _HealthClient:
+    def __init__(self) -> None:
+        self.up = True
+
+    async def check_connection(self):
+        return (self.up, "1.0", 1) if self.up else (False, None, None)
+
+
+class _Admins:
+    """Подмена `_notify`: сколько админов взяли сообщение, задаёт тест."""
+
+    def __init__(self) -> None:
+        self.delivered = 1
+        self.texts: list[str] = []
+
+    async def __call__(self, text: str) -> int:
+        self.texts.append(text)
+        return self.delivered
+
+
+def _monitor(client, admins, db=None):
+    from bot.services.health_monitor import HealthMonitor
+
+    return HealthMonitor({"Radarr": client}, notify=admins, db=db)
+
+
+async def test_undelivered_alert_stays_pending_and_is_retried(db):
+    from structlog.testing import capture_logs
+
+    client, admins = _HealthClient(), _Admins()
+    monitor = _monitor(client, admins, db)
+    client.up = False
+    admins.delivered = 0
+
+    with capture_logs() as logs:
+        await monitor.evaluate()  # первый сбой
+        await monitor.evaluate()  # подтверждён, но Telegram лежит
+
+    assert len(admins.texts) == 1
+    assert "health_alert_sent" not in [e["event"] for e in logs]
+    assert "health_alert_undelivered" in [e["event"] for e in logs]
+    assert monitor._open == {}
+    assert monitor.needs_recheck
+    assert await db.kv_get("health_open") is None
+
+    admins.delivered = 1
+    with capture_logs() as logs:
+        await monitor.evaluate()
+    assert len(admins.texts) == 2
+    assert "недоступен" in admins.texts[-1]
+    assert "health_alert_sent" in [e["event"] for e in logs]
+    assert set(monitor._open) == {"service:Radarr"}
+    assert not monitor.needs_recheck
+
+    await monitor.evaluate()  # объявлено: дальше молчание
+    assert len(admins.texts) == 2
+
+
+async def test_undelivered_recovery_is_retried_too(db):
+    client, admins = _HealthClient(), _Admins()
+    monitor = _monitor(client, admins, db)
+    client.up = False
+    await monitor.evaluate()
+    await monitor.evaluate()
+
+    client.up = True
+    admins.delivered = 0
+    await monitor.evaluate()
+    assert set(monitor._open) == {"service:Radarr"}
+
+    admins.delivered = 1
+    await monitor.evaluate()
+    assert "снова доступен" in admins.texts[-1]
+    assert monitor._open == {}
+    assert len([t for t in admins.texts if "снова доступен" in t]) == 2
+
+
+async def test_problem_gone_before_delivery_is_never_announced_as_recovered(db):
+    client, admins = _HealthClient(), _Admins()
+    monitor = _monitor(client, admins, db)
+    client.up = False
+    admins.delivered = 0
+    await monitor.evaluate()
+    await monitor.evaluate()
+
+    client.up = True
+    admins.delivered = 1
+    admins.texts.clear()
+    await monitor.evaluate()
+
+    assert admins.texts == []
+    assert monitor._open == {} and monitor._pending == {}
+
+
+async def test_open_problem_survives_restart_in_the_stored_shape(db):
+    """Форма `health_open` как у живого бота: {key: {text, resolved_text}}."""
+    import json
+
+    await db.kv_set(
+        "health_open",
+        json.dumps({"service:Radarr": {"text": "🔌 Radarr недоступен", "resolved_text": "🔌 Radarr снова доступен"}}),
+    )
+    client, admins = _HealthClient(), _Admins()
+    client.up = False
+    monitor = _monitor(client, admins, db)
+
+    await monitor.evaluate()
+    assert admins.texts == []  # уже объявлено до рестарта
+
+    client.up = True
+    await monitor.evaluate()
+    assert len(admins.texts) == 1 and "снова доступен" in admins.texts[0]
+    assert json.loads(await db.kv_get("health_open")) == {}
+
+
+async def test_new_alert_is_stored_in_the_same_shape(db):
+    import json
+
+    client, admins = _HealthClient(), _Admins()
+    monitor = _monitor(client, admins, db)
+    client.up = False
+    await monitor.evaluate()
+    await monitor.evaluate()
+
+    stored = json.loads(await db.kv_get("health_open"))
+    assert stored == {
+        "service:Radarr": {"text": "🔌 Radarr недоступен", "resolved_text": "🔌 Radarr снова доступен"},
+    }
+
+
+async def test_notify_raising_counts_as_not_delivered(db):
+    client = _HealthClient()
+
+    async def broken(_text: str) -> int:
+        raise RuntimeError("boom")
+
+    monitor = _monitor(client, broken, db)
+    client.up = False
+    await monitor.evaluate()
+    await monitor.evaluate()
+    assert monitor._open == {} and monitor.needs_recheck
+
+
+async def test_notify_admins_counts_deliveries(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot import main
+
+    _RecordedSleep(monkeypatch)
+
+    async def send_message(chat_id, *_args, **_kwargs):
+        if chat_id == 1:
+            raise _forbidden()
+        return "ok"
+
+    bot = AsyncMock()
+    bot.send_message = send_message
+
+    assert await main.notify_admins(bot, [1, 2], "text", MagicMock()) == 1
+    assert await main.notify_admins(bot, [1], "text", MagicMock()) == 0
+
+
+# ---------------------------------------------------------------- DB-03
+async def test_first_maintenance_cycle_runs_a_minute_after_start(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot import main
+
+    sleeps: list[float] = []
+    fake_db = MagicMock()
+    fake_db.run_maintenance = AsyncMock(return_value={})
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise asyncio.CancelledError
+        assert fake_db.run_maintenance.await_count == 0
+
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    await main._periodic_cleanup(fake_db, MagicMock())
+
+    assert sleeps == [60, 6 * 3600]
+    fake_db.run_maintenance.assert_awaited_once_with(backup=True)
+
+
+# ---------------------------------------------------------------- мёртвые фоновые задачи
+async def test_dead_background_task_is_logged_at_error():
+    from structlog.testing import capture_logs
+
+    from bot import main
+
+    async def dies() -> None:
+        raise RuntimeError("упал цикл")
+
+    with capture_logs() as logs:
+        task = main._spawn_background(dies(), "library_watch")
+        await asyncio.wait([task])
+        await asyncio.sleep(0)
+
+    died = [e for e in logs if e["event"] == "background_task_died"]
+    assert len(died) == 1
+    assert died[0]["log_level"] == "error"
+    assert died[0]["task"] == "library_watch"
+    assert "упал цикл" in died[0]["error"]
+
+
+async def test_background_loop_returning_on_its_own_is_logged_at_error():
+    from structlog.testing import capture_logs
+
+    from bot import main
+
+    async def quits() -> None:
+        return None
+
+    with capture_logs() as logs:
+        task = main._spawn_background(quits(), "digest")
+        await task
+        await asyncio.sleep(0)
+
+    assert [e["task"] for e in logs if e["event"] == "background_task_died"] == ["digest"]
+
+
+async def test_cancelled_background_task_is_silent_even_if_it_swallows_the_cancel():
+    """Наши циклы ловят CancelledError и выходят штатно: это не смерть."""
+    from structlog.testing import capture_logs
+
+    from bot import main
+
+    async def swallows() -> None:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            return
+
+    async def plain() -> None:
+        await asyncio.sleep(60)
+
+    with capture_logs() as logs:
+        tasks = [main._spawn_background(swallows(), "a"), main._spawn_background(plain(), "b")]
+        await asyncio.sleep(0)
+        await main._cancel_background_tasks(tasks)
+        await asyncio.sleep(0)
+
+    assert [e for e in logs if e["event"] == "background_task_died"] == []
+
+
+async def test_cancel_reports_a_task_that_had_already_died():
+    """Исключение уже упавшей задачи не пропадает молча при остановке."""
+    from structlog.testing import capture_logs
+
+    from bot import main
+
+    async def dies() -> None:
+        raise RuntimeError("давно упал")
+
+    with capture_logs() as logs:
+        task = main._spawn_background(dies(), "health_watch")
+        await asyncio.wait([task])
+        await main._cancel_background_tasks([task])
+
+    assert any(e["event"] == "background_task_died" and "давно упал" in e["error"] for e in logs)
+
+
+@pytest.mark.parametrize("loop_name", ["_health_watch", "_library_watch", "_digest_watch"])
+async def test_failed_setup_does_not_kill_the_loop(monkeypatch, loop_name):
+    """Сбой подготовки цикла повторяется на следующем проходе, а не убивает задачу."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bot import main
+    from bot.clients import registry
+
+    get_radarr = AsyncMock(side_effect=[RuntimeError("ещё не готов"), MagicMock()])
+    monkeypatch.setattr(registry, "get_radarr", get_radarr)
+    for name in ("get_sonarr", "get_prowlarr", "get_lidarr", "get_slskd"):
+        monkeypatch.setattr(registry, name, AsyncMock(return_value=None))
+    settings = MagicMock(
+        timezone="UTC", digest_hour=9, qbittorrent_enabled=False, notify_check_interval=60,
+        music_notify_settle_seconds=300, music_notify_stall_seconds=3600,
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+
+    sleeps = 0
+
+    async def fake_sleep(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    fake_db = MagicMock()
+    fake_db.kv_get = AsyncMock(return_value=None)
+
+    args = (MagicMock(), [], MagicMock(), fake_db) if loop_name == "_health_watch" else (MagicMock(), fake_db, MagicMock())
+    await getattr(main, loop_name)(*args)
+
+    assert get_radarr.await_count == 2

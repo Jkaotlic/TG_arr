@@ -20,7 +20,9 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import (
     TelegramBadRequest,
     TelegramForbiddenError,
+    TelegramNetworkError,
     TelegramRetryAfter,
+    TelegramServerError,
 )
 from aiogram.types import ErrorEvent
 
@@ -30,7 +32,12 @@ from bot.clients.registry import get_qbittorrent
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers import setup_routers
-from bot.logging_utils import TransientPollingFilter, describe_error, process_rss_mb
+from bot.logging_utils import (
+    TransientPollingFilter,
+    describe_error,
+    log_background_task_end,
+    process_rss_mb,
+)
 from bot.middleware.auth import (
     AuthMiddleware,
     LoggingMiddleware,
@@ -415,6 +422,18 @@ _HEALTH_FIRST_CHECK_S = 60
 _HEALTH_RECHECK_S = 120
 
 
+async def notify_admins(bot: Bot, admin_ids: Iterable[int], text: str, logger) -> int:
+    """Разослать алерт админам и вернуть, сколько его получили (OBS-02)."""
+    delivered = 0
+    for admin_id in admin_ids:
+        try:
+            await send_telegram(bot, admin_id, text)
+            delivered += 1
+        except Exception as e:
+            logger.warning("health_alert_send_failed", user_id=admin_id, error=describe_error(e))
+    return delivered
+
+
 async def _health_watch(bot: Bot, admin_ids: list, logger, db: Optional[Database] = None) -> None:
     """Poll the four *arr services' health and alert admins when the stack
     degrades.
@@ -436,25 +455,25 @@ async def _health_watch(bot: Bot, admin_ids: list, logger, db: Optional[Database
 
     interval = 15 * 60
 
-    async def _notify(text: str) -> None:
-        for admin_id in admin_ids:
-            try:
-                await send_telegram(bot, admin_id, text)
-            except Exception as e:
-                logger.warning("health_alert_send_failed", user_id=admin_id, error=describe_error(e))
+    async def _notify(text: str) -> int:
+        return await notify_admins(bot, admin_ids, text, logger)
 
-    clients = {
-        "Radarr": await get_radarr(),
-        "Sonarr": await get_sonarr(),
-        "Prowlarr": await get_prowlarr(),
-        "Lidarr": await get_lidarr(),
-    }
-    # Lidarr is the one optional service among the four (settings.lidarr_enabled);
-    # get_lidarr() answers None when it is not configured, and HealthMonitor
-    # must not be handed a None "client" to poll.
-    clients = {name: client for name, client in clients.items() if client is not None}
+    async def _build_monitor() -> HealthMonitor:
+        clients = {
+            "Radarr": await get_radarr(),
+            "Sonarr": await get_sonarr(),
+            "Prowlarr": await get_prowlarr(),
+            "Lidarr": await get_lidarr(),
+        }
+        # Lidarr is the one optional service among the four (settings.lidarr_enabled);
+        # get_lidarr() answers None when it is not configured, and HealthMonitor
+        # must not be handed a None "client" to poll.
+        clients = {name: client for name, client in clients.items() if client is not None}
+        # OBS-02: без админов некому доставлять, и проблема не должна вечно ждать
+        # доставки, перепроверяясь каждые две минуты.
+        return HealthMonitor(clients, notify=_notify if admin_ids else None, db=db)
 
-    monitor = HealthMonitor(clients, notify=_notify, db=db)
+    monitor: Optional[HealthMonitor] = None
     structlog.contextvars.bind_contextvars(component="health_watch")
     # NOTIF-09 (audit 2026-09-23): first check a minute after start (not 15),
     # and a quick re-check 2 minutes after a first failure so an outage is
@@ -464,6 +483,9 @@ async def _health_watch(bot: Bot, admin_ids: list, logger, db: Optional[Database
         while True:
             try:
                 await asyncio.sleep(delay)
+                # Сборка внутри try: её сбой повторяется, а не убивает задачу молча.
+                if monitor is None:
+                    monitor = await _build_monitor()
                 with background_calls():
                     await monitor.evaluate()
                 delay = _HEALTH_RECHECK_S if monitor.needs_recheck else interval
@@ -487,6 +509,36 @@ _chat_send_locks: dict[int, asyncio.Lock] = {}
 #: RetryAfter (flood control) instead of delivery.
 _SAME_CHAT_GAP_S = 1.0
 
+#: LOGIC-08: паузы между попытками при 5xx и сетевой ошибке (всего три попытки).
+_SEND_RETRY_PAUSES_S = (2, 5)
+
+
+async def _send_with_retries(bot: Bot, chat_id: int, text: str, reply_markup):
+    """LOGIC-08: ночные 502 Telegram не должны стоить уведомления.
+
+    Циклы шлют последовательно, поэтому задержка ограничена: 7 с пауз на сообщение
+    плюс таймауты самих запросов. Таймаут ответа может повторить уже доставленное
+    сообщение: одна копия лучше потерянного уведомления.
+    """
+    attempt = 0
+    while True:
+        try:
+            return await bot.send_message(
+                chat_id, text, parse_mode=ParseMode.HTML, reply_markup=reply_markup,
+            )
+        except (TelegramServerError, TelegramNetworkError) as e:
+            if attempt >= len(_SEND_RETRY_PAUSES_S):
+                structlog.get_logger().warning(
+                    "telegram_send_failed",
+                    user_id=chat_id,
+                    attempts=attempt + 1,
+                    error_type=type(e).__name__,
+                    error=describe_error(e),
+                )
+                raise
+            await asyncio.sleep(_SEND_RETRY_PAUSES_S[attempt])
+            attempt += 1
+
 
 async def send_telegram(bot: Bot, chat_id: int, text: str, reply_markup=None):
     """Send one background notification (HTML) politely.
@@ -494,7 +546,8 @@ async def send_telegram(bot: Bot, chat_id: int, text: str, reply_markup=None):
     Audit 2026-09-23 (NOTIF-11): keeps ≥1 s between messages to the same
     chat inside a burst and, on `TelegramRetryAfter`, sleeps the time
     Telegram asked for and retries once. A second flood error (or any other
-    error) propagates to the caller, which logs it per recipient.
+    error) propagates to the caller, which logs it per recipient. 5xx and
+    network errors are retried first (`_send_with_retries`, LOGIC-08).
     """
     # Review round 1: per-chat lock, so two background tasks (library watch,
     # health, qBit) can't both read "last send was long ago" and burst.
@@ -507,9 +560,7 @@ async def send_telegram(bot: Bot, chat_id: int, text: str, reply_markup=None):
                 await asyncio.sleep(wait)
         try:
             try:
-                return await bot.send_message(
-                    chat_id, text, parse_mode=ParseMode.HTML, reply_markup=reply_markup,
-                )
+                return await _send_with_retries(bot, chat_id, text, reply_markup)
             except TelegramBadRequest as e:
                 if reply_markup is None:
                     raise
@@ -518,15 +569,13 @@ async def send_telegram(bot: Bot, chat_id: int, text: str, reply_markup=None):
                 structlog.get_logger().warning(
                     "telegram_markup_rejected", user_id=chat_id, error=describe_error(e)
                 )
-                return await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=None)
+                return await _send_with_retries(bot, chat_id, text, None)
             except TelegramRetryAfter as e:
                 structlog.get_logger().warning(
                     "telegram_retry_after", user_id=chat_id, retry_after=e.retry_after
                 )
                 await asyncio.sleep(e.retry_after)
-                return await bot.send_message(
-                    chat_id, text, parse_mode=ParseMode.HTML, reply_markup=reply_markup,
-                )
+                return await _send_with_retries(bot, chat_id, text, reply_markup)
         finally:
             _last_sent_at[chat_id] = time.monotonic()
 
@@ -789,17 +838,20 @@ async def _digest_watch(bot: Bot, db: Database, logger) -> None:
     async def _recipients() -> list[tuple[int, UserPreferences]]:
         return await recipient_preferences(db)
 
-    digest = DigestService(
-        db,
-        radarr=await get_radarr(),
-        sonarr=await get_sonarr(),
-        qbittorrent=await get_qbittorrent() if settings.qbittorrent_enabled else None,
-        get_slskd=get_slskd,
-        recipients=_recipients,
-        send=_send,
-        tz=tz,
-        hour=settings.digest_hour,
-    )
+    async def _build_digest() -> DigestService:
+        return DigestService(
+            db,
+            radarr=await get_radarr(),
+            sonarr=await get_sonarr(),
+            qbittorrent=await get_qbittorrent() if settings.qbittorrent_enabled else None,
+            get_slskd=get_slskd,
+            recipients=_recipients,
+            send=_send,
+            tz=tz,
+            hour=settings.digest_hour,
+        )
+
+    digest: Optional[DigestService] = None
     structlog.contextvars.bind_contextvars(component="digest")
     delay = 60
     try:
@@ -807,6 +859,8 @@ async def _digest_watch(bot: Bot, db: Database, logger) -> None:
             try:
                 await asyncio.sleep(delay)
                 delay = _DIGEST_CHECK_S
+                if digest is None:
+                    digest = await _build_digest()
                 with background_calls():
                     await digest.maybe_send()
             except asyncio.CancelledError:
@@ -837,26 +891,29 @@ async def _library_watch(
     async def _notify(text: str, category: str, **extra) -> None:
         await deliver_library_notice(bot, db, text, category, logger, live=live, **extra)
 
-    radarr = await get_radarr()
-    sonarr = await get_sonarr()
-    watcher = LibraryWatcher(
-        radarr,
-        sonarr,
-        notify=_notify,
-        get_slskd=get_slskd,
-        db=db,
-        music_settle_seconds=settings.music_notify_settle_seconds,
-        music_stall_seconds=settings.music_notify_stall_seconds,
-        poll_interval_seconds=interval,
-        live=live,
-        # M1: «🔁 Докачать» only where Lidarr gave up (see music_retry).
-        music_retry=MusicRetryService(db, get_lidarr).offers,
-    )
+    async def _build_watcher() -> LibraryWatcher:
+        return LibraryWatcher(
+            await get_radarr(),
+            await get_sonarr(),
+            notify=_notify,
+            get_slskd=get_slskd,
+            db=db,
+            music_settle_seconds=settings.music_notify_settle_seconds,
+            music_stall_seconds=settings.music_notify_stall_seconds,
+            poll_interval_seconds=interval,
+            live=live,
+            # M1: «🔁 Докачать» only where Lidarr gave up (see music_retry).
+            music_retry=MusicRetryService(db, get_lidarr).offers,
+        )
+
+    watcher: Optional[LibraryWatcher] = None
     structlog.contextvars.bind_contextvars(component="library_watch")
     try:
         while True:
             try:
                 await asyncio.sleep(interval)
+                if watcher is None:
+                    watcher = await _build_watcher()
                 with background_calls():
                     await watcher.poll()
             except asyncio.CancelledError:
@@ -865,6 +922,12 @@ async def _library_watch(
                 logger.warning("library_watch_failed", error=describe_error(e))
     finally:
         structlog.contextvars.unbind_contextvars("component")
+
+
+#: DB-03: первая чистка и бэкап через минуту после старта, а не через 6 часов:
+#: при частых деплоях обслуживание иначе не доживало до своего часа.
+_MAINTENANCE_FIRST_S = 60
+_MAINTENANCE_INTERVAL_S = 6 * 3600
 
 
 async def _periodic_cleanup(db: Database, logger, notification_service: Optional[NotificationService] = None) -> None:
@@ -883,14 +946,15 @@ async def _periodic_cleanup(db: Database, logger, notification_service: Optional
     обеспечивает сам ``Database._backup``: он идемпотентен по дате и пропускает
     день, для которого файл уже есть.
     """
-    interval = 6 * 3600
+    delay = _MAINTENANCE_FIRST_S
     structlog.contextvars.bind_contextvars(component="periodic_cleanup")
     cycle = 0
     consecutive_failures = 0
     try:
         while True:
             try:
-                await asyncio.sleep(interval)
+                await asyncio.sleep(delay)
+                delay = _MAINTENANCE_INTERVAL_S
                 cycle += 1
                 stats = await db.run_maintenance(backup=True)
                 if any(stats.values()):
@@ -1020,6 +1084,15 @@ def build_dispatcher(
     return dp
 
 
+def _spawn_background(coro, name: str) -> asyncio.Task:
+    """Запустить фоновый цикл. Файл живости остаётся свежим и при мёртвом цикле,
+    поэтому его смерть видна только в журнале."""
+    task = asyncio.create_task(coro, name=name)
+    task.add_done_callback(log_background_task_end)
+    structlog.get_logger().info("background_task_started", task=name)
+    return task
+
+
 async def _cancel_background_tasks(tasks) -> None:
     """BUG-R6-01: cancel background tasks and WAIT for them to unwind.
 
@@ -1029,6 +1102,7 @@ async def _cancel_background_tasks(tasks) -> None:
     "Task was destroyed but it is pending!" and skipping their cleanup (e.g.
     `unbind_contextvars`). Exceptions raised while unwinding are swallowed:
     shutdown must not fail because a background task misbehaved on the way out.
+    Their logging is `log_background_task_end`'s: see `_spawn_background`.
     """
     pending = [t for t in tasks if t is not None]
     for task in pending:
@@ -1055,18 +1129,20 @@ async def on_shutdown(
     # фоновый цикл на каждом деплое бьётся в закрытые БД и клиенты.
     await _cancel_background_tasks(background_tasks)
 
-    # Stop notification service. OBS-07 (2026-07-30): `stop()` already logs
-    # "Notification service stopped" — the same duplicate that was removed from
-    # the startup path was still here, so every shutdown logged it twice.
-    if notification_service:
-        await notification_service.stop()
+    try:
+        # Stop notification service. OBS-07 (2026-07-30): `stop()` already logs
+        # "Notification service stopped" — the same duplicate that was removed from
+        # the startup path was still here, so every shutdown logged it twice.
+        if notification_service:
+            await notification_service.stop()
 
-    # RACE-05: the qBittorrent client used by the notification service is the
-    # registry singleton, so close_all_clients() below closes it exactly once.
-    # Close all singleton clients from registry
-    await close_all_clients()
-
-    await db.close()
+        # RACE-05: the qBittorrent client used by the notification service is the
+        # registry singleton, so close_all_clients() below closes it exactly once.
+        # Close all singleton clients from registry
+        await close_all_clients()
+    finally:
+        # Незакрытая БД держит процесс: поток aiosqlite не демон.
+        await db.close()
 
 
 async def main() -> None:
@@ -1091,7 +1167,26 @@ async def main() -> None:
 
     # Initialize database
     db = Database(settings.database_path)
-    await db.connect()
+    # Поток aiosqlite не демон: пока соединение открыто, процесс не завершится, и
+    # контейнер при сбое старта висел бы вместо перезапуска. `close()` безопасен
+    # повторно, но вызывается только для незакрытой базы: обычно её закрыл shutdown.
+    try:
+        await db.connect()
+        await _serve(settings, db, logger)
+    except Exception as e:
+        logger.error("Bot crashed", error=describe_error(e), exc_info=True)
+        raise
+    finally:
+        if db.is_connected:
+            await db.close()
+
+
+async def _serve(settings, db: Database, logger) -> None:
+    """Всё после подключения к базе: бот, фоновые циклы, polling и уборка."""
+    # Заполняется ниже, когда задачи созданы; обработчик сработает только после этого.
+    background_tasks: list[asyncio.Task] = []
+    notification_service: Optional[NotificationService] = None
+    shutdown_done = False
 
     # Initialize bot
     bot = Bot(
@@ -1099,100 +1194,92 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    # E1 (improvements round 2): one living status message per bot grab.
-    live = await _build_live_status(bot, db)
-
-    # Initialize qBittorrent client and notification service if configured
-    notification_service: Optional[NotificationService] = None
-
-    if settings.qbittorrent_enabled:
-        logger.info("qBittorrent integration enabled", url=settings.qbittorrent_url)
-        # RACE-05: reuse the registry's qBittorrent singleton (the same client
-        # the download handlers use) instead of constructing a second one, so
-        # there is ONE qBittorrent client / auth session. Its lifecycle is owned
-        # by the registry — close_all() handles shutdown.
-        qbittorrent = await get_qbittorrent()
-
-        # OBS-03: return bool instead of swallowing silently — the previous
-        # version caught every exception and returned None, which made
-        # NotificationService._notify_completion's "Sent completion
-        # notification" INFO log fire unconditionally, even when delivery
-        # failed (blocked bot, flood limit, etc).
-        async def send_notification(user_id: int, message: str) -> bool:
-            try:
-                await send_telegram(bot, user_id, message)
-                return True
-            except Exception as e:
-                logger.warning(
-                    "Failed to send notification",
-                    user_id=user_id,
-                    error=describe_error(e),
-                )
-                return False
-
-        if qbittorrent is not None:
-            notification_service = NotificationService(
-                qbittorrent, send_notification, exclude_chats=live.owner_chats,
-            )
-    else:
-        logger.info("qBittorrent integration disabled")
-
-    # Initialize dispatcher
-    dp = build_dispatcher(db, notification_service)
-
-    # Register startup/shutdown handlers
-    async def _on_startup(*_: object, **__: object) -> None:
-        await on_startup(bot, db, notification_service)
-
-    # Заполняется ниже, когда задачи созданы; обработчик сработает только после этого.
-    background_tasks: list[asyncio.Task] = []
-
     async def _on_shutdown(*_: object, **__: object) -> None:
+        nonlocal shutdown_done
+        shutdown_done = True
         await on_shutdown(bot, db, notification_service, background_tasks)
 
-    dp.startup.register(_on_startup)
-    dp.shutdown.register(_on_shutdown)
-
-    # SEC-14 / DEPLOY-04: liveness touch-file for Docker HEALTHCHECK.
-    # The Dockerfile healthcheck looks for /tmp/tgarr-alive modified within
-    # the last 2 minutes; we refresh it every 30s while the event loop is
-    # healthy. Verify manually with: `docker kill --signal=SIGSTOP <cid>` →
-    # container must flip to `unhealthy` within ~2 min.
-    async def _liveness_touch() -> None:
-        while True:
-            try:
-                Path("/tmp/tgarr-alive").touch()
-            except Exception:
-                # swallow — touch failure must not kill the bot
-                pass
-            await asyncio.sleep(30)
-
-    liveness_task = asyncio.create_task(_liveness_touch())
-    logger.info("background_task_started", task="liveness")
-    cleanup_task = asyncio.create_task(_periodic_cleanup(db, logger, notification_service))
-    logger.info("background_task_started", task="cleanup")
-    health_task = asyncio.create_task(
-        _health_watch(bot, sorted(set(settings.admin_tg_ids)), logger, db)
-    )
-    logger.info("background_task_started", task="health_watch")
-    library_task = asyncio.create_task(_library_watch(bot, db, logger, live))
-    logger.info("background_task_started", task="library_watch")
-    live_task = asyncio.create_task(_live_status_watch(live, logger))
-    logger.info("background_task_started", task="live_status")
-    digest_task = asyncio.create_task(_digest_watch(bot, db, logger))
-    logger.info("background_task_started", task="digest")
-    background_tasks.extend([liveness_task, cleanup_task, health_task, library_task, live_task, digest_task])
-
-    faulthandler.enable()
-    threading.Thread(
-        target=_liveness_watchdog,
-        daemon=True,
-        name="liveness-watchdog",
-    ).start()
-    logger.info("background_task_started", task="watchdog")
-
-    # Start polling
     try:
+        # E1 (improvements round 2): one living status message per bot grab.
+        live = await _build_live_status(bot, db)
+
+        # Initialize qBittorrent client and notification service if configured
+        if settings.qbittorrent_enabled:
+            logger.info("qBittorrent integration enabled", url=settings.qbittorrent_url)
+            # RACE-05: reuse the registry's qBittorrent singleton (the same client
+            # the download handlers use) instead of constructing a second one, so
+            # there is ONE qBittorrent client / auth session. Its lifecycle is owned
+            # by the registry — close_all() handles shutdown.
+            qbittorrent = await get_qbittorrent()
+
+            # OBS-03: return bool instead of swallowing silently — the previous
+            # version caught every exception and returned None, which made
+            # NotificationService._notify_completion's "Sent completion
+            # notification" INFO log fire unconditionally, even when delivery
+            # failed (blocked bot, flood limit, etc).
+            async def send_notification(user_id: int, message: str) -> bool:
+                try:
+                    await send_telegram(bot, user_id, message)
+                    return True
+                except Exception as e:
+                    logger.warning(
+                        "Failed to send notification",
+                        user_id=user_id,
+                        error=describe_error(e),
+                    )
+                    return False
+
+            if qbittorrent is not None:
+                notification_service = NotificationService(
+                    qbittorrent, send_notification, exclude_chats=live.owner_chats,
+                )
+        else:
+            logger.info("qBittorrent integration disabled")
+
+        # Initialize dispatcher
+        dp = build_dispatcher(db, notification_service)
+
+        # Register startup/shutdown handlers
+        async def _on_startup(*_: object, **__: object) -> None:
+            await on_startup(bot, db, notification_service)
+
+        dp.startup.register(_on_startup)
+        dp.shutdown.register(_on_shutdown)
+
+        # SEC-14 / DEPLOY-04: liveness touch-file for Docker HEALTHCHECK.
+        # The Dockerfile healthcheck looks for /tmp/tgarr-alive modified within
+        # the last 2 minutes; we refresh it every 30s while the event loop is
+        # healthy. Verify manually with: `docker kill --signal=SIGSTOP <cid>` →
+        # container must flip to `unhealthy` within ~2 min.
+        async def _liveness_touch() -> None:
+            while True:
+                try:
+                    Path("/tmp/tgarr-alive").touch()
+                except Exception:
+                    # swallow — touch failure must not kill the bot
+                    pass
+                await asyncio.sleep(30)
+
+        background_tasks.extend([
+            _spawn_background(_liveness_touch(), "liveness"),
+            _spawn_background(_periodic_cleanup(db, logger, notification_service), "cleanup"),
+            _spawn_background(
+                _health_watch(bot, sorted(set(settings.admin_tg_ids)), logger, db), "health_watch",
+            ),
+            _spawn_background(_library_watch(bot, db, logger, live), "library_watch"),
+            _spawn_background(_live_status_watch(live, logger), "live_status"),
+            _spawn_background(_digest_watch(bot, db, logger), "digest"),
+        ])
+
+        faulthandler.enable()
+        threading.Thread(
+            target=_liveness_watchdog,
+            daemon=True,
+            name="liveness-watchdog",
+        ).start()
+        logger.info("background_task_started", task="watchdog")
+
+        # Start polling
         logger.info("Starting polling...")
         await dp.start_polling(
             bot,
@@ -1200,15 +1287,16 @@ async def main() -> None:
             # отправленный во время 40-секундного деплоя, не должен пропасть.
             allowed_updates=["message", "callback_query"],
         )
-    except Exception as e:
-        logger.error("Bot crashed", error=describe_error(e), exc_info=True)
-        raise
     finally:
         # BUG-R6-01: await the cancellation instead of firing and forgetting.
-        # Обычно задачи уже отменены в on_shutdown (BUG-09). Это страховка на случай,
-        # когда start_polling упал до emit_shutdown; повторная отмена безвредна.
-        await _cancel_background_tasks(background_tasks)
-        await bot.session.close()
+        # Обычно всё уже убрал on_shutdown (BUG-09). Здесь страховка на случай, когда
+        # shutdown не сработал: aiogram зовёт startup вне своего try, и сбой в нём
+        # оставил бы работающими задачи, клиентов и базу.
+        try:
+            if not shutdown_done:
+                await on_shutdown(bot, db, notification_service, background_tasks)
+        finally:
+            await bot.session.close()
 
 
 if __name__ == "__main__":

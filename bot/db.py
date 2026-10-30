@@ -132,6 +132,10 @@ class Database:
             logger.info("Database connection closed")
 
     @property
+    def is_connected(self) -> bool:
+        return self._connection is not None
+
+    @property
     def conn(self) -> aiosqlite.Connection:
         """Get database connection."""
         if self._connection is None:
