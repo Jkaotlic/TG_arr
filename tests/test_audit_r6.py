@@ -91,11 +91,12 @@ async def test_cancel_background_tasks_accepts_none_entries():
 
 
 def test_main_shutdown_uses_the_helper():
-    """The finally-block in main() must route through the awaited helper."""
+    """The finally-block of `_serve` routes through on_shutdown and its awaited helper."""
     from bot import main as main_mod
 
-    source = inspect.getsource(main_mod.main)
-    assert "_cancel_background_tasks" in source
+    source = inspect.getsource(main_mod._serve)
+    assert "on_shutdown" in source
+    assert "_cancel_background_tasks" in inspect.getsource(main_mod.on_shutdown)
     assert "liveness_task.cancel()" not in source
     assert "cleanup_task.cancel()" not in source
 

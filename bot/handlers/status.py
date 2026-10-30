@@ -220,6 +220,12 @@ async def check_service(client: HealthCheckable, name: str) -> SystemStatus:
         )
 
 
+def _wanted_total(records: Any) -> int:
+    """Число записей в очереди *arr: `totalRecords`, а для обычного списка его длина."""
+    total = getattr(records, "total_records", None)
+    return total if isinstance(total, int) else len(records)
+
+
 def _group_wanted_episodes(records: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """Group Sonarr's flat wanted/missing episode records by series title.
 
@@ -265,7 +271,11 @@ async def cmd_wanted(message: Message) -> None:
         await status_msg.edit_text(Formatters.format_error("Не удалось получить очередь поиска"))
         return
 
-    total = len(movies) + len(episodes)
+    # BUG-11: *arr отдаёт страницу, а очередь может быть длиннее неё. Счётчики
+    # берутся из `totalRecords`, а на экране показывается то, что вошло в страницу.
+    movies_total = _wanted_total(movies)
+    episodes_total = _wanted_total(episodes)
+    total = movies_total + episodes_total
     if total == 0:
         await status_msg.edit_text("✅ Очередь поиска пуста — всё найдено.")
         return
@@ -273,20 +283,25 @@ async def cmd_wanted(message: Message) -> None:
     lines = [f"📋 <b>Ищется: {total} позиций</b>\n"]
 
     if movies:
-        lines.append(f"🎬 <b>Фильмы ({len(movies)})</b>")
+        lines.append(f"🎬 <b>Фильмы ({movies_total})</b>")
         for rec in movies[:15]:
             title = rec.get("title") or "Unknown"
             year = rec.get("year")
             year_str = f" ({year})" if year else ""
             lines.append(f"• <b>{html.escape(str(title))}</b>{year_str}")
-        if len(movies) > 15:
-            lines.append(f"<i>…и ещё {len(movies) - 15} фильмов</i>")
+        if movies_total > 15:
+            lines.append(f"<i>…и ещё {movies_total - 15} фильмов</i>")
 
     if episodes:
         grouped = _group_wanted_episodes(episodes)
         if movies:
             lines.append("")
-        lines.append(f"📺 <b>Сериалы ({len(grouped)} тайтлов, {len(episodes)} эп.)</b>")
+        if episodes_total > len(episodes):
+            # Тайтлов во всей очереди не знаем: считаем только по странице.
+            lines.append(f"📺 <b>Сериалы ({episodes_total} эп.)</b>")
+            lines.append(f"<i>Тайтлы — по первым {len(episodes)} эп. списка, дальше не загружались</i>")
+        else:
+            lines.append(f"📺 <b>Сериалы ({len(grouped)} тайтлов, {len(episodes)} эп.)</b>")
         for title, entries in sorted(grouped.items(), key=lambda kv: -len(kv[1]))[:15]:
             seasons = sorted(
                 {str(e.get("seasonNumber")) for e in entries if e.get("seasonNumber") is not None},

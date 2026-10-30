@@ -104,7 +104,6 @@ def test_season_preset_names_are_human():
     assert season_preset_name("firstSeason") == "первый сезон"
     assert season_preset_name("future") == "только будущие"
     assert season_preset_name("all") == "все сезоны"
-    assert season_preset_name("none") == "нет"
     assert season_preset_name(None) == "авто (по релизу)"
 
 
@@ -143,9 +142,12 @@ def _series_session(**kw) -> SearchSession:
 @pytest.mark.asyncio
 async def test_season_menu_shows_human_current_preset():
     from bot.handlers.search import grab
+    from bot.ui.callbacks import SeasonMenuCB
 
     cb = _cb()
-    await grab.handle_season_menu(cb, User(tg_id=42), _db(_series_session(monitor_type="latestSeason")))
+    await grab.handle_season_menu(
+        cb, SeasonMenuCB(tok="tok"), User(tg_id=42), _db(_series_session(monitor_type="latestSeason")),
+    )
     text = cb.message.edit_text.await_args.args[0]
     assert "последний сезон" in text and "latestSeason" not in text
 
@@ -158,7 +160,7 @@ async def test_season_preset_answer_and_card_are_human_and_full():
     cb = _cb()
     services = (MagicMock(), MagicMock(qbittorrent=None))
     with patch.object(grab._search, "get_services", AsyncMock(return_value=services)):
-        await grab.handle_season_preset(cb, SeasonPresetCB(preset="firstSeason"), User(tg_id=42),
+        await grab.handle_season_preset(cb, SeasonPresetCB(tok="tok", preset="firstSeason"), User(tg_id=42),
                                         _db(_series_session()))
     assert "первый сезон" in cb.answer.await_args.args[0]
     text = cb.message.edit_text.await_args.args[0]
@@ -169,11 +171,12 @@ async def test_season_preset_answer_and_card_are_human_and_full():
 @pytest.mark.asyncio
 async def test_season_back_renders_full_card():
     from bot.handlers.search import grab
+    from bot.ui.callbacks import SeasonBackCB
 
     cb = _cb()
     services = (MagicMock(), MagicMock(qbittorrent=None))
     with patch.object(grab._search, "get_services", AsyncMock(return_value=services)):
-        await grab.handle_season_back(cb, User(tg_id=42), _db(_series_session()))
+        await grab.handle_season_back(cb, SeasonBackCB(tok="tok"), User(tg_id=42), _db(_series_session()))
     text = cb.message.edit_text.await_args.args[0]
     assert "---" in text and "Show" in text
 
@@ -298,13 +301,13 @@ async def test_list_staleness_uses_msg_stale():
     from bot.handlers import torrserver
     from bot.handlers.search import free
     from bot.ui.callbacks import FindPageCB, TsPageCB
-    from bot.ui.keyboards._constants import MSG_STALE
+    from bot.ui.list_token import STALE_LIST_TEXT
 
     cb = _cb()
     await torrserver.handle_page(cb, TsPageCB(page=1))
-    assert cb.answer.await_args.args[0] == MSG_STALE
+    assert cb.answer.await_args.args[0] == STALE_LIST_TEXT
 
     cb2 = _cb()
     db = MagicMock(get_session=AsyncMock(return_value=None))
     await free.handle_find_page(cb2, FindPageCB(page=1), User(tg_id=42), db)
-    assert cb2.answer.await_args.args[0] == MSG_STALE
+    assert cb2.answer.await_args.args[0] == STALE_LIST_TEXT

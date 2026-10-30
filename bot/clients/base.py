@@ -4,10 +4,10 @@ import asyncio
 import contextvars
 import json
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, NoReturn, Optional
+from typing import Any, NoReturn, Optional, TypeVar
 
 import httpx
 import structlog
@@ -15,15 +15,25 @@ from tenacity import (
     RetryCallState,
     retry,
     retry_if_exception_type,
+    retry_if_not_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
 
 from bot.config import Settings, get_settings
+from bot.logging_utils import describe_error
 from bot.models import MIN_PACK_EPISODES, QualityProfile, RootFolder, SearchResult
 from bot.services.release_parser import enrich_from_title, parse_episode_numbers, parse_quality_name
 
 logger = structlog.get_logger()
+
+#: Ответ *arr, который дольше обычного HTTP_TIMEOUT, — норма: он сам ходит к
+#: TMDb/TVDB/MusicBrainz, индексатору, клиенту загрузки или собирает большие
+#: выборки. Замеры: Sonarr lookup ~34 с (2026-08-10), /history Radarr до 56 с
+#: (2026-10-10). Такие вызовы раньше проходили лишь потому, что таймаута не было
+#: совсем (NET-01). Повтора по таймауту чтения у них нет: *arr ещё работает над
+#: первым запросом. Обрыв соединения падает быстро и повторяется, как обычно.
+SLOW_ARR_TIMEOUT = 90.0
 
 
 def _log_before_sleep(retry_state: RetryCallState) -> None:
@@ -40,8 +50,21 @@ def _log_before_sleep(retry_state: RetryCallState) -> None:
         "request_retry_attempt",
         service=service,
         attempt=retry_state.attempt_number,
-        error=str(exc) if exc else None,
+        error=describe_error(exc) if exc else None,
     )
+
+
+class WantedList(list[dict[str, Any]]):
+    """Одна страница `/wanted/missing` и настоящее число записей в очереди.
+
+    BUG-11: *arr отдаёт страницу и `totalRecords`; считать очередь по длине
+    страницы значит показать «200», когда в очереди 1500. Остаётся списком, чтобы
+    вызывающий, которому нужны только записи, ничего не менял.
+    """
+
+    def __init__(self, records: Iterable[dict[str, Any]] = (), total_records: Optional[int] = None) -> None:
+        super().__init__(records)
+        self.total_records = max(len(self), total_records) if total_records is not None else len(self)
 
 
 class APIError(Exception):
@@ -198,6 +221,22 @@ class CircuitBreaker:
         self._probing = False
 
 
+#: Запрос точно не дошёл до сервера: соединения не было.
+_NOT_SENT_ERRORS: tuple[type[Exception], ...] = (
+    httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
+)
+#: Методы, которые можно повторить, даже если первый запрос дошёл до сервера.
+_REPEATABLE_METHODS = frozenset({"GET"})
+_RETRY_POLICY: dict[str, Any] = {
+    "stop": stop_after_attempt(3),
+    "wait": wait_exponential(multiplier=1, min=1, max=4),
+    "reraise": True,
+    "before_sleep": _log_before_sleep,
+}
+
+_T = TypeVar("_T")
+
+
 class BaseAPIClient:
     """Base async HTTP client with retry logic."""
 
@@ -242,6 +281,23 @@ class BaseAPIClient:
             self._ttl_cache[key] = (now, value)
             return value
 
+    def _slow_timeout(self) -> float:
+        """Таймаут долгих вызовов: HTTP_TIMEOUT без верхней границы, и «долгий»
+        вызов не должен получить меньше обычного."""
+        return max(SLOW_ARR_TIMEOUT, self._get_http_timeout())
+
+    def _resolve_timeout(self, timeout: Optional[float]) -> Any:
+        """Значение для `client.request(timeout=...)`.
+
+        NET-01: явный `timeout=None` для httpx значит «без таймаута», настройка
+        клиента действует, только если передать USE_CLIENT_DEFAULT. Явный таймаут
+        удлиняет ожидание ответа, но не соединение: мёртвый хост не должен держать
+        вызов 90 с на каждую попытку.
+        """
+        if timeout is None:
+            return httpx.USE_CLIENT_DEFAULT
+        return httpx.Timeout(timeout, connect=min(timeout, self._get_http_timeout()))
+
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
         async with self._client_lock:
@@ -281,12 +337,11 @@ class BaseAPIClient:
     # 5xx is no longer retried here: Prowlarr/Radarr 502/504 usually mean the
     # downstream is overloaded — retrying compounds the wait. Surface the error
     # so the user can retry manually.
+    # BUG-06: любая транспортная ошибка, а не только таймаут и отказ в соединении:
+    # стухшее keep-alive соединение даёт ReadError или RemoteProtocolError.
     @retry(
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError, RetryableAPIError)),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=4),
-        reraise=True,
-        before_sleep=_log_before_sleep,
+        retry=retry_if_exception_type((httpx.TransportError, RetryableAPIError)),
+        **_RETRY_POLICY,
     )
     async def _request(
         self,
@@ -298,6 +353,50 @@ class BaseAPIClient:
         headers: Optional[dict[str, str]] = None,
     ) -> dict[str, Any] | list[Any]:
         """`_request_once` with tenacity retries (interactive calls only)."""
+        return await self._request_once(
+            method, endpoint, params=params, json_data=json_data, timeout=timeout, headers=headers,
+        )
+
+    # Долгое чтение: запрос безопасно повторить, но таймаут ответа значит, что *arr
+    # ещё работает над ним, и второй запрос только множит нагрузку. Обрыв же падает
+    # быстро: без повтора стухшее keep-alive выглядело бы как «релиза нет в очереди».
+    @retry(
+        retry=(
+            retry_if_exception_type((httpx.TransportError, RetryableAPIError))
+            & retry_if_not_exception_type((httpx.ReadTimeout, httpx.WriteTimeout))
+        ),
+        **_RETRY_POLICY,
+    )
+    async def _request_except_read_timeout(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[dict[str, Any]] = None,
+        json_data: Optional[dict[str, Any] | list[Any]] = None,
+        timeout: Optional[float] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any] | list[Any]:
+        """`_request_once` с повтором на всё, кроме таймаутов чтения и записи."""
+        return await self._request_once(
+            method, endpoint, params=params, json_data=json_data, timeout=timeout, headers=headers,
+        )
+
+    # PERF-01, BUG-07: запрос мог дойти до сервера — повторять нельзя. Безопасны
+    # только отказ в соединении и 429: сервер запрос не обрабатывал.
+    @retry(
+        retry=retry_if_exception_type((*_NOT_SENT_ERRORS, RetryableAPIError)),
+        **_RETRY_POLICY,
+    )
+    async def _request_if_not_sent(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[dict[str, Any]] = None,
+        json_data: Optional[dict[str, Any] | list[Any]] = None,
+        timeout: Optional[float] = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any] | list[Any]:
+        """`_request_once` с повтором, только пока запрос не ушёл на сервер."""
         return await self._request_once(
             method, endpoint, params=params, json_data=json_data, timeout=timeout, headers=headers,
         )
@@ -335,7 +434,7 @@ class BaseAPIClient:
                 url=url,
                 params=params,
                 json=json_data,
-                timeout=timeout,
+                timeout=self._resolve_timeout(timeout),
                 headers=headers,
             )
             elapsed = (time.monotonic() - start_time) * 1000
@@ -417,9 +516,9 @@ class BaseAPIClient:
                 log.debug("request_timeout")
             raise
 
-        except httpx.ConnectError:
+        except httpx.TransportError as e:
             if not is_background_call():
-                log.debug("request_connect_error")
+                log.debug("request_transport_error", error_type=type(e).__name__)
             raise
 
     async def _safe_request(
@@ -430,6 +529,8 @@ class BaseAPIClient:
         json_data: Optional[dict[str, Any] | list[Any]] = None,
         timeout: Optional[float] = None,
         headers: Optional[dict[str, str]] = None,
+        retry_after_send: Optional[bool] = None,
+        retry_read_timeouts: bool = True,
     ) -> dict[str, Any] | list[Any]:
         """Wrap _request to convert transport errors after retries are exhausted.
 
@@ -438,7 +539,15 @@ class BaseAPIClient:
         without a network attempt while the breaker is open, and otherwise a
         single attempt; interactive calls keep tenacity's retries while the
         service is healthy and fall back to a single attempt while it is down.
+
+        ``retry_after_send``: можно ли повторять запрос, который мог дойти до
+        сервера. По умолчанию — только GET: второй POST повторит побочный эффект,
+        а второй DELETE получит 404 по уже удалённому.
+        ``retry_read_timeouts=False``: повторять всё, кроме таймаутов чтения и
+        записи (см. `_request_except_read_timeout`).
         """
+        if retry_after_send is None:
+            retry_after_send = method in _REPEATABLE_METHODS
         background = is_background_call()
         breaker = self.breaker
         if not breaker.allow(background=background):
@@ -449,6 +558,7 @@ class BaseAPIClient:
             return await self._send_through_breaker(
                 breaker, background, method, endpoint,
                 params=params, json_data=json_data, timeout=timeout, headers=headers,
+                retry_after_send=retry_after_send, retry_read_timeouts=retry_read_timeouts,
             )
         finally:
             if probe_token is not None:
@@ -465,15 +575,24 @@ class BaseAPIClient:
         json_data: Optional[dict[str, Any] | list[Any]],
         timeout: Optional[float],
         headers: Optional[dict[str, str]],
+        retry_after_send: bool,
+        retry_read_timeouts: bool,
     ) -> dict[str, Any] | list[Any]:
         """One request with the breaker's bookkeeping (see the caller)."""
-        send = self._request_once if (background or breaker.is_down) else self._request
+        if background or breaker.is_down:
+            send = self._request_once
+        elif not retry_after_send:
+            send = self._request_if_not_sent
+        elif not retry_read_timeouts:
+            send = self._request_except_read_timeout
+        else:
+            send = self._request
         try:
             result = await send(
                 method, endpoint, params=params, json_data=json_data, timeout=timeout, headers=headers,
             )
-        except (httpx.TimeoutException, httpx.ConnectError, RetryableAPIError) as e:
-            breaker.record_failure(str(e))
+        except (httpx.TransportError, RetryableAPIError) as e:
+            breaker.record_failure(describe_error(e))
             if background:
                 if isinstance(e, RetryableAPIError):
                     raise
@@ -502,11 +621,11 @@ class BaseAPIClient:
             service=self.service_name,
             method=method,
             endpoint=endpoint,
-            error=str(error),
+            error=describe_error(error),
         )
         if isinstance(error, httpx.TimeoutException):
             raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}") from error
-        if isinstance(error, httpx.ConnectError):
+        if isinstance(error, httpx.TransportError):
             raise ServiceConnectionError(
                 f"Не удалось подключиться к {self.service_name} ({self.base_url})"
             ) from error
@@ -517,9 +636,22 @@ class BaseAPIClient:
         endpoint: str,
         params: Optional[dict[str, Any]] = None,
         timeout: Optional[float] = None,
+        retry_after_send: bool = True,
+        retry_read_timeouts: bool = True,
     ) -> dict[str, Any] | list[Any]:
         """HTTP GET request."""
-        return await self._safe_request("GET", endpoint, params=params, timeout=timeout)
+        return await self._safe_request(
+            "GET", endpoint, params=params, timeout=timeout,
+            retry_after_send=retry_after_send, retry_read_timeouts=retry_read_timeouts,
+        )
+
+    async def _get_slow(
+        self, endpoint: str, params: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any] | list[Any]:
+        """GET, ответ на который *arr готовит долго (см. SLOW_ARR_TIMEOUT)."""
+        return await self.get(
+            endpoint, params=params, timeout=self._slow_timeout(), retry_read_timeouts=False,
+        )
 
     async def post(
         self,
@@ -527,9 +659,14 @@ class BaseAPIClient:
         json_data: Optional[dict[str, Any] | list[Any]] = None,
         params: Optional[dict[str, Any]] = None,
         timeout: Optional[float] = None,
+        retry_after_send: Optional[bool] = None,
     ) -> dict[str, Any] | list[Any]:
-        """HTTP POST request."""
-        return await self._safe_request("POST", endpoint, params=params, json_data=json_data, timeout=timeout)
+        """HTTP POST request. ``retry_after_send=True`` — для POST, который только
+        читает: повторить его безопасно."""
+        return await self._safe_request(
+            "POST", endpoint, params=params, json_data=json_data, timeout=timeout,
+            retry_after_send=retry_after_send,
+        )
 
     # DEAD-11: no HTTP DELETE method — removed (zero callers; Radarr/Sonarr/
     # Lidarr client methods never delete resources, and qBittorrent
@@ -561,7 +698,7 @@ class BaseAPIClient:
         try:
             response = await client.request(
                 method="POST", url=url, params=params, json=json_data,
-                timeout=timeout, headers=headers,
+                timeout=self._resolve_timeout(timeout), headers=headers,
             )
             # OBS-02: mirror _request — time the call and surface slow ones to
             # WARNING so push/grab latency is reconstructable from prod logs.
@@ -588,10 +725,20 @@ class BaseAPIClient:
                 return response.json()
             except (json.JSONDecodeError, ValueError):
                 return {"raw": response.text}
-        except httpx.TimeoutException:
-            raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}")
-        except httpx.ConnectError:
-            raise ServiceConnectionError(f"Не удалось подключиться к {self.service_name} ({self.base_url})")
+        except httpx.TransportError as e:
+            # Молчание и отказ в соединении — признак, что сервис лежит: следующая
+            # проверка уйдёт одной попыткой, а не 3 × HTTP_TIMEOUT. Разовый обрыв —
+            # нет: это обычно стухшее keep-alive, на GET он лечится повтором и в
+            # breaker не попадает, а здесь отнял бы повтор у проверки очереди.
+            if isinstance(e, (httpx.TimeoutException, httpx.ConnectError)):
+                self.breaker.record_failure(describe_error(e))
+            if isinstance(e, httpx.TimeoutException):
+                raise ServiceConnectionError(f"Таймаут соединения с {self.service_name}") from e
+            # BUG-06: обрыв на середине (ReadError и т.п.) — тоже «ответа нет,
+            # запрос мог дойти»; вызывающий проверяет очередь или библиотеку.
+            raise ServiceConnectionError(
+                f"Не удалось подключиться к {self.service_name} ({self.base_url})"
+            ) from e
 
     async def check_connection(self) -> tuple[bool, Optional[str], Optional[float]]:
         """Check if service is available. Returns (available, version, response_time_ms)."""
@@ -652,6 +799,7 @@ class ArrBaseClient(BaseAPIClient):
         await self._post_no_retry(
             f"{self._api_prefix}/release",
             json_data={"guid": guid, "indexerId": indexer_id},
+            timeout=self._slow_timeout(),
         )
         return True
 
@@ -683,7 +831,9 @@ class ArrBaseClient(BaseAPIClient):
         if publish_date:
             payload["publishDate"] = publish_date
 
-        result = await self._post_no_retry(f"{self._api_prefix}/release/push", json_data=payload)
+        result = await self._post_no_retry(
+            f"{self._api_prefix}/release/push", json_data=payload, timeout=self._slow_timeout(),
+        )
         # BUG-01: POST /release/push returns List<ReleaseResource>, not a
         # single object — unwrap it so callers can read `approved`.
         if isinstance(result, list):
@@ -702,7 +852,7 @@ class ArrBaseClient(BaseAPIClient):
         if not wanted:
             return False
         try:
-            result = await self.get(f"{self._api_prefix}/queue", params={"pageSize": 200})
+            result = await self._get_slow(f"{self._api_prefix}/queue", params={"pageSize": 200})
         except Exception:
             return False
         records = result.get("records") if isinstance(result, dict) else result
@@ -719,7 +869,7 @@ class ArrBaseClient(BaseAPIClient):
         Records carry the release ``title``, ``downloadId`` (torrent hash)
         and the tracked-download status/messages; errors propagate.
         """
-        result = await self.get(f"{self._api_prefix}/queue", params={"pageSize": page_size})
+        result = await self._get_slow(f"{self._api_prefix}/queue", params={"pageSize": page_size})
         records = result.get("records") if isinstance(result, dict) else result
         return [r for r in records if isinstance(r, dict)] if isinstance(records, list) else []
 
@@ -766,7 +916,7 @@ class ArrBaseClient(BaseAPIClient):
 
     async def _get_wanted(
         self, page_size: int = 50, extra_params: Optional[dict[str, Any]] = None,
-    ) -> list[dict[str, Any]]:
+    ) -> WantedList:
         """Read the "missing" list. Rollback 2026-08-10: /wanted lived on
         the previous backend's catalog query before; *arr paginates it instead.
 
@@ -782,17 +932,24 @@ class ArrBaseClient(BaseAPIClient):
         `SonarrClient.get_wanted_episodes`), Radarr sends nothing, since
         Radarr's movie records have no series to embed and the param would
         be meaningless noise on that call.
+
+        BUG-11: возвращается `WantedList` — страница плюс `totalRecords`, а не
+        голая страница: очередь длиннее `page_size` иначе выглядит обрезанной.
         """
         params: dict[str, Any] = {
             "pageSize": page_size, "sortKey": "title", "sortDirection": "ascending",
         }
         if extra_params:
             params.update(extra_params)
-        result = await self.get(f"{self._api_prefix}/wanted/missing", params=params)
+        result = await self._get_slow(f"{self._api_prefix}/wanted/missing", params=params)
         if isinstance(result, dict):
             records = result.get("records", [])
-            return records if isinstance(records, list) else []
-        return []
+            total = result.get("totalRecords")
+            return WantedList(
+                records if isinstance(records, list) else [],
+                total if isinstance(total, int) and not isinstance(total, bool) else None,
+            )
+        return WantedList()
 
     async def _set_monitored(self, resource: str, resource_id: int, monitored: bool) -> bool:
         """Flip the monitored flag, preserving every other field.
@@ -811,6 +968,7 @@ class ArrBaseClient(BaseAPIClient):
         # _request bare here leaked a raw httpx exception instead.
         await self._safe_request(
             "PUT", f"{self._api_prefix}/{resource}/{resource_id}", json_data=current,
+            timeout=self._slow_timeout(),
         )
         return True
 
@@ -821,15 +979,37 @@ class ArrBaseClient(BaseAPIClient):
         catalog cleanup can never take the media with it.
         """
         # Fix round 1 (2026-08-10 review): same _safe_request fix as
-        # _set_monitored above. Retrying a DELETE is still safe (it's
-        # idempotent — a repeat DELETE 404s rather than double-deleting); the
-        # bug was the missing error translation, not the retry.
+        # _set_monitored above. Удаление с файлами бывает долгим; повтора после
+        # таймаута нет — он получил бы 404 и выдал успех за ошибку.
         await self._safe_request(
             "DELETE",
             f"{self._api_prefix}/{resource}/{resource_id}",
             params={"deleteFiles": delete_files, "addImportListExclusion": False},
+            timeout=self._slow_timeout(),
         )
         return True
+
+    async def _find_after_failed_add(
+        self, error: APIError, find: Callable[[], Awaitable[Optional[_T]]],
+    ) -> Optional[_T]:
+        """BUG-07: add-POST упал — тайтл мог всё же попасть в библиотеку.
+
+        Ответ потерян по дороге, либо *arr отверг повтор как «already added».
+        Проверка одна: что она не нашла тайтл, ещё не значит, что его нет, и
+        вызывающий сообщит исходную ошибку. Неверный ключ проверять незачем.
+        """
+        if isinstance(error, AuthenticationError):
+            return None
+        try:
+            found = await find()
+        except Exception as e:
+            logger.warning(
+                "add_recheck_failed", service=self.service_name, error_type=type(e).__name__,
+            )
+            return None
+        if found is not None:
+            logger.info("add_found_after_error", service=self.service_name, error=str(error))
+        return found
 
     #: Servarr's shared History `eventType` filter is bound from the query
     #: string as the enum's ordinal, not the camelCase name the JSON body
@@ -871,7 +1051,7 @@ class ArrBaseClient(BaseAPIClient):
             # the other's flag. Adds the title and its provider ids.
             params["includeMovie"] = "true"
             params["includeSeries"] = "true"
-        result = await self.get(f"{self._api_prefix}/history", params=params)
+        result = await self._get_slow(f"{self._api_prefix}/history", params=params)
         if isinstance(result, dict):
             records = result.get("records", [])
             return records if isinstance(records, list) else []
@@ -899,7 +1079,7 @@ class ArrBaseClient(BaseAPIClient):
         if include_details:
             params["includeMovie"] = "true"
             params["includeSeries"] = "true"
-        result = await self.get(f"{self._api_prefix}/history/since", params=params)
+        result = await self._get_slow(f"{self._api_prefix}/history/since", params=params)
         return result if isinstance(result, list) else []
 
     async def _get_releases(self, params: dict[str, Any]) -> list["SearchResult"]:
@@ -909,12 +1089,16 @@ class ArrBaseClient(BaseAPIClient):
         `customFormatScore`, `rejected` and the human-readable `rejections` —
         so the bot can tell the user WHY a release will not be taken.
         Slow: it fans out to every indexer, hence the search timeout.
+        PERF-01: повтора нет, если запрос мог дойти до *arr: каждый повтор снова
+        тратит квоту индексаторов, пока *arr ещё занят первым. Строже, чем
+        `_get_slow`: обрыв не значит, что рассылку не начали.
         """
         settings = get_settings()
         results = await self.get(
             f"{self._api_prefix}/release",
             params=params,
             timeout=settings.prowlarr_search_timeout,
+            retry_after_send=False,
         )
         if not isinstance(results, list):
             return []

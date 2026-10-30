@@ -15,7 +15,7 @@ from bot.clients.registry import get_qbittorrent, get_slskd
 from bot.handlers._cache import remember_lru
 from bot.handlers.common import accessible_message, safe_edit, strip_command, swallow_not_modified
 from bot.models import QBittorrentStatus, TorrentFilter, TorrentInfo, User
-from bot.ui.callbacks import TorrentActionCB, TorrentMoreCB, TorrentPageCB
+from bot.ui.callbacks import TorrentActionCB, TorrentMoreCB, TorrentPageCB, TorrentStepCB
 from bot.ui.formatters import Formatters
 from bot.ui.formatters.torrent import format_limit_ru
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -321,12 +321,41 @@ async def _render_torrent_list(
 async def handle_torrent_page(
     callback: CallbackQuery, callback_data: TorrentPageCB, is_admin: bool = False,
 ) -> None:
-    """Render the torrent list at ``callback_data.page``/``callback_data.flt``.
+    """«Обновить» и «Назад»: перерисовать список с зажатой в границы страницей.
 
-    LOGIC-01: replaces the old separate ``t_refresh``/``t_page:N``/``t_back``
-    string handlers — refresh, pagination, and "back to list" are all just
-    "redraw this filter at this page" now, so the filter can no longer be
-    silently dropped on any of those three paths.
+    LOGIC-01: refresh и «назад к списку» — это «перерисуй этот фильтр на этой
+    странице», фильтр не теряется.
+
+    BUG-03: пока пользователь смотрел страницу 2, торренты докачались и страниц
+    осталась одна. Раньше «Обновить» и «Назад» отвечали «Неверная страница» и
+    повтор не помогал; теперь страница зажимается, как у мутирующих действий.
+    Явное листание ◀️/▶️ — отдельное семейство ``TorrentStepCB``, оно по-прежнему
+    алертит (TEST-08a).
+    """
+    message = accessible_message(callback)
+    if message is None:
+        return
+
+    qbt = await check_qbt_enabled(callback)
+    if not qbt:
+        return
+
+    try:
+        await _render_torrent_list(
+            message, qbt, _parse_filter(callback_data.flt), max(0, callback_data.page),
+            user_id=_user_id(callback), is_admin=is_admin,
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error("Torrent list refresh error", error=str(e), exc_info=True)
+        await callback.answer("Ошибка операции", show_alert=True)
+
+
+@router.callback_query(TorrentStepCB.filter())
+async def handle_torrent_step(
+    callback: CallbackQuery, callback_data: TorrentStepCB, is_admin: bool = False,
+) -> None:
+    """Render the torrent list at ``callback_data.page``/``callback_data.flt``.
 
     TEST-08a: unlike ``_render_torrent_list`` (which clamps and always
     renders — used by mutating callbacks that just want "some valid page"),

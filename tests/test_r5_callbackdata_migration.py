@@ -83,9 +83,10 @@ async def test_handle_release_selection_reads_callback_data():
 def test_artist_cb_roundtrip():
     from bot.ui.callbacks import ArtistCB
 
-    packed = ArtistCB(idx=4).pack()
+    packed = ArtistCB(tok="abc123", idx=4).pack()
     got = ArtistCB.unpack(packed)
     assert got.idx == 4
+    assert got.tok == "abc123"
 
 
 def test_artist_list_buttons_use_typed_cb():
@@ -93,7 +94,7 @@ def test_artist_list_buttons_use_typed_cb():
     from bot.ui.keyboards import Keyboards
 
     artists = [ArtistInfo(name=f"A{i}", mb_id=str(i)) for i in range(3)]
-    kb = Keyboards.artist_list(artists, current_page=0, per_page=5)
+    kb = Keyboards.artist_list(artists, "abc123", current_page=0, per_page=5)
     cbs = _cbs(kb)
     artist_cbs = [c for c in cbs if c.startswith("art:")]
     assert len(artist_cbs) == 3
@@ -108,6 +109,7 @@ async def test_handle_artist_selection_reads_callback_data():
 
     artists = [ArtistInfo(name="Metallica", mb_id="m1"), ArtistInfo(name="Slayer", mb_id="m2")]
     music._artist_candidates[42] = artists
+    token = music._artist_tokens.issue(42)
 
     db = AsyncMock()
     db.get_session = AsyncMock(return_value=None)
@@ -123,7 +125,7 @@ async def test_handle_artist_selection_reads_callback_data():
     cb.message.edit_text = AsyncMock()
     cb.answer = AsyncMock()
 
-    await music.handle_artist_selection(cb, ArtistCB(idx=1), db_user, db)
+    await music.handle_artist_selection(cb, ArtistCB(tok=token, idx=1), db_user, db)
 
     saved_session = db.save_session.call_args.args[1]
     assert saved_session.selected_content.name == "Slayer"
@@ -301,16 +303,17 @@ def test_resolution_and_auto_grab_keyboards_use_typed_setting_cb():
 def test_season_preset_cb_roundtrip():
     from bot.ui.callbacks import SeasonPresetCB
 
-    packed = SeasonPresetCB(preset="firstSeason").pack()
+    packed = SeasonPresetCB(tok="abc123", preset="firstSeason").pack()
     got = SeasonPresetCB.unpack(packed)
     assert got.preset == "firstSeason"
+    assert got.tok == "abc123"
 
 
 def test_season_presets_keyboard_uses_typed_cb():
     from bot.ui.callbacks import SeasonPresetCB
     from bot.ui.keyboards import Keyboards
 
-    kb = Keyboards.season_presets()
+    kb = Keyboards.season_presets("abc123")
     cbs = [c for c in _cbs(kb) if c.startswith("ssn:")]
     presets = {SeasonPresetCB.unpack(c).preset for c in cbs}
     assert presets == {"all", "future", "firstSeason", "latestSeason"}
@@ -326,6 +329,7 @@ async def test_handle_season_preset_reads_callback_data():
         user_id=1, query="q", content_type=ContentType.SERIES,
         selected_result=SearchResult(guid="g", title="t"),
         title_created=True,  # audit GRAB-05: presets only for a series this search added
+        list_token="abc123",
     )
     db = AsyncMock()
     db.get_session = AsyncMock(return_value=session)
@@ -343,7 +347,7 @@ async def test_handle_season_preset_reads_callback_data():
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(grab_mod._search, "get_services", AsyncMock(return_value=(MagicMock(), MagicMock(qbittorrent=None))))
-        await grab_mod.handle_season_preset(cb, SeasonPresetCB(preset="future"), db_user, db)
+        await grab_mod.handle_season_preset(cb, SeasonPresetCB(tok="abc123", preset="future"), db_user, db)
 
     assert session.monitor_type == "future"
 
@@ -363,7 +367,7 @@ def test_trending_item_cb_roundtrip():
 
 
 def test_trending_lists_use_typed_trending_item_cb():
-    from bot.ui.callbacks import TrendingItemCB
+    from bot.ui.callbacks import TrendingArtistCB, TrendingItemCB
     from bot.ui.keyboards import Keyboards
 
     movies = [MovieInfo(title="M", tmdb_id=1, year=2020)]
@@ -379,10 +383,11 @@ def test_trending_lists_use_typed_trending_item_cb():
     got2 = TrendingItemCB.unpack(cbs2[0])
     assert got2.kind == "series" and got2.item_id == "2"
 
-    kb3 = Keyboards.trending_artists([{"name": "Artist0"}])
-    cbs3 = [c for c in _cbs(kb3) if c.startswith("tri:")]
-    got3 = TrendingItemCB.unpack(cbs3[0])
-    assert got3.kind == "artist" and got3.item_id == "0"
+    # BUG-18: артист из чарта — индекс в личном кэше, поэтому своя кнопка с токеном.
+    kb3 = Keyboards.trending_artists([{"name": "Artist0"}], list_token="abc123")
+    cbs3 = [c for c in _cbs(kb3) if c.startswith("tra:")]
+    got3 = TrendingArtistCB.unpack(cbs3[0])
+    assert got3.tok == "abc123" and got3.idx == 0
 
 
 @pytest.mark.asyncio
@@ -409,9 +414,10 @@ async def test_handle_movie_from_trending_reads_callback_data():
 @pytest.mark.asyncio
 async def test_handle_trending_artist_click_reads_callback_data():
     from bot.handlers import music
-    from bot.ui.callbacks import TrendingItemCB
+    from bot.ui.callbacks import TrendingArtistCB
 
     music._trending_artists_cache[7] = [{"name": "Metallica"}]
+    token = music._trending_artist_tokens.issue(7)
 
     db = AsyncMock()
     db_user = MagicMock()
@@ -425,7 +431,7 @@ async def test_handle_trending_artist_click_reads_callback_data():
     mock_search = AsyncMock()
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(music, "process_music_search", mock_search)
-        await music.handle_trending_artist_click(cb, TrendingItemCB(kind="artist", item_id="0"), db_user, db)
+        await music.handle_trending_artist_click(cb, TrendingArtistCB(tok=token, idx=0), db_user, db)
 
     mock_search.assert_awaited()
     music._trending_artists_cache.pop(7, None)

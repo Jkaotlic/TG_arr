@@ -5,7 +5,7 @@ speed-limit menu and delete confirmation.
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.models import TorrentFilter, TorrentInfo
-from bot.ui.callbacks import TorrentActionCB, TorrentMoreCB, TorrentPageCB
+from bot.ui.callbacks import TorrentActionCB, TorrentMoreCB, TorrentPageCB, TorrentStepCB
 from bot.ui.keyboards._constants import BTN_BACK, BTN_CLOSE, CallbackData
 
 
@@ -80,7 +80,7 @@ class _TorrentKeyboards:
                 nav_buttons.append(
                     InlineKeyboardButton(
                         text="◀️",
-                        callback_data=TorrentPageCB(page=current_page - 1, flt=current_filter.value).pack(),
+                        callback_data=TorrentStepCB(page=current_page - 1, flt=current_filter.value).pack(),
                     )
                 )
             nav_buttons.append(
@@ -90,7 +90,7 @@ class _TorrentKeyboards:
                 nav_buttons.append(
                     InlineKeyboardButton(
                         text="▶️",
-                        callback_data=TorrentPageCB(page=current_page + 1, flt=current_filter.value).pack(),
+                        callback_data=TorrentStepCB(page=current_page + 1, flt=current_filter.value).pack(),
                     )
                 )
             keyboard.append(nav_buttons)
@@ -310,10 +310,10 @@ class _TorrentKeyboards:
         BUG-14/DEAD-03: previously generated ``t_delete:confirm:<hash16>`` /
         ``t_delf:confirm:<hash16>``, which the handlers would have parsed as
         a (nonexistent) short-hash "confirm" — this keyboard was unreachable
-        AND broken. Now wired for the "delete with files" flow only (the
-        irreversible one): confirm uses the dedicated ``t_delfc:`` prefix,
-        cancel goes back to the torrent card via ``t:<hash>``. Plain delete
-        (keep files, reversible) still fires immediately without this step.
+        AND broken. Now wired for both delete flows (audit UI-16: no delete
+        fires on the first tap). Delete with files confirms with
+        ``TorrentActionCB(action="delfc")``, plain delete (keep files) with
+        ``action="delc"``; "back" returns to the torrent card (``action="view"``).
         """
         full_hash = torrent_hash
         if with_files:

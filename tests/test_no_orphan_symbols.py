@@ -50,22 +50,6 @@ ORPHAN_ALLOWLIST: dict[str, str] = {
         "Переопределение logging.Filter.filter: вызывает stdlib logging для каждой "
         "записи логгера aiogram.dispatcher (фильтр ставит setup_logging), а не код bot/."
     ),
-    "bot.services.add_service.AddService.ensure_title": (
-        "Намеренная NotImplementedError-заглушка отката 2026-08-10: композитный "
-        "поток прежнего бэкенда, у которого нет эквивалента в *arr. Падает громко "
-        "и называет задачу, владеющую заменой — это лучше и молчаливой догадки, и "
-        "голого AttributeError."
-    ),
-    "bot.services.add_service.AddService.add_and_queue_best": (
-        "Та же заглушка отката: «добавить + дать профилю выбрать + поставить в "
-        "очередь» одним действием. Ближайший эквивалент — add_movie/add_series с "
-        "search_for_movie=True, но форму для пользователя никто не специфицировал."
-    ),
-    "bot.services.add_service.AddService.grab_with_fallback": (
-        "Та же заглушка отката: многокандидатный retry-цикл прежнего бэкенда. "
-        "grab_release's native/push split закрывает тот один релиз, который выбрал "
-        "пользователь."
-    ),
     "bot.services.search_service._reset_module_state": (
         "Хелпер для тестов, вызывается autouse-фикстурой в tests/conftest.py. "
         "_DETECTION_CACHE и _CIRCUIT_BREAKER — процессные глобалы, без сброса "

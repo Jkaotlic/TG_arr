@@ -63,13 +63,9 @@ which was too aggressive: real callers already exist in
 bot/handlers/{trending.py,search/commands.py,search/grab.py}, even though
 fixing those call sites is Task 12's job, not this one's).
 
-Composite flows specific to the previous backend, with no *arr equivalent
-specified by any task yet (`ensure_title`, `add_and_queue_best`,
-`grab_with_fallback`), are kept as
-`NotImplementedError` stubs naming Task 12/13, matching the precedent
-`search_service.py` set for `search_metadata`/`get_seasons` — a stub that
-fails loudly beats both silently guessing a shape and a bare
-`AttributeError` on a name nobody bothered to keep.
+Композитные потоки прежнего бэкенда (`ensure_title`, `add_and_queue_best`,
+`grab_with_fallback`) не имеют эквивалента в *arr; заглушки
+`NotImplementedError` удалены (DEAD-01): вызывать их было некому.
 """
 
 import json
@@ -131,13 +127,18 @@ def _qbit_category(content_type: ContentType, release: SearchResult) -> str:
 
     Free-text search does not know the facet up front — its `content_type` is
     `UNKNOWN` — but Prowlarr's own category ids usually do, and
-    `ProwlarrClient._normalize_result` puts that in `detected_type`. Falls back
-    to the movie category, which is what these call sites used unconditionally
-    before.
+    `ProwlarrClient._normalize_result` puts that in `detected_type`.
+
+    LOGIC-10: музыка и нераспознанный тип получают пустую категорию (qBit
+    кладёт торрент без категории). Раньше они уходили в `radarr`: Radarr видел
+    чужой торрент в своей категории, а уведомление о завершении подавлялось
+    правилом «этим занимается library_watch» (его обходит только тег
+    `DIRECT_TAG`). Пустая строка нигде ниже не требуется: клиент qBit её просто
+    не отправляет, а `NotificationService` читает `category or ""`.
     """
     if content_type in _QBIT_CATEGORIES:
         return _QBIT_CATEGORIES[content_type]
-    return _QBIT_CATEGORIES.get(release.detected_type, "radarr")
+    return _QBIT_CATEGORIES.get(release.detected_type, "")
 
 
 #: Audit 2026-09-23 (GRAB-08/14): why a grab did not happen, stored as
@@ -454,45 +455,6 @@ class AddService:
             action.error_message = str(e)
             return None, action
 
-    # Fix round 1 (2026-08-10 review): a service whose own docstring promises
-    # "adding content and grabbing releases" must be able to add — bare
-    # AttributeErrors on these three names is a worse failure mode than a
-    # named NotImplementedError, and real callers already exist
-    # (bot/handlers/{trending.py,search/commands.py,search/grab.py}) even
-    # though repointing them is Task 12's job. Matches the precedent
-    # search_service.py set for search_metadata/get_seasons: fail loudly with
-    # a message naming the task that owns the replacement, rather than
-    # guessing a shape with no driving test.
-    _COMPOSITE_FLOW_NOT_CONVERTED = (
-        "was specific to the previous backend (its composite "
-        "add+queue/redeem-candidate-token flow has no *arr equivalent "
-        "specified by any task yet) and was not carried into the *arr "
-        "rollback — see Task 12/13, "
-        "docs/superpowers/plans/2026-08-10-arr-restore.md"
-    )
-
-    async def ensure_title(self, *args, **kwargs):
-        """The previous backend's "find or add unmonitored" step. Task 12
-        explicitly removes this step from the search flow rather than
-        repointing it."""
-        raise NotImplementedError(f"ensure_title {self._COMPOSITE_FLOW_NOT_CONVERTED}")
-
-    async def add_and_queue_best(self, *args, **kwargs):
-        """The previous backend's "add + let the profile pick + queue
-        automatically" one-shot. The nearest *arr equivalent is
-        `add_movie`/`add_series` with `search_for_movie`/
-        `search_for_missing=True`, but no task has specified the
-        caller-facing shape ("Скачать лучшее") yet."""
-        raise NotImplementedError(f"add_and_queue_best {self._COMPOSITE_FLOW_NOT_CONVERTED}")
-
-    async def grab_with_fallback(self, *args, **kwargs):
-        """The previous backend's multi-candidate retry loop (some indexers'
-        download links it couldn't resolve to an info-hash). `grab_release`'s
-        native/push split already handles the one release *arr's own verdict
-        picked; no task has specified multi-candidate retry for the *arr
-        rollback."""
-        raise NotImplementedError(f"grab_with_fallback {self._COMPOSITE_FLOW_NOT_CONVERTED}")
-
     # ---------------------------------------------------------------- grab
     async def grab_release(
         self,
@@ -596,15 +558,7 @@ class AddService:
                 return await self._retry_expired_release(
                     log, action, arr_client, release, content_type, arr_id,
                 )
-            if isinstance(e, ServiceConnectionError) and await self._landed_in_queue(
-                arr_client, release,
-            ):
-                log.info("native_grab_found_in_queue_after_error", error=str(e))
-                action.success = True
-                _log_grab_completed(
-                    log, success=True, path="native", force_download=False,
-                    content_type=content_type, detail="queued_despite_error",
-                )
+            if await self._landed_despite_error(log, action, arr_client, release, content_type, e):
                 return True, action
             return self._native_failed(log, action, content_type, e)
         except Exception as e:
@@ -627,6 +581,29 @@ class AddService:
             log, success=False, path="failed", force_download=False, content_type=content_type,
         )
         return False, action
+
+    async def _landed_despite_error(
+        self,
+        log,
+        action: ActionLog,
+        arr_client: ArrBaseClient,
+        release: SearchResult,
+        content_type: ContentType,
+        error: Exception,
+        path: str = "native",
+    ) -> bool:
+        """GRAB-14: ответ потерян, а POST мог дойти — релиз уже в очереди *arr?"""
+        if not isinstance(error, ServiceConnectionError):
+            return False
+        if not await self._landed_in_queue(arr_client, release):
+            return False
+        log.info("grab_found_in_queue_after_error", path=path, error=str(error))
+        action.success = True
+        _log_grab_completed(
+            log, success=True, path=path, force_download=False,
+            content_type=content_type, detail="queued_despite_error",
+        )
+        return True
 
     @staticmethod
     async def _landed_in_queue(arr_client: ArrBaseClient, release: SearchResult) -> bool:
@@ -673,6 +650,10 @@ class AddService:
                 # Review fix round 1: a second 404 means *arr forgot it again —
                 # the release is gone, not "unreachable".
                 if not (isinstance(e, APIError) and e.status_code == 404):
+                    if await self._landed_despite_error(
+                        log, action, arr_client, fresh, content_type, e,
+                    ):
+                        return True, action
                     return self._native_failed(log, action, content_type, e)
                 log.warning("release_retry_404", error=str(e))
             else:
@@ -734,8 +715,13 @@ class AddService:
                             publish_date=release.publish_date.isoformat() if release.publish_date else None,
                         )
                     except APIError as e:
-                        # A transport failure is not a verdict.
+                        # Сбой транспорта — ещё не вердикт, но push мог дойти, а
+                        # «нет вердикта» ведёт к предложению автопоиска.
                         log.warning("push_release_failed", error=str(e))
+                        if await self._landed_despite_error(
+                            log, action, arr_client, release, content_type, e, path="push",
+                        ):
+                            return True, action
                     else:
                         log.info("push_release_result", result=_safe_push_result(result))
                         if result and result.get("approved") is True:

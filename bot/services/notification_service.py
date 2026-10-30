@@ -1,18 +1,57 @@
 """Notification service for download completion alerts."""
 
 import asyncio
+import html
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import structlog
 
 from bot.clients.qbittorrent import DIRECT_TAG, STATE_MAP, QBittorrentClient
 from bot.config import get_settings
-from bot.logging_utils import describe_error
+from bot.logging_utils import describe_error, log_background_task_end
 from bot.models import TorrentInfo, TorrentState
 from bot.ui.formatters import Formatters
 
 logger = structlog.get_logger()
+
+#: Часы qBittorrent и бота могут расходиться: допуск к «завершён после прошлого
+#: опроса». Повтора он не даст: завершённые хэши помнит `_completed_hashes`.
+_CLOCK_SKEW_MARGIN = timedelta(seconds=120)
+#: Допуск для хэша, которого не было в прошлом чтении. Он новый, поэтому расхождение
+#: часов здесь не важно, но старая библиотека, принесённая дельтой, рассылкой не станет.
+_NEW_HASH_MARGIN = timedelta(hours=24)
+
+
+#: Потолок отдельных сообщений одному чату за один опрос. Больше завершений за раз
+#: уходят одной сводкой: поток из десятков сообщений (перепроверка, перенос
+#: библиотеки, будущая ошибка в учёте) хуже одной строки с именами.
+MAX_SEPARATE_COMPLETIONS = 5
+#: Сколько имён называет сводка и какой длины каждое: сообщение остаётся коротким.
+_SUMMARY_NAMES = 3
+_SUMMARY_NAME_MAX = 80
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _plural_downloads(count: int) -> str:
+    if count % 100 in range(11, 15):
+        return "загрузок"
+    return {1: "загрузка", 2: "загрузки", 3: "загрузки", 4: "загрузки"}.get(count % 10, "загрузок")
+
+
+def format_completion_summary(names: list[str]) -> str:
+    """«✅ Завершено 7 загрузок: a, b, c и ещё 4», имена экранированы и урезаны."""
+    shown = [
+        html.escape(name if len(name) <= _SUMMARY_NAME_MAX else name[: _SUMMARY_NAME_MAX - 1] + "…")
+        for name in names[:_SUMMARY_NAMES]
+    ]
+    text = f"✅ Завершено {len(names)} {_plural_downloads(len(names))}: {', '.join(shown)}"
+    rest = len(names) - len(shown)
+    return f"{text} и ещё {rest}" if rest > 0 else text
 
 
 class NotificationService:
@@ -27,6 +66,8 @@ class NotificationService:
         qbittorrent: QBittorrentClient,
         send_notification: Callable[[int, str], Awaitable[bool] | Awaitable[None]],
         exclude_chats: Optional[Callable[[str], Awaitable[set[int]]]] = None,
+        claim_direct_chats: Optional[Callable[[TorrentInfo], Awaitable[set[int]]]] = None,
+        clock: Callable[[], datetime] = _utcnow,
     ):
         """
         Initialize notification service.
@@ -46,6 +87,11 @@ class NotificationService:
         #: follows this torrent (``LiveStatusService.owner_chats``) — they
         #: get no separate "download complete" message.
         self._exclude_chats = exclude_chats
+        #: LOGIC-09: живое сообщение, ещё ищущее свой прямой торрент, забирает его
+        #: (``LiveStatusService.claim_direct_chats``). Магнет, докачанный до привязки,
+        #: не должен дать хозяину второе сообщение.
+        self._claim_direct_chats = claim_direct_chats
+        self._clock = clock
         self.settings = get_settings()
 
         # Track known torrents and their completion state
@@ -62,6 +108,13 @@ class NotificationService:
         self._torrents_raw: dict[str, dict[str, Any]] = {}
         self._rid = 0
 
+        # LOGIC-09: время прошлого успешного чтения qBit (None до первого) и хэши,
+        # уже виденные завершёнными. Новый завершённый торрент объявляется, только
+        # если докачан после прошлого опроса; при первом чтении не объявляется
+        # ничего, иначе каждый рестарт рассылал бы всю раздачу.
+        self._last_sync_at: Optional[datetime] = None
+        self._completed_hashes: set[str] = set()
+
         # Users subscribed to notifications
         self._subscribed_users: set[int] = set()
 
@@ -74,6 +127,10 @@ class NotificationService:
         # than kept forever, so get_stats()/OBS-09 needs a separate running
         # counter to report a meaningful "completed this run" figure.
         self._completed_count = 0
+
+        #: Завершения текущего опроса: (торрент, текст, получатели). `None` вне опроса,
+        #: тогда `_notify_completion` шлёт сразу. Сводка считается по этому списку.
+        self._cycle_batch: Optional[list[tuple[TorrentInfo, str, list[int]]]] = None
 
     def subscribe_user(self, user_id: int) -> None:
         """Subscribe a user to download notifications."""
@@ -100,7 +157,8 @@ class NotificationService:
             return
 
         self._running = True
-        self._monitor_task = asyncio.create_task(self._monitor_loop())
+        self._monitor_task = asyncio.create_task(self._monitor_loop(), name="notification_monitor")
+        self._monitor_task.add_done_callback(log_background_task_end)
         logger.info(
             "Notification service started",
             check_interval=self.settings.notify_check_interval,
@@ -257,13 +315,22 @@ class NotificationService:
                 if is_complete:
                     # Nothing left to watch — not tracked at all (NOTIF-10).
                     completed += 1
+                    self._completed_hashes.add(torrent_hash)
                     continue
+                if self._is_rechecking_finished(torrent_hash, torrent):
+                    # Бот стартовал вместе с qBit, раздача в проверке: прогресс на
+                    # время проверки низкий, но завершалась она раньше.
+                    self._completed_hashes.add(torrent_hash)
+                    continue
+                # LOGIC-09: качался во время рестарта или деплоя. Он докачается уже
+                # при нас и получит своё уведомление, как любой другой.
                 self._tracked_torrents[torrent.hash] = {
                     "completed": False,
-                    "notified": True,  # Don't notify for existing torrents
+                    "notified": False,
                     "name": torrent.name,
                     "added_on": torrent.added_on,
                 }
+            self._last_sync_at = self._clock()
 
             logger.info(
                 "Initial torrent sync completed",
@@ -275,6 +342,15 @@ class NotificationService:
             logger.error("Failed to perform initial sync", error=describe_error(e), exc_info=True)
 
     async def _check_for_completions(self) -> None:
+        """Один опрос; завершения опроса уходят вместе, см. `_flush_cycle`."""
+        self._cycle_batch = []
+        try:
+            await self._poll_completions()
+        finally:
+            batch, self._cycle_batch = self._cycle_batch, None
+            await self._flush_cycle(batch)
+
+    async def _poll_completions(self) -> None:
         """Check for newly completed downloads and send notifications.
 
         PERF-02 full: polls qBittorrent's ``sync/maindata`` delta protocol
@@ -291,12 +367,16 @@ class NotificationService:
         work at all, which is the whole point of the delta protocol on a Pi.
         """
         maindata = await self.qbittorrent.get_maindata(self._rid)
+        seen_before = set(self._torrents_raw)
         self._merge_maindata(maindata)
+        previous_sync, self._last_sync_at = self._last_sync_at, self._clock()
+        resync = bool(maindata.get("full_update"))
 
         for h in maindata.get("torrents_removed", []):
             self._tracked_torrents.pop(h, None)
+            self._completed_hashes.discard(h)
 
-        if maindata.get("full_update"):
+        if resync:
             changed_hashes = list(self._torrents_raw)
         else:
             changed_hashes = list(maindata.get("torrents", {}))
@@ -310,21 +390,36 @@ class NotificationService:
             tracked = self._tracked_torrents.get(torrent_hash)
 
             if tracked is None:
-                # New torrent observed mid-run. If it's already complete
-                # the moment we see it (e.g. instantly-finished magnet),
-                # treat it like _initial_sync would — suppress the
-                # notification rather than fire one for a download we
-                # never actually watched progress on — and do not track it
-                # at all: a seeding torrent shows up in every delta, and
-                # keeping it would grow the dict for nothing (audit
-                # 2026-09-23, NOTIF-10 "prune completed entries").
+                # New torrent observed mid-run. Already complete the moment we
+                # see it: it finished between two polls (LOGIC-09, the idle
+                # interval is 5 minutes) or is old news — `completion_on` tells
+                # which. Either way it is not tracked: a seeding torrent shows up
+                # in every delta, and keeping it would grow the dict for nothing
+                # (audit 2026-09-23, NOTIF-10 "prune completed entries").
                 if not is_complete:
+                    if self._is_rechecking_finished(torrent_hash, torrent):
+                        # Перепроверка раздачи, которая уже завершалась (мы её видели
+                        # завершённой или qBit помнит `completion_on`): прогресс на
+                        # время проверки падает, но это не новая загрузка. Хэш
+                        # остаётся в `_completed_hashes`, иначе 50 раздач в checkingUP
+                        # объявились бы второй раз. Если проверка найдёт недостающее,
+                        # состояние сменится на downloading, и тогда раздача
+                        # отслеживается заново, как положено.
+                        self._completed_hashes.add(torrent_hash)
+                        continue
+                    self._completed_hashes.discard(torrent_hash)
                     self._tracked_torrents[torrent_hash] = {
                         "completed": False,
                         "notified": False,
                         "name": torrent.name,
                         "added_on": torrent.added_on,
                     }
+                elif torrent_hash not in self._completed_hashes:
+                    self._completed_hashes.add(torrent_hash)
+                    if self._finished_since(
+                        torrent, previous_sync, new=not resync and torrent_hash not in seen_before,
+                    ):
+                        await self._completion_reached(torrent)
                 continue
 
             if tracked["completed"]:
@@ -333,32 +428,59 @@ class NotificationService:
                 continue
 
             if is_complete:
+                self._completed_hashes.add(torrent_hash)
                 if not tracked["notified"]:
-                    if (
-                        (torrent.category or "") in self.settings.arr_torrent_category_set
-                        # Final review 2026-09-24: the bot pushed this one
-                        # straight into qBit — no *arr grabbed it, so
-                        # library_watch never will announce it.
-                        and DIRECT_TAG not in torrent.tags
-                    ):
-                        # NOTIF-07 (audit 2026-09-23): Radarr/Sonarr
-                        # import this torrent and library_watch announces
-                        # it once it is in the library — a qBit message
-                        # here would be the second one for one film.
-                        logger.debug(
-                            "qbit_completion_left_to_library_watch",
-                            torrent_name=torrent.name,
-                            category=torrent.category,
-                        )
-                    else:
-                        await self._notify_completion(torrent)
-                    self._completed_count += 1
+                    await self._completion_reached(torrent)
                 # Once complete+notified there is no further state to
                 # track — drop it now instead of keeping a growing dict
                 # of finished torrents alive for the process lifetime.
                 del self._tracked_torrents[torrent_hash]
             # else: still downloading/paused/stalled/errored — leave
             # tracked, re-check next cycle.
+
+    def _is_rechecking_finished(self, torrent_hash: str, torrent: TorrentInfo) -> bool:
+        """Раздача в проверке, и она уже завершалась.
+
+        `completion_on` у qBit остаётся после завершения, поэтому у раздачи без него
+        (-1 или 0) завершения не было: её докачка — настоящее событие.
+        """
+        return torrent.state == TorrentState.CHECKING and (
+            torrent_hash in self._completed_hashes or torrent.completion_on is not None
+        )
+
+    @staticmethod
+    def _finished_since(torrent: TorrentInfo, previous_sync: Optional[datetime], *, new: bool) -> bool:
+        """Докачан после прошлого опроса. До первого чтения qBit — никогда.
+
+        ``new``: дельта принесла хэш, которого не было в прошлом чтении. Он новый по
+        определению, поэтому часы qBit могут отставать сильно: допуск сутки. Полное
+        чтение (resync) такого не знает, и там допуск обычный, иначе вся раздача ушла
+        бы рассылкой.
+        """
+        if previous_sync is None or torrent.completion_on is None:
+            return False
+        return torrent.completion_on > previous_sync - (_NEW_HASH_MARGIN if new else _CLOCK_SKEW_MARGIN)
+
+    async def _completion_reached(self, torrent: TorrentInfo) -> None:
+        if (
+            (torrent.category or "") in self.settings.arr_torrent_category_set
+            # Final review 2026-09-24: the bot pushed this one
+            # straight into qBit — no *arr grabbed it, so
+            # library_watch never will announce it.
+            and DIRECT_TAG not in torrent.tags
+        ):
+            # NOTIF-07 (audit 2026-09-23): Radarr/Sonarr
+            # import this torrent and library_watch announces
+            # it once it is in the library — a qBit message
+            # here would be the second one for one film.
+            logger.debug(
+                "qbit_completion_left_to_library_watch",
+                torrent_name=torrent.name,
+                category=torrent.category,
+            )
+        else:
+            await self._notify_completion(torrent)
+        self._completed_count += 1
 
     async def _notify_completion(self, torrent: TorrentInfo) -> None:
         """Send completion notification to all subscribed users.
@@ -378,42 +500,66 @@ class NotificationService:
         skip: set[int] = set()
         if self._exclude_chats is not None:
             try:
-                skip = await self._exclude_chats(torrent.hash)
+                skip = set(await self._exclude_chats(torrent.hash))
+                if self._claim_direct_chats is not None and DIRECT_TAG in torrent.tags:
+                    skip |= await self._claim_direct_chats(torrent)
             except Exception as e:
                 logger.warning("notification_exclude_failed", error=describe_error(e))
 
-        for user_id in self.get_subscribed_users():
+        recipients = []
+        for user_id in sorted(self.get_subscribed_users()):
             if user_id in skip:
                 logger.debug("completion_left_to_living_message", user_id=user_id)
                 continue
-            try:
-                result = await self.send_notification(user_id, message)
-            except Exception as e:
-                logger.error(
-                    "notification_send_raised",
-                    user_id=user_id,
-                    torrent_name=torrent.name,
-                    error=describe_error(e),
-                    exc_info=True,
-                )
-                continue
+            recipients.append(user_id)
 
-            # Legacy callables return None; treat that as success for
-            # backward compatibility. A callable that explicitly returns
-            # False means "did not deliver" and must not be logged as sent.
-            sent = result is not False
-            if sent:
-                logger.info(
-                    "Sent completion notification",
-                    user_id=user_id,
-                    torrent_name=torrent.name,
-                )
-            else:
-                logger.warning(
-                    "notification_not_delivered",
-                    user_id=user_id,
-                    torrent_name=torrent.name,
-                )
+        if self._cycle_batch is not None:
+            # Внутри опроса: отправка после подсчёта, см. `_flush_cycle`.
+            self._cycle_batch.append((torrent, message, recipients))
+            return
+        for user_id in recipients:
+            await self._deliver(user_id, message, torrent.name)
+
+    async def _flush_cycle(self, batch: list[tuple[TorrentInfo, str, list[int]]]) -> None:
+        """Разослать завершения опроса: не больше `MAX_SEPARATE_COMPLETIONS` на чат
+        отдельными сообщениями, больше — одна сводка.
+
+        Живые сообщения исключены ещё при постановке в очередь, так что считаются
+        только те завершения, которые чат действительно получил бы.
+        """
+        per_user: dict[int, list[tuple[TorrentInfo, str]]] = {}
+        for torrent, message, recipients in batch:
+            for user_id in recipients:
+                per_user.setdefault(user_id, []).append((torrent, message))
+        for user_id, items in per_user.items():
+            if len(items) <= MAX_SEPARATE_COMPLETIONS:
+                for torrent, message in items:
+                    await self._deliver(user_id, message, torrent.name)
+                continue
+            names = [torrent.name for torrent, _message in items]
+            logger.info("completion_summary", user_id=user_id, count=len(names))
+            await self._deliver(user_id, format_completion_summary(names), f"{len(names)} загрузок")
+
+    async def _deliver(self, user_id: int, message: str, label: str) -> None:
+        try:
+            result = await self.send_notification(user_id, message)
+        except Exception as e:
+            logger.error(
+                "notification_send_raised",
+                user_id=user_id,
+                torrent_name=label,
+                error=describe_error(e),
+                exc_info=True,
+            )
+            return
+
+        # Legacy callables return None; treat that as success for
+        # backward compatibility. A callable that explicitly returns
+        # False means "did not deliver" and must not be logged as sent.
+        if result is not False:
+            logger.info("Sent completion notification", user_id=user_id, torrent_name=label)
+        else:
+            logger.warning("notification_not_delivered", user_id=user_id, torrent_name=label)
 
     def get_stats(self) -> dict:
         """Get notification service statistics."""

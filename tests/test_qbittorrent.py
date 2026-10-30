@@ -504,21 +504,6 @@ class TestFormatters:
         assert "Сиды" in result or "Пиры" in result
         assert torrent.save_path in result
 
-    def test_format_torrent_compact(self, torrent):
-        """Test formatting compact torrent info."""
-        result = Formatters.format_torrent_compact(torrent)
-
-        assert "75%" in result
-        assert "⬇️" in result
-
-    def test_format_no_torrents(self):
-        """Test formatting no torrents message."""
-        result = Formatters.format_no_torrents(TorrentFilter.ALL)
-        assert "Торрентов нет" in result or "нет" in result
-
-        result = Formatters.format_no_torrents(TorrentFilter.DOWNLOADING)
-        assert "загр" in result.lower() or "нет" in result
-
     def test_format_speed_limit_changed(self):
         """Test formatting speed limit change message."""
         result = Formatters.format_speed_limit_changed("dl", 1024)
@@ -528,17 +513,6 @@ class TestFormatters:
         result = Formatters.format_speed_limit_changed("ul", 0)
         assert "Отдача" in result or "⬆️" in result
         assert "без ограничений" in result or "∞" in result
-
-    def test_format_torrent_action(self):
-        """Test formatting torrent action result."""
-        result = Formatters.format_torrent_action("pause", "Test.Torrent", True)
-        assert "Пауза" in result or "⏸" in result
-
-        result = Formatters.format_torrent_action("resume", "Test.Torrent", True)
-        assert "Возобновлен" in result or "▶️" in result
-
-        result = Formatters.format_torrent_action("pause", "Test.Torrent", False)
-        assert "Ошибка" in result or "❌" in result
 
 
 class TestKeyboards:

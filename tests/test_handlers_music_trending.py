@@ -234,7 +234,7 @@ async def test_render_artist_list_respects_results_per_page_setting(monkeypatch)
         message.edit_text = AsyncMock()
         artists = [_make_artist(i) for i in range(5)]
 
-        await music._render_artist_list(message, artists, page=0)
+        await music._render_artist_list(message, artists, "abc123", page=0)
 
         keyboard = message.edit_text.call_args.kwargs["reply_markup"]
         # One button row per artist on the page, plus a nav row (since
@@ -601,6 +601,7 @@ def _music_db(session=None) -> MagicMock:
     db = MagicMock()
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
+    db.update_session = AsyncMock(return_value=True)
     db.delete_session = AsyncMock()
     db.log_action = AsyncMock()
 

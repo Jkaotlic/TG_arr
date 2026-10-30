@@ -52,6 +52,7 @@ def _db(session=None) -> MagicMock:
     db = MagicMock()
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
+    db.update_session = AsyncMock(return_value=True)
     db.delete_session = AsyncMock()
     db.log_action = AsyncMock()
 
@@ -137,7 +138,7 @@ async def test_album_releases_keep_lidarr_order_rejected_last():
     with _services(add_service), patch.object(music, "accessible_message", return_value=cb.message):
         await music.handle_album_source(cb, AlbumSourceCB(album_id=3, source="tor"), _user(), db)
 
-    saved = db.save_session.await_args.args[1]
+    saved = db.update_session.await_args.args[1]
     assert [r.guid for r in saved.results] == ["first", "second", "bad"]
 
 

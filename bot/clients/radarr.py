@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import APIError, ArrBaseClient
+from bot.clients.base import APIError, ArrBaseClient, WantedList
 from bot.models import MovieInfo, SearchResult
 
 logger = structlog.get_logger()
@@ -33,7 +33,7 @@ class RadarrClient(ArrBaseClient):
         log.info("Looking up movie in Radarr")
 
         params = {"term": query}
-        results = await self.get("/api/v3/movie/lookup", params=params)
+        results = await self._get_slow("/api/v3/movie/lookup", params=params)
 
         if not isinstance(results, list):
             return []
@@ -56,8 +56,12 @@ class RadarrClient(ArrBaseClient):
         params = {"tmdbId": tmdb_id}
         results = await self.get("/api/v3/movie", params=params)
 
-        if isinstance(results, list) and results:
-            return self._parse_movie(results[0])
+        # Сверяем id, а не берём первую строку: чужой тайтл здесь выглядел бы как
+        # «уже добавлен» и при проверке, и при перепроверке после сбоя (BUG-07).
+        if isinstance(results, list):
+            for item in results:
+                if isinstance(item, dict) and item.get("tmdbId") == tmdb_id:
+                    return self._parse_movie(item)
         return None
 
     async def add_movie(
@@ -107,7 +111,18 @@ class RadarrClient(ArrBaseClient):
         if tags:
             payload["tags"] = tags
 
-        result = await self.post("/api/v3/movie", json_data=payload)
+        # BUG-07: без повторов — второй POST получил бы 400 «already added».
+        try:
+            result = await self._post_no_retry(
+                "/api/v3/movie", json_data=payload, timeout=self._slow_timeout(),
+            )
+        except APIError as e:
+            existing = await self._find_after_failed_add(
+                e, lambda: self.get_movie_by_tmdb(movie.tmdb_id),
+            )
+            if existing is None:
+                raise
+            return existing
 
         if isinstance(result, dict):
             added_movie = self._parse_movie(result)
@@ -126,7 +141,7 @@ class RadarrClient(ArrBaseClient):
         result = await self.post("/api/v3/command", json_data=payload)
         return result if isinstance(result, dict) else {}
 
-    async def get_wanted_movies(self, page_size: int = 50) -> list[dict[str, Any]]:
+    async def get_wanted_movies(self, page_size: int = 50) -> WantedList:
         """Movies that are monitored but have no file."""
         return await self._get_wanted(page_size)
 
@@ -157,7 +172,7 @@ class RadarrClient(ArrBaseClient):
             "start": start,
             "end": end,
         }
-        results = await self.get("/api/v3/calendar", params=params)
+        results = await self._get_slow("/api/v3/calendar", params=params)
         if not isinstance(results, list):
             return []
 

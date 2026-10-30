@@ -112,7 +112,18 @@ class EmbyClient:
         params: Optional[dict] = None,
         json_data: Optional[dict] = None,
     ) -> Any:
-        """Make authenticated request to Emby API."""
+        """Make authenticated request to Emby API (with retries)."""
+        return await self._request_once(method, endpoint, params=params, json_data=json_data)
+
+    async def _request_once(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[dict] = None,
+        json_data: Optional[dict] = None,
+    ) -> Any:
+        """One authenticated request. Напрямую — для команд, которые нельзя
+        повторять: сервер мог принять первую, а ответ потеряться."""
         client = await self._get_client()
 
         try:
@@ -146,6 +157,10 @@ class EmbyClient:
             raise EmbyConnectionError("Таймаут соединения с Emby") from exc
         except httpx.ConnectError as exc:
             raise EmbyConnectionError(f"Не удалось подключиться к Emby ({self.base_url})") from exc
+        except httpx.TransportError as exc:
+            # BUG-06: обрыв на середине. EmbyError, а не EmbyConnectionError: запрос
+            # мог дойти, а `_request` повторяет и POST.
+            raise EmbyError(f"Обрыв соединения с Emby ({self.base_url})") from exc
 
     async def get_server_info(self) -> EmbyServerInfo:
         """Get server information."""
@@ -214,7 +229,7 @@ class EmbyClient:
         if not info.has_update_available:
             raise EmbyError("Обновление недоступно")
 
-        await self._request("POST", "/System/Update")
+        await self._request_once("POST", "/System/Update")
         logger.info("Update installation started")
 
     async def restart_server(self) -> None:
@@ -224,7 +239,7 @@ class EmbyClient:
         if not info.can_self_restart:
             raise EmbyError("Сервер не поддерживает перезагрузку")
 
-        await self._request("POST", "/System/Restart")
+        await self._request_once("POST", "/System/Restart")
         logger.info("Server restart initiated")
 
     async def get_sessions(self) -> list[dict]:

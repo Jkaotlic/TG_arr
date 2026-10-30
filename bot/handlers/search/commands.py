@@ -5,7 +5,7 @@ and shows the first results page."""
 import html
 import re
 import time
-from typing import Optional
+from typing import Any, NamedTuple, Optional
 
 import structlog
 from aiogram import F
@@ -16,9 +16,16 @@ from aiogram.types import Message
 from bot.config import get_settings
 from bot.db import Database
 from bot.handlers.common import strip_command
+from bot.clients.base import APIError
 from bot.models import ActionLog, ActionType, ContentType, SearchSession, User
 from bot.services.add_service import resolve_profile_with_source
-from bot.services.search_service import SearchService, describe_search_failure
+from bot.services.search_service import (
+    CatalogLookupError,
+    SearchService,
+    describe_search_failure,
+    describe_unreachable,
+    normalize_title,
+)
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import Keyboards
 from bot.ui.list_token import new_list_token
@@ -28,6 +35,10 @@ from bot.handlers import search as _search
 from .services import MAX_QUERY_LENGTH, router
 
 logger = structlog.get_logger()
+
+#: Без них каталог не проверить. Lidarr и slskd в этот список не входят: фильм или
+#: сериал бот найдёт и без них.
+_VIDEO_SERVICES = frozenset({"radarr", "sonarr"})
 
 
 @router.message(Command("search"))
@@ -108,46 +119,56 @@ async def handle_text_search(message: Message, db_user: User, db: Database) -> N
     await process_search(message, message.text.strip(), ContentType.UNKNOWN, db_user, db)
 
 
-def _normalize_title(value: str) -> str:
-    """Casefold + collapse punctuation so "Дюна:" == "дюна"."""
-    return re.sub(r"[^\w\s]", "", (value or "").casefold()).strip()
+class TitleResolution(NamedTuple):
+    """Что делать со списком кандидатов: выбрать одного или спросить."""
+
+    chosen: Any
+    must_ask: bool
 
 
-def needs_title_confirmation(
+def resolve_title_candidate(
     candidates: list, query: str, query_year: Optional[int]
-) -> bool:
-    """Whether the user must pick which title they meant.
+) -> TitleResolution:
+    """Which title the user meant, or that they must be asked (LOGIC-01).
+
+    Одно решение на вопрос и на выбор: раньше первая функция видела единственное
+    точное совпадение и не спрашивала, а вторая о нём не знала и брала `candidates[0]`.
+    Запрос «Дюна» при [«Дюна: Часть вторая», «Дюна»] молча добавлял вторую часть.
 
     Prod incident 2026-07-29: "Холодное сердце" returned a German film from
     2016 first (Disney's Frozen wasn't in the metadata list at all) and the bot
     silently added it to the catalog, then searched releases for the wrong
-    film. Picking the top hit is only safe when the answer is unambiguous:
+    film. Picking a candidate is only safe when the answer is unambiguous:
 
-    - one candidate, or
-    - the query carried a year and exactly one candidate matches it, or
-    - exactly one candidate's title equals the query.
+    - the query carried a year: exactly one candidate of that year (±1), or several
+      of that year with exactly one exact title. Никого этого года — вопрос, даже при
+      точном названии: "Dune 2021" must not resolve to the 1984 film;
+    - no year: one candidate, or exactly one candidate's title equals the query.
 
     Anything else is a guess, and a wrong guess costs a junk catalog entry plus
     a pointless indexer search — so ask instead.
     """
-    if len(candidates) <= 1:
-        return False
+    if not candidates:
+        return TitleResolution(None, False)
 
-    wanted = _normalize_title(query)
+    if len(candidates) == 1:
+        only = candidates[0]
+        # Год у кандидата неизвестен: сравнивать не с чем, а другого кандидата нет.
+        if query_year and only.year and abs(int(only.year) - int(query_year)) > 1:
+            return TitleResolution(None, True)
+        return TitleResolution(only, False)
+
     # Strip a trailing year from the query before comparing titles.
-    if query_year:
-        wanted = _normalize_title(re.sub(rf"\b{query_year}\b", "", query))
+    wanted = normalize_title(re.sub(rf"\b{query_year}\b", "", query) if query_year else query)
 
+    pool = candidates
     if query_year:
-        year_matches = [
-            c for c in candidates if c.year and abs(int(c.year) - int(query_year)) <= 1
-        ]
-        if len(year_matches) == 1:
-            return False
-        # Several candidates in the same year — fall through to the title check.
+        pool = [c for c in candidates if c.year and abs(int(c.year) - int(query_year)) <= 1]
+        if len(pool) == 1:
+            return TitleResolution(pool[0], False)
 
-    exact = [c for c in candidates if _normalize_title(c.title) == wanted]
-    return len(exact) != 1
+    exact = [c for c in pool if normalize_title(c.title) == wanted]
+    return TitleResolution(exact[0], False) if len(exact) == 1 else TitleResolution(None, True)
 
 
 def should_ask_for_season(
@@ -164,21 +185,6 @@ def should_ask_for_season(
     if parsed_season is not None:
         return False
     return len(seasons) > 1
-
-
-def _pick_metadata_candidate(candidates: list, query_year: Optional[int]):
-    """Choose the metadata candidate the user most likely meant.
-
-    Prefers a year match (±1) when the query carried a year — "Dune 2021" must
-    not resolve to the 1984 film just because it ranks higher by popularity.
-    """
-    if not candidates:
-        return None
-    if query_year:
-        for candidate in candidates:
-            if candidate.year and abs(int(candidate.year) - int(query_year)) <= 1:
-                return candidate
-    return candidates[0]
 
 
 async def _lookup_metadata_candidates(search_service, term: str, content_type: ContentType) -> list:
@@ -199,16 +205,52 @@ async def _lookup_metadata_candidates(search_service, term: str, content_type: C
     `SearchService.lookup_movies`/`lookup_series`, the same guarded path
     `detect_content_type`'s own fan-out uses. Series/anime reuse
     `SearchService.split_series_candidates`, the same genre-based split
-    `detect_content_type` uses, so a plain "/series" search and an
-    auto-detected one classify anime identically.
+    `detect_content_type` uses.
+
+    LOGIC-04: жанр здесь подсказка, а не фильтр: тип назвал сам пользователь. /series
+    не выбрасывает никого. /anime ставит вперёд тайтлы с жанром Anime, а если таких
+    нет, показывает всех: жанры TVDB для аниме на живом Sonarr не проверялись.
+
+    LOGIC-02: сбой Radarr или Sonarr доходит сюда как `CatalogLookupError`.
     """
     if content_type is ContentType.MOVIE:
         return await search_service.lookup_movies(term)
-    if content_type in (ContentType.SERIES, ContentType.ANIME):
+    if content_type is ContentType.SERIES:
+        return await search_service.lookup_series(term)
+    if content_type is ContentType.ANIME:
         all_series = await search_service.lookup_series(term)
-        series, anime = SearchService.split_series_candidates(all_series)
-        return anime if content_type is ContentType.ANIME else series
+        _series, anime = SearchService.split_series_candidates(all_series)
+        return anime or all_series
     return []
+
+
+class ArrAddError(ValueError):
+    """Тайтл найден, но Radarr/Sonarr не смог его добавить (5xx, таймаут).
+
+    Наследует `ValueError`, чтобы вызывающий показал причину как есть, а не
+    «Ничего не найдено»: тайтл только что нашёлся, и предложение искать свободно
+    по нему было бы ложью.
+    """
+
+
+async def _profiles_and_folders(client, service: str):
+    """Профили качества и корневые папки; сбой называет `service`.
+
+    Без обёртки `ServiceConnectionError` отсюда доходил до обработчика как
+    «Индексеры не ответили вовремя» и обвинял не тот сервис.
+    """
+    try:
+        return await client.get_quality_profiles(), await client.get_root_folders()
+    except APIError as e:
+        raise CatalogLookupError(service, e) from e
+
+
+def _add_failure(arr_name: str, candidate, action) -> ArrAddError:
+    reason = (getattr(action, "error_message", None) or "").strip()
+    text = f"{arr_name} не смог добавить «{candidate.title}»"
+    if reason:
+        text += f": {reason}"
+    return ArrAddError(text)
 
 
 async def _resolve_arr_entry(
@@ -222,7 +264,7 @@ async def _resolve_arr_entry(
     Rollback 2026-08-10 (Task 12). *arr's interactive release search needs a
     movie/series id already in Radarr/Sonarr's own library — unlike the
     previous backend, which searched releases per catalog title after an
-    explicit "ensure_title" add (unmonitored, purely to get an id).
+    explicit unmonitored add, purely to get an id.
     Radarr/Sonarr have no such "list releases for something not yet added"
     mode, and adding is cheap and is what the user wants anyway if they go on
     to grab something — so this adds the title the moment a candidate is resolved
@@ -235,8 +277,10 @@ async def _resolve_arr_entry(
     round-trip.
 
     Returns `(title_info, arr_id, created)`; `(None, None, False)` when
-    there is genuinely nothing to resolve (no candidate) or the add call
-    itself failed against a *reachable, configured* Radarr/Sonarr. Raises
+    there is genuinely nothing to resolve (no candidate). Провал самого
+    добавления (5xx, таймаут) бросает `ArrAddError` с причиной от сервиса, а
+    сбой запроса профилей и папок — `CatalogLookupError` с именем сервиса.
+    Raises
     `ValueError` when Radarr/Sonarr has no quality profiles or no root
     folders configured at all — that is a setup problem, not "this title
     doesn't exist", and the caller renders it as a distinct message instead
@@ -258,8 +302,7 @@ async def _resolve_arr_entry(
         if candidate.radarr_id:
             return candidate, candidate.radarr_id, False
         client = add_service.radarr
-        profiles = await client.get_quality_profiles()
-        folders = await client.get_root_folders()
+        profiles, folders = await _profiles_and_folders(client, "radarr")
         if not profiles or not folders:
             logger.warning("radarr_add_blocked_no_profiles_or_folders")
             raise ValueError("В Radarr не настроены профили качества или папки — обратитесь к администратору")
@@ -269,7 +312,7 @@ async def _resolve_arr_entry(
             get_settings().radarr_default_profile_id,
         )
         folder_path = add_service.resolve_root_folder(folders, db_user.preferences.radarr_root_folder_id)
-        added, _action = await add_service.add_movie(
+        added, action = await add_service.add_movie(
             candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
             search_for_movie=False,
             # Added UNMONITORED: this add exists only to obtain a Radarr id so
@@ -281,6 +324,8 @@ async def _resolve_arr_entry(
             monitored=False,
         )
         if added is None or not added.radarr_id:
+            if action is not None and action.success is False:
+                raise _add_failure("Radarr", candidate, action)
             return None, None, False
         return added, added.radarr_id, True
 
@@ -288,8 +333,7 @@ async def _resolve_arr_entry(
     if candidate.sonarr_id:
         return candidate, candidate.sonarr_id, False
     client = add_service.sonarr
-    profiles = await client.get_quality_profiles()
-    folders = await client.get_root_folders()
+    profiles, folders = await _profiles_and_folders(client, "sonarr")
     if not profiles or not folders:
         logger.warning("sonarr_add_blocked_no_profiles_or_folders")
         raise ValueError("В Sonarr не настроены профили качества или папки — обратитесь к администратору")
@@ -298,7 +342,7 @@ async def _resolve_arr_entry(
         get_settings().sonarr_default_profile_id,
     )
     folder_path = add_service.resolve_root_folder(folders, db_user.preferences.sonarr_root_folder_id)
-    added, _action = await add_service.add_series(
+    added, action = await add_service.add_series(
         candidate, quality_profile_id=profile.id, root_folder_path=folder_path,
         content_type=content_type, search_for_missing=False,
         # Same reasoning as the movie branch, and worse if ignored: the client
@@ -307,6 +351,8 @@ async def _resolve_arr_entry(
         monitored=False, monitor="none",
     )
     if added is None or not added.sonarr_id:
+        if action is not None and action.success is False:
+            raise _add_failure("Sonarr", candidate, action)
         return None, None, False
     return added, added.sonarr_id, True
 
@@ -475,6 +521,19 @@ async def process_search(
                 question_suffix = (
                     "фильм, сериал, аниме или музыка?" if show_music else "фильм, сериал или аниме?"
                 )
+                # LOGIC-02: спрашивать о типе бессмысленно, если показать нечего, а
+                # не ответил видеосервис: «нигде нет» было бы неправдой. Не ответила
+                # только музыка: фильм и сериал проверены, вопрос с предупреждением
+                # ведёт дальше, вплоть до свободного поиска.
+                if _VIDEO_SERVICES.intersection(detection.failed_services) and not any(
+                    detection.candidates.values()
+                ):
+                    await status_msg.edit_text(Formatters.format_error(
+                        f"{describe_unreachable(detection.failed_services)}, поэтому поиск сейчас "
+                        "невозможен. Состояние сервисов — в /health."
+                    ))
+                    log.warning("search_branch", branch="services_down", failed=detection.failed_services)
+                    return
                 hint = ""
                 if detection and detection.candidates:
                     hint_lines = []
@@ -487,17 +546,26 @@ async def process_search(
                             hint_lines.append(f"{label} {shown}")
                     if hint_lines:
                         hint = "\n\n<i>Похоже на:</i>\n" + "\n".join(hint_lines)
-                await status_msg.edit_text(
-                    f"🤔 <b>{html.escape(query)}</b> — это {question_suffix}{hint}",
-                    reply_markup=Keyboards.content_type_selection(show_music=show_music),
-                    parse_mode="HTML",
-                )
+                if detection.failed_services:
+                    hint += (
+                        f"\n\n⚠️ {describe_unreachable(detection.failed_services)} — "
+                        "поэтому определить тип сам не могу."
+                    )
+                # BUG-02: токен привязывает кнопки вопроса к этому запросу.
                 session = SearchSession(
                     user_id=user_id,
                     query=query,
                     content_type=ContentType.UNKNOWN,
+                    list_token=new_list_token(),
                 )
                 await db.save_session(user_id, session)
+                await status_msg.edit_text(
+                    f"🤔 <b>{html.escape(query)}</b> — это {question_suffix}{hint}",
+                    reply_markup=Keyboards.content_type_selection(
+                        show_music=show_music, list_token=session.list_token,
+                    ),
+                    parse_mode="HTML",
+                )
                 log.info("search_branch", branch="question_user")
                 return
 
@@ -527,23 +595,26 @@ async def process_search(
             # 2026-07-29: don't guess. Adding the wrong title costs a junk
             # library entry AND an indexer search for a film the user never
             # asked for.
-            if needs_title_confirmation(candidates, lookup_term, parsed.get("year")):
+            resolution = resolve_title_candidate(candidates, lookup_term, parsed.get("year"))
+            if resolution.must_ask:
+                # BUG-01: новый выбор — новый токен, кнопки прежнего выбора устарели.
                 session = SearchSession(
                     user_id=user_id,
                     query=query,
                     content_type=content_type,
                     lookup_candidates=list(candidates[:5]),
+                    list_token=new_list_token(),
                 )
                 await db.save_session(user_id, session)
                 await status_msg.edit_text(
                     f"🤔 Уточните, что именно нужно — <b>{html.escape(query)}</b>:",
-                    reply_markup=Keyboards.title_candidates(candidates),
+                    reply_markup=Keyboards.title_candidates(candidates, list_token=session.list_token),
                     parse_mode="HTML",
                 )
                 log.info("search_branch", branch="ask_title", candidates=len(candidates))
                 return
 
-            chosen = _pick_metadata_candidate(candidates, parsed.get("year"))
+            chosen = resolution.chosen
 
         try:
             title, arr_id, created = await _resolve_arr_entry(add_service, content_type, chosen, db_user)
@@ -554,7 +625,10 @@ async def process_search(
             # "no_metadata" message below. This is a setup problem, distinct
             # from a genuine no-match, so it gets its own message.
             await status_msg.edit_text(Formatters.format_error(str(ve)))
-            log.warning("search_branch", branch="add_config_error", error=str(ve))
+            log.warning(
+                "search_branch", branch="add_failed" if isinstance(ve, ArrAddError) else "add_config_error",
+                error=str(ve),
+            )
             return
         created = created or title_created
         if title is None or arr_id is None:
@@ -605,9 +679,12 @@ async def process_search(
         # полноценный, чем номер сезона (и поэтому именно `is not None`).
         seasons = _known_seasons(title, content_type)
         season_answered = season_override is not None
-        # Сезон 0 в Sonarr — спецвыпуски, а не «всё шоу»: «весь сериал» должен
-        # доехать до поиска как отсутствие сезонного фильтра.
-        season_wanted = parsed.get("season") or season_override or None
+        # LOGIC-13: сезон 0 в Sonarr — спецвыпуски. Только ответ выбора `season_override
+        # == 0` значит «весь сериал», а «S00E01» в запросе это настоящий сезон 0: `or`
+        # терял его и искал в сезоне 1.
+        season_wanted = parsed.get("season")
+        if season_wanted is None and season_override != 0:
+            season_wanted = season_override
         if not season_answered and should_ask_for_season(content_type, seasons, parsed.get("season")):
             session = SearchSession(
                 user_id=user_id,
@@ -740,7 +817,7 @@ async def process_search(
         # 2026-07-29: say *what* failed when we know — a masked internal
         # error is almost always "every indexer is rate-limited", and the user
         # can act on that (wait it out) but not on "временно недоступен".
-        error_text = Formatters.format_error(html.escape(describe_search_failure(e)))
+        error_text = Formatters.format_error(describe_search_failure(e))  # BUG-17: без второго escape
         if status_msg is not None:
             try:
                 await status_msg.edit_text(error_text)

@@ -85,6 +85,13 @@ _LINE_MISSING = "❌ Загрузка пропала из очереди"
 _LINE_NOT_IMPORTED = "⚠️ Не импортировано — проверь *arr"
 _LINE_UNTRACKED = "Статус загрузки не отслеживается — сообщу, когда будет в библиотеке."
 
+#: PERF-03: запас к `created_at` при чтении /history/since. *arr пишет `grabbed` раньше,
+#: чем бот создаёт строку, и его часы могут расходиться с нашими.
+_HISTORY_MARGIN = timedelta(seconds=300)
+
+#: Прямой торрент может быть добавлен чуть раньше, чем бот создаст строку.
+_DIRECT_ADD_MARGIN = timedelta(seconds=60)
+
 #: qBittorrent reports "unknown" ETA as 8640000 s (100 days).
 _ETA_UNKNOWN = 8_640_000
 
@@ -261,6 +268,7 @@ class LiveStatusService:
         self._emby_retry_every = emby_retry_every
         # per-tick caches (reset by tick())
         self._history: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._history_since: dict[str, datetime] = {}
         self._queues: dict[str, list[dict[str, Any]]] = {}
         self._emby_cache: dict[str, Optional[str]] = {}
 
@@ -276,6 +284,33 @@ class LiveStatusService:
             if r["kind"] != KIND_NOTICE and (r["download_id"] or "") == wanted and r["state"] != LOST
             and r["state"] != UNTRACKED
         }
+
+    async def claim_direct_chats(self, torrent: TorrentInfo) -> set[int]:
+        """Привязать докачанный прямой торрент к ждущей строке и вернуть её чат.
+
+        LOGIC-09: торрент, докачанный раньше привязки, `owner_chats` ещё не узнаёт.
+        Подходит та же строка, что выбрал бы `_link_direct`: сначала по имени релиза,
+        затем самая старая из созданных не позже минуты до добавления торрента. Чужие
+        торренты чата сюда не попадают. Привязка здесь же, потому что сообщение чату
+        подавляется: строка обязана дойти до «скачано», а не до `_LINE_UNTRACKED` с
+        обещанием сообщить, которое уже некому выполнить.
+        """
+        wanted = torrent.hash.upper()
+        rows = await self._db.live_rows()
+        if any((r["download_id"] or "") == wanted for r in rows):
+            return set()  # у торрента уже есть строка, `owner_chats` её учёл
+        waiting = [r for r in rows if r["state"] == WAITING and r["kind"] != KIND_NOTICE and r["arr"] == "qbit"]
+        name = torrent.name.strip().casefold()
+        row = next((r for r in waiting if (r.get("release") or "").strip().casefold() == name), None)
+        if row is None and torrent.added_on is not None:
+            row = next(
+                (r for r in waiting if torrent.added_on >= (_parse(r["created_at"]) or self._clock()) - _DIRECT_ADD_MARGIN),
+                None,
+            )
+        if row is None:
+            return set()
+        await self._save(row, download_id=wanted, state=DOWNLOADING, updated_at=self._clock().isoformat())
+        return {int(row["chat_id"])}
 
     # ------------------------------------------------------------ edits
     async def _apply(self, row: dict[str, Any], markup: Any = None, **fields: Any) -> EditOutcome:
@@ -321,6 +356,7 @@ class LiveStatusService:
         if not rows:
             return
         self._history, self._queues, self._emby_cache = {}, {}, {}
+        self._history_since = self._oldest_rows(rows)
         # Batch E fix 1: flood control is per chat — skip that chat's other
         # rows this tick, keep the rest going.
         flooded: set[int] = set()
@@ -334,6 +370,18 @@ class LiveStatusService:
                 continue
             if outcome == "retry":
                 flooded.add(int(row["chat_id"]))
+
+    def _oldest_rows(self, rows: list[dict[str, Any]]) -> dict[str, datetime]:
+        """Самая старая строка на сервис: от неё читается история этого тика."""
+        oldest: dict[str, datetime] = {}
+        for row in rows:
+            if row["kind"] == KIND_NOTICE or row["state"] == EMBY:
+                continue  # история им не нужна, а старая строка удлинила бы чтение
+            created = _parse(row["created_at"]) or self._clock()
+            arr = row["arr"]
+            if arr not in oldest or created < oldest[arr]:
+                oldest[arr] = created
+        return oldest
 
     async def _advance(self, row: dict[str, Any]) -> Optional[EditOutcome]:
         state = row["state"]
@@ -365,11 +413,19 @@ class LiveStatusService:
             client = self._arr.get(arr)
             records: list[dict[str, Any]] = []
             if client is not None:
+                # PERF-03: раз в 30 с лёгкий /history/since, а не страница /history.
+                # Часовой пояс и граница те же, что у LibraryWatcher: UTC с точностью
+                # до секунды, «не раньше». Сервис отдаёт старые записи первыми, а
+                # привязка ждёт новые первыми.
+                since = self._history_since.get(arr, self._clock()) - _HISTORY_MARGIN
                 try:
-                    records = await client.get_history(event_type=event_type, page_size=50)
+                    records = await client.get_history_since(since, event_type=event_type)
                 except Exception as e:
                     logger.debug("live_status_history_failed", arr=arr, error=describe_error(e))
-            self._history[key] = records if isinstance(records, list) else []
+            self._history[key] = (
+                sorted(records, key=lambda r: str(r.get("date") or ""), reverse=True)
+                if isinstance(records, list) else []
+            )
         return self._history[key]
 
     async def _cached_queue(self, arr: str) -> Optional[list[dict[str, Any]]]:
@@ -453,7 +509,7 @@ class LiveStatusService:
         created = _parse(row["created_at"]) or self._clock()
         recent = [
             t for t in tagged
-            if t.added_on is not None and t.added_on >= created - timedelta(seconds=60)
+            if t.added_on is not None and t.added_on >= created - _DIRECT_ADD_MARGIN
         ]
         if recent:
             newest = max(recent, key=lambda t: t.added_on or created)

@@ -600,7 +600,7 @@ async def test_process_search_auto_detection_uses_detect_content_type():
 @pytest.mark.asyncio
 async def test_lookup_movies_respects_an_open_circuit_breaker():
     from bot.services import search_service as search_service_mod
-    from bot.services.search_service import SearchService
+    from bot.services.search_service import CatalogLookupError, SearchService
 
     radarr = AsyncMock()
     service = SearchService(radarr, AsyncMock())
@@ -609,16 +609,17 @@ async def test_lookup_movies_respects_an_open_circuit_breaker():
         search_service_mod._CIRCUIT_BREAKER.record_failure("radarr")
     assert search_service_mod._CIRCUIT_BREAKER.is_open("radarr")
 
-    result = await service.lookup_movies("Dune")
+    # LOGIC-02: открытый breaker это сбой, а не «ничего не найдено».
+    with pytest.raises(CatalogLookupError):
+        await service.lookup_movies("Dune")
 
-    assert result == []
     radarr.lookup_movie.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_lookup_series_respects_an_open_circuit_breaker():
     from bot.services import search_service as search_service_mod
-    from bot.services.search_service import SearchService
+    from bot.services.search_service import CatalogLookupError, SearchService
 
     sonarr = AsyncMock()
     service = SearchService(AsyncMock(), sonarr)
@@ -627,9 +628,9 @@ async def test_lookup_series_respects_an_open_circuit_breaker():
         search_service_mod._CIRCUIT_BREAKER.record_failure("sonarr")
     assert search_service_mod._CIRCUIT_BREAKER.is_open("sonarr")
 
-    result = await service.lookup_series("Frieren")
+    with pytest.raises(CatalogLookupError):
+        await service.lookup_series("Frieren")
 
-    assert result == []
     sonarr.lookup_series.assert_not_awaited()
 
 
@@ -642,7 +643,7 @@ async def test_handler_lookup_uses_the_guarded_search_service_path_not_raw_clien
     isolation (the two tests above)."""
     from bot.handlers.search.commands import _lookup_metadata_candidates
     from bot.services import search_service as search_service_mod
-    from bot.services.search_service import SearchService
+    from bot.services.search_service import CatalogLookupError, SearchService
 
     radarr = AsyncMock()
     service = SearchService(radarr, AsyncMock())
@@ -650,9 +651,9 @@ async def test_handler_lookup_uses_the_guarded_search_service_path_not_raw_clien
     for _ in range(3):
         search_service_mod._CIRCUIT_BREAKER.record_failure("radarr")
 
-    result = await _lookup_metadata_candidates(service, "Dune", ContentType.MOVIE)
+    with pytest.raises(CatalogLookupError):
+        await _lookup_metadata_candidates(service, "Dune", ContentType.MOVIE)
 
-    assert result == []
     radarr.lookup_movie.assert_not_awaited()
 
 
@@ -936,7 +937,7 @@ async def test_browsing_releases_does_not_enlist_the_title_in_arr_rss():
     add_service.radarr.get_quality_profiles = AsyncMock(return_value=[MagicMock(id=7)])
     add_service.radarr.get_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="G:\f")])
     add_service.sonarr.get_quality_profiles = AsyncMock(return_value=[MagicMock(id=7)])
-    add_service.sonarr.get_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="G:\s")])
+    add_service.sonarr.get_root_folders = AsyncMock(return_value=[MagicMock(id=1, path="G:\\s")])
     add_service.resolve_profile = MagicMock(return_value=MagicMock(id=7))
     add_service.resolve_root_folder = MagicMock(return_value="G:\f")
     add_service.add_movie = AsyncMock(

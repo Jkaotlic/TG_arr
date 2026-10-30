@@ -30,7 +30,7 @@ async def test_add_series_sends_anime_series_type():
     series = SeriesInfo(tvdb_id=99, title="Frieren")
     response = {"tvdbId": 99, "title": "Frieren", "id": 3, "seriesType": "anime"}
 
-    with patch.object(client, "post", new=AsyncMock(return_value=response)) as post:
+    with patch.object(client, "_post_no_retry", new=AsyncMock(return_value=response)) as post:
         added = await client.add_series(
             series,
             quality_profile_id=7,
@@ -55,7 +55,7 @@ async def test_add_series_defaults_to_standard_type():
     client = SonarrClient("http://sonarr", "key")
     response = {"tvdbId": 1, "title": "Fargo", "id": 4}
 
-    with patch.object(client, "post", new=AsyncMock(return_value=response)) as post:
+    with patch.object(client, "_post_no_retry", new=AsyncMock(return_value=response)) as post:
         await client.add_series(
             SeriesInfo(tvdb_id=1, title="Fargo"),
             quality_profile_id=4,
@@ -85,7 +85,7 @@ async def test_delete_series_uses_the_series_resource():
     from bot.clients.sonarr import SonarrClient
 
     client = SonarrClient("http://sonarr", "key")
-    with patch.object(client, "_request", new=AsyncMock(return_value={})) as req:
+    with patch.object(client, "_request_if_not_sent", new=AsyncMock(return_value={})) as req:
         ok = await client.delete_series(3, delete_files=True)
 
     assert ok is True
@@ -150,7 +150,7 @@ async def test_set_series_monitored_patches_the_resource():
 
     client = SonarrClient("http://sonarr", "key")
     with patch.object(client, "get", new=AsyncMock(return_value={"id": 3, "monitored": True})), \
-         patch.object(client, "_request", new=AsyncMock(return_value={"id": 3, "monitored": False})) as req:
+         patch.object(client, "_request_if_not_sent", new=AsyncMock(return_value={"id": 3, "monitored": False})) as req:
         ok = await client.set_series_monitored(3, False)
 
     assert ok is True
@@ -171,7 +171,7 @@ async def test_set_series_monitored_surfaces_service_connection_error_on_persist
 
     client = SonarrClient("http://sonarr", "key")
     with patch.object(client, "get", new=AsyncMock(return_value={"id": 3, "monitored": True})), \
-         patch.object(client, "_request", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
+         patch.object(client, "_request_if_not_sent", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
         with pytest.raises(ServiceConnectionError):
             await client.set_series_monitored(3, False)
 
@@ -184,7 +184,7 @@ async def test_delete_series_surfaces_service_connection_error_on_persistent_fai
     from bot.clients.sonarr import SonarrClient
 
     client = SonarrClient("http://sonarr", "key")
-    with patch.object(client, "_request", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
+    with patch.object(client, "_request_if_not_sent", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
         with pytest.raises(ServiceConnectionError):
             await client.delete_series(3)
 

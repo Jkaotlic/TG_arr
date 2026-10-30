@@ -268,7 +268,29 @@ async def test_legacy_t_page_tells_user_to_refresh():
 
 @pytest.mark.asyncio
 async def test_torrent_page_callback_garbage_page_shows_alert():
-    """TEST-08a: an out-of-range page number must not render, must alert."""
+    """TEST-08a: явное листание ◀️/▶️ за край не рисует, а алертит (BUG-03: это TorrentStepCB)."""
+    from bot.handlers import downloads
+    from bot.models import TorrentFilter
+    from bot.ui.callbacks import TorrentStepCB
+
+    qbt = AsyncMock()
+    qbt.get_torrents = AsyncMock(return_value=_torrents(3))  # 1 page only
+
+    cb = _make_torrent_page_callback(page=99, flt=TorrentFilter.ALL.value)
+    cb.data = TorrentStepCB(page=99, flt=TorrentFilter.ALL.value).pack()
+
+    with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
+        await downloads.handle_torrent_step(cb, TorrentStepCB.unpack(cb.data))
+
+    cb.answer.assert_awaited_once()
+    args, kwargs = cb.answer.call_args
+    assert kwargs.get("show_alert") is True
+    cb.message.edit_text.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_torrent_page_callback_refresh_clamps_the_page():
+    """BUG-03: «Обновить»/«Назад» при сократившемся списке рисуют последнюю страницу."""
     from bot.handlers import downloads
     from bot.models import TorrentFilter
     from bot.ui.callbacks import TorrentPageCB
@@ -281,10 +303,9 @@ async def test_torrent_page_callback_garbage_page_shows_alert():
     with patch.object(downloads, "get_qbittorrent", AsyncMock(return_value=qbt)):
         await downloads.handle_torrent_page(cb, TorrentPageCB.unpack(cb.data))
 
-    cb.answer.assert_awaited_once()
+    cb.message.edit_text.assert_awaited_once()
     args, kwargs = cb.answer.call_args
-    assert kwargs.get("show_alert") is True
-    cb.message.edit_text.assert_not_called()
+    assert not kwargs.get("show_alert")
 
 
 @pytest.mark.asyncio

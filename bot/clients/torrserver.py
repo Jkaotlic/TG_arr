@@ -50,6 +50,9 @@ _INDEXER_ID_RE = re.compile(r"/(\d+)/download")
 #: TorznabUrls entries end with the same id: http://host:9696/<id>
 _SOURCE_ID_RE = re.compile(r"/(\d+)/?$")
 
+#: Действия POST /torrents, которые только читают: их безопасно повторить.
+_READ_ACTIONS = frozenset({"list", "get"})
+
 
 def _as_int(value: Any, default: Optional[int] = 0) -> Optional[int]:
     """Best-effort int coercion for a single field from the server.
@@ -98,7 +101,10 @@ class TorrServerClient(BaseAPIClient):
     async def _torrents(self, payload: dict[str, Any]) -> Any:
         """POST /torrents, translating transport/auth errors into TorrServerError."""
         try:
-            return await self.post("/torrents", json_data=payload, timeout=self.timeout)
+            return await self.post(
+                "/torrents", json_data=payload, timeout=self.timeout,
+                retry_after_send=payload.get("action") in _READ_ACTIONS,
+            )
         except AuthenticationError as e:
             raise TorrServerError("Неверный логин или пароль TorrServer") from e
         except ServiceConnectionError as e:
@@ -153,7 +159,7 @@ class TorrServerClient(BaseAPIClient):
     # transient network errors (not on an HTTP-level error status — a 500 is
     # a real answer, not a transport failure, and must fail immediately).
     @retry(
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
+        retry=retry_if_exception_type(httpx.TransportError),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=4),
         reraise=True,
@@ -225,7 +231,9 @@ class TorrServerClient(BaseAPIClient):
     async def get_server_settings(self) -> dict[str, Any]:
         """Raw settings object (cache size, torznab sources, ...)."""
         try:
-            result = await self.post("/settings", json_data={"action": "get"}, timeout=self.timeout)
+            result = await self.post(
+                "/settings", json_data={"action": "get"}, timeout=self.timeout, retry_after_send=True,
+            )
         except AuthenticationError as e:
             raise TorrServerError("Неверный логин или пароль TorrServer") from e
         except (ServiceConnectionError, APIError) as e:
@@ -298,8 +306,10 @@ class TorrServerClient(BaseAPIClient):
         immediately and the raw payload is never stored.
         """
         try:
+            # PERF-01: без повтора по таймауту — та же рассылка по всем индексаторам.
             result = await self.get(
                 "/torznab/search/", params={"query": query}, timeout=self.search_timeout,
+                retry_after_send=False,
             )
         except AuthenticationError as e:
             raise TorrServerError("Неверный логин или пароль TorrServer") from e

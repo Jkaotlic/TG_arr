@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import structlog
 
-from bot.clients.base import APIError, ArrBaseClient
+from bot.clients.base import APIError, ArrBaseClient, WantedList
 from bot.models import SearchResult, SeriesInfo
 
 logger = structlog.get_logger()
@@ -33,7 +33,7 @@ class SonarrClient(ArrBaseClient):
         log.info("Looking up series in Sonarr")
 
         params = {"term": query}
-        results = await self.get("/api/v3/series/lookup", params=params)
+        results = await self._get_slow("/api/v3/series/lookup", params=params)
 
         if not isinstance(results, list):
             return []
@@ -55,8 +55,11 @@ class SonarrClient(ArrBaseClient):
         params = {"tvdbId": tvdb_id}
         results = await self.get("/api/v3/series", params=params)
 
-        if isinstance(results, list) and results:
-            return self._parse_series(results[0])
+        # Сверяем id, а не берём первую строку: см. RadarrClient.get_movie_by_tmdb.
+        if isinstance(results, list):
+            for item in results:
+                if isinstance(item, dict) and item.get("tvdbId") == tvdb_id:
+                    return self._parse_series(item)
         return None
 
     async def add_series(
@@ -134,7 +137,18 @@ class SonarrClient(ArrBaseClient):
         if tags:
             payload["tags"] = tags
 
-        result = await self.post("/api/v3/series", json_data=payload)
+        # BUG-07: без повторов — второй POST получил бы 400 «already added».
+        try:
+            result = await self._post_no_retry(
+                "/api/v3/series", json_data=payload, timeout=self._slow_timeout(),
+            )
+        except APIError as e:
+            existing = await self._find_after_failed_add(
+                e, lambda: self.get_series_by_tvdb(series.tvdb_id),
+            )
+            if existing is None:
+                raise
+            return existing
 
         if isinstance(result, dict):
             added_series = self._parse_series(result)
@@ -183,7 +197,7 @@ class SonarrClient(ArrBaseClient):
         result = await self.post("/api/v3/command", json_data=payload)
         return result if isinstance(result, dict) else {}
 
-    async def get_wanted_episodes(self, page_size: int = 50) -> list[dict[str, Any]]:
+    async def get_wanted_episodes(self, page_size: int = 50) -> WantedList:
         """Episodes that are monitored but have no file.
 
         Review fix round 1 (2026-08-10, task-13 re-review): `includeSeries=
@@ -237,6 +251,7 @@ class SonarrClient(ArrBaseClient):
                 "series": [{"id": series_id}],
                 "monitoringOptions": {"monitor": monitor},
             },
+            timeout=self._slow_timeout(),
         )
         return True
 
@@ -268,6 +283,7 @@ class SonarrClient(ArrBaseClient):
             current["monitored"] = True
         await self._safe_request(
             "PUT", f"{self._api_prefix}/series/{series_id}", json_data=current,
+            timeout=self._slow_timeout(),
         )
         return True
 
@@ -302,7 +318,7 @@ class SonarrClient(ArrBaseClient):
             "includeSeries": "true",
             "includeEpisodeFile": "false",
         }
-        results = await self.get("/api/v3/calendar", params=params)
+        results = await self._get_slow("/api/v3/calendar", params=params)
         if not isinstance(results, list):
             return []
 

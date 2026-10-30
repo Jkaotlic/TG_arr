@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import html
+from collections.abc import Callable
 from typing import Optional
 
 import structlog
@@ -49,13 +50,14 @@ from bot.ui.callbacks import (
     SlskdCardCB,
     SlskdCB,
     SlskdPageCB,
+    TrendingArtistCB,
     TrendingItemCB,
 )
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.keyboards._constants import MSG_OLD_BUTTON
 from bot.ui.list_token import ListTokenRegistry, answer_stale, new_list_token, token_matches
-from bot.ui.menu import MENU_MUSIC, MUSIC_PROMPT
+from bot.ui.menu import MENU_BUTTONS, MENU_MUSIC, MUSIC_PROMPT
 
 logger = structlog.get_logger()
 router = Router()
@@ -92,6 +94,10 @@ _trending_artists_cache: dict[int, list[dict]] = {}
 # бы миграции сохранённых сессий. Цена — «список истёк» после рестарта бота,
 # ровно как у артистов выше.
 _album_candidates: dict[int, list[AlbumInfo]] = {}
+# BUG-18: кнопки этих двух списков несут индекс, поэтому и токен: иначе старая кнопка
+# открывает элемент с тем же номером из более нового списка.
+_artist_tokens = ListTokenRegistry()
+_trending_artist_tokens = ListTokenRegistry()
 
 
 def _artist_list_text(artists: list[ArtistInfo], page_artists: list[ArtistInfo], start_idx: int) -> str:
@@ -105,7 +111,9 @@ def _artist_list_text(artists: list[ArtistInfo], page_artists: list[ArtistInfo],
     return "\n".join(lines)
 
 
-async def _render_artist_list(message: Message, artists: list[ArtistInfo], page: int = 0) -> None:
+async def _render_artist_list(
+    message: Message, artists: list[ArtistInfo], list_token: str, page: int = 0,
+) -> None:
     """LOGIC-14a: shared renderer for the artist-list keyboard — dedups the
     three previously-copied render blocks (initial search, art_page:, music_back).
 
@@ -122,7 +130,7 @@ async def _render_artist_list(message: Message, artists: list[ArtistInfo], page:
     await safe_edit(
         message,
         text,
-        reply_markup=Keyboards.artist_list(artists, current_page=page, per_page=per_page),
+        reply_markup=Keyboards.artist_list(artists, current_page=page, per_page=per_page, list_token=list_token),
         parse_mode="HTML",
     )
 
@@ -177,6 +185,77 @@ async def _show_album_scope(message: Message, artist: ArtistInfo, albums: list[A
             per_page=get_settings().results_per_page,
         ),
         parse_mode="HTML",
+    )
+
+
+def _same_music_flow(fresh: SearchSession | None, expected: SearchSession) -> bool:
+    """Сессия в базе всё ещё тот самый поток: музыка, тот же артист, тот же токен.
+
+    BUG-05: после долгого ожидания (поиск раздач, добавление артиста) пользователь
+    мог начать другой запрос или нажать «Отмена».
+    """
+    return (
+        fresh is not None
+        and fresh.content_type is ContentType.MUSIC
+        and isinstance(fresh.selected_content, ArtistInfo)
+        and isinstance(expected.selected_content, ArtistInfo)
+        and fresh.list_token == expected.list_token
+        and _artist_fingerprint(fresh.selected_content) == _artist_fingerprint(expected.selected_content)
+    )
+
+
+async def _update_same_flow(
+    db: Database, user_id: int, expected: SearchSession, mutate: Callable[[SearchSession], None],
+) -> SearchSession | None:
+    """Внести правку в сессию, только если поток тот же; иначе ``None``.
+
+    Читает заново под замком и пишет через ``update_session``: старая копия,
+    прочитанная до долгого await, не затирает новое состояние, а отменённая
+    сессия не воскресает (``update_session`` не создаёт строку).
+    """
+    async with db.session_lock(user_id):
+        fresh = await db.get_session(user_id)
+        if fresh is None or not _same_music_flow(fresh, expected):
+            return None
+        mutate(fresh)
+        if not await db.update_session(user_id, fresh):
+            return None
+        return fresh
+
+
+async def _mark_superseded(message: Message | None, db: Database, user_id: int) -> None:
+    """Поток вытеснен, пока мы ждали: старое сообщение не должно вечно «искать».
+
+    Сессия есть, значит пользователь начал новый запрос: помечаем старое
+    сообщение и снимаем кнопки. Сессии нет, значит запрос отменён: обработчик
+    отмены уже написал своё, поверх него не пишем.
+    """
+    if message is None or await db.get_session(user_id) is None:
+        return
+    try:
+        await safe_edit(message, "⌛ Запрос устарел, начните заново.")
+    except Exception as e:
+        logger.warning("superseded_mark_failed", error=str(e))
+
+
+def _artist_source_name() -> str:
+    """Кто ищет артистов: Lidarr, а без него — Soulseek через slskd."""
+    return "Lidarr" if get_settings().lidarr_enabled else "Soulseek (slskd)"
+
+
+def _album_sources_keyboard(user_id: int, artist: ArtistInfo, album: AlbumInfo, artist_id: int = 0):
+    """«Где искать?» для альбома: «Назад» ведёт на страницу списка, где альбом стоит.
+
+    BUG-04: после пустого поиска торрентов клавиатура собиралась без артиста и
+    страницы, «Назад» давал ``alpg:0:0``, а «Вся дискография» отвечала «Список
+    устарел». Теперь оба экрана строятся одним местом.
+    """
+    ordered = Keyboards.album_order(_album_candidates.get(user_id) or [])
+    position = next((i for i, a in enumerate(ordered) if a.lidarr_id == album.lidarr_id), 0)
+    return Keyboards.album_sources(
+        album.lidarr_id,
+        artist_id=artist.lidarr_id or artist_id,
+        page=position // get_settings().results_per_page,
     )
 
 
@@ -550,7 +629,11 @@ async def handle_menu_music(message: Message) -> None:
 
 # A command typed as the reply ("/downloads") is a command, not an artist
 # name — let it fall through to its own router (final review 2026-09-24).
-@prompt_router.message(F.reply_to_message.text == MUSIC_PROMPT, ~F.text.startswith("/"))
+@prompt_router.message(
+    F.reply_to_message.text == MUSIC_PROMPT,
+    ~F.text.startswith("/"),
+    ~F.text.in_(MENU_BUTTONS),  # BUG-14: нажатая кнопка меню — не имя артиста
+)
 async def handle_music_prompt_reply(message: Message, db_user: User, db: Database) -> None:
     """The artist name typed in reply to the "🎵 Музыка" prompt."""
     await process_music_search(message, (message.text or "").strip(), db_user, db)
@@ -579,23 +662,32 @@ async def process_music_search(
 
     services = await _get_music_services()
     if services is None:
-        await message.answer("Lidarr не настроен. Добавьте LIDARR_URL и LIDARR_API_KEY в .env")
+        await message.answer(
+            "Музыкальный контур не настроен. Добавьте LIDARR_URL/LIDARR_API_KEY "
+            "или SLSKD_URL/SLSKD_API_KEY в .env"
+        )
         return
     search_service, _add_service = services
 
     user_id = db_user.tg_id
     log = logger.bind(user_id=user_id, query=query)
 
+    # Сообщения называют то, что настроено на самом деле: при одном slskd
+    # «Lidarr недоступен?» отправляло бы чинить сервис, которого нет.
+    source = _artist_source_name()
     if status_msg is None:
-        status_msg = await message.answer("🔍 Ищу артистов в Lidarr...")
+        status_msg = await message.answer(f"🔍 Ищу артистов в {source}...")
     else:
-        await status_msg.edit_text("🔍 Ищу артистов в Lidarr...")
+        await status_msg.edit_text(f"🔍 Ищу артистов в {source}...")
 
     try:
         artists = await search_service.lookup_artist(query)
     except Exception as e:
         log.error("Artist lookup failed", error=str(e), exc_info=True)
-        await status_msg.edit_text(Formatters.format_error("Не удалось найти артистов (Lidarr недоступен?)"))
+        # BUG-32: как и при «Артист не найден», чужая сессия не должна оживать от
+        # кнопок, которые остались в чате.
+        await db.delete_session(user_id)
+        await status_msg.edit_text(Formatters.format_error(f"Не удалось найти артистов ({source} недоступен?)"))
         return
 
     if not artists:
@@ -628,7 +720,9 @@ async def process_music_search(
     )
     await db.log_action(action)
 
-    await _render_artist_list(status_msg, _artist_candidates[user_id], page=0)
+    await _render_artist_list(
+        status_msg, _artist_candidates[user_id], page=0, list_token=_artist_tokens.issue(user_id),
+    )
 
 
 @router.callback_query(F.data.startswith(CallbackData.ARTIST_PAGE))
@@ -656,7 +750,7 @@ async def handle_artist_pagination(callback: CallbackQuery, db_user: User, db: D
         await callback.answer("Неверная страница", show_alert=True)
         return
 
-    await _render_artist_list(message, artists, page=page)
+    await _render_artist_list(message, artists, page=page, list_token=_artist_tokens.current(user_id))
     await callback.answer()
 
 
@@ -680,7 +774,11 @@ async def handle_music_back(callback: CallbackQuery, db_user: User, db: Database
          if isinstance(chosen, ArtistInfo) and a.mb_id == chosen.mb_id),
         0,
     )
-    await _render_artist_list(message, artists, page=position // get_settings().results_per_page)
+    await _render_artist_list(
+        message, artists,
+        page=position // get_settings().results_per_page,
+        list_token=_artist_tokens.current(user_id),
+    )
     await callback.answer()
 
 
@@ -697,11 +795,13 @@ async def handle_artist_selection(
     idx = callback_data.idx
 
     artists = _artist_candidates.get(user_id) or []
-    if idx < 0 or idx >= len(artists):
-        await callback.answer("Выбор истёк. Начните новый поиск.", show_alert=True)
+    if not _artist_tokens.check(user_id, callback_data.tok) or idx >= len(artists):
+        await answer_stale(callback)
         return
 
     artist = artists[idx]
+    # BUG-15: дискография прежнего артиста не должна пережить выбор нового.
+    _album_candidates.pop(user_id, None)
 
     # DB-02: lock the read-modify-write cycle around storing the selected artist.
     async with db.session_lock(user_id):
@@ -780,6 +880,12 @@ async def handle_album_scope(
         )
         return
 
+    # BUG-15: кнопка альбома принадлежит артисту, под которым нарисован список.
+    # Без сверки кнопка артиста A при сессии артиста B открывала альбом A, а
+    # торрент-граб потом мониторил артиста B.
+    if artist.lidarr_id and callback_data.artist_id != artist.lidarr_id:
+        await answer_stale(callback)
+        return
     album = _find_album(user_id, callback_data.album_id)
     if album is None:
         await callback.answer("Список альбомов истёк. Начните новый поиск.", show_alert=True)
@@ -788,15 +894,9 @@ async def handle_album_scope(
     await callback.answer()
     year = f" · {album.year}" if album.year else ""
     # Audit UI-08: "Назад" goes to the album page this album sits on.
-    ordered = Keyboards.album_order(_album_candidates.get(user_id) or [])
-    position = next((i for i, a in enumerate(ordered) if a.lidarr_id == album.lidarr_id), 0)
     await message.edit_text(
         f"💿 <b>{html.escape(album.title)}</b>{year}\n\nГде искать?",
-        reply_markup=Keyboards.album_sources(
-            album.lidarr_id,
-            artist_id=artist.lidarr_id or callback_data.artist_id,
-            page=position // get_settings().results_per_page,
-        ),
+        reply_markup=_album_sources_keyboard(user_id, artist, album, callback_data.artist_id),
         parse_mode="HTML",
     )
 
@@ -957,7 +1057,7 @@ async def handle_album_source(
         logger.error("album_release_search_failed", error=str(e), exc_info=True)
         await message.edit_text(
             Formatters.format_error("Индексеры не ответили"),
-            reply_markup=Keyboards.album_sources(album.lidarr_id),
+            reply_markup=_album_sources_keyboard(user_id, artist, album),
         )
         return
 
@@ -969,7 +1069,7 @@ async def handle_album_source(
                 f"Торренты для <b>{html.escape(album.title)}</b> не найдены.\n\n"
                 "Soulseek ищет по файлам и на таких запросах обычно удачливее."
             ),
-            reply_markup=Keyboards.album_sources(album.lidarr_id),
+            reply_markup=_album_sources_keyboard(user_id, artist, album),
             parse_mode="HTML",
         )
         return
@@ -981,13 +1081,21 @@ async def handle_album_source(
     # ставила MP3 выше FLAC, который профиль хотел. Сортировка стабильна.
     releases.sort(key=lambda r: r.rejected)
 
-    async with db.session_lock(user_id):
-        session.results = releases
-        session.current_page = 0
-        session.list_token = new_list_token()  # audit GRAB-03: new list, new token
-        await db.save_session(user_id, session)
+    def _store_releases(fresh: SearchSession) -> None:
+        fresh.results = releases
+        fresh.current_page = 0
+        fresh.list_token = new_list_token()  # audit GRAB-03: new list, new token
 
-    await _render_album_releases(message, session, album.lidarr_id, page=0)
+    # BUG-05: Lidarr отвечал долго; пока ждали, пользователь мог начать другой
+    # поиск или отменить этот. Старую копию сессии поверх не пишем и чужое
+    # сообщение не правим.
+    stored = await _update_same_flow(db, user_id, session, _store_releases)
+    if stored is None:
+        logger.info("album_releases_dropped_flow_changed", user_id=user_id)
+        await _mark_superseded(message, db, user_id)
+        return
+
+    await _render_album_releases(message, stored, album.lidarr_id, page=0)
 
 
 def _album_label(user_id: int, session: SearchSession, album_id: int) -> str:
@@ -1349,12 +1457,25 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
                     return
                 artist = added
                 lidarr_id = added.lidarr_id
-                # DB-02: тот же lock, что при выборе артиста.
-                async with db.session_lock(user_id):
-                    session.selected_content = artist
-                    await db.save_session(user_id, session)
+                # DB-02/BUG-05: тот же lock, что при выборе артиста; добавление
+                # шло долго, и поток мог смениться или быть отменён.
+                def _store_artist(fresh: SearchSession) -> None:
+                    fresh.selected_content = added
+
+                stored = await _update_same_flow(db, user_id, session, _store_artist)
+                if stored is None:
+                    logger.info("music_add_dropped_flow_changed", user_id=user_id)
+                    await _mark_superseded(message, db, user_id)
+                    return
+                # Дальше сравниваем с тем, что записали (в нём уже артист из
+                # Lidarr с его mb_id): отпечаток исходного артиста мог не совпасть.
+                session = stored
 
             albums = await _albums_with_retry(add_service.lidarr, lidarr_id)
+            if not _same_music_flow(await db.get_session(user_id), session):
+                logger.info("music_albums_dropped_flow_changed", user_id=user_id)
+                await _mark_superseded(message, db, user_id)
+                return
             _remember(_album_candidates, user_id, albums)
             if message is not None:
                 await _show_album_scope(message, artist, albums)
@@ -1406,36 +1527,37 @@ async def handle_trending_music(callback: CallbackQuery) -> None:
 
     await message.edit_text(
         Formatters.format_trending_artists(artists),
-        reply_markup=Keyboards.trending_artists(artists),
+        reply_markup=Keyboards.trending_artists(artists, list_token=_trending_artist_tokens.issue(user_id)),
         parse_mode="HTML",
     )
 
 
-@router.callback_query(TrendingItemCB.filter(F.kind == "artist"))
+@router.callback_query(TrendingArtistCB.filter())
 async def handle_trending_artist_click(
-    callback: CallbackQuery, callback_data: TrendingItemCB, db_user: User, db: Database,
+    callback: CallbackQuery, callback_data: TrendingArtistCB, db_user: User, db: Database,
 ) -> None:
     """Click a trending artist → lookup in Lidarr and show details."""
     message = accessible_message(callback)
     if message is None:
         return
 
-    try:
-        idx = int(callback_data.item_id)
-    except ValueError:
-        await callback.answer("Неверный выбор", show_alert=True)
-        return
-
+    idx = callback_data.idx
     user_id = callback.from_user.id
     artists = _trending_artists_cache.get(user_id) or []
-    if idx < 0 or idx >= len(artists):
-        await callback.answer("Выбор истёк", show_alert=True)
+    if not _trending_artist_tokens.check(user_id, callback_data.tok) or idx >= len(artists):
+        await answer_stale(callback)
         return
 
     name = artists[idx].get("name", "")
     await callback.answer()
     # Audit UI-14: the results replace the trending list in this message.
     await process_music_search(message, name, db_user, db, status_msg=message)
+
+
+@router.callback_query(TrendingItemCB.filter(F.kind == "artist"))
+async def handle_legacy_indexed_trending_artist(callback: CallbackQuery) -> None:
+    """BUG-18: ``tri:artist:N`` без токена не знает, из какого чарта этот номер."""
+    await answer_stale(callback)
 
 
 @router.callback_query(F.data.startswith(CallbackData.TRENDING_ARTIST))

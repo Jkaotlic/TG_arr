@@ -78,13 +78,6 @@ class ActionType(str, Enum):
     DELETE = "delete"
 
 
-class UserRole(str, Enum):
-    """User role in the system."""
-
-    USER = "user"
-    ADMIN = "admin"
-
-
 class QualityInfo(BaseModel):
     """Parsed quality information from release title."""
 
@@ -563,7 +556,6 @@ class User(BaseModel):
     tg_id: int
     username: Optional[str] = None
     first_name: Optional[str] = None
-    role: UserRole = UserRole.USER
     preferences: UserPreferences = Field(default_factory=UserPreferences)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)

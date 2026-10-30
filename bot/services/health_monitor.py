@@ -89,12 +89,17 @@ class HealthMonitor:
     - with a database, the open problems are kept in
       `notify_kv['health_open']`, so a restart during an outage does not
       announce it again (and still announces the recovery).
+
+    OBS-02 (аудит 2026-10-30): состояние меняется только после доставки хотя бы
+    одному админу. Не доставлено: проблема остаётся в ожидании (а восстановление
+    открытой) и объявляется на следующей проверке. `notify` возвращает число
+    доставленных; вызываемый без результата (None) считается доставившим.
     """
 
     def __init__(
         self,
         clients: dict[str, Any],
-        notify: Optional[Callable[[str], Awaitable[None]]] = None,
+        notify: Optional[Callable[[str], Awaitable[Optional[int]]]] = None,
         db: Optional["Database"] = None,
     ):
         self.clients = clients
@@ -158,15 +163,10 @@ class HealthMonitor:
                 continue
             if key in self._pending:
                 went_down.append(problem)
-                self._open[key] = problem
-                del self._pending[key]
-            else:
-                self._pending[key] = problem
+            self._pending[key] = problem
         for key in [k for k in self._pending if k not in current]:
-            del self._pending[key]  # a single blip: never announced
+            del self._pending[key]  # a single blip (or gone before delivery): never announced
         came_back = [p for k, p in self._open.items() if k not in current]
-        for problem in came_back:
-            del self._open[problem.key]
 
         if went_down or came_back:
             parts = []
@@ -174,15 +174,22 @@ class HealthMonitor:
                 parts.append("⚠️ <b>Проблема</b>\n\n" + "\n".join(p.text for p in went_down))
             if came_back:
                 parts.append("✅ <b>Восстановлено</b>\n\n" + "\n".join(p.resolved_text for p in came_back))
-            await self._announce("\n\n".join(parts))
-            await self._save()
+            if await self._announce("\n\n".join(parts)):
+                for problem in went_down:
+                    self._open[problem.key] = problem
+                    del self._pending[problem.key]
+                for problem in came_back:
+                    del self._open[problem.key]
+                await self._save()
         return report
 
     async def _load(self) -> None:
         if self._loaded or self._db is None:
             return
-        self._loaded = True
+        # Отметка после чтения: сбой БД здесь не должен забыть открытые проблемы и
+        # объявить их заново.
         raw = await self._db.kv_get(_OPEN_PROBLEMS_KEY)
+        self._loaded = True
         if not raw:
             return
         try:
@@ -205,16 +212,23 @@ class HealthMonitor:
         except Exception as e:
             logger.warning("health_open_problems_save_failed", error=describe_error(e))
 
-    async def _announce(self, text: str) -> None:
-        """Send one alert. A delivery failure must not stop the monitor —
-        otherwise a Telegram blip would leave the state machine stuck."""
+    async def _announce(self, text: str) -> bool:
+        """Send one alert; True when someone got it (or there is nobody to tell).
+
+        A delivery failure must not stop the monitor — otherwise a Telegram
+        blip would leave the state machine stuck.
+        """
         if self.notify is None:
-            return
+            return True
         try:
-            await self.notify(text)
+            delivered = await self.notify(text)
         except Exception as e:
             logger.warning("health_alert_failed", error=describe_error(e))
-            return
+            return False
+        if delivered is not None and delivered < 1:
+            logger.warning("health_alert_undelivered", text=" ".join(text.split())[:200])
+            return False
         # Logged on success too: otherwise "no alert was needed" and "the alert
         # was sent" are indistinguishable afterwards.
         logger.info("health_alert_sent", text=" ".join(text.split())[:200])
+        return True

@@ -11,10 +11,11 @@ from bot.models import ContentType, SearchResult, SearchSession
 def test_page_cb_roundtrip():
     from bot.ui.callbacks import PageCB
 
-    packed = PageCB(scope="search", page=3).pack()
+    packed = PageCB(scope="search", page=3, tok="abc123").pack()
     got = PageCB.unpack(packed)
     assert got.scope == "search"
     assert got.page == 3
+    assert got.tok == "abc123"
 
 
 def test_search_results_nav_uses_typed_pagecb():
@@ -38,6 +39,7 @@ async def test_handle_pagination_reads_callback_data():
     session = SearchSession(
         user_id=1, query="q", content_type=ContentType.MOVIE,
         results=[SearchResult(guid=str(i), title=f"t{i}") for i in range(10)],
+        list_token="abc123",
     )
     db = AsyncMock()
     db.get_session = AsyncMock(return_value=session)
@@ -53,7 +55,7 @@ async def test_handle_pagination_reads_callback_data():
     cb.message.edit_text = AsyncMock()
     cb.answer = AsyncMock()
 
-    await search.handle_pagination(cb, PageCB(scope="search", page=1), db_user, db)
+    await search.handle_pagination(cb, PageCB(scope="search", page=1, tok="abc123"), db_user, db)
 
     assert session.current_page == 1
     cb.message.edit_text.assert_awaited()

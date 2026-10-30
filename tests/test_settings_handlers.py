@@ -192,10 +192,9 @@ async def test_settings_set_calls_answer_exactly_once():
 
 @pytest.mark.asyncio
 async def test_settings_set_render_failure_still_answers_exactly_once():
-    """If the point-update succeeds but re-rendering the menu fails (e.g. an
-    *arr HTTP error), the handler must still call answer() exactly once (the
-    error alert) — not once for a premature success toast and again in the
-    except block.
+    """LOGIC-14: запись в БД прошла, а перерисовка меню упала (Radarr лежит).
+    Настройка сохранена, поэтому ответ ровно один и это тост успеха, а не
+    «Ошибка обновления» (раньше тест закреплял именно этот дефект).
     """
     db_user = _make_user()
     db = AsyncMock()
@@ -212,7 +211,8 @@ async def test_settings_set_render_failure_still_answers_exactly_once():
 
     assert cb.answer.call_count == 1
     args, kwargs = cb.answer.call_args
-    assert kwargs.get("show_alert") is True
+    assert not kwargs.get("show_alert")
+    assert "Ошибка" not in (args[0] if args else "")
 
 
 @pytest.mark.asyncio

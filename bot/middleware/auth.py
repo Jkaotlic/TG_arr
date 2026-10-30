@@ -80,18 +80,16 @@ class AuthMiddleware(BaseMiddleware):
         db_user = await self.db.get_user(user_id)
         if db_user is None:
             # Create user
-            from bot.models import User, UserRole
+            from bot.models import User
 
-            is_admin = self.settings.is_admin(user_id)
             db_user = User(
                 tg_id=user_id,
                 username=user.username,
                 first_name=user.first_name,
-                role=UserRole.ADMIN if is_admin else UserRole.USER,
             )
             try:
                 await self.db.create_user(db_user)
-                logger.info("Created new user", user_id=user_id, role=db_user.role.value)
+                logger.info("Created new user", user_id=user_id)
             except Exception as e:
                 # Concurrent creation conflict - re-fetch
                 logger.debug("User creation conflict, re-fetching", user_id=user_id, error=str(e))

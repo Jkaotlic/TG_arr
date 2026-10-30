@@ -8,8 +8,11 @@
   shows up as a trend instead of a surprise OOM kill.
 """
 
+import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
+
+import structlog
 
 #: aiogram's polling loop logs failures as "Failed to fetch updates - <Type>: <msg>".
 _FETCH_FAILED = "Failed to fetch updates - "
@@ -24,6 +27,25 @@ _TRANSIENT_TYPES = frozenset({"TelegramServerError", "TelegramRetryAfter", "Tele
 def describe_error(error: BaseException) -> str:
     """`str(error)`, or the exception's type name when the message is empty."""
     return str(error) or type(error).__name__
+
+
+def log_background_task_end(task: "asyncio.Task[Any]") -> None:
+    """Done-callback фонового цикла: завершение, о котором не просили, это смерть.
+
+    Наши циклы ловят CancelledError и выходят штатно, поэтому `task.cancelled()`
+    мало: запрошенную отмену показывает `task.cancelling()`. Супервизора нет
+    намеренно: задача мертва до перезапуска контейнера, журнал это показывает.
+    """
+    if task.cancelled() or task.cancelling():
+        return
+    error = task.exception()
+    structlog.get_logger().error(
+        "background_task_died",
+        task=task.get_name(),
+        error=describe_error(error) if error is not None else "цикл завершился сам",
+        error_type=type(error).__name__ if error is not None else None,
+        exc_info=error,
+    )
 
 
 class TransientPollingFilter(logging.Filter):

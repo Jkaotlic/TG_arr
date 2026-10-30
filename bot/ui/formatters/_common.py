@@ -7,6 +7,10 @@ from datetime import datetime, timezone, tzinfo
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import structlog
+
+logger = structlog.get_logger()
+
 
 def _e(text) -> str:
     """Escape HTML entities in user-provided text."""
@@ -26,6 +30,9 @@ _ZONEINFO_CACHE: dict[str, tzinfo] = {}
 def _get_cached_zoneinfo(tz_name: str) -> tzinfo:
     """Return a cached ZoneInfo for `tz_name`, falling back to UTC if the
     IANA database doesn't know it (DEAD-14: single plain except clause).
+
+    OBS-03: откат на UTC пишется в лог, раз на имя (результат кэшируется):
+    опечатка в TIMEZONE иначе молча сдвигает все времена у пользователей.
     """
     cached = _ZONEINFO_CACHE.get(tz_name)
     if cached is not None:
@@ -33,7 +40,8 @@ def _get_cached_zoneinfo(tz_name: str) -> tzinfo:
     tz: tzinfo
     try:
         tz = ZoneInfo(tz_name)
-    except Exception:
+    except Exception as e:
+        logger.warning("unknown_timezone_fallback_utc", timezone=tz_name, error=type(e).__name__)
         tz = timezone.utc
     _ZONEINFO_CACHE[tz_name] = tz
     return tz
@@ -176,7 +184,6 @@ SEASON_PRESET_NAMES = {
     "future": "только будущие",
     "firstSeason": "первый сезон",
     "latestSeason": "последний сезон",
-    "none": "нет",
 }
 
 

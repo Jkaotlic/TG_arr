@@ -10,6 +10,10 @@ from bot.models import MovieInfo, SeriesInfo
 
 logger = structlog.get_logger()
 
+#: external_ids только уточняет добавление из трендов, а без него есть запасной путь:
+#: ждать его полные HTTP_TIMEOUT незачем.
+_EXTERNAL_IDS_TIMEOUT = 10.0
+
 
 class TMDbClient(BaseAPIClient):
     """Client for TMDb API to fetch trending/popular content."""
@@ -74,12 +78,17 @@ class TMDbClient(BaseAPIClient):
         endpoint: str,
         params: Optional[dict] = None,
         timeout: Optional[float] = None,
+        retry_after_send: bool = True,
+        retry_read_timeouts: bool = True,
     ):
         """BUG-13: a v3 key must be sent as ?api_key=... on every request."""
         if not self._is_v4_token:
             params = dict(params or {})
             params.setdefault("api_key", self.api_key)
-        return await super().get(endpoint, params=params, timeout=timeout)
+        return await super().get(
+            endpoint, params=params, timeout=timeout,
+            retry_after_send=retry_after_send, retry_read_timeouts=retry_read_timeouts,
+        )
 
     async def get_trending_movies(self, time_window: str = "week", page: int = 1) -> list[MovieInfo]:
         """Get trending movies.
@@ -143,6 +152,21 @@ class TMDbClient(BaseAPIClient):
         log.info("Trending series fetched", count=len(series_list))
         return series_list
 
+    async def get_series_tvdb_id(self, tmdb_id: int) -> Optional[int]:
+        """TVDB id сериала по его id в TMDb, None, если у TMDb его нет.
+
+        Названия сравнивать ненадёжно: TMDb отвечает на TMDB_LANGUAGE («Игра
+        престолов»), а Sonarr по-английски. Id указывает ровно на один сериал.
+        Ошибки уходят вызывающему, у него есть запасной путь.
+        """
+        result = await self.get(
+            f"/tv/{tmdb_id}/external_ids", timeout=_EXTERNAL_IDS_TIMEOUT, retry_read_timeouts=False,
+        )
+        tvdb_id = result.get("tvdb_id") if isinstance(result, dict) else None
+        if isinstance(tvdb_id, int) and not isinstance(tvdb_id, bool) and tvdb_id > 0:
+            return tvdb_id
+        return None
+
     def _parse_movie(self, item: dict) -> Optional[MovieInfo]:
         """Parse TMDb movie data to MovieInfo."""
         if not item.get("id"):
@@ -201,11 +225,12 @@ class TMDbClient(BaseAPIClient):
             except (ValueError, IndexError):
                 pass
 
-        # TMDb uses its own 'id', not TVDB's — Sonarr resolves the real
-        # tvdb_id by title/year lookup on add, so it stays 0 here.
+        # TMDb uses its own 'id', not TVDB's: the real tvdb_id is resolved on add
+        # (`get_series_tvdb_id`), so it stays 0 here.
         return SeriesInfo(
             title=item.get("name", "Unknown"),
-            tvdb_id=0,  # resolved by name/year via Sonarr's own lookup on add
+            original_title=item.get("original_name") or None,
+            tvdb_id=0,
             tmdb_id=item["id"],  # Store TMDb ID
             year=year or 0,
             overview=item.get("overview", ""),

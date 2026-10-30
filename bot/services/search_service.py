@@ -17,9 +17,9 @@ Rollback 2026-08-10. What changed back and why:
   longer comes from a dedicated facet on the previous backend. Sonarr's
   `/series/lookup` returns one flat list, and `series_type` on a result not
   yet in the catalog is always "standard" — so anime-ness is read from the
-  `Animation` genre Sonarr/TVDB attaches to the title, splitting the flat
-  list into series and anime candidate sets before the existing
-  scoring/tie-break logic runs.
+  `Anime` genre Sonarr/TVDB attaches to the title (LOGIC-04: `Animation` alone
+  is a plain cartoon), splitting the flat list into series and anime candidate
+  sets before the existing scoring/tie-break logic runs.
 - **Release search** is `search_releases_for_title` (Task 9): Radarr/Sonarr's
   interactive search (`GET .../release?movieId=`/`?seriesId=`) already judges
   every candidate against the user's quality profile and custom formats —
@@ -64,13 +64,20 @@ _SERIES_PATTERNS = [
 ]
 
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2}|21\d{2})\b")
-_SE_RE = re.compile(r"s(\d{1,2})(?:e(\d{1,3}))?", re.IGNORECASE)
+# LOGIC-12: граница с обеих сторон, иначе «Cars2» это «Car», сезон 2, а «Ford S2000»
+# сезон 20. Подчёркивание границей считается: «Show_S01E05» встречается в запросах.
+# Хвост `E06` у мультисерии входит в совпадение, иначе граница отвергла бы S01E05E06.
+_SE_RE = re.compile(r"(?<![^\W_])s(\d{1,2})(?:e(\d{1,3})(?:-?e\d{1,3})*)?(?![^\W_])", re.IGNORECASE)
 # `\d{1,2}(?!\d)` вместо `\d+`: «Ведьмак 2 сезон 1080p» иначе даёт season=1080.
 _SEASON_WORD_RE = re.compile(r"(?:season|сезон)\s*(\d{1,2})(?!\d)", re.IGNORECASE)
 # Обратный порядок — обычный для русского: «4 сезон», «3-й сезон». Живой прогон
 # 2026-08-12: «Тед Лассо 4 сезон» давал season=None, и бот спрашивал сезон,
 # который пользователь уже назвал.
-_SEASON_BEFORE_WORD_RE = re.compile(r"(\d{1,2})\s*-?\s*(?:й|ый|ой)?\s*сезон", re.IGNORECASE)
+# SEC-05: `\s*-?\s*(?:..)?\s*` давал кубический бэктрекинг на длинной цепочке
+# пробелов («1» + 2000 пробелов — секунды при замершем event loop).
+_SEASON_BEFORE_WORD_RE = re.compile(r"(\d{1,2})[\s-]*(?:(?:й|ый|ой)[\s-]*)?сезон", re.IGNORECASE)
+# Запрос длиннее — не поиск, а мусор: до разбора регулярками обрезается.
+_MAX_QUERY_PARSE_LEN = 300
 _QUALITY_TOKENS = ("2160p", "4k", "4к", "uhd", "1080p", "720p", "480p")
 # Each lookup fans out to TMDb/TVDB/MusicBrainz directly now (no more single
 # round-trip to the previous backend). Live measurement 2026-08-10: Radarr
@@ -144,8 +151,46 @@ class _CircuitBreaker:
 _CIRCUIT_BREAKER = _CircuitBreaker()
 
 
+#: Как сервис зовётся в сообщении пользователю.
+_SERVICE_LABELS = {"radarr": "Radarr", "sonarr": "Sonarr", "lidarr": "Lidarr", "slskd": "Soulseek"}
+
+
+def service_label(service: str) -> str:
+    return _SERVICE_LABELS.get(service, service)
+
+
+def describe_unreachable(services: "tuple[str, ...] | list[str]") -> str:
+    """«Radarr не отвечает» / «Radarr и Sonarr не отвечают»."""
+    labels = [service_label(service) for service in services]
+    if len(labels) == 1:
+        return f"{labels[0]} не отвечает"
+    return f"{', '.join(labels[:-1])} и {labels[-1]} не отвечают"
+
+
+class CatalogLookupError(ServiceConnectionError):
+    """LOGIC-02: Radarr, Sonarr или Lidarr не смог ответить на поиск по каталогу.
+
+    Пустой список и сбой обязаны различаться: «Ничего не найдено» при лежащем
+    Radarr врёт пользователю, а «В библиотеке нет» в /title ещё и уводит от карточки
+    с настоящим тайтлом.
+    """
+
+    def __init__(self, service: str, cause: Optional[BaseException] = None):
+        super().__init__(describe_unreachable([service]))
+        self.service = service
+        self.cause = cause
+
+
 def describe_search_failure(exc: BaseException) -> str:
     """Turn a search failure into something the user can act on."""
+    if isinstance(exc, CatalogLookupError):
+        label = service_label(exc.service)
+        if isinstance(exc.cause, AuthenticationError):
+            return f"Ошибка авторизации в {label} — проверьте API-ключ."
+        return (
+            f"{label} не отвечает, поэтому поиск сейчас невозможен. Это не значит, "
+            "что такого тайтла нет: повторите запрос позже. Состояние сервисов — в /health."
+        )
     if isinstance(exc, ServiceConnectionError):
         return (
             "Индексеры не ответили вовремя. Обычно это залипший трекер — "
@@ -154,6 +199,12 @@ def describe_search_failure(exc: BaseException) -> str:
     if isinstance(exc, AuthenticationError):
         return "Ошибка авторизации в медиасервисе — проверьте API-ключи."
     return "Поиск временно недоступен"
+
+
+def normalize_title(value: str) -> str:
+    """Casefold + collapse punctuation so "Дюна:" == "дюна"."""
+    without_punctuation = re.sub(r"[^\w\s]", "", (value or "").casefold())
+    return re.sub(r"\s+", " ", without_punctuation).strip()
 
 
 def _normalize_query(query: str) -> str:
@@ -210,6 +261,9 @@ class DetectionResult(NamedTuple):
     # adding the title. Empty for MUSIC/UNKNOWN winners or when detection
     # short-circuited before a lookup ran.
     lookup_results: list = []
+    # LOGIC-02: сервисы, не ответившие на этот запрос ("radarr", "sonarr", "lidarr", "slskd").
+    # Непустой кортеж значит, что вывод неполон: результат не кэшируется.
+    failed_services: tuple[str, ...] = ()
 
 
 class SearchService:
@@ -232,10 +286,14 @@ class SearchService:
         self.scoring = scoring or ScoringService()
 
     async def _lookup_branch(self, service: str, coro_factory) -> list[Any]:
-        """Run one lookup under the semaphore, respecting the breaker."""
+        """Run one lookup under the semaphore, respecting the breaker.
+
+        LOGIC-02: сбой и открытый breaker бросают `CatalogLookupError`. Пустой список
+        теперь значит только одно: сервис ответил, и у него ничего нет.
+        """
         if _CIRCUIT_BREAKER.is_open(service):
             logger.warning("lookup_skipped_breaker_open", service=service)
-            return []
+            raise CatalogLookupError(service)
         try:
             async with _DETECTION_SEMAPHORE:
                 result = await coro_factory()
@@ -246,7 +304,23 @@ class SearchService:
         except Exception as e:
             _CIRCUIT_BREAKER.record_failure(service)
             logger.warning("lookup_failed", service=service, error=str(e))
-            return []
+            raise CatalogLookupError(service, e) from e
+
+    async def _detect_branch(self, service: str, coro_factory) -> list[Any]:
+        """`_lookup_branch` со своим сроком: зависший сервис не отнимает ответы других.
+
+        Общий `wait_for` на весь gather терял и то, что уже успели ответить, и имя
+        сервиса, который подвёл (LOGIC-02).
+
+        В breaker этот срок не пишется: он короче обычного ответа Sonarr и о здоровье
+        сервиса не говорит. Три медленных автоопределения иначе закрыли бы явный
+        /series, которому положено ждать до 90 с.
+        """
+        try:
+            return await asyncio.wait_for(self._lookup_branch(service, coro_factory), timeout=_DETECT_TIMEOUT_S)
+        except asyncio.TimeoutError as e:
+            logger.warning("lookup_timeout", service=service)
+            raise CatalogLookupError(service, e) from e
 
     async def lookup_movies(self, query: str) -> list[MovieInfo]:
         """Guarded Radarr title lookup for a caller outside `detect_content_type`
@@ -258,13 +332,17 @@ class SearchService:
         same protection now, not just auto-detection; see `_lookup_branch`'s
         docstring for the "burst of searches takes the service down"
         incident this exists to prevent).
+
+        LOGIC-02: бросает `CatalogLookupError`, если Radarr не смог ответить;
+        `describe_search_failure` формулирует это для пользователя.
         """
         return await self._lookup_branch("radarr", lambda: self.radarr.lookup_movie(query))
 
     async def lookup_series(self, query: str) -> list[SeriesInfo]:
         """Guarded Sonarr title lookup — see `lookup_movies`. Returns the raw,
         unsplit list; pair with `split_series_candidates` to separate anime
-        from plain series, the same way `detect_content_type` does.
+        from plain series, the same way `detect_content_type` does. Сбой бросает
+        `CatalogLookupError`, как и у `lookup_movies`.
         """
         return await self._lookup_branch("sonarr", lambda: self.sonarr.lookup_series(query))
 
@@ -276,8 +354,9 @@ class SearchService:
         one flat list, and `series_type` on a result not yet in the catalog
         is always "standard" (rollback 2026-08-10 live measurement). Genre is
         the only signal *arr offers before a title is added, so an
-        "Animation" genre marks a result as an anime candidate instead of a
-        plain series one.
+        "Anime" genre marks a result as an anime candidate instead of a plain
+        series one. LOGIC-04: "Animation" без "Anime" — обычный мультсериал:
+        «Rick and Morty» с seriesType=anime ломал нумерацию серий.
 
         Public (Task 12, review fix round 1 — was `_split_series_candidates`):
         `bot/handlers/search/commands.py` needed this same split for an
@@ -286,9 +365,18 @@ class SearchService:
         series: list = []
         anime: list = []
         for item in series_list:
-            genres = {g.lower() for g in (getattr(item, "genres", None) or [])}
-            (anime if "animation" in genres else series).append(item)
+            (anime if SearchService.series_content_type(item) is ContentType.ANIME else series).append(item)
         return series, anime
+
+    @staticmethod
+    def series_content_type(item: Any) -> ContentType:
+        """ANIME для результата Sonarr с жанром Anime, иначе SERIES.
+
+        Одно правило для автоопределения, `/series` и добавления из трендов:
+        жанр `anime` решает, а `animation` сам по себе обычный мультсериал.
+        """
+        genres = {str(g).lower() for g in (getattr(item, "genres", None) or [])}
+        return ContentType.ANIME if "anime" in genres else ContentType.SERIES
 
     async def detect_content_type(self, query: str) -> DetectionResult:
         """
@@ -301,11 +389,12 @@ class SearchService:
         substring containment, so "Joker" doesn't match a random "Joker"-named
         artist with 1-letter overlap.
 
-        Failure surfacing (BUG-05): a lookup failing doesn't silently become
-        an empty result set — each branch is guarded by `_lookup_branch`
-        (semaphore + circuit breaker), and if every branch comes back empty
-        the confidence score is 0 so the user gets the type question instead
-        of a wrong auto-pick.
+        Failure surfacing (BUG-05, LOGIC-02): a lookup failing doesn't silently
+        become an empty result set. Each branch is guarded by `_lookup_branch`
+        (semaphore + circuit breaker); a failed one lands in `failed_services`.
+        Ответ другой ветки при этом не уверенность: лежит Sonarr, и совпадение из
+        Radarr победило бы просто за неявкой соперника. Поэтому при сбое значимой
+        ветки результат UNKNOWN с пониженной уверенностью, и он не кэшируется.
         """
         log = logger.bind(query=query)
         clean_query = self._strip_quality_tokens(query.strip())
@@ -340,31 +429,29 @@ class SearchService:
             and not episodic
         )
 
-        try:
-            gathered = await asyncio.wait_for(
-                asyncio.gather(
-                    self._lookup_branch("radarr", lambda: self.radarr.lookup_movie(clean_query)),
-                    self._lookup_branch("sonarr", lambda: self.sonarr.lookup_series(clean_query)),
-                    self._lookup_branch("lidarr", lambda: self._lookup_artists(clean_query_no_year))
-                    if music_allowed
-                    else _empty_list(),
-                    return_exceptions=True,
-                ),
-                timeout=_DETECT_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
-            log.warning("detect_content_type", winner="unknown", reason="lookup_timeout")
-            return self._episodic_fallback(episodic, "lookup_timeout")
+        # Ветку музыки называем тем, что настроено: без Lidarr её отвечает slskd.
+        music_source = "lidarr" if self.lidarr is not None else "slskd"
+        gathered = await asyncio.gather(
+            self._detect_branch("radarr", lambda: self.radarr.lookup_movie(clean_query)),
+            self._detect_branch("sonarr", lambda: self.sonarr.lookup_series(clean_query)),
+            self._detect_branch(music_source, lambda: self._lookup_artists(clean_query_no_year, strict=True))
+            if music_allowed
+            else _empty_list(),
+            return_exceptions=True,
+        )
 
         # BUG-04: `return_exceptions=True` also captures CancelledError, which
         # would turn a shutdown (or a cancelled callback task) into a normal
-        # "detection failed" answer. Re-raise it instead. (_lookup_branch
-        # already swallows every other exception into `[]`, so this is the
-        # only kind of BaseException that can still show up here.)
+        # "detection failed" answer. Re-raise it instead.
         for outcome in gathered:
             if isinstance(outcome, asyncio.CancelledError):
                 raise outcome
 
+        failed = tuple(
+            service
+            for service, outcome in zip(("radarr", "sonarr", music_source), gathered)
+            if isinstance(outcome, BaseException)
+        )
         movies_result, series_result, artists_result = gathered
         movies = movies_result if isinstance(movies_result, list) else []
         all_series = series_result if isinstance(series_result, list) else []
@@ -433,6 +520,19 @@ class SearchService:
             candidates=candidates,
         )
 
+        # LOGIC-02: выбирать можно, только если ответили все, кто мог бы возразить.
+        # Для запроса с «S01» Radarr и так не участвует, поэтому его сбой не мешает
+        # решить, а сбой Sonarr отдаёт решение `_episodic_fallback`: тип ясен из самого
+        # запроса, и честное сообщение покажет следующий шаг, lookup_series.
+        deciding_failures = [s for s in failed if not (episodic and s == "radarr")]
+        if deciding_failures:
+            log.warning("detect_content_type_partial", failed=failed, winner=top_type.value)
+            if episodic:
+                return self._episodic_fallback(True, "sonarr_failed", candidates)._replace(failed_services=failed)
+            return DetectionResult(
+                ContentType.UNKNOWN, top_score * 0.5, "partial_failure", candidates, failed_services=failed,
+            )
+
         # Confidence threshold: below 0.7 → UNKNOWN so the user gets the question.
         if top_score < 0.7:
             # …unless the query is episodic, where "which of series/anime" is a
@@ -454,6 +554,10 @@ class SearchService:
         else:
             result = DetectionResult(top_type, top_score, reason, candidates, list(winning_items))
 
+        if failed:
+            # Radarr не ответил на запрос с «S01»: решение верное, но кэш оставлял бы
+            # его и после того, как сервис поднимется, а запрос этого не стоит.
+            return result._replace(failed_services=failed)
         _cache_put(cache_key, result)
         return result
 
@@ -471,18 +575,27 @@ class SearchService:
             return DetectionResult(ContentType.SERIES, 0.9, f"series_pattern:{reason}", candidates or {})
         return DetectionResult(ContentType.UNKNOWN, 0.0, reason, candidates or {})
 
-    async def _lookup_artists(self, query: str) -> list[ArtistInfo]:
-        """Artist lookup for detection — Lidarr first, slskd as the fallback."""
+    async def _lookup_artists(self, query: str, *, strict: bool = False) -> list[ArtistInfo]:
+        """Artist lookup for detection — Lidarr first, slskd as the fallback.
+
+        ``strict=True`` (автоопределение, LOGIC-02): если подвели все настроенные
+        источники, ошибка уходит наверх, а не становится пустым списком.
+        """
+        last_error: Optional[Exception] = None
         if self.lidarr is not None:
             try:
                 return await self.lidarr.lookup_artist(query)
             except Exception as e:
+                last_error = e
                 logger.warning("lidarr_lookup_failed", error=str(e))
         if self.slskd is not None:
             try:
                 return await self.slskd.lookup_artists(query)
             except Exception as e:
+                last_error = e
                 logger.warning("slskd_lookup_failed", error=str(e))
+        if strict and last_error is not None:
+            raise last_error
         return []
 
     @staticmethod
@@ -705,8 +818,12 @@ class SearchService:
         return ordered
 
     async def lookup_artist(self, query: str) -> list[ArtistInfo]:
-        """Look up artists (Lidarr, falling back to slskd)."""
-        return await self._lookup_artists(query)
+        """Look up artists (Lidarr, falling back to slskd).
+
+        Сбой всех настроенных источников бросает их ошибку: «Артист не найден» при
+        лежащем Lidarr было бы неправдой (LOGIC-02).
+        """
+        return await self._lookup_artists(query, strict=True)
 
     def parse_query(self, query: str) -> dict[str, Any]:
         """
@@ -718,13 +835,14 @@ class SearchService:
         """
         result: dict[str, Any] = {
             "original": query,
-            "title": query,
+            "title": query[:_MAX_QUERY_PARSE_LEN],
             "year": None,
             "season": None,
             "episode": None,
             "quality": None,
         }
 
+        query = query[:_MAX_QUERY_PARSE_LEN]
         query_lower = query.lower()
 
         # Year — bounded with \b to avoid latching on 4-digit substrings (BUG-06).

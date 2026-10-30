@@ -672,33 +672,6 @@ async def test_add_series_failure_is_reported_without_raising():
     assert action.success is False
 
 
-# ----------------------------------------------------- unconverted composites
-@pytest.mark.asyncio
-async def test_ensure_title_raises_not_implemented_naming_task_12():
-    """Fix round 1 (2026-08-10 review): a bare AttributeError is a worse
-    failure mode than a named stub for a real (if not-yet-repointed) caller —
-    bot/handlers/search/commands.py:215 still calls this."""
-    service = _service()
-    with pytest.raises(NotImplementedError, match="Task 12"):
-        await service.ensure_title()
-
-
-@pytest.mark.asyncio
-async def test_add_and_queue_best_raises_not_implemented_naming_task_12():
-    """Real caller: bot/handlers/trending.py:370."""
-    service = _service()
-    with pytest.raises(NotImplementedError, match="Task 12"):
-        await service.add_and_queue_best()
-
-
-@pytest.mark.asyncio
-async def test_grab_with_fallback_raises_not_implemented_naming_task_12():
-    """Real caller: bot/handlers/search/grab.py:212."""
-    service = _service()
-    with pytest.raises(NotImplementedError, match="Task 12"):
-        await service.grab_with_fallback()
-
-
 # ---------------------------------------------------------------------- music
 @pytest.mark.asyncio
 async def test_add_artist_without_lidarr_returns_error():

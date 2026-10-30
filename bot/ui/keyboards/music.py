@@ -34,6 +34,7 @@ class _MusicKeyboards:
     @staticmethod
     def artist_list(
         artists: list[ArtistInfo],
+        list_token: str,
         current_page: int = 0,
         per_page: int = 5,
     ) -> InlineKeyboardMarkup:
@@ -52,7 +53,7 @@ class _MusicKeyboards:
             keyboard.append([
                 InlineKeyboardButton(
                     text=label,
-                    callback_data=ArtistCB(idx=idx).pack(),
+                    callback_data=ArtistCB(tok=list_token, idx=idx).pack(),
                 )
             ])
 

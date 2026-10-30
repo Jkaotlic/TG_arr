@@ -2,6 +2,7 @@
 
 import asyncio
 import html
+import re
 
 import structlog
 from aiogram import F, Router
@@ -13,14 +14,21 @@ from bot.config import get_settings
 from bot.clients.registry import get_qbittorrent, get_radarr, get_sonarr, get_tmdb
 from bot.db import Database
 from bot.handlers.common import accessible_message
-from bot.handlers._cache import get_ttl, put_ttl
+from bot.handlers._cache import get_ttl, put_ttl, remember_lru
+from bot.handlers.search import _claim_grab, _release_grab
 from bot.models import MovieInfo, SeriesInfo, User
 from bot.services.add_service import AddService, resolve_profile_with_source
-from bot.services.search_service import SearchService
-from bot.ui.callbacks import AddContentCB, TrendingItemCB
+from bot.services.search_service import (
+    CatalogLookupError,
+    SearchService,
+    describe_search_failure,
+    normalize_title,
+)
+from bot.ui.callbacks import AddContentCB, TrendingItemCB, TrendingSeriesPickCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
 from bot.ui.keyboards._constants import MSG_OLD_BUTTON
+from bot.ui.list_token import ListTokenRegistry, answer_stale
 from bot.ui.menu import MENU_TRENDING
 
 logger = structlog.get_logger()
@@ -56,6 +64,13 @@ _CACHE_TTL_SECONDS = 6 * 60 * 60
 
 # Lock for cache mutations (asyncio is single-threaded, but protects across awaits)
 _cache_lock = asyncio.Lock()
+
+# LOGIC-03: варианты из Sonarr, которые показаны пользователю, когда сериал из трендов
+# не совпал. Кнопка несёт индекс, поэтому у списка свой токен.
+_series_pick_candidates: dict[int, list[SeriesInfo]] = {}
+_series_pick_tokens = ListTokenRegistry()
+_MAX_SERIES_PICK_USERS = 100
+_MAX_SERIES_PICK_CHOICES = 5
 
 
 def _cache_put(cache: dict[int, Any], key: int, value: Any) -> None:
@@ -363,27 +378,97 @@ async def handle_series_from_trending(callback: CallbackQuery, callback_data: Tr
         )
 
 
-async def _resolve_series_for_add(search_service: SearchService, series: SeriesInfo) -> SeriesInfo | None:
+def _comparable_title(title: str) -> str:
+    """Название без регистра, знаков и хвостового года: «Doctor Who (2005)» у TVDB."""
+    without_year = re.sub(r"\s*\(\d{4}\)\s*$", "", title or "")
+    return normalize_title(without_year)
+
+
+def _match_series(series: SeriesInfo, candidates: list[SeriesInfo]) -> SeriesInfo | None:
+    """Кандидат, совпавший с сериалом из трендов по названию и году ±1, или None.
+
+    LOGIC-03: поиск Sonarr нечёткий, а годы TMDb и TVDB расходятся. Кто стоит первым,
+    тот и добавлялся с monitor="all" и поиском всех сезонов. Неизвестный год проверку
+    не проходит: подтвердить совпадение нечем. Двое подошедших допустимы, только если
+    ровно у одного год совпал точно.
+    """
+    if not series.year:
+        return None
+    # TMDb отвечает на TMDB_LANGUAGE, а Sonarr по-английски: годится и исходное название.
+    wanted = {_comparable_title(series.title), _comparable_title(series.original_title or series.title)}
+    matches = [
+        c for c in candidates
+        if c.year and abs(c.year - series.year) <= 1 and _comparable_title(c.title) in wanted
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    exact_year = [c for c in matches if c.year == series.year]
+    return exact_year[0] if len(exact_year) == 1 else None
+
+
+async def _resolve_series_for_add(
+    search_service: SearchService, series: SeriesInfo,
+) -> tuple[SeriesInfo | None, list[SeriesInfo]]:
     """TMDb trending carries no `tvdb_id` (see `TMDbClient.get_trending_series`
     — it stays 0, "resolved by name" was the previous backend's job) but Sonarr's
     `add_series` needs a real one. Resolve it via Sonarr's own guarded
     lookup (`SearchService.lookup_series`, same semaphore/circuit-breaker
     path every other Sonarr lookup goes through) before adding.
 
-    Returns `series` unchanged if it already carries a `tvdb_id`, the best
-    title/year match from Sonarr's lookup otherwise, or `None` if Sonarr
-    has nothing matching the title at all.
+    Сначала точно: TVDB id от TMDb и поиск Sonarr `tvdb:<id>`. Название и год (`_match_series`)
+    только запасной путь, когда id узнать не удалось. Если id известен, но Sonarr его не
+    вернул, одноимённый сериал с другим id автоматически не берётся: это другой сериал.
+
+    Возвращает `(сериал, варианты)`: `series` как есть, если `tvdb_id` уже известен;
+    совпавшего кандидата; либо `None` и то, из чего выбирать пользователю. Пустые
+    варианты значат, что у Sonarr нет ничего похожего. Сбой Sonarr бросает
+    `CatalogLookupError`.
     """
     if series.tvdb_id:
-        return series
-    candidates = await search_service.lookup_series(series.title)
-    if not candidates:
-        return None
-    if series.year:
-        exact = next((c for c in candidates if c.year == series.year), None)
+        return series, []
+
+    tvdb_id = await _tvdb_id_from_tmdb(series)
+    if tvdb_id is not None:
+        exact = _with_tvdb_id(await search_service.lookup_series(f"tvdb:{tvdb_id}"), tvdb_id)
         if exact is not None:
-            return exact
-    return candidates[0]
+            return exact, []
+
+    candidates = await _lookup_series_by_name(search_service, series)
+    match = _match_series(series, candidates) if tvdb_id is None else _with_tvdb_id(candidates, tvdb_id)
+    if match is not None:
+        return match, []
+    return None, candidates[:_MAX_SERIES_PICK_CHOICES]
+
+
+def _with_tvdb_id(candidates: list[SeriesInfo], tvdb_id: int) -> SeriesInfo | None:
+    return next((c for c in candidates if c.tvdb_id == tvdb_id), None)
+
+
+async def _tvdb_id_from_tmdb(series: SeriesInfo) -> int | None:
+    """TVDB id от TMDb. Любой сбой значит «не узнали»: у добавления есть запасной путь.
+
+    В лог идёт только тип ошибки: при ключе v3 в тексте исключения может быть URL с ним.
+    """
+    if not series.tmdb_id:
+        return None
+    tmdb = await get_tmdb()
+    if tmdb is None:
+        return None
+    try:
+        return await tmdb.get_series_tvdb_id(series.tmdb_id)
+    except Exception as e:
+        logger.warning("tmdb_external_ids_failed", tmdb_id=series.tmdb_id, error_type=type(e).__name__)
+        return None
+
+
+async def _lookup_series_by_name(search_service: SearchService, series: SeriesInfo) -> list[SeriesInfo]:
+    """Поиск Sonarr по названию: исходное находит точнее переведённого, а переведённое
+    спрашивается, только если исходное не дало ничего (запрос к Sonarr долгий)."""
+    original = series.original_title or series.title
+    candidates = await search_service.lookup_series(original)
+    if not candidates and original != series.title:
+        candidates = await search_service.lookup_series(series.title)
+    return candidates
 
 
 async def _drop_keyboard(message: Any) -> None:
@@ -491,66 +576,17 @@ async def _add_series_from_trending(callback: CallbackQuery, series: SeriesInfo,
         add_service = AddService(await get_radarr(), sonarr, qbittorrent=await get_qbittorrent())
         search_service = SearchService(add_service.radarr, sonarr)
 
-        resolved = await _resolve_series_for_add(search_service, series)
+        resolved, choices = await _resolve_series_for_add(search_service, series)
         if resolved is None:
-            await status_msg.edit_text(
-                Formatters.format_warning(
-                    f"Не удалось сопоставить <b>{html.escape(series.title)}</b> с Sonarr"
-                ),
-                parse_mode="HTML",
-            )
+            await _offer_series_choices(status_msg, series, choices, callback.from_user.id)
             return
 
-        profiles, folders = await asyncio.gather(
-            add_service.get_sonarr_profiles(), add_service.get_sonarr_root_folders(),
-        )
-        if not profiles or not folders:
-            await status_msg.edit_text(
-                Formatters.format_error("В Sonarr не настроены профили качества или папки")
-            )
-            return
+        await _add_resolved_series(status_msg, message, add_service, resolved, db_user, db)
 
-        # Audit 2026-09-23 UI-05: a series already in Sonarr keeps the
-        # monitoring its owner set — "all seasons" is only for a new add.
-        existing = resolved if resolved.sonarr_id else (
-            await add_service.sonarr.get_series_by_tvdb(resolved.tvdb_id)
-            if resolved.tvdb_id else None
-        )
-        if existing is not None and existing.sonarr_id:
-            await status_msg.edit_text(
-                f"📺 <b>{html.escape(existing.title)}</b> — "
-                "Уже в библиотеке — управлять через /title",
-                parse_mode="HTML",
-            )
-            await _drop_keyboard(message)
-            return
-
-        prefs = db_user.preferences
-        profile, _source = resolve_profile_with_source(
-            profiles, prefs.sonarr_quality_profile_id, get_settings().sonarr_default_profile_id,
-        )
-        folder_path = AddService.resolve_root_folder(folders, prefs.sonarr_root_folder_id)
-
-        # New series: every season monitored + search — what the button
-        # label "➕ В библиотеку (все сезоны)" promises.
-        added, action = await add_service.add_series(
-            resolved, quality_profile_id=int(profile.id), root_folder_path=folder_path,
-            monitor="all",
-        )
-        action.user_id = db_user.tg_id
-        await db.log_action(action)
-
-        if added is not None:
-            year_str = f" ({added.year})" if added.year else ""
-            await status_msg.edit_text(
-                f"✅ <b>{html.escape(added.title)}</b>{year_str} добавлен в Sonarr "
-                "(все сезоны) — ищу релизы...",
-                parse_mode="HTML",
-            )
-            await _drop_keyboard(message)
-        else:
-            error_text = action.error_message or "Не удалось добавить сериал"
-            await status_msg.edit_text(f"❌ {html.escape(error_text[:200])}")
+    except CatalogLookupError as e:
+        # LOGIC-02: «Не удалось сопоставить» при лежащем Sonarr было бы неправдой.
+        logger.warning("trending_add_series_lookup_failed", title=series.title, service=e.service)
+        await status_msg.edit_text(Formatters.format_error(describe_search_failure(e)), parse_mode="HTML")
 
     except Exception as e:
         logger.error(
@@ -561,27 +597,123 @@ async def _add_series_from_trending(callback: CallbackQuery, series: SeriesInfo,
         )
 
 
+async def _offer_series_choices(
+    status_msg: Message, series: SeriesInfo, choices: list[SeriesInfo], user_id: int,
+) -> None:
+    """LOGIC-03: совпадение не подтверждено, поэтому ничего не добавляется, решает
+    пользователь. Сказать «в Sonarr нет» нельзя: возможно, сериал там есть под другим
+    названием, и подтвердить это просто не удалось."""
+    title = html.escape(series.title)
+    if not choices:
+        await status_msg.edit_text(
+            Formatters.format_warning(f"Не удалось сопоставить <b>{title}</b> с Sonarr"),
+            parse_mode="HTML",
+        )
+        return
+    remember_lru(_series_pick_candidates, user_id, choices, _MAX_SERIES_PICK_USERS)
+    await status_msg.edit_text(
+        f"🤔 Не удалось точно определить сериал <b>{title}</b>"
+        f"{f' ({series.year})' if series.year else ''}, выберите:\n\n"
+        "Выбранный добавится со всеми сезонами и сразу пойдёт в поиск.",
+        reply_markup=Keyboards.trending_series_choices(choices, _series_pick_tokens.issue(user_id)),
+        parse_mode="HTML",
+    )
+
+
+async def _add_resolved_series(
+    status_msg: Message,
+    message: Message,
+    add_service: AddService,
+    resolved: SeriesInfo,
+    db_user: User,
+    db: Database,
+) -> None:
+    """Добавить в Sonarr сериал, в котором уже нет сомнений."""
+    profiles, folders = await asyncio.gather(
+        add_service.get_sonarr_profiles(), add_service.get_sonarr_root_folders(),
+    )
+    if not profiles or not folders:
+        await status_msg.edit_text(
+            Formatters.format_error("В Sonarr не настроены профили качества или папки")
+        )
+        return
+
+    # Audit 2026-09-23 UI-05: a series already in Sonarr keeps the
+    # monitoring its owner set — "all seasons" is only for a new add.
+    existing = resolved if resolved.sonarr_id else (
+        await add_service.sonarr.get_series_by_tvdb(resolved.tvdb_id)
+        if resolved.tvdb_id else None
+    )
+    if existing is not None and existing.sonarr_id:
+        await status_msg.edit_text(
+            f"📺 <b>{html.escape(existing.title)}</b> — "
+            "Уже в библиотеке — управлять через /title",
+            parse_mode="HTML",
+        )
+        await _drop_keyboard(message)
+        return
+
+    prefs = db_user.preferences
+    profile, _source = resolve_profile_with_source(
+        profiles, prefs.sonarr_quality_profile_id, get_settings().sonarr_default_profile_id,
+    )
+    folder_path = AddService.resolve_root_folder(folders, prefs.sonarr_root_folder_id)
+
+    # New series: every season monitored + search — what the button
+    # label "➕ В библиотеку (все сезоны)" promises.
+    added, action = await add_service.add_series(
+        resolved, quality_profile_id=int(profile.id), root_folder_path=folder_path,
+        # Тип по жанрам кандидата Sonarr, как при поиске: без него аниме из трендов
+        # добавлялось с seriesType=standard.
+        content_type=SearchService.series_content_type(resolved),
+        monitor="all",
+    )
+    action.user_id = db_user.tg_id
+    await db.log_action(action)
+
+    if added is not None:
+        year_str = f" ({added.year})" if added.year else ""
+        await status_msg.edit_text(
+            f"✅ <b>{html.escape(added.title)}</b>{year_str} добавлен в Sonarr "
+            "(все сезоны) — ищу релизы...",
+            parse_mode="HTML",
+        )
+        await _drop_keyboard(message)
+    else:
+        error_text = action.error_message or "Не удалось добавить сериал"
+        await status_msg.edit_text(f"❌ {html.escape(error_text[:200])}")
+
+
 @router.callback_query(AddContentCB.filter(F.kind == "movie"))
 async def handle_add_movie_from_trending(
     callback: CallbackQuery, callback_data: AddContentCB, db_user: User, db: Database
 ) -> None:
     """Add a movie to Radarr from the trending list."""
-    await callback.answer()
     message = accessible_message(callback)
     if message is None:
+        await callback.answer()
         return
 
-    tmdb_id = callback_data.tmdb_id
-    movie = _cache_get(_trending_movies_cache, tmdb_id)
-
-    if not movie:
-        await message.answer(
-            "❌ Фильм не найден в кэше.\n"
-            "Попробуйте обновить список или используйте обычный поиск."
-        )
+    # BUG-12: двойной тап не отправляет добавление дважды.
+    user_id = callback.from_user.id
+    if not await _claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
         return
+    try:
+        await callback.answer()
+        tmdb_id = callback_data.tmdb_id
+        movie = _cache_get(_trending_movies_cache, tmdb_id)
 
-    await _add_movie_from_trending(callback, movie, db_user, db)
+        if not movie:
+            await message.answer(
+                "❌ Фильм не найден в кэше.\n"
+                "Попробуйте обновить список или используйте обычный поиск."
+            )
+            return
+
+        await _add_movie_from_trending(callback, movie, db_user, db)
+    finally:
+        _release_grab(user_id)
 
 
 @router.callback_query(AddContentCB.filter(F.kind == "series"))
@@ -589,22 +721,66 @@ async def handle_add_series_from_trending(
     callback: CallbackQuery, callback_data: AddContentCB, db_user: User, db: Database
 ) -> None:
     """Add a series to Sonarr from the trending list."""
-    await callback.answer()
     message = accessible_message(callback)
     if message is None:
+        await callback.answer()
         return
 
-    tmdb_id = callback_data.tmdb_id
-    series = _cache_get(_trending_series_cache, tmdb_id)
+    # BUG-12: двойной тап не отправляет добавление дважды.
+    user_id = callback.from_user.id
+    if not await _claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
+        return
+    try:
+        await callback.answer()
+        tmdb_id = callback_data.tmdb_id
+        series = _cache_get(_trending_series_cache, tmdb_id)
 
-    if not series:
-        await message.answer(
-            "❌ Сериал не найден в кэше.\n"
-            "Попробуйте обновить список или используйте обычный поиск."
-        )
+        if not series:
+            await message.answer(
+                "❌ Сериал не найден в кэше.\n"
+                "Попробуйте обновить список или используйте обычный поиск."
+            )
+            return
+
+        await _add_series_from_trending(callback, series, db_user, db)
+    finally:
+        _release_grab(user_id)
+
+
+@router.callback_query(TrendingSeriesPickCB.filter())
+async def handle_trending_series_pick(
+    callback: CallbackQuery, callback_data: TrendingSeriesPickCB, db_user: User, db: Database,
+) -> None:
+    """LOGIC-03: пользователь сам выбрал сериал, и теперь это уже не догадка."""
+    message = accessible_message(callback)
+    if message is None:
+        await callback.answer()
         return
 
-    await _add_series_from_trending(callback, series, db_user, db)
+    user_id = callback.from_user.id
+    if not await _claim_grab(user_id):
+        await callback.answer("⏳ Уже обрабатываю предыдущий запрос…")
+        return
+    try:
+        choices = _series_pick_candidates.get(user_id) or []
+        if not _series_pick_tokens.check(user_id, callback_data.tok) or callback_data.idx >= len(choices):
+            await answer_stale(callback)
+            return
+        chosen = choices[callback_data.idx]
+        # Выбор сделан: повторное нажатие той же кнопки уже устарело.
+        _series_pick_tokens.drop(user_id)
+        await callback.answer()
+
+        try:
+            sonarr = await get_sonarr()
+            add_service = AddService(await get_radarr(), sonarr, qbittorrent=await get_qbittorrent())
+            await _add_resolved_series(message, message, add_service, chosen, db_user, db)
+        except Exception as e:
+            logger.error("trending_pick_series_failed", title=chosen.title, error=str(e), exc_info=True)
+            await message.edit_text(Formatters.format_error("Не удалось добавить"), parse_mode="HTML")
+    finally:
+        _release_grab(user_id)
 
 
 # ---------------------------------------------------------------------------

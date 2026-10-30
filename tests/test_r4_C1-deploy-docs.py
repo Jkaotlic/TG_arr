@@ -90,7 +90,8 @@ def test_dev_deps_consistent_between_pyproject_and_requirements() -> None:
 
     pins: dict[str, tuple[int, ...]] = {}
     for line in _read("requirements-dev.txt").splitlines():
-        line = line.strip()
+        # TEST-01: у строки может быть маркер окружения («; sys_platform == ...»).
+        line = line.split(";", 1)[0].strip()
         if not line or line.startswith("#") or "==" not in line:
             continue
         name, ver = _parse_pin(line)

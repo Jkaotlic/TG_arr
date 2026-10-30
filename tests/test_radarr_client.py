@@ -46,7 +46,7 @@ async def test_add_movie_sends_the_profile_folder_and_search_option():
     movie = MovieInfo(tmdb_id=42, title="Dune", year=2021)
     response = {"tmdbId": 42, "title": "Dune", "year": 2021, "id": 15}
 
-    with patch.object(client, "post", new=AsyncMock(return_value=response)) as post:
+    with patch.object(client, "_post_no_retry", new=AsyncMock(return_value=response)) as post:
         added = await client.add_movie(
             movie, quality_profile_id=7, root_folder_path="G:\\radarr\\Films",
         )
@@ -162,7 +162,7 @@ async def test_set_movie_monitored_patches_the_resource():
 
     client = RadarrClient("http://radarr", "key")
     with patch.object(client, "get", new=AsyncMock(return_value={"id": 15, "monitored": True})), \
-         patch.object(client, "_request", new=AsyncMock(return_value={"id": 15, "monitored": False})) as req:
+         patch.object(client, "_request_if_not_sent", new=AsyncMock(return_value={"id": 15, "monitored": False})) as req:
         ok = await client.set_movie_monitored(15, False)
 
     assert ok is True
@@ -177,7 +177,7 @@ async def test_delete_movie_defaults_to_keeping_files():
     from bot.clients.radarr import RadarrClient
 
     client = RadarrClient("http://radarr", "key")
-    with patch.object(client, "_request", new=AsyncMock(return_value={})) as req:
+    with patch.object(client, "_request_if_not_sent", new=AsyncMock(return_value={})) as req:
         ok = await client.delete_movie(15)
 
     assert ok is True
@@ -200,7 +200,7 @@ async def test_set_movie_monitored_surfaces_service_connection_error_on_persiste
 
     client = RadarrClient("http://radarr", "key")
     with patch.object(client, "get", new=AsyncMock(return_value={"id": 15, "monitored": True})), \
-         patch.object(client, "_request", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
+         patch.object(client, "_request_if_not_sent", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
         with pytest.raises(ServiceConnectionError):
             await client.set_movie_monitored(15, False)
 
@@ -214,7 +214,7 @@ async def test_delete_movie_surfaces_service_connection_error_on_persistent_fail
     from bot.clients.radarr import RadarrClient
 
     client = RadarrClient("http://radarr", "key")
-    with patch.object(client, "_request", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
+    with patch.object(client, "_request_if_not_sent", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
         with pytest.raises(ServiceConnectionError):
             await client.delete_movie(15)
 
