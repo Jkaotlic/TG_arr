@@ -1778,3 +1778,310 @@ async def test_history_failure_during_a_tick_is_survived(db):
     radarr.fail = True
     await service.tick()
     assert edits == []
+
+
+# ---------------------------------------------------------------- первый старт после деплоя
+class _FirstStart:
+    """Все источники уведомлений поверх одной базы; пересоздание объектов = рестарт."""
+
+    def __init__(self, db: Database, clock: _Clock, radarr, sonarr, slskd, health, qbit_data) -> None:
+        from unittest.mock import AsyncMock
+
+        from bot.models import UserPreferences
+        from bot.services.digest import DigestService
+        from bot.services.health_monitor import HealthMonitor
+        from bot.services.library_watcher import LibraryWatcher
+        from bot.services.live_status import LiveStatusService
+        from bot.services.notification_service import NotificationService
+
+        self.sent: list[str] = []
+        self.edits: list[str] = []
+        self.clock = clock
+        self.qbit_data = qbit_data
+
+        async def library_notice(text: str, category: str, **extra) -> None:
+            self.sent.append(text)
+
+        async def admin_notice(text: str) -> int:
+            self.sent.append(text)
+            return 1
+
+        async def user_notice(_uid: int, text: str) -> bool:
+            self.sent.append(text)
+            return True
+
+        async def editor(_chat, _message, text, _markup=None) -> str:
+            self.edits.append(text)
+            return "ok"
+
+        async def get_slskd():
+            return slskd
+
+        async def recipients():
+            return [(111, UserPreferences())]
+
+        async def digest_send(_uid: int, text: str) -> None:
+            self.sent.append(text)
+
+        qbit = AsyncMock()
+        qbit.get_torrent.return_value = None
+        qbit.get_torrents.return_value = []
+        qbit.get_maindata.side_effect = self._maindata
+        queue_client = AsyncMock(get_queue=AsyncMock(return_value=[]), get_calendar=AsyncMock(return_value=[]))
+        queue_client.get_history_since.return_value = []
+
+        self.live = LiveStatusService(db, editor, radarr=radarr, sonarr=sonarr, qbittorrent=qbit, clock=clock)
+        self.watcher = LibraryWatcher(
+            radarr, sonarr, notify=library_notice, get_slskd=get_slskd, db=db, clock=clock,
+            music_settle_seconds=300, music_stall_seconds=3600, poll_interval_seconds=60, live=self.live,
+        )
+        self.monitor = HealthMonitor({"Radarr": health}, notify=admin_notice, db=db)
+        self.digest = DigestService(
+            db, radarr=queue_client, sonarr=queue_client, recipients=recipients, send=digest_send,
+            clock=clock, tz=timezone.utc, hour=0,
+        )
+        self.qbit = NotificationService(
+            qbit, user_notice, exclude_chats=self.live.owner_chats,
+            pending_direct_chats=self.live.pending_direct_chats, clock=clock,
+        )
+        self.qbit.subscribe_user(111)
+
+    async def _maindata(self, rid: int) -> dict:
+        if rid == 0:
+            return _maindata(1, dict(self.qbit_data["all"]), full=True)
+        delta, self.qbit_data["delta"] = self.qbit_data["delta"], {}
+        return _maindata(rid + 1, delta)
+
+    async def start(self) -> None:
+        await self.qbit._initial_sync()
+
+    async def rounds(self, count: int, step: float = 60) -> None:
+        for _ in range(count):
+            self.clock.advance(step)
+            await self.live.tick()
+            await self.watcher.poll()
+            await self.monitor.evaluate()
+            await self.digest.maybe_send()
+            await self.qbit._check_for_completions()
+
+
+async def test_first_start_on_the_live_database_sends_no_storm_and_no_duplicates(tmp_path):
+    """Review Focus 4. База как у живого бота: схема v7, отметки, старые батчи и строки."""
+    import json
+
+    from bot.models import SlskdTransfer
+    from bot.services import music_notify
+
+    start = NOW.replace(hour=10, minute=0, second=0, microsecond=0)
+    clock = _Clock(start)
+    watermark = start - timedelta(seconds=40)  # 40 секунд деплоя
+
+    def listed(album: str, n: int, state: str, requested: timedelta, ended: timedelta | None = None) -> SlskdTransfer:
+        directory = f"music\\{album}"
+        name = f"{n:02d} - Track {n}.flac"
+        return SlskdTransfer(
+            username="peer", filename=name, state=state, size=100, id=f"{album}-{n}", batch_id=f"b{n}",
+            directory=directory, full_filename=f"{directory}\\{name}", requested_at=start - requested,
+            ended_at=start - ended if ended is not None else None,
+        )
+
+    day = timedelta(days=1)
+    stuck_old = listed("Artist - Seeded (2020)", 1, "Queued, Remotely", 40 * day)
+    stuck_ancient = listed("Artist - Ancient (2019)", 1, "Queued, Remotely", 100 * day)
+    partial_done = listed("Artist - Partial (2021)", 1, "Completed, Succeeded", 5 * day, 5 * day)
+    partial_queued = listed("Artist - Partial (2021)", 2, "Queued, Remotely", 5 * day)
+    finished_old = listed("Artist - Old (2018)", 1, "Completed, Succeeded", 30 * day, 30 * day)
+    never_seen_old = listed("Artist - Unknown (2017)", 1, "Completed, Succeeded", 20 * day, 20 * day)
+    settling = listed("Artist - Settling (2022)", 1, "Completed, Succeeded", timedelta(minutes=5), timedelta(seconds=90))
+
+    path = tmp_path / "bot.db"
+    await _write_v7_database(path)
+    raw = sqlite3.connect(path)
+    for transfer, notified, changed in (
+        (stuck_old, start - 40 * day, start - 40 * day),
+        (stuck_ancient, start - 100 * day, start - 100 * day),
+        (partial_done, start - 5 * day, start - 5 * day),
+        (partial_queued, start - 5 * day, start - 5 * day),
+        (finished_old, start - 30 * day, start - 30 * day),
+        (settling, None, start - timedelta(seconds=90)),
+    ):
+        key = music_notify.batch_key(transfer)
+        raw.execute(
+            "INSERT OR REPLACE INTO music_batch VALUES (?, ?, ?, ?, ?)",
+            (key, music_notify.album_title(transfer.directory), changed.isoformat(), changed.isoformat(),
+             notified.isoformat() if notified else None),
+        )
+        raw.execute(
+            "INSERT INTO music_transfer VALUES (?, ?, ?, ?, ?)",
+            (music_notify.transfer_id(transfer), key, music_notify.track_key(transfer), transfer.state,
+             changed.isoformat()),
+        )
+    for key, value in {
+        "import_watermark:radarr": watermark.isoformat(),
+        "import_watermark:sonarr": watermark.isoformat(),
+        "slskd_watermark": (start - timedelta(seconds=100)).isoformat(),
+        "digest_last_date": start.date().isoformat(),
+        "health_open": json.dumps({"service:Radarr": {
+            "text": "🔌 Radarr недоступен", "resolved_text": "🔌 Radarr снова доступен",
+        }}, ensure_ascii=False),
+    }.items():
+        raw.execute("INSERT INTO notify_kv VALUES (?, ?)", (key, value))
+    stamp = (start - timedelta(hours=1)).isoformat()
+    raw.execute(
+        "INSERT INTO live_status (key, chat_id, message_id, kind, title, arr, download_id, state, created_at, "
+        "updated_at, edited_at) VALUES ('111:5', 111, 5, 'movie', 'Film', 'radarr', ?, 'downloading', ?, ?, ?)",
+        (HASH_A.upper(), stamp, stamp, stamp),
+    )
+    raw.commit()
+    raw.close()
+
+    # *arr: уже объявленное (в том числе запись ровно на отметке) и пришедшее за простой.
+    radarr, sonarr = _Arr(), _Arr()
+    radarr.records = [
+        _import_record(1, "Давний фильм", start - 3 * day, "OLD1"),
+        _import_record(2, "Фильм на отметке", watermark, "OLD2"),
+        _import_record(3, "Фильм за простой", watermark + timedelta(seconds=20), "NEW1"),
+    ]
+    sonarr.records = [
+        _import_record(1, "Сериал на отметке", watermark, "OLD3"),
+        _import_record(2, "Сериал за простой", watermark + timedelta(seconds=10), "NEW2"),
+        _import_record(3, "Сериал за простой", watermark + timedelta(seconds=15), "NEW2"),
+    ]
+    slskd = _Slskd()
+    slskd.transfers = [stuck_old, stuck_ancient, partial_done, partial_queued, finished_old, never_seen_old, settling]
+    health = _HealthClient()
+    health.up = False
+    # qBit: большая раздача, торрент хозяина живого сообщения и обычная закачка.
+    seeding = {f"{n:040x}": _done(f"Раздача {n}", finished=start - timedelta(seconds=n + 1)) for n in range(1, 31)}
+    qbit_data = {"all": {**seeding, HASH_A: _busy("Film"), HASH_B: _busy("Обычная")}, "delta": {}}
+
+    database = Database(str(path))
+    await database.connect()
+    try:
+        assert await database._get_schema_version() == 8
+
+        # ---- первый старт: только то, что случилось за простой, и каждое один раз
+        rig = _FirstStart(database, clock, radarr, sonarr, slskd, health, qbit_data)
+        await rig.start()
+        await rig.rounds(6)
+        assert sorted(rig.sent) == sorted([
+            "✅ <b>Фильм за простой</b> — в библиотеке.",
+            "✅ <b>Сериал за простой</b> — в библиотеке (2 серии).",
+            "🎵 <b>Artist — Settling (2022)</b>: 1/1 скачано",
+        ])
+
+        # ---- первое обслуживание (через минуту после старта) и опросы после него
+        rig.sent.clear()
+        await database.run_maintenance(backup=True)
+        await rig.rounds(3)
+        assert rig.sent == []
+
+        # ---- торренты: ждавший докачки уведомляет, хозяин граба второго не получает
+        qbit_data["delta"] = {
+            HASH_A: {"progress": 1.0, "state": "uploading"},
+            HASH_B: {"progress": 1.0, "state": "uploading"},
+        }
+        await rig.rounds(1)
+        assert len(rig.sent) == 1 and "Обычная" in rig.sent[0]
+        rig.sent.clear()
+
+        # ---- старые застрявшие альбомы молчат и через час, и когда докачались
+        await rig.rounds(65)  # больше часа обычными опросами: правило застоя срабатывает
+        assert rig.sent == []
+        slskd.transfers[3] = listed("Artist - Partial (2021)", 2, "Completed, Succeeded", 5 * day, -timedelta(hours=3))
+        await rig.rounds(2, step=301)
+        assert rig.sent == []
+
+        # ---- Radarr поднялся: одно сообщение о восстановлении
+        health.up = True
+        await rig.rounds(2)
+        assert len(rig.sent) == 1 and "снова доступен" in rig.sent[0]
+        rig.sent.clear()
+
+        # ---- ещё один рестарт на той же базе: новых сообщений нет
+        qbit_data["all"] = {**seeding, HASH_A: _done("Film"), HASH_B: _done("Обычная")}
+        again = _FirstStart(database, clock, radarr, sonarr, slskd, health, qbit_data)
+        await again.start()
+        await again.rounds(5)
+        assert again.sent == []
+    finally:
+        await database.close()
+
+
+async def test_batch_dropped_by_maintenance_is_not_news_while_slskd_still_lists_it(db):
+    """DB-02: надгробие убрано, а очередь всё ещё в slskd. Это не новая закачка."""
+    from bot.models import SlskdTransfer
+
+    clock, slskd = _Clock(), _Slskd()
+    watcher, sent = _music_watcher(db, clock, slskd)
+    await watcher.poll()
+
+    clock.advance(60)
+    slskd.transfers = [SlskdTransfer(
+        username="peer", filename="01 - T.flac", state="Queued, Remotely", size=100, id="stuck", batch_id="b",
+        directory=ALBUM, full_filename=f"{ALBUM}\\01 - T.flac", requested_at=clock.now - timedelta(days=100),
+    )]
+    await watcher.poll()
+    clock.advance(4000)
+    await watcher.poll()
+    assert sent == []
+    assert await db.music_transfer_states() == {}
+
+
+async def test_new_queued_transfer_requested_after_the_last_poll_still_counts(db):
+    from bot.models import SlskdTransfer
+
+    clock, slskd = _Clock(), _Slskd()
+    watcher, sent = _music_watcher(db, clock, slskd)
+    await watcher.poll()
+
+    clock.advance(60)
+    slskd.transfers = [SlskdTransfer(
+        username="peer", filename="01 - T.flac", state="Queued, Remotely", size=100, id="fresh", batch_id="b",
+        directory=ALBUM, full_filename=f"{ALBUM}\\01 - T.flac", requested_at=clock.now - timedelta(seconds=10),
+    )]
+    await watcher.poll()
+    clock.advance(4000)
+    await watcher.poll()
+    assert len(sent) == 1 and "ещё 1 в очереди" in sent[0]
+
+
+async def test_flush_at_shutdown_is_bounded_when_telegram_hangs(monkeypatch):
+    """Настоящая отмена: лежащий Telegram не съедает время на остановку контейнера."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from structlog.testing import capture_logs
+
+    from bot import main
+    from bot.clients import registry
+    from bot.services import library_watcher
+
+    for name in ("get_radarr", "get_sonarr", "get_lidarr", "get_slskd"):
+        monkeypatch.setattr(registry, name, AsyncMock(return_value=None))
+    settings = MagicMock(notify_check_interval=60, music_notify_settle_seconds=300, music_notify_stall_seconds=3600)
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "_LIBRARY_FLUSH_TIMEOUT_S", 0.05)
+    started = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def hanging_flush() -> None:
+        await real_sleep(30)
+
+    async def poll() -> None:
+        started.set()
+
+    watcher = MagicMock(poll=poll, flush_held=hanging_flush)
+    monkeypatch.setattr(library_watcher, "LibraryWatcher", MagicMock(return_value=watcher))
+
+    async def fake_sleep(seconds: float) -> None:
+        await real_sleep(0 if not started.is_set() else 30)
+
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    with capture_logs() as logs:
+        task = asyncio.create_task(main._library_watch(MagicMock(), MagicMock(), main.structlog.get_logger()))
+        await asyncio.wait_for(started.wait(), 2)
+        await real_sleep(0)
+        task.cancel()
+        await asyncio.wait_for(asyncio.gather(task), 2)
+
+    assert any(e["event"] == "library_watch_flush_failed" for e in logs)

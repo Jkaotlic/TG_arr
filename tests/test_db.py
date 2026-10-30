@@ -3,7 +3,6 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
 
 import aiosqlite
 import pytest

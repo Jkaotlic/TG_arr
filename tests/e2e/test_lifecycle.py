@@ -16,12 +16,14 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import structlog
 from aiogram import Dispatcher, methods
+from aiogram.exceptions import TelegramServerError
 from aiogram.types import Update
 
 import bot.main as bot_main
 from bot.db import Database
-from tests.e2e.fakes import FakeTelegram
+from tests.e2e.fakes import BOT_TOKEN, BotEnv, FakeTelegram
 
 
 class _PollingTelegram(FakeTelegram):
@@ -297,3 +299,58 @@ def test_process_exits_with_an_error_when_startup_fails(tmp_path):
         [sys.executable, "-c", script], cwd=tmp_path, env=env, capture_output=True, timeout=30,
     )
     assert done.returncode == 1, done.stderr.decode(errors="replace")[-2000:]
+
+
+async def test_library_loop_over_real_clients_delivers_through_a_telegram_502(monkeypatch, make_e2e_stack):
+    """Настоящий цикл, клиенты и сокеты: отметка берётся из /history, дальше только
+    /history/since, а 502 Telegram стоит паузы, но не уведомления (LOGIC-08)."""
+    stack = await make_e2e_stack()
+    radarr, sonarr = stack.backends["radarr"], stack.backends["sonarr"]
+    old = {"id": 1, "sourceTitle": "Старый", "downloadId": "OLD", "date": "2026-10-30T09:00:00Z"}
+    new = {"id": 2, "sourceTitle": "Новый", "downloadId": "NEW", "date": "2026-10-30T09:30:00Z"}
+    radarr.route("GET", "/api/v3/history", {"records": [old]})
+    radarr.route("GET", "/api/v3/history/since", [old, new])
+    sonarr.route("GET", "/api/v3/history", {"records": []})
+    sonarr.route("GET", "/api/v3/history/since", [])
+
+    telegram = FakeTelegram()
+    real_send = telegram._send_message
+    failures_left = [1]
+
+    def flaky_send(bot: Any, method: Any) -> Any:
+        if failures_left:
+            failures_left.clear()
+            raise TelegramServerError(method, "Bad Gateway")
+        return real_send(bot, method)
+
+    telegram.on_method(methods.SendMessage, flaky_send)
+    bot = bot_main.Bot(BOT_TOKEN, session=telegram)
+
+    real_sleep = asyncio.sleep
+    pauses: list[float] = []
+
+    async def quick_sleep(seconds: float, *args: Any, **kwargs: Any) -> None:
+        pauses.append(seconds)
+        await real_sleep(0.005)
+
+    db = Database(str(stack.db_path))
+    await db.connect()
+    monkeypatch.setattr(bot_main.asyncio, "sleep", quick_sleep)
+    task = asyncio.create_task(bot_main._library_watch(bot, db, structlog.get_logger()))
+    try:
+        async with asyncio.timeout(10):
+            while len([c for c in telegram.calls if isinstance(c.method, methods.SendMessage)]) < 2:
+                await real_sleep(0.01)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        monkeypatch.undo()
+        await db.close()
+
+    sent = [c for c in telegram.calls if isinstance(c.method, methods.SendMessage)]
+    assert {c.method.chat_id for c in sent} == {BotEnv.ADMIN, BotEnv.USER}
+    assert all("Новый" in c.method.text for c in sent)
+    assert 2 in pauses
+    assert telegram.violations == []
+    assert len(radarr.calls("GET", "/api/v3/history")) == 1
+    assert radarr.calls("GET", "/api/v3/history/since")

@@ -467,6 +467,17 @@ class LibraryWatcher:
                 ended = transfer.ended_at
                 if ended is None or ended <= cutoff:
                     continue  # history, not news
+            elif (
+                previous is None
+                and not first_run
+                and transfer.requested_at is not None
+                and transfer.requested_at <= cutoff
+            ):
+                # DB-02: запрошен до прошлого опроса, а базе неизвестен, значит чистка
+                # убрала его надгробие (90 дней), пока slskd его держит. Не новость:
+                # иначе застрявшая очередь объявлялась бы заново. Когда такой файл
+                # докачается, он пройдёт по правилу выше как обычная новость.
+                continue
             known[tid] = state
             changes.append((
                 tid,

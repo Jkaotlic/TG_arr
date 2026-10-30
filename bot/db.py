@@ -791,7 +791,8 @@ class Database:
         DB-02 (аудит 2026-10-30): надгробие живёт ``tombstone_days`` с последнего
         изменения и объявления, иначе ``music_transfer`` растёт без предела, а эта
         таблица читается целиком на каждом опросе. Очередь, которую slskd держит
-        дольше, может быть объявлена заново: одно сообщение раз в 90 дней.
+        дольше, заново не объявляется: её отсеивает `LibraryWatcher._poll_transfers`
+        по ``requested_at``.
         """
         now = datetime.now(timezone.utc)
         cutoff = (now - timedelta(days=days)).isoformat()
