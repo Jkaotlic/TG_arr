@@ -32,7 +32,7 @@ class _TrendingKeyboards:
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
-    def trending_artists(artists: list[dict], list_token: str = "") -> InlineKeyboardMarkup:
+    def trending_artists(artists: list[dict], list_token: str) -> InlineKeyboardMarkup:
         """Create keyboard for trending artists (Deezer chart)."""
         keyboard = []
         for i, a in enumerate(artists[:10]):

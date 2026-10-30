@@ -10,8 +10,9 @@ import time
 
 import pytest
 
+from bot.clients.tmdb import TMDbClient
 from bot.handlers import music, trending
-from bot.models import SeriesInfo
+from bot.models import MovieInfo, SeriesInfo
 from tests.e2e.fakes import BotEnv, FakeBackend, find_button, movie, release, stock_radarr_movie, texts
 
 ADMIN = BotEnv.ADMIN
@@ -693,3 +694,156 @@ async def test_whole_series_button_still_means_whole_series(bot_env):
 
     assert bot_env.sonarr.calls("GET", "/api/v3/release") == []
     assert [request.json["name"] for request in bot_env.sonarr.calls("POST", "/api/v3/command")] == ["SeriesSearch"]
+
+
+# ------------------------------------------------- Правки ревью: точно по id
+
+
+@pytest.fixture
+async def tmdb(bot_env, monkeypatch):
+    """Настоящий TMDbClient на поддельном сервере: в проде адрес зашит в клиенте."""
+    backend = FakeBackend("tmdb")
+    await backend.start()
+    client = TMDbClient("v3-secret-key")
+    client.base_url = backend.url
+
+    async def get_tmdb():
+        return client
+
+    monkeypatch.setattr(trending, "get_tmdb", get_tmdb)
+    yield backend
+    await client.close()
+    await backend.stop()
+
+
+GOT = SeriesInfo(tmdb_id=55, title="Игра престолов", original_title="Game of Thrones", year=2011)
+
+
+def _lookup_terms(env: BotEnv) -> list[str]:
+    return [request.query["term"] for request in env.sonarr.calls("GET", "/api/v3/series/lookup")]
+
+
+async def test_russian_trending_title_with_a_known_tvdb_id_adds_right_away(bot_env, tmdb):
+    tmdb.route("GET", "/tv/55/external_ids", {"tvdb_id": 121361})
+    stock_sonarr(bot_env, {"tvdb:121361": [show("Game of Thrones", 121361, year=2011)]})
+    remember_trending_series(GOT)
+
+    await bot_env.tap(ADMIN, None, "addc:series:55")
+
+    assert [post["tvdbId"] for post in _series_posts(bot_env)] == [121361]
+    assert _lookup_terms(bot_env) == ["tvdb:121361"]
+    assert tmdb.calls("GET", "/tv/55/external_ids")[0].query["api_key"] == "v3-secret-key"
+
+
+async def test_unknown_tvdb_id_falls_back_to_the_original_name(bot_env, tmdb):
+    tmdb.route("GET", "/tv/55/external_ids", {"tvdb_id": None})
+    stock_sonarr(bot_env, {"Game of Thrones": [show("Game of Thrones", 121361, year=2011)]})
+    remember_trending_series(GOT)
+
+    await bot_env.tap(ADMIN, None, "addc:series:55")
+
+    assert [post["tvdbId"] for post in _series_posts(bot_env)] == [121361]
+
+
+async def test_external_ids_failure_does_not_break_the_flow(bot_env, tmdb):
+    tmdb.route("GET", "/tv/55/external_ids", {}, status=500)
+    stock_sonarr(bot_env, {"Game of Thrones": [show("Game of Thrones", 121361, year=2011)]})
+    remember_trending_series(GOT)
+
+    await bot_env.tap(ADMIN, None, "addc:series:55")
+
+    assert [post["tvdbId"] for post in _series_posts(bot_env)] == [121361]
+
+
+async def test_no_id_and_no_title_match_offers_an_honest_choice(bot_env, tmdb):
+    tmdb.route("GET", "/tv/55/external_ids", {})
+    stock_sonarr(bot_env, {"Game of Thrones": [show("Game of Thrones: Conquest", 9, year=2019)]})
+    remember_trending_series(GOT)
+
+    calls = await bot_env.tap(ADMIN, None, "addc:series:55")
+
+    assert _series_posts(bot_env) == []
+    joined = "\n".join(texts(calls))
+    assert "Не удалось точно определить" in joined
+    assert "нет точного совпадения" not in joined
+    assert find_button(calls, "Conquest")
+
+
+async def test_known_id_that_sonarr_does_not_return_is_not_replaced_by_a_namesake(bot_env, tmdb):
+    """TMDb назвал id, а одноимённый сериал с другим id это другой сериал."""
+    tmdb.route("GET", "/tv/55/external_ids", {"tvdb_id": 121361})
+    stock_sonarr(bot_env, {
+        "tvdb:121361": [show("Something Else", 7, year=2011)],
+        "Game of Thrones": [show("Game of Thrones", 8, year=2011)],
+    })
+    remember_trending_series(GOT)
+
+    calls = await bot_env.tap(ADMIN, None, "addc:series:55")
+
+    assert _series_posts(bot_env) == []
+    assert find_button(calls, "Game of Thrones")
+
+
+async def test_sonarr_down_with_a_known_id_names_sonarr(bot_env, tmdb):
+    tmdb.route("GET", "/tv/55/external_ids", {"tvdb_id": 121361})
+    bot_env.sonarr.fail_all(500)
+    remember_trending_series(GOT)
+
+    joined = "\n".join(texts(await bot_env.tap(ADMIN, None, "addc:series:55")))
+
+    assert "Sonarr" in joined
+    assert "определить" not in joined
+
+
+async def test_trending_movie_goes_by_tmdb_id_without_a_title_lookup(bot_env):
+    stock_radarr_movie(bot_env.radarr, movie(title="Dune", tmdbId=438631))
+    trending._cache_put(trending._trending_movies_cache, 438631, MovieInfo(title="Дюна", tmdb_id=438631, year=2021))
+
+    await bot_env.tap(ADMIN, None, "addc:movie:438631")
+
+    assert added_movie_ids(bot_env) == [438631]
+    assert bot_env.radarr.calls("GET", "/api/v3/movie/lookup") == []
+
+
+# ------------------------------------------------- Правки ревью: Lidarr и вопрос
+
+
+async def test_only_lidarr_down_with_no_video_hits_still_asks(make_bot_env):
+    """Radarr и Sonarr ответили: фразы «поиск невозможен» здесь быть не должно."""
+    env = await make_bot_env(backends=("lidarr",))
+    stock_radarr_candidates(env, {})
+    stock_sonarr(env, {})
+    env.backends["lidarr"].fail_all(500)
+
+    calls = await env.say(ADMIN, "Alpha")
+
+    joined = "\n".join(texts(calls))
+    assert "Lidarr" in joined
+    assert "поиск сейчас невозможен" not in joined
+
+    # Дальше тот же путь, что и без сбоя, вплоть до свободного поиска.
+    answered = await env.press(ADMIN, calls, "Фильм")
+    assert find_button(answered, "Искать по названию")
+
+
+async def test_radarr_and_lidarr_down_with_no_hits_is_still_an_error(make_bot_env):
+    env = await make_bot_env(backends=("lidarr",))
+    stock_sonarr(env, {})
+    env.radarr.fail_all(500)
+    env.backends["lidarr"].fail_all(500)
+
+    calls = await env.say(ADMIN, "Alpha")
+
+    assert "Radarr" in "\n".join(texts(calls))
+    assert not any(call.buttons for call in calls)
+
+
+async def test_music_search_with_lidarr_down_does_not_claim_no_artist(make_bot_env):
+    env = await make_bot_env(backends=("lidarr",))
+    env.backends["lidarr"].fail_all(500)
+    prompt = (await env.say(ADMIN, "🎵 Музыка"))[-1]
+
+    joined = "\n".join(texts(await env.say(ADMIN, "Radiohead", reply_to=prompt)))
+
+    assert "Артист не найден" not in joined
+    assert "Lidarr" in joined

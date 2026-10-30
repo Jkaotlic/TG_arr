@@ -94,7 +94,7 @@ def test_artist_list_buttons_use_typed_cb():
     from bot.ui.keyboards import Keyboards
 
     artists = [ArtistInfo(name=f"A{i}", mb_id=str(i)) for i in range(3)]
-    kb = Keyboards.artist_list(artists, current_page=0, per_page=5)
+    kb = Keyboards.artist_list(artists, "abc123", current_page=0, per_page=5)
     cbs = _cbs(kb)
     artist_cbs = [c for c in cbs if c.startswith("art:")]
     assert len(artist_cbs) == 3
@@ -313,7 +313,7 @@ def test_season_presets_keyboard_uses_typed_cb():
     from bot.ui.callbacks import SeasonPresetCB
     from bot.ui.keyboards import Keyboards
 
-    kb = Keyboards.season_presets()
+    kb = Keyboards.season_presets("abc123")
     cbs = [c for c in _cbs(kb) if c.startswith("ssn:")]
     presets = {SeasonPresetCB.unpack(c).preset for c in cbs}
     assert presets == {"all", "future", "firstSeason", "latestSeason"}

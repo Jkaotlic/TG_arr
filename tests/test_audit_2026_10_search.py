@@ -419,3 +419,157 @@ async def test_a_refused_grab_still_reports_failure_and_drops_the_session():
 
     assert "Radarr сказал нет" in _edited(message)
     db.delete_session.assert_awaited_once()
+
+
+# ------------------------------------------------------------- Правки ревью
+
+
+async def test_slow_detection_does_not_open_the_breaker(monkeypatch):
+    """Короткий срок автоопределения ничего не говорит о здоровье сервиса."""
+    import asyncio
+
+    from bot.services import search_service as module
+
+    async def never(*_args):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(module, "_DETECT_TIMEOUT_S", 0.01)
+    radarr, sonarr = AsyncMock(), AsyncMock()
+    radarr.lookup_movie.return_value = []
+    sonarr.lookup_series = never
+    service = SearchService(radarr, sonarr)
+
+    for attempt in range(4):
+        await service.detect_content_type(f"query {attempt}")
+
+    assert not module._CIRCUIT_BREAKER.is_open("sonarr")
+
+
+@pytest.mark.parametrize(
+    ("has_lidarr", "expected", "absent"),
+    [(False, "Soulseek", "Lidarr"), (True, "Lidarr", "Soulseek")],
+)
+async def test_music_branch_is_named_after_what_is_configured(has_lidarr, expected, absent):
+    from bot.services.search_service import describe_unreachable
+
+    lidarr = AsyncMock() if has_lidarr else None
+    if lidarr is not None:
+        lidarr.lookup_artist.side_effect = ConnectionError("down")
+    slskd = AsyncMock()
+    slskd.lookup_artists.side_effect = ConnectionError("down")
+    radarr, sonarr = AsyncMock(), AsyncMock()
+    radarr.lookup_movie.return_value = [_m("Queen", 2020)]
+    sonarr.lookup_series.return_value = []
+    service = SearchService(radarr, sonarr, lidarr=lidarr, slskd=slskd)
+
+    result = await service.detect_content_type("Queen")
+
+    text = describe_unreachable(result.failed_services)
+    assert expected in text and absent not in text
+
+
+async def test_public_artist_lookup_reports_failure():
+    lidarr = AsyncMock()
+    lidarr.lookup_artist.side_effect = ConnectionError("down")
+    service = SearchService(AsyncMock(), AsyncMock(), lidarr=lidarr)
+
+    with pytest.raises(ConnectionError):
+        await service.lookup_artist("Queen")
+
+
+async def test_public_artist_lookup_still_falls_back_to_slskd():
+    lidarr, slskd = AsyncMock(), AsyncMock()
+    lidarr.lookup_artist.side_effect = ConnectionError("down")
+    slskd.lookup_artists.return_value = ["found"]
+    service = SearchService(AsyncMock(), AsyncMock(), lidarr=lidarr, slskd=slskd)
+
+    assert await service.lookup_artist("Queen") == ["found"]
+
+
+@pytest.mark.parametrize(
+    "name", ["content_type_selection", "season_presets", "title_candidates", "artist_list", "trending_artists"],
+)
+def test_keyboards_with_indexed_buttons_require_a_token(name):
+    import inspect
+
+    from bot.ui.keyboards import Keyboards
+
+    parameter = inspect.signature(getattr(Keyboards, name)).parameters["list_token"]
+    assert parameter.default is inspect.Parameter.empty
+
+
+def test_title_normalizer_is_public_and_shared():
+    from bot.handlers import trending
+    from bot.handlers.search import commands
+    from bot.services.search_service import normalize_title
+
+    assert normalize_title("Дюна:  Часть - вторая") == "дюна часть вторая"
+    assert not hasattr(commands, "_normalize_title")
+    assert not hasattr(trending, "_normalize_title")
+
+
+# --- TMDb: external_ids
+
+
+def _tmdb_client(**kwargs):
+    from bot.clients.tmdb import TMDbClient
+
+    return TMDbClient(api_key="v3-secret-key", **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"tvdb_id": 121361}, 121361),
+        ({"tvdb_id": None}, None),
+        ({"tvdb_id": 0}, None),
+        ({"tvdb_id": "x"}, None),
+        ({"tvdb_id": True}, None),
+        ({}, None),
+        ([], None),
+    ],
+)
+async def test_external_ids_returns_only_a_real_id(payload, expected):
+    client = _tmdb_client()
+    client._safe_request = AsyncMock(return_value=payload)
+
+    assert await client.get_series_tvdb_id(55) == expected
+    assert client._safe_request.await_args.args[:2] == ("GET", "/tv/55/external_ids")
+
+
+def test_tmdb_parser_keeps_the_original_name():
+    series = _tmdb_client()._parse_series({"id": 1, "name": "Игра престолов", "original_name": "Game of Thrones"})
+
+    assert series.title == "Игра престолов"
+    assert series.original_title == "Game of Thrones"
+
+
+async def test_tmdb_client_goes_through_the_configured_proxy():
+    client = _tmdb_client(proxy_url="http://198.51.100.7:8899")
+
+    http = await client._get_client()
+    try:
+        assert http._mounts, "прокси не подключён"
+    finally:
+        await client.close()
+
+
+async def test_external_ids_failure_does_not_put_the_key_in_logs(monkeypatch):
+    from structlog.testing import capture_logs
+
+    from bot.handlers import trending
+
+    tmdb = _tmdb_client()
+    # Так выглядело бы исключение httpx с полным URL запроса.
+    tmdb._safe_request = AsyncMock(
+        side_effect=RuntimeError("GET https://api.themoviedb.org/3/tv/55/external_ids?api_key=v3-secret-key"),
+    )
+    monkeypatch.setattr(trending, "get_tmdb", AsyncMock(return_value=tmdb))
+    search_service = MagicMock()
+    search_service.lookup_series = AsyncMock(return_value=[])
+
+    with capture_logs() as logs:
+        await trending._resolve_series_for_add(search_service, SeriesInfo(title="X", tvdb_id=0, tmdb_id=55))
+
+    assert logs, "сбой должен быть виден в логах"
+    assert "v3-secret-key" not in repr(logs)

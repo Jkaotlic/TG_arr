@@ -52,7 +52,7 @@ def test_episode_range_pack_from_prowlarr_monitors_everything():
 def test_season_presets_keyboard_offers_all_presets():
     from bot.ui.keyboards import Keyboards
 
-    kb = Keyboards.season_presets()
+    kb = Keyboards.season_presets("abc123")
     cbs = [b.callback_data for row in kb.inline_keyboard for b in row if b.callback_data]
     joined = " ".join(cbs)
     for preset in ("all", "future", "latestSeason", "firstSeason"):

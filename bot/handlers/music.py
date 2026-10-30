@@ -111,7 +111,7 @@ def _artist_list_text(artists: list[ArtistInfo], page_artists: list[ArtistInfo],
 
 
 async def _render_artist_list(
-    message: Message, artists: list[ArtistInfo], page: int = 0, list_token: str = "",
+    message: Message, artists: list[ArtistInfo], list_token: str, page: int = 0,
 ) -> None:
     """LOGIC-14a: shared renderer for the artist-list keyboard — dedups the
     three previously-copied render blocks (initial search, art_page:, music_back).

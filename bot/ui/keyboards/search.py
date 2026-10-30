@@ -36,7 +36,7 @@ class _SearchKeyboards:
     """Search-result / release-details keyboard mixin."""
 
     @staticmethod
-    def content_type_selection(show_music: bool = False, list_token: str = "") -> InlineKeyboardMarkup:
+    def content_type_selection(list_token: str, show_music: bool = False) -> InlineKeyboardMarkup:
         """Create keyboard for selecting content type (movie/series/anime/music).
 
         ``list_token`` ties the question to its query (BUG-02)."""
@@ -298,7 +298,7 @@ class _SearchKeyboards:
         ])
 
     @staticmethod
-    def season_presets(list_token: str = "") -> InlineKeyboardMarkup:
+    def season_presets(list_token: str) -> InlineKeyboardMarkup:
         """Feature #2: season-monitoring preset picker.
 
         BUG-16: "Назад" uses the dedicated SeasonBackCB, not the generic BackCB —
@@ -342,7 +342,7 @@ class _SearchKeyboards:
         return buttons
 
     @staticmethod
-    def title_candidates(candidates: list, list_token: str = "") -> InlineKeyboardMarkup:
+    def title_candidates(candidates: list, list_token: str) -> InlineKeyboardMarkup:
         """Ask which title the user meant (see `resolve_title_candidate`)."""
         from bot.ui.callbacks import TitleCB
 

@@ -152,7 +152,7 @@ _CIRCUIT_BREAKER = _CircuitBreaker()
 
 
 #: Как сервис зовётся в сообщении пользователю.
-_SERVICE_LABELS = {"radarr": "Radarr", "sonarr": "Sonarr", "lidarr": "Lidarr"}
+_SERVICE_LABELS = {"radarr": "Radarr", "sonarr": "Sonarr", "lidarr": "Lidarr", "slskd": "Soulseek"}
 
 
 def service_label(service: str) -> str:
@@ -199,6 +199,12 @@ def describe_search_failure(exc: BaseException) -> str:
     if isinstance(exc, AuthenticationError):
         return "Ошибка авторизации в медиасервисе — проверьте API-ключи."
     return "Поиск временно недоступен"
+
+
+def normalize_title(value: str) -> str:
+    """Casefold + collapse punctuation so "Дюна:" == "дюна"."""
+    without_punctuation = re.sub(r"[^\w\s]", "", (value or "").casefold())
+    return re.sub(r"\s+", " ", without_punctuation).strip()
 
 
 def _normalize_query(query: str) -> str:
@@ -255,7 +261,7 @@ class DetectionResult(NamedTuple):
     # adding the title. Empty for MUSIC/UNKNOWN winners or when detection
     # short-circuited before a lookup ran.
     lookup_results: list = []
-    # LOGIC-02: сервисы, не ответившие на этот запрос ("radarr", "sonarr", "lidarr").
+    # LOGIC-02: сервисы, не ответившие на этот запрос ("radarr", "sonarr", "lidarr", "slskd").
     # Непустой кортеж значит, что вывод неполон: результат не кэшируется.
     failed_services: tuple[str, ...] = ()
 
@@ -305,11 +311,14 @@ class SearchService:
 
         Общий `wait_for` на весь gather терял и то, что уже успели ответить, и имя
         сервиса, который подвёл (LOGIC-02).
+
+        В breaker этот срок не пишется: он короче обычного ответа Sonarr и о здоровье
+        сервиса не говорит. Три медленных автоопределения иначе закрыли бы явный
+        /series, которому положено ждать до 90 с.
         """
         try:
             return await asyncio.wait_for(self._lookup_branch(service, coro_factory), timeout=_DETECT_TIMEOUT_S)
         except asyncio.TimeoutError as e:
-            _CIRCUIT_BREAKER.record_failure(service)
             logger.warning("lookup_timeout", service=service)
             raise CatalogLookupError(service, e) from e
 
@@ -411,10 +420,12 @@ class SearchService:
             and not episodic
         )
 
+        # Ветку музыки называем тем, что настроено: без Lidarr её отвечает slskd.
+        music_source = "lidarr" if self.lidarr is not None else "slskd"
         gathered = await asyncio.gather(
             self._detect_branch("radarr", lambda: self.radarr.lookup_movie(clean_query)),
             self._detect_branch("sonarr", lambda: self.sonarr.lookup_series(clean_query)),
-            self._detect_branch("lidarr", lambda: self._lookup_artists(clean_query_no_year, strict=True))
+            self._detect_branch(music_source, lambda: self._lookup_artists(clean_query_no_year, strict=True))
             if music_allowed
             else _empty_list(),
             return_exceptions=True,
@@ -429,7 +440,7 @@ class SearchService:
 
         failed = tuple(
             service
-            for service, outcome in zip(("radarr", "sonarr", "lidarr"), gathered)
+            for service, outcome in zip(("radarr", "sonarr", music_source), gathered)
             if isinstance(outcome, BaseException)
         )
         movies_result, series_result, artists_result = gathered
@@ -798,8 +809,12 @@ class SearchService:
         return ordered
 
     async def lookup_artist(self, query: str) -> list[ArtistInfo]:
-        """Look up artists (Lidarr, falling back to slskd)."""
-        return await self._lookup_artists(query)
+        """Look up artists (Lidarr, falling back to slskd).
+
+        Сбой всех настроенных источников бросает их ошибку: «Артист не найден» при
+        лежащем Lidarr было бы неправдой (LOGIC-02).
+        """
+        return await self._lookup_artists(query, strict=True)
 
     def parse_query(self, query: str) -> dict[str, Any]:
         """

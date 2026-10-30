@@ -18,7 +18,12 @@ from bot.db import Database
 from bot.handlers.common import strip_command
 from bot.models import ActionLog, ActionType, ContentType, SearchSession, User
 from bot.services.add_service import resolve_profile_with_source
-from bot.services.search_service import SearchService, describe_search_failure, describe_unreachable
+from bot.services.search_service import (
+    SearchService,
+    describe_search_failure,
+    describe_unreachable,
+    normalize_title,
+)
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import Keyboards
 from bot.ui.list_token import new_list_token
@@ -28,6 +33,10 @@ from bot.handlers import search as _search
 from .services import MAX_QUERY_LENGTH, router
 
 logger = structlog.get_logger()
+
+#: Без них каталог не проверить. Lidarr и slskd в этот список не входят: фильм или
+#: сериал бот найдёт и без них.
+_VIDEO_SERVICES = frozenset({"radarr", "sonarr"})
 
 
 @router.message(Command("search"))
@@ -108,12 +117,6 @@ async def handle_text_search(message: Message, db_user: User, db: Database) -> N
     await process_search(message, message.text.strip(), ContentType.UNKNOWN, db_user, db)
 
 
-def _normalize_title(value: str) -> str:
-    """Casefold + collapse punctuation so "Дюна:" == "дюна"."""
-    without_punctuation = re.sub(r"[^\w\s]", "", (value or "").casefold())
-    return re.sub(r"\s+", " ", without_punctuation).strip()
-
-
 class TitleResolution(NamedTuple):
     """Что делать со списком кандидатов: выбрать одного или спросить."""
 
@@ -154,7 +157,7 @@ def resolve_title_candidate(
         return TitleResolution(only, False)
 
     # Strip a trailing year from the query before comparing titles.
-    wanted = _normalize_title(re.sub(rf"\b{query_year}\b", "", query) if query_year else query)
+    wanted = normalize_title(re.sub(rf"\b{query_year}\b", "", query) if query_year else query)
 
     pool = candidates
     if query_year:
@@ -162,7 +165,7 @@ def resolve_title_candidate(
         if len(pool) == 1:
             return TitleResolution(pool[0], False)
 
-    exact = [c for c in pool if _normalize_title(c.title) == wanted]
+    exact = [c for c in pool if normalize_title(c.title) == wanted]
     return TitleResolution(exact[0], False) if len(exact) == 1 else TitleResolution(None, True)
 
 
@@ -484,8 +487,12 @@ async def process_search(
                     "фильм, сериал, аниме или музыка?" if show_music else "фильм, сериал или аниме?"
                 )
                 # LOGIC-02: спрашивать о типе бессмысленно, если показать нечего, а
-                # кто-то не ответил: «нигде нет» было бы неправдой.
-                if detection.failed_services and not any(detection.candidates.values()):
+                # не ответил видеосервис: «нигде нет» было бы неправдой. Не ответила
+                # только музыка: фильм и сериал проверены, вопрос с предупреждением
+                # ведёт дальше, вплоть до свободного поиска.
+                if _VIDEO_SERVICES.intersection(detection.failed_services) and not any(
+                    detection.candidates.values()
+                ):
                     await status_msg.edit_text(Formatters.format_error(
                         f"{describe_unreachable(detection.failed_services)}, поэтому поиск сейчас "
                         "невозможен. Состояние сервисов — в /health."

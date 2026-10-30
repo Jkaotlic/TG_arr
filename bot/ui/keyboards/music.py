@@ -34,9 +34,9 @@ class _MusicKeyboards:
     @staticmethod
     def artist_list(
         artists: list[ArtistInfo],
+        list_token: str,
         current_page: int = 0,
         per_page: int = 5,
-        list_token: str = "",
     ) -> InlineKeyboardMarkup:
         """Create keyboard for artist selection from lookup results."""
         total_pages = max(1, (len(artists) + per_page - 1) // per_page)

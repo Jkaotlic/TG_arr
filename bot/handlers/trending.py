@@ -14,12 +14,16 @@ from bot.config import get_settings
 from bot.clients.registry import get_qbittorrent, get_radarr, get_sonarr, get_tmdb
 from bot.db import Database
 from bot.handlers.common import accessible_message
-from bot.handlers.search.commands import _normalize_title
 from bot.handlers._cache import get_ttl, put_ttl, remember_lru
 from bot.handlers.search import _claim_grab, _release_grab
 from bot.models import MovieInfo, SeriesInfo, User
 from bot.services.add_service import AddService, resolve_profile_with_source
-from bot.services.search_service import CatalogLookupError, SearchService, describe_search_failure
+from bot.services.search_service import (
+    CatalogLookupError,
+    SearchService,
+    describe_search_failure,
+    normalize_title,
+)
 from bot.ui.callbacks import AddContentCB, TrendingItemCB, TrendingSeriesPickCB
 from bot.ui.formatters import Formatters
 from bot.ui.keyboards import CallbackData, Keyboards
@@ -377,7 +381,7 @@ async def handle_series_from_trending(callback: CallbackQuery, callback_data: Tr
 def _comparable_title(title: str) -> str:
     """Название без регистра, знаков и хвостового года: «Doctor Who (2005)» у TVDB."""
     without_year = re.sub(r"\s*\(\d{4}\)\s*$", "", title or "")
-    return _normalize_title(without_year)
+    return normalize_title(without_year)
 
 
 def _match_series(series: SeriesInfo, candidates: list[SeriesInfo]) -> SeriesInfo | None:
@@ -390,10 +394,11 @@ def _match_series(series: SeriesInfo, candidates: list[SeriesInfo]) -> SeriesInf
     """
     if not series.year:
         return None
-    wanted = _comparable_title(series.title)
+    # TMDb отвечает на TMDB_LANGUAGE, а Sonarr по-английски: годится и исходное название.
+    wanted = {_comparable_title(series.title), _comparable_title(series.original_title or series.title)}
     matches = [
         c for c in candidates
-        if c.year and abs(c.year - series.year) <= 1 and _comparable_title(c.title) == wanted
+        if c.year and abs(c.year - series.year) <= 1 and _comparable_title(c.title) in wanted
     ]
     if len(matches) == 1:
         return matches[0]
@@ -410,6 +415,10 @@ async def _resolve_series_for_add(
     lookup (`SearchService.lookup_series`, same semaphore/circuit-breaker
     path every other Sonarr lookup goes through) before adding.
 
+    Сначала точно: TVDB id от TMDb и поиск Sonarr `tvdb:<id>`. Название и год (`_match_series`)
+    только запасной путь, когда id узнать не удалось. Если id известен, но Sonarr его не
+    вернул, одноимённый сериал с другим id автоматически не берётся: это другой сериал.
+
     Возвращает `(сериал, варианты)`: `series` как есть, если `tvdb_id` уже известен;
     совпавшего кандидата; либо `None` и то, из чего выбирать пользователю. Пустые
     варианты значат, что у Sonarr нет ничего похожего. Сбой Sonarr бросает
@@ -417,11 +426,49 @@ async def _resolve_series_for_add(
     """
     if series.tvdb_id:
         return series, []
-    candidates = await search_service.lookup_series(series.title)
-    match = _match_series(series, candidates)
+
+    tvdb_id = await _tvdb_id_from_tmdb(series)
+    if tvdb_id is not None:
+        exact = _with_tvdb_id(await search_service.lookup_series(f"tvdb:{tvdb_id}"), tvdb_id)
+        if exact is not None:
+            return exact, []
+
+    candidates = await _lookup_series_by_name(search_service, series)
+    match = _match_series(series, candidates) if tvdb_id is None else _with_tvdb_id(candidates, tvdb_id)
     if match is not None:
         return match, []
     return None, candidates[:_MAX_SERIES_PICK_CHOICES]
+
+
+def _with_tvdb_id(candidates: list[SeriesInfo], tvdb_id: int) -> SeriesInfo | None:
+    return next((c for c in candidates if c.tvdb_id == tvdb_id), None)
+
+
+async def _tvdb_id_from_tmdb(series: SeriesInfo) -> int | None:
+    """TVDB id от TMDb. Любой сбой значит «не узнали»: у добавления есть запасной путь.
+
+    В лог идёт только тип ошибки: при ключе v3 в тексте исключения может быть URL с ним.
+    """
+    if not series.tmdb_id:
+        return None
+    tmdb = await get_tmdb()
+    if tmdb is None:
+        return None
+    try:
+        return await tmdb.get_series_tvdb_id(series.tmdb_id)
+    except Exception as e:
+        logger.warning("tmdb_external_ids_failed", tmdb_id=series.tmdb_id, error_type=type(e).__name__)
+        return None
+
+
+async def _lookup_series_by_name(search_service: SearchService, series: SeriesInfo) -> list[SeriesInfo]:
+    """Поиск Sonarr по названию: исходное находит точнее переведённого, а переведённое
+    спрашивается, только если исходное не дало ничего (запрос к Sonarr долгий)."""
+    original = series.original_title or series.title
+    candidates = await search_service.lookup_series(original)
+    if not candidates and original != series.title:
+        candidates = await search_service.lookup_series(series.title)
+    return candidates
 
 
 async def _drop_keyboard(message: Any) -> None:
@@ -553,7 +600,9 @@ async def _add_series_from_trending(callback: CallbackQuery, series: SeriesInfo,
 async def _offer_series_choices(
     status_msg: Message, series: SeriesInfo, choices: list[SeriesInfo], user_id: int,
 ) -> None:
-    """LOGIC-03: совпадения нет, поэтому ничего не добавляется, решает пользователь."""
+    """LOGIC-03: совпадение не подтверждено, поэтому ничего не добавляется, решает
+    пользователь. Сказать «в Sonarr нет» нельзя: возможно, сериал там есть под другим
+    названием, и подтвердить это просто не удалось."""
     title = html.escape(series.title)
     if not choices:
         await status_msg.edit_text(
@@ -563,9 +612,9 @@ async def _offer_series_choices(
         return
     remember_lru(_series_pick_candidates, user_id, choices, _MAX_SERIES_PICK_USERS)
     await status_msg.edit_text(
-        f"🤔 В Sonarr нет точного совпадения для <b>{title}</b>"
-        f"{f' ({series.year})' if series.year else ''}.\n\n"
-        "Какой сериал добавить? Выбранный добавится со всеми сезонами и сразу пойдёт в поиск.",
+        f"🤔 Не удалось точно определить сериал <b>{title}</b>"
+        f"{f' ({series.year})' if series.year else ''}, выберите:\n\n"
+        "Выбранный добавится со всеми сезонами и сразу пойдёт в поиск.",
         reply_markup=Keyboards.trending_series_choices(choices, _series_pick_tokens.issue(user_id)),
         parse_mode="HTML",
     )
