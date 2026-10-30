@@ -9,7 +9,7 @@ import pytest
 
 from bot.clients.torrserver import TorrServerError
 from bot.handlers import torrserver
-from bot.handlers.search import commands, free
+from bot.handlers.search import free
 from bot.ui.formatters import Formatters
 
 #: Строка со всеми тремя символами, которые экранирует format_error.
@@ -84,9 +84,5 @@ def test_format_error_escapes_exactly_once():
     _assert_escaped_once(Formatters.format_error(NASTY))
 
 
-def test_commands_module_does_not_escape_before_format_error():
-    """commands.py:782 — тот же приём; проверяем исходник, драйвить весь поиск ради этого незачем."""
-    import inspect
-
-    source = inspect.getsource(commands)
-    assert "format_error(html.escape(" not in source
+# Поведение commands.py:782 (кавычка в тексте ошибки) проверяет сквозной тест
+# tests/e2e/test_navigation_flows.py::test_error_with_an_apostrophe_is_escaped_once_by_the_search_handler.

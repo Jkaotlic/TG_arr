@@ -194,6 +194,10 @@ async def test_new_search_during_torrent_lookup_is_not_overwritten(make_bot_env)
     assert session_before is not None and session_after is not None
     assert session_after.model_dump() == session_before.model_dump()
     assert not any("Alpha Album FLAC" in text for text in texts(calls))
+    # Старое сообщение не врёт про идущий поиск: «устарел» и без кнопок.
+    old = env.tg.known_message(ADMIN, torrents.call.message.message_id)
+    assert "устарел" in old.text and "Ищу" not in old.text
+    assert old.reply_markup is None
 
 
 async def test_cancel_during_torrent_lookup_does_not_resurrect_the_session(make_bot_env):
@@ -214,6 +218,9 @@ async def test_cancel_during_torrent_lookup_does_not_resurrect_the_session(make_
 
     assert await env.db.get_session(ADMIN) is None
     assert [c for c in calls if c.name == "EditMessageText" and "Alpha Album FLAC" in (c.text or "")] == []
+    # Сообщение остаётся таким, каким его оставила отмена.
+    old = env.tg.known_message(ADMIN, torrents.call.message.message_id)
+    assert "Операция отменена" in old.text
 
 
 async def test_cancel_during_artist_add_does_not_resurrect_the_session(make_bot_env):
@@ -434,16 +441,13 @@ async def test_title_double_tap_on_unmonitor_has_no_error(bot_env):
 
 
 async def test_unmonitored_series_card_warns_that_only_new_episodes_are_followed(bot_env):
-    series = {
-        "id": 3, "title": "Hit Show", "year": 2020, "tvdbId": 55, "monitored": False,
-        "seasons": [{"seasonNumber": 1, "monitored": False}], "images": [],
-    }
-    _stock_library(bot_env, [], [series])
+    _stock_library(bot_env, [], [_series_row(files=4, total=10)])
 
     calls = await bot_env.say(ADMIN, "/title Hit Show")
 
     text = "\n".join(texts(calls))
     assert "только новые серии" in text
+    assert "Серий: 4/10" in text
 
 
 # ------------------------------------------------- музыка без Lidarr: имена в сообщениях
@@ -458,3 +462,136 @@ async def test_music_search_in_a_slskd_only_setup_does_not_name_lidarr(make_bot_
     shown = "\n".join(texts(calls))
     assert "Lidarr" not in shown, shown
     assert "Soulseek" in shown
+
+
+# ------------------------------------------------- fix round 1
+
+
+async def _adding_gamma(make_bot_env, *, added_mb_id: str = "mb-g", albums_hang: bool = False):
+    env = await _music_library(make_bot_env)
+    lidarr = env.backends["lidarr"]
+    lidarr.route("GET", "/api/v1/artist/lookup", [{"artistName": "Gamma", "foreignArtistId": "mb-g"}])
+    lidarr.route("GET", "/api/v1/artist", [])
+    lidarr.route(
+        "POST", "/api/v1/artist",
+        {"artistName": "Gamma", "foreignArtistId": added_mb_id, "id": 9}, hang=not albums_hang,
+    )
+    lidarr.route("GET", "/api/v1/album", [_album(51, "Gamma Album", 9)], hang=albums_hang)
+    card = await _open_artist(env, "Gamma", "Gamma")
+    return env, lidarr, card
+
+
+async def test_superseded_artist_add_leaves_an_honest_old_message(make_bot_env):
+    env, lidarr, card = await _adding_gamma(make_bot_env)
+    add = find_button(card, "Искать")
+
+    adding = asyncio.create_task(env.tap(ADMIN, add.call, add.button))
+    await _wait_for_request(lidarr, "POST", "/api/v1/artist")
+    stock_radarr_movie(env.radarr)
+    await env.say(ADMIN, "/movie Дюна")
+    lidarr.recover()
+    await adding
+
+    old = env.tg.known_message(ADMIN, add.call.message.message_id)
+    assert "устарел" in old.text and "Смотрю дискографию" not in old.text
+    assert old.reply_markup is None
+
+
+async def test_superseded_discography_lookup_leaves_an_honest_old_message(make_bot_env):
+    env, lidarr, card = await _adding_gamma(make_bot_env, albums_hang=True)
+    add = find_button(card, "Искать")
+
+    adding = asyncio.create_task(env.tap(ADMIN, add.call, add.button))
+    await _wait_for_request(lidarr, "GET", "/api/v1/album")
+    stock_radarr_movie(env.radarr)
+    await env.say(ADMIN, "/movie Дюна")
+    lidarr.recover()
+    await adding
+
+    old = env.tg.known_message(ADMIN, add.call.message.message_id)
+    assert "устарел" in old.text and "Смотрю дискографию" not in old.text
+    assert old.reply_markup is None
+
+
+async def test_cancelled_artist_add_keeps_the_cancel_message(make_bot_env):
+    env, lidarr, card = await _adding_gamma(make_bot_env)
+    add = find_button(card, "Искать")
+    cancel = find_button(card, "Отмена")
+
+    adding = asyncio.create_task(env.tap(ADMIN, add.call, add.button))
+    await _wait_for_request(lidarr, "POST", "/api/v1/artist")
+    await env.tap(ADMIN, cancel.call, cancel.button)
+    lidarr.recover()
+    await adding
+
+    assert "Операция отменена" in env.tg.known_message(ADMIN, add.call.message.message_id).text
+
+
+async def test_artist_whose_mb_id_changes_on_add_still_gets_its_album_list(make_bot_env):
+    """Fingerprint = mb_id; Lidarr вернул артиста с другим mb_id. Поток тот же, он не сброшен."""
+    env, lidarr, card = await _adding_gamma(make_bot_env, added_mb_id="mb-g-canonical", albums_hang=True)
+    lidarr.recover()
+    lidarr.route("POST", "/api/v1/artist", {"artistName": "Gamma", "foreignArtistId": "mb-g-canonical", "id": 9})
+    lidarr.route("GET", "/api/v1/album", [_album(51, "Gamma Album", 9)])
+    add = find_button(card, "Искать")
+
+    calls = await env.tap(ADMIN, add.call, add.button)
+
+    assert any("Gamma Album" in " ".join(b.text for b in c.buttons) for c in calls)
+    assert "устарел" not in env.tg.known_message(ADMIN, add.call.message.message_id).text
+
+
+async def test_back_after_indexer_failure_keeps_artist_and_page(make_bot_env):
+    env = await _music_library(make_bot_env)
+    albums = await _open_albums(env, "Alpha", "Alpha One")
+    sources = await env.press(ADMIN, albums, "Alpha Album")
+    env.backends["lidarr"].route("GET", "/api/v1/release", {"message": "boom"}, status=500)
+
+    failed = await env.press(ADMIN, sources, "Торренты")
+    assert any("Индексеры не ответили" in text for text in texts(failed))
+    scope = await env.press(ADMIN, failed, "Назад")
+    whole = await env.press(ADMIN, scope, "Вся дискография")
+
+    assert not stale_text(whole), texts(whole)
+    assert any("вся дискография?" in text for text in texts(whole))
+
+
+async def test_error_with_an_apostrophe_is_escaped_once_by_the_search_handler(bot_env, monkeypatch):
+    """BUG-17 через настоящий обработчик /movie: «it's & <b>» экранируется один раз."""
+    from bot.handlers.search import commands
+
+    monkeypatch.setattr(commands, "describe_search_failure", lambda exc: "it's & <b>")
+    bot_env.radarr.fail_all(500)
+
+    calls = await bot_env.say(ADMIN, "/movie Дюна")
+
+    raw = "\n".join(c.method.text for c in calls if c.name in ("SendMessage", "EditMessageText"))
+    assert "it&#x27;s &amp; &lt;b&gt;" in raw, raw
+    assert "&amp;amp;" not in raw and "&amp;#x27;" not in raw
+
+
+def _series_row(files: int, total: int, monitored: bool = False) -> dict:
+    return {
+        "id": 3, "title": "Hit Show", "year": 2020, "tvdbId": 55, "monitored": monitored, "images": [],
+        "seasons": [{"seasonNumber": 1, "monitored": False,
+                     "statistics": {"episodeFileCount": files, "totalEpisodeCount": total}}],
+    }
+
+
+async def test_series_card_without_missing_episodes_has_no_future_only_warning(bot_env):
+    _stock_library(bot_env, [], [_series_row(files=10, total=10)])
+
+    calls = await bot_env.say(ADMIN, "/title Hit Show")
+
+    assert "только новые серии" not in "\n".join(texts(calls))
+    assert any("Серий: 10/10" in text for text in texts(calls))
+
+
+async def test_series_delete_confirm_warns_about_files_for_a_known_series(bot_env):
+    _stock_library(bot_env, [], [_series_row(files=4, total=10)])
+    card = await bot_env.say(ADMIN, "/title Hit Show")
+
+    calls = await bot_env.press(ADMIN, card, "Удалить")
+
+    text = "\n".join(texts(calls))
+    assert "Файлов на диске: <b>4</b>" in text and "на диске нет" not in text

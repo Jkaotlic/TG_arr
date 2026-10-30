@@ -177,15 +177,32 @@ async def cmd_title(message: Message, db_user: User, db: Database, is_admin: boo
     )
 
 
+def _series_counts(title: SeriesInfo) -> tuple[int, int]:
+    """(скачано серий, всего серий) из статистики сезонов карточки.
+
+    ``SeriesInfo.episodes_owned/episodes_total`` парсер Sonarr не заполняет
+    (всегда 0), а ``seasons[].statistics`` приходит уже в ответе lookup, так что
+    лишних вызовов API не нужно. Нет статистики: падаем на поля модели.
+    """
+    owned = total = 0
+    for season in title.seasons:
+        stats = season.get("statistics") or {}
+        owned += int(stats.get("episodeFileCount") or 0)
+        total += int(stats.get("totalEpisodeCount") or 0)
+    return (owned, total) if total else (title.episodes_owned, title.episodes_total)
+
+
 def _render_title_card(title: "MovieInfo | SeriesInfo") -> str:
     """One card describing what the actions below will act on."""
     year = f" ({title.year})" if getattr(title, "year", None) else ""
     lines = [f"🗂 <b>{html.escape(title.title)}</b>{year}", ""]
     lines.append(f"👀 Мониторинг: {'включён' if title.monitored else 'выключен'}")
     if isinstance(title, SeriesInfo):
-        if title.episodes_total:
-            lines.append(f"📥 Серий: {title.episodes_owned}/{title.episodes_total}")
-        if not title.monitored:
+        owned, total = _series_counts(title)
+        if total:
+            lines.append(f"📥 Серий: {owned}/{total}")
+        # LOGIC-15: предупреждение нужно только там, где есть что недобрано.
+        if not title.monitored and total > owned:
             lines.append("")
             lines.append(_FUTURE_ONLY_NOTE)
     elif title.has_file:
@@ -309,9 +326,9 @@ async def handle_title_action(
                     if title.has_file
                     else "\n\nФайла на диске нет."
                 )
-            elif isinstance(title, SeriesInfo) and title.episodes_owned:
+            elif isinstance(title, SeriesInfo) and _series_counts(title)[0]:
                 warning = (
-                    f"\n\n⚠️ Файлов на диске: <b>{title.episodes_owned}</b> — они "
+                    f"\n\n⚠️ Файлов на диске: <b>{_series_counts(title)[0]}</b> — они "
                     "<b>останутся</b>, удаляется только запись в Sonarr."
                 )
             else:

@@ -223,6 +223,21 @@ async def _update_same_flow(
         return fresh
 
 
+async def _mark_superseded(message: Message | None, db: Database, user_id: int) -> None:
+    """Поток вытеснен, пока мы ждали: старое сообщение не должно вечно «искать».
+
+    Сессия есть, значит пользователь начал новый запрос: помечаем старое
+    сообщение и снимаем кнопки. Сессии нет, значит запрос отменён: обработчик
+    отмены уже написал своё, поверх него не пишем.
+    """
+    if message is None or await db.get_session(user_id) is None:
+        return
+    try:
+        await safe_edit(message, "⌛ Запрос устарел, начните заново.")
+    except Exception as e:
+        logger.warning("superseded_mark_failed", error=str(e))
+
+
 def _artist_source_name() -> str:
     """Кто ищет артистов: Lidarr, а без него — Soulseek через slskd."""
     return "Lidarr" if get_settings().lidarr_enabled else "Soulseek (slskd)"
@@ -1077,6 +1092,7 @@ async def handle_album_source(
     stored = await _update_same_flow(db, user_id, session, _store_releases)
     if stored is None:
         logger.info("album_releases_dropped_flow_changed", user_id=user_id)
+        await _mark_superseded(message, db, user_id)
         return
 
     await _render_album_releases(message, stored, album.lidarr_id, page=0)
@@ -1446,13 +1462,19 @@ async def handle_confirm_music_add(callback: CallbackQuery, db_user: User, db: D
                 def _store_artist(fresh: SearchSession) -> None:
                     fresh.selected_content = added
 
-                if await _update_same_flow(db, user_id, session, _store_artist) is None:
+                stored = await _update_same_flow(db, user_id, session, _store_artist)
+                if stored is None:
                     logger.info("music_add_dropped_flow_changed", user_id=user_id)
+                    await _mark_superseded(message, db, user_id)
                     return
+                # Дальше сравниваем с тем, что записали (в нём уже артист из
+                # Lidarr с его mb_id): отпечаток исходного артиста мог не совпасть.
+                session = stored
 
             albums = await _albums_with_retry(add_service.lidarr, lidarr_id)
             if not _same_music_flow(await db.get_session(user_id), session):
                 logger.info("music_albums_dropped_flow_changed", user_id=user_id)
+                await _mark_superseded(message, db, user_id)
                 return
             _remember(_album_candidates, user_id, albums)
             if message is not None:
