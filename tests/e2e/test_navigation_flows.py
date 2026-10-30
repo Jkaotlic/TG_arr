@@ -6,7 +6,11 @@
 
 import asyncio
 
-from tests.e2e.fakes import BotEnv, TgCall, find_button, stock_radarr_movie, texts
+import pytest
+
+from bot.ui.callbacks import TsTorrentCB
+from bot.ui.menu import MENU_DOWNLOADS, MENU_MUSIC
+from tests.e2e.fakes import BotEnv, FakeResponse, TgCall, find_button, stock_radarr_movie, texts
 
 ADMIN = BotEnv.ADMIN
 
@@ -232,3 +236,140 @@ async def test_cancel_during_artist_add_does_not_resurrect_the_session(make_bot_
 
     assert await env.db.get_session(ADMIN) is None
     assert not [c for c in calls if c.name == "EditMessageText" and "Gamma Album" in " ".join(b.text for b in c.buttons)]
+
+
+# ------------------------------------------------- BUG-14: ForceReply и команды
+
+
+@pytest.mark.parametrize("typed", ["/downloads", MENU_DOWNLOADS])
+@pytest.mark.parametrize("prompt_source", ["torrserver", "music"])
+async def test_command_or_menu_button_typed_into_a_prompt_reply_is_not_a_query(make_bot_env, prompt_source, typed):
+    env = await make_bot_env(backends=("torrserver", "qbittorrent", "lidarr"))
+    env.backends["torrserver"].route("POST", "/torrents", [])
+    env.backends["lidarr"].route("GET", "/api/v1/artist/lookup", [])
+    if prompt_source == "torrserver":
+        prompt = next(c for c in await env.tap(ADMIN, None, "ts_search") if c.name == "SendMessage")
+    else:
+        prompt = (await env.say(ADMIN, MENU_MUSIC))[-1]
+    torrserver_before = len(env.backends["torrserver"].requests)
+    lidarr_before = len(env.backends["lidarr"].requests)
+
+    await env.say(ADMIN, typed, reply_to=prompt)
+
+    assert env.backends["qbittorrent"].calls("GET", "/api/v2/torrents/info"), "список загрузок не открыт"
+    assert len(env.backends["torrserver"].requests) == torrserver_before
+    assert len(env.backends["lidarr"].requests) == lidarr_before
+
+
+# ------------------------------------------------- LOGIC-19: список TorrServer
+
+
+async def test_torrserver_list_failure_after_delete_is_not_an_empty_list(make_bot_env):
+    env = await make_bot_env(backends=("torrserver",))
+
+    def torrents(request):
+        if request.json["action"] == "rem":
+            return {}
+        return FakeResponse({"message": "boom"}, status=500)
+
+    env.backends["torrserver"].route("POST", "/torrents", responder=torrents)
+    delete = TsTorrentCB(action="delconf", h="a" * 40).pack()
+
+    calls = await env.tap(ADMIN, None, delete)
+
+    text = "\n".join(texts(calls))
+    assert "Раздача удалена" in text
+    assert "Список пуст" not in text
+    assert "недоступен" in text
+
+
+# ------------------------------------------------- LOGIC-14, BUG-13: настройки
+
+
+def _alert_texts(calls: list[TgCall]) -> list[str]:
+    return [c.method.text for c in calls if c.name == "AnswerCallbackQuery" and c.method.text]
+
+
+async def test_settings_open_with_sonarr_down_and_say_what_is_missing(bot_env):
+    bot_env.sonarr.fail_all(500)
+
+    calls = await bot_env.say(ADMIN, "/settings")
+
+    text = "\n".join(texts(calls))
+    assert "Ваши настройки" in text
+    assert "Ошибка загрузки настроек" not in text
+    assert "Sonarr" in text and "недоступен" in text
+
+
+async def test_unrelated_toggle_with_sonarr_down_is_not_an_update_error(bot_env):
+    bot_env.sonarr.fail_all(500)
+    menu = await bot_env.say(ADMIN, "/settings")
+    quality = await bot_env.press(ADMIN, menu, "Качество")
+
+    calls = await bot_env.press(ADMIN, quality, "1080p")
+
+    assert _alert_texts(calls) == ["Разрешение обновлено!"]
+    assert any("1080p" in text for text in texts(calls))
+    assert (await bot_env.db.get_user(ADMIN)).preferences.preferred_resolution == "1080p"
+
+
+async def test_double_tap_on_a_settings_toggle_gives_no_error_alert(bot_env):
+    menu = await bot_env.say(ADMIN, "/settings")
+    quality = await bot_env.press(ADMIN, menu, "Качество")
+    pick = find_button(quality, "1080p")
+
+    await bot_env.tap(ADMIN, pick.call, pick.button)
+    second = await bot_env.tap(ADMIN, pick.call, pick.button)
+
+    assert not any("Ошибка" in text for text in _alert_texts(second)), _alert_texts(second)
+
+
+# ------------------------------------------------- Emby: BUG-16, BUG-13
+
+
+def _stock_emby(env) -> None:
+    emby = env.backends["emby"]
+    emby.route("GET", "/System/Info", {
+        "ServerName": "e2e-emby", "Version": "4.8", "OperatingSystem": "Linux",
+        "CanSelfRestart": True, "CanSelfUpdate": True, "HasUpdateAvailable": False,
+    })
+    emby.route("GET", "/Library/VirtualFolders", [])
+    emby.route("GET", "/Sessions", [])
+
+
+async def test_emby_status_failure_keeps_a_refresh_button(make_bot_env):
+    env = await make_bot_env(backends=("emby",))
+    _stock_emby(env)
+    shown = await env.say(ADMIN, "/emby")
+    env.backends["emby"].fail_all(500)
+
+    failed = await env.press(ADMIN, shown, "Обновить")
+
+    assert any("Обновить" in b.text for b in _edit(failed).buttons)
+    env.backends["emby"].recover()
+    _stock_emby(env)
+    recovered = await env.press(ADMIN, failed, "Обновить")
+    assert any("e2e-emby" in text for text in texts(recovered))
+
+
+async def test_emby_failure_keyboard_does_not_offer_admin_actions_to_a_user(make_bot_env):
+    env = await make_bot_env(backends=("emby",))
+    env.backends["emby"].fail_all(500)
+
+    calls = await env.say(BotEnv.USER, "/emby")
+
+    labels = [b.text for c in calls for b in c.buttons]
+    assert any("Обновить" in label for label in labels)
+    assert not any("Перезагрузить" in label or "Сканировать" in label for label in labels)
+
+
+async def test_emby_restart_prompt_double_tap_has_no_error(make_bot_env):
+    env = await make_bot_env(backends=("emby",))
+    _stock_emby(env)
+    shown = await env.say(ADMIN, "/emby")
+    restart = find_button(shown, "Перезагрузить")
+
+    await env.tap(ADMIN, restart.call, restart.button)
+    second = await env.tap(ADMIN, restart.call, restart.button)
+
+    assert not any("Ошибка" in text for text in _alert_texts(second)), _alert_texts(second)
