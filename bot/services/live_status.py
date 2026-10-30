@@ -85,6 +85,10 @@ _LINE_MISSING = "❌ Загрузка пропала из очереди"
 _LINE_NOT_IMPORTED = "⚠️ Не импортировано — проверь *arr"
 _LINE_UNTRACKED = "Статус загрузки не отслеживается — сообщу, когда будет в библиотеке."
 
+#: PERF-03: запас к `created_at` при чтении /history/since. *arr пишет `grabbed` раньше,
+#: чем бот создаёт строку, и его часы могут расходиться с нашими.
+_HISTORY_MARGIN = timedelta(seconds=300)
+
 #: qBittorrent reports "unknown" ETA as 8640000 s (100 days).
 _ETA_UNKNOWN = 8_640_000
 
@@ -261,6 +265,7 @@ class LiveStatusService:
         self._emby_retry_every = emby_retry_every
         # per-tick caches (reset by tick())
         self._history: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._history_since: dict[str, datetime] = {}
         self._queues: dict[str, list[dict[str, Any]]] = {}
         self._emby_cache: dict[str, Optional[str]] = {}
 
@@ -329,6 +334,7 @@ class LiveStatusService:
         if not rows:
             return
         self._history, self._queues, self._emby_cache = {}, {}, {}
+        self._history_since = self._oldest_rows(rows)
         # Batch E fix 1: flood control is per chat — skip that chat's other
         # rows this tick, keep the rest going.
         flooded: set[int] = set()
@@ -342,6 +348,18 @@ class LiveStatusService:
                 continue
             if outcome == "retry":
                 flooded.add(int(row["chat_id"]))
+
+    def _oldest_rows(self, rows: list[dict[str, Any]]) -> dict[str, datetime]:
+        """Самая старая строка на сервис: от неё читается история этого тика."""
+        oldest: dict[str, datetime] = {}
+        for row in rows:
+            if row["kind"] == KIND_NOTICE or row["state"] == EMBY:
+                continue  # история им не нужна, а старая строка удлинила бы чтение
+            created = _parse(row["created_at"]) or self._clock()
+            arr = row["arr"]
+            if arr not in oldest or created < oldest[arr]:
+                oldest[arr] = created
+        return oldest
 
     async def _advance(self, row: dict[str, Any]) -> Optional[EditOutcome]:
         state = row["state"]
@@ -373,11 +391,19 @@ class LiveStatusService:
             client = self._arr.get(arr)
             records: list[dict[str, Any]] = []
             if client is not None:
+                # PERF-03: раз в 30 с лёгкий /history/since, а не страница /history.
+                # Часовой пояс и граница те же, что у LibraryWatcher: UTC с точностью
+                # до секунды, «не раньше». Сервис отдаёт старые записи первыми, а
+                # привязка ждёт новые первыми.
+                since = self._history_since.get(arr, self._clock()) - _HISTORY_MARGIN
                 try:
-                    records = await client.get_history(event_type=event_type, page_size=50)
+                    records = await client.get_history_since(since, event_type=event_type)
                 except Exception as e:
                     logger.debug("live_status_history_failed", arr=arr, error=describe_error(e))
-            self._history[key] = records if isinstance(records, list) else []
+            self._history[key] = (
+                sorted(records, key=lambda r: str(r.get("date") or ""), reverse=True)
+                if isinstance(records, list) else []
+            )
         return self._history[key]
 
     async def _cached_queue(self, arr: str) -> Optional[list[dict[str, Any]]]:

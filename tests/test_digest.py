@@ -51,8 +51,8 @@ def _import(rid: int, did: str, when: datetime, *, movie: str | None = None, ser
 
 def _clients():
     radarr, sonarr, qbit, slskd = AsyncMock(), AsyncMock(), AsyncMock(), AsyncMock()
-    radarr.get_history.return_value = []
-    sonarr.get_history.return_value = []
+    radarr.get_history_since.return_value = []
+    sonarr.get_history_since.return_value = []
     radarr.get_queue.return_value = []
     sonarr.get_queue.return_value = []
     sonarr.get_calendar.return_value = []
@@ -119,11 +119,11 @@ async def test_collect_content(db):
     clock = Clock(_local(9, 5))
     clients = radarr, sonarr, qbit, slskd = _clients()
     now_utc = clock()
-    radarr.get_history.return_value = [
+    radarr.get_history_since.return_value = [
         _import(1, "A", _local(8), movie="Dune"),
         _import(2, "OLD", _local(8, day=24) - timedelta(hours=2), movie="Old"),
     ]
-    sonarr.get_history.return_value = [
+    sonarr.get_history_since.return_value = [
         _import(3, "P", _local(2), series="Show"),
         _import(4, "P", _local(2), series="Show"),  # one season pack = one entry
     ]
@@ -154,7 +154,8 @@ async def test_collect_content(db):
         ("library", "Radarr: 1 с предупреждением"),
     ]
     assert data.airing == ["Show — S02E05"]
-    assert radarr.get_history.call_args.kwargs.get("include_details") is True
+    assert radarr.get_history_since.call_args.kwargs.get("include_details") is True
+    radarr.get_history.assert_not_awaited()
 
 
 # ------------------------------------------------------------------ schedule
@@ -173,7 +174,7 @@ async def test_once_per_day_and_not_before_the_hour(db):
     sent: list = []
     clock = Clock(_local(8, 59))
     clients = _clients()
-    clients[0].get_history.return_value = [_import(1, "A", _local(8), movie="Dune")]
+    clients[0].get_history_since.return_value = [_import(1, "A", _local(8), movie="Dune")]
     svc = _service(db, clock, clients, sent)
     await svc.maybe_send()
     assert sent == []  # before DIGEST_HOUR
@@ -188,7 +189,7 @@ async def test_once_per_day_and_not_before_the_hour(db):
 async def test_catch_up_after_downtime_but_not_late_evening(db):
     sent: list = []
     clients = _clients()
-    clients[0].get_history.return_value = [_import(1, "A", _local(8), movie="Dune")]
+    clients[0].get_history_since.return_value = [_import(1, "A", _local(8), movie="Dune")]
     clock = Clock(_local(15))  # bot was down at 09:00
     await _service(db, clock, clients, sent).maybe_send()
     assert len(sent) == 1
@@ -204,7 +205,7 @@ async def test_timezone_boundary_uses_local_day(db):
     """02:30 MSK is still the previous day in UTC — the local date counts."""
     sent: list = []
     clients = _clients()
-    clients[0].get_history.return_value = [_import(1, "A", _local(1), movie="Dune")]
+    clients[0].get_history_since.return_value = [_import(1, "A", _local(1), movie="Dune")]
     await db.kv_set("digest_last_date", "2026-09-24")
     clock = Clock(_local(2, 30))
     await _service(db, clock, clients, sent, hour=2).maybe_send()
@@ -216,7 +217,7 @@ async def test_timezone_boundary_uses_local_day(db):
 async def test_muted_and_opted_out_users(db):
     sent: list = []
     clients = _clients()
-    clients[0].get_history.return_value = [_import(1, "A", _local(8), movie="Dune")]
+    clients[0].get_history_since.return_value = [_import(1, "A", _local(8), movie="Dune")]
     users = [
         (111, UserPreferences()),
         (222, UserPreferences(notify_library=False)),  # only section muted → nothing to say
@@ -294,7 +295,7 @@ async def test_failed_collect_does_not_burn_the_day(db):
     sent: list = []
     clock = Clock(_local(9, 1))
     clients = _clients()
-    clients[0].get_history.return_value = [_import(1, "A", _local(8), movie="Dune")]
+    clients[0].get_history_since.return_value = [_import(1, "A", _local(8), movie="Dune")]
     svc = _service(db, clock, clients, sent)
     real_collect = svc.collect
     calls = 0

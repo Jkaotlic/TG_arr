@@ -1434,3 +1434,347 @@ async def test_partial_album_regrabbed_ends_with_one_more_summary(db):
     clock.advance(301)
     await watcher.poll()
     assert len(sent) == 2 and "4/4 скачано" in sent[1]
+
+
+# ---------------------------------------------------------------- LOGIC-07, PERF-02
+MSK = timezone(timedelta(hours=3))
+
+
+def _msk(hour: int, minute: int = 0, day: int = 25) -> datetime:
+    return datetime(2026, 9, day, hour, minute, tzinfo=MSK)
+
+
+class _DigestRig:
+    """Сводка с подделками всех источников; `users` и часы задаёт тест."""
+
+    def __init__(self, db: Database, when: datetime, users=None, hour: int = 9) -> None:
+        from unittest.mock import AsyncMock
+
+        from bot.models import UserPreferences
+        from bot.services.digest import DigestService
+
+        self.clock = _Clock(when.astimezone(timezone.utc))
+        self.sent: list[tuple[int, str]] = []
+        self.radarr, self.sonarr, self.qbit, self.slskd = AsyncMock(), AsyncMock(), AsyncMock(), AsyncMock()
+        for client in (self.radarr, self.sonarr):
+            client.get_history_since.return_value = []
+            client.get_queue.return_value = []
+        self.sonarr.get_calendar.return_value = []
+        self.qbit.get_torrents.return_value = []
+        self.slskd.get_transfers.return_value = []
+        self.get_slskd = AsyncMock(return_value=self.slskd)
+        self.db = db
+
+        async def recipients():
+            return users if users is not None else [(111, UserPreferences())]
+
+        async def send(uid: int, text: str) -> None:
+            self.sent.append((uid, text))
+
+        self.service = DigestService(
+            db, radarr=self.radarr, sonarr=self.sonarr, qbittorrent=self.qbit, get_slskd=self.get_slskd,
+            recipients=recipients, send=send, clock=self.clock, tz=MSK, hour=hour,
+        )
+
+    def at(self, when: datetime) -> None:
+        self.clock.now = when.astimezone(timezone.utc)
+
+    def imported(self, title: str, when: datetime) -> None:
+        self.radarr.get_history_since.return_value = [{
+            "id": 1, "sourceTitle": "Rel", "movie": {"title": title},
+            "date": when.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }]
+
+
+async def test_failed_source_before_noon_is_retried_without_marking_the_day(db):
+    from structlog.testing import capture_logs
+
+    rig = _DigestRig(db, _msk(9, 1))
+    rig.radarr.get_queue.side_effect = ConnectionError("radarr down")
+
+    with capture_logs() as logs:
+        assert await rig.service.maybe_send() == 0
+
+    assert rig.sent == []
+    assert await db.kv_get("digest_last_date") is None
+    failed = [e for e in logs if e["event"] == "digest_source_failed"]
+    assert failed and failed[0]["log_level"] == "warning" and failed[0]["source"] == "Radarr"
+
+    rig.radarr.get_queue.side_effect = None
+    rig.imported("Dune", _msk(8))
+    rig.at(_msk(9, 6))
+    assert await rig.service.maybe_send() == 1
+    assert "Dune" in rig.sent[0][1] and "Недоступны" not in rig.sent[0][1]
+    assert await db.kv_get("digest_last_date") == "2026-09-25"
+
+    rig.at(_msk(9, 11))
+    assert await rig.service.maybe_send() == 0
+
+
+async def test_at_noon_digest_goes_out_with_the_unavailable_sources_and_is_marked(db):
+    rig = _DigestRig(db, _msk(11, 59))
+    rig.radarr.get_queue.side_effect = ConnectionError("radarr down")
+    rig.qbit.get_torrents.side_effect = ConnectionError("qbit down")
+    rig.sonarr.get_history_since.return_value = [{
+        "id": 1, "series": {"title": "Show"}, "date": _msk(8).astimezone(timezone.utc).isoformat(),
+    }]
+
+    assert await rig.service.maybe_send() == 0  # 11:59 по местному времени
+
+    rig.at(_msk(12, 0))
+    assert await rig.service.maybe_send() == 1
+    text = rig.sent[0][1]
+    assert "Show" in text
+    assert "Недоступны: qBittorrent, Radarr" in text
+    assert await db.kv_get("digest_last_date") == "2026-09-25"
+
+    rig.at(_msk(12, 5))
+    assert await rig.service.maybe_send() == 0
+    assert len(rig.sent) == 1
+
+
+async def test_cutoff_is_local_noon_not_utc_noon(db):
+    """09:00 UTC это уже 12:00 в Москве: сводка идёт, хотя по UTC ещё утро."""
+    rig = _DigestRig(db, datetime(2026, 9, 25, 8, 59, tzinfo=timezone.utc))
+    rig.sonarr.get_queue.side_effect = ConnectionError("down")
+    assert await rig.service.maybe_send() == 0
+
+    rig.clock.now = datetime(2026, 9, 25, 9, 0, tzinfo=timezone.utc)
+    assert await rig.service.maybe_send() == 1
+    assert "Недоступны: Sonarr" in rig.sent[0][1]
+
+
+async def test_the_day_being_retried_is_the_local_one(db):
+    """00:30 в Москве: по UTC ещё вчера, но день и полдень считаются по местному времени."""
+    await db.kv_set("digest_last_date", "2026-09-25")
+    rig = _DigestRig(db, datetime(2026, 9, 25, 21, 30, tzinfo=timezone.utc), hour=0)
+    rig.radarr.get_queue.side_effect = ConnectionError("down")
+
+    assert await rig.service.maybe_send() == 0  # местное 26-е, 00:30: до полудня ждём
+    assert await db.kv_get("digest_last_date") == "2026-09-25"
+
+    rig.at(_msk(12, 0, day=26))
+    await rig.service.maybe_send()
+    assert await db.kv_get("digest_last_date") == "2026-09-26"
+
+
+@pytest.mark.parametrize(
+    ("break_source", "name"),
+    [
+        (lambda r: setattr(r.radarr.get_history_since, "side_effect", ConnectionError("x")), "Radarr"),
+        (lambda r: setattr(r.sonarr.get_history_since, "side_effect", ConnectionError("x")), "Sonarr"),
+        (lambda r: setattr(r.radarr.get_queue, "side_effect", ConnectionError("x")), "Radarr"),
+        (lambda r: setattr(r.sonarr.get_calendar, "side_effect", ConnectionError("x")), "Sonarr"),
+        (lambda r: setattr(r.qbit.get_torrents, "side_effect", ConnectionError("x")), "qBittorrent"),
+        (lambda r: setattr(r.slskd.get_transfers, "side_effect", ConnectionError("x")), "slskd"),
+        (lambda r: setattr(r.get_slskd, "side_effect", ConnectionError("x")), "slskd"),
+    ],
+)
+async def test_every_source_reports_its_failure(db, break_source, name):
+    rig = _DigestRig(db, _msk(13))
+    break_source(rig)
+    assert await rig.service.maybe_send() == 1
+    assert f"Недоступны: {name}" in rig.sent[0][1]
+
+
+async def test_source_named_once_even_if_two_of_its_calls_failed(db):
+    rig = _DigestRig(db, _msk(13))
+    rig.radarr.get_history_since.side_effect = ConnectionError("x")
+    rig.radarr.get_queue.side_effect = ConnectionError("x")
+    await rig.service.maybe_send()
+    assert "Недоступны: Radarr\n" in rig.sent[0][1] + "\n"
+
+
+async def test_slskd_not_configured_is_not_a_failure(db):
+    rig = _DigestRig(db, _msk(9, 1))
+    rig.get_slskd.return_value = None
+    await rig.service.maybe_send()
+    assert await db.kv_get("digest_last_date") == "2026-09-25"
+
+
+async def test_quiet_day_with_a_dead_source_says_so_after_noon(db):
+    rig = _DigestRig(db, _msk(12))
+    rig.radarr.get_queue.side_effect = ConnectionError("x")
+    assert await rig.service.maybe_send() == 1
+    assert "Недоступны: Radarr" in rig.sent[0][1]
+
+
+async def test_unavailable_line_respects_muted_categories(db):
+    from bot.models import UserPreferences
+
+    users = [
+        (111, UserPreferences(notify_library=False)),  # Radarr ему неинтересен
+        (222, UserPreferences(notify_music="off")),
+        (333, UserPreferences(digest_enabled=False)),
+    ]
+    rig = _DigestRig(db, _msk(13), users=users)
+    rig.radarr.get_queue.side_effect = ConnectionError("x")
+    await rig.service.maybe_send()
+    assert [uid for uid, _ in rig.sent] == [222]
+
+
+async def test_db_error_keeps_the_retry_even_after_noon(db, monkeypatch):
+    rig = _DigestRig(db, _msk(13))
+
+    async def broken(_since):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db, "music_albums_notified_since", broken)
+    assert await rig.service.maybe_send() == 0
+    assert rig.sent == []
+    assert await db.kv_get("digest_last_date") is None
+
+
+async def test_digest_reads_light_history_since_the_window_start(db):
+    rig = _DigestRig(db, _msk(9, 5))
+    window_start = rig.clock.now - timedelta(hours=24)
+    rig.radarr.get_history_since.return_value = [
+        {"id": 1, "movie": {"title": "На границе"}, "date": window_start.isoformat()},
+        {"id": 2, "movie": {"title": "Старый"}, "date": (window_start - timedelta(seconds=1)).isoformat()},
+        {"id": 3, "movie": {"title": "Смещение"}, "date": _msk(8).isoformat()},
+    ]
+
+    data = await rig.service.collect()
+
+    assert data.library == ["На границе", "Смещение"]
+    rig.radarr.get_history.assert_not_awaited()
+    call = rig.radarr.get_history_since.await_args
+    assert call.args[0] == window_start
+    assert call.kwargs["event_type"] == "downloadFolderImported"
+    assert call.kwargs["include_details"] is True
+
+
+# ---------------------------------------------------------------- PERF-03
+class _LiveArr:
+    def __init__(self) -> None:
+        self.grabbed: list[dict] = []
+        self.imported: list[dict] = []
+        self.since_calls: list[tuple[datetime, str]] = []
+        self.paged_calls = 0
+        self.fail = False
+
+    async def get_history(self, **_kwargs):
+        self.paged_calls += 1
+        return []
+
+    async def get_history_since(self, since: datetime, event_type: str = "downloadFolderImported", **_kwargs):
+        self.since_calls.append((since, event_type))
+        if self.fail:
+            raise ConnectionError("down")
+        records = self.grabbed if event_type == "grabbed" else self.imported
+        return sorted(records, key=lambda r: r["date"])
+
+    async def get_queue(self):
+        return []
+
+
+async def _live_rig(db, clock, radarr):
+    from bot.services.live_status import LiveStatusService
+
+    edits: list[str] = []
+
+    async def editor(_chat, _message, text, _markup=None) -> str:
+        edits.append(text)
+        return "ok"
+
+    class _Qbit:
+        async def get_torrent(self, _hash):
+            return None
+
+        async def get_torrents(self, **_kwargs):
+            return []
+
+    return LiveStatusService(db, editor, radarr=radarr, qbittorrent=_Qbit(), clock=clock), edits
+
+
+async def _grab(db, clock, *, message: int = 5, guid: str | None = "https://indexer.example.com/1"):
+    from bot.services import live_status
+
+    return await live_status.register_grab(
+        db, chat_id=111, message_id=message, kind="movie", title="Film", release="Film.2020",
+        arr="radarr", arr_id=7, guid=guid, now=clock.now,
+    )
+
+
+async def test_living_message_asks_only_for_history_since_its_oldest_row(db):
+    clock, radarr = _Clock(), _LiveArr()
+    service, _edits = await _live_rig(db, clock, radarr)
+    await _grab(db, clock, message=5)
+    first_created = clock.now
+    clock.advance(120)
+    await _grab(db, clock, message=6)
+
+    await service.tick()
+
+    assert radarr.paged_calls == 0
+    assert len(radarr.since_calls) == 1  # одно чтение на тик, а не на строку
+    since, event_type = radarr.since_calls[0]
+    assert event_type == "grabbed"
+    assert first_created - timedelta(minutes=10) <= since <= first_created - timedelta(seconds=60)
+
+
+async def test_grab_recorded_just_before_the_row_was_created_still_links(db):
+    """*arr пишет `grabbed` раньше, чем бот создаёт строку: граница с запасом."""
+    from bot.services import live_status
+
+    clock, radarr = _Clock(), _LiveArr()
+    service, _edits = await _live_rig(db, clock, radarr)
+    await _grab(db, clock)
+    radarr.grabbed = [{
+        "id": 1, "downloadId": "ABC", "sourceTitle": "Film.2020",
+        "date": (clock.now - timedelta(seconds=30)).isoformat().replace("+00:00", "Z"),
+        "data": {"guid": "https://indexer.example.com/1"},
+    }]
+
+    await service.tick()
+
+    rows = await db.live_rows()
+    assert rows[0]["download_id"] == "ABC"
+    assert rows[0]["state"] != live_status.WAITING
+
+
+async def test_own_search_still_links_the_newest_grab(db):
+    """/history/since отдаёт старые первыми, а привязка ждёт новые первыми."""
+    clock, radarr = _Clock(), _LiveArr()
+    service, _edits = await _live_rig(db, clock, radarr)
+    await _grab(db, clock, guid=None)
+
+    def grab(download_id: str, seconds: int) -> dict:
+        when = clock.now + timedelta(seconds=seconds)
+        return {
+            "id": seconds, "downloadId": download_id, "movieId": 7, "sourceTitle": "Film.2020",
+            "date": when.isoformat().replace("+00:00", "Z"), "data": {},
+        }
+
+    radarr.grabbed = [grab("OLDER", 5), grab("NEWER", 25)]
+    await service.tick()
+
+    assert (await db.live_rows())[0]["download_id"] == "NEWER"
+
+
+async def test_import_of_an_old_row_is_found_in_light_history(db):
+    from bot.services import live_status
+
+    clock, radarr = _Clock(), _LiveArr()
+    service, edits = await _live_rig(db, clock, radarr)
+    await _grab(db, clock)
+    created = clock.now
+    await db.live_update("111:5", state=live_status.COMPLETED, download_id="ABC")
+    clock.advance(6 * 3600)
+    radarr.imported = [{
+        "id": 1, "downloadId": "abc", "date": (clock.now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+    }]
+
+    await service.tick()
+
+    assert "в библиотеке" in edits[-1]
+    assert radarr.since_calls[0][0] <= created
+
+
+async def test_history_failure_during_a_tick_is_survived(db):
+    clock, radarr = _Clock(), _LiveArr()
+    service, edits = await _live_rig(db, clock, radarr)
+    await _grab(db, clock)
+    radarr.fail = True
+    await service.tick()
+    assert edits == []

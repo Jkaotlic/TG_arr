@@ -62,6 +62,10 @@ class FakeArr:
         self.history_calls.append(event_type)
         return list(self.grabbed if event_type == "grabbed" else self.imported)
 
+    async def get_history_since(self, since: datetime, event_type: str = "downloadFolderImported", **_: Any):
+        self.history_calls.append(event_type)
+        return list(self.grabbed if event_type == "grabbed" else self.imported)
+
     async def get_queue(self) -> list[dict]:
         return list(self.queue)
 
