@@ -601,6 +601,7 @@ def _music_db(session=None) -> MagicMock:
     db = MagicMock()
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
+    db.update_session = AsyncMock(return_value=True)
     db.delete_session = AsyncMock()
     db.log_action = AsyncMock()
 

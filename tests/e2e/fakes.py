@@ -683,6 +683,14 @@ class RecordedRequest:
 
 
 @dataclass
+class FakeResponse:
+    """Ответ responder'а с кодом: когда один и тот же маршрут отвечает по-разному."""
+
+    payload: Any
+    status: int = 200
+
+
+@dataclass
 class _Route:
     method: str
     pattern: "re.Pattern[str]"
@@ -846,7 +854,10 @@ class FakeBackend:
         if route is None:
             return web.json_response({"message": f"e2e: нет маршрута {request.method} {request.path}"}, status=404)
         payload = route.responder(record) if route.responder is not None else route.payload
-        return web.json_response(payload, status=route.status, headers=route.headers)
+        status = route.status
+        if isinstance(payload, FakeResponse):
+            payload, status = payload.payload, payload.status
+        return web.json_response(payload, status=status, headers=route.headers)
 
 
 # ------------------------------------------------------------------------ Данные

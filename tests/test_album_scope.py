@@ -49,6 +49,7 @@ def _db(session=None) -> MagicMock:
     db = MagicMock()
     db.get_session = AsyncMock(return_value=session)
     db.save_session = AsyncMock()
+    db.update_session = AsyncMock(return_value=True)
     db.delete_session = AsyncMock()
     db.log_action = AsyncMock()
 
@@ -217,7 +218,7 @@ async def test_torrent_source_lists_lidarr_releases():
         )
 
     add_service.lidarr.get_releases.assert_awaited_once_with(3)
-    saved = db.save_session.await_args.args[1]
+    saved = db.update_session.await_args.args[1]
     assert [r.guid for r in saved.results] == ["g"]
 
 
@@ -508,7 +509,7 @@ async def test_rejected_releases_sink_to_the_bottom():
             callback, AlbumSourceCB(album_id=3, source="tor"), _user(), db,
         )
 
-    saved = db.save_session.await_args.args[1]
+    saved = db.update_session.await_args.args[1]
     # Audit 2026-09-23 GRAB-15: within a group, Lidarr's own order (its
     # quality profile ranked them) — no longer re-sorted by seeders.
     assert [r.guid for r in saved.results] == ["ok-low", "ok-high", "bad"]

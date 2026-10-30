@@ -4,7 +4,9 @@
 (двойной тап), BUG-14 (ForceReply), LOGIC-14/15/17/18, BUG-16, LOGIC-19.
 """
 
-from tests.e2e.fakes import BotEnv, TgCall, find_button, texts
+import asyncio
+
+from tests.e2e.fakes import BotEnv, TgCall, find_button, stock_radarr_movie, texts
 
 ADMIN = BotEnv.ADMIN
 
@@ -91,3 +93,142 @@ async def test_old_format_page_button_in_a_chat_does_not_raise(make_bot_env):
     calls = await env.tap(ADMIN, None, "tpg:5:all")
 
     assert any(c.name in ("AnswerCallbackQuery", "EditMessageText") for c in calls)
+
+
+# ------------------------------------------------- музыка: BUG-04, BUG-05, BUG-15
+
+
+def _artist(name: str, mb_id: str, lidarr_id: int) -> dict:
+    return {"artistName": name, "foreignArtistId": mb_id, "id": lidarr_id}
+
+
+def _album(album_id: int, title: str, artist_id: int) -> dict:
+    return {"id": album_id, "title": title, "artistId": artist_id, "releaseDate": "2020-01-01T00:00:00Z"}
+
+
+async def _music_library(make_bot_env, *, torrents: list | None = None):
+    """Lidarr, где у артистов Alpha и Beta уже есть id, по одному альбому и пустые раздачи."""
+    env = await make_bot_env(backends=("lidarr",))
+    lidarr = env.backends["lidarr"]
+    artists = {"Alpha": [_artist("Alpha One", "mb-a1", 5)], "Beta": [_artist("Beta One", "mb-b1", 6)]}
+    albums = {"5": [_album(31, "Alpha Album", 5)], "6": [_album(41, "Beta Album", 6)]}
+    lidarr.route("GET", "/api/v1/artist/lookup", responder=lambda r: artists.get(r.query["term"], []))
+    lidarr.route("GET", "/api/v1/album", responder=lambda r: albums.get(r.query["artistId"], []))
+    lidarr.route("GET", "/api/v1/release", torrents if torrents is not None else [])
+    return env
+
+
+async def _open_artist(env, query: str, name: str):
+    prompt = (await env.say(ADMIN, "🎵 Музыка"))[-1]
+    found = await env.say(ADMIN, query, reply_to=prompt)
+    return await env.press(ADMIN, found, name)
+
+
+async def _open_albums(env, query: str, name: str):
+    card = await _open_artist(env, query, name)
+    return await env.press(ADMIN, card, "Искать")
+
+
+async def test_back_from_empty_torrents_keeps_the_artist(make_bot_env):
+    env = await _music_library(make_bot_env)
+    albums = await _open_albums(env, "Alpha", "Alpha One")
+    sources = await env.press(ADMIN, albums, "Alpha Album")
+    empty = await env.press(ADMIN, sources, "Торренты")
+    assert any("не найдены" in text for text in texts(empty))
+
+    scope = await env.press(ADMIN, empty, "Назад")
+    whole = await env.press(ADMIN, scope, "Вся дискография")
+
+    assert not stale_text(whole), texts(whole)
+    assert any("вся дискография?" in text for text in texts(whole))
+
+
+def stale_text(calls) -> bool:
+    return any("устарел" in (c.text or "") for c in calls if c.name == "AnswerCallbackQuery")
+
+
+async def test_album_button_of_another_artist_answers_stale(make_bot_env):
+    """BUG-15: артист B выбран, кэш альбомов ещё от A: кнопка A не должна открыть альбом."""
+    env = await _music_library(make_bot_env)
+    alpha_albums = await _open_albums(env, "Alpha", "Alpha One")
+    album_button = find_button(alpha_albums, "Alpha Album")
+    await _open_artist(env, "Beta", "Beta One")
+
+    calls = await env.tap(ADMIN, album_button.call, album_button)
+
+    assert stale_text(calls), texts(calls)
+    assert not [c for c in calls if c.name == "EditMessageText"]
+
+
+async def _wait_for_request(backend, method: str, path: str) -> None:
+    for _ in range(200):
+        if backend.calls(method, path):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"запрос {method} {path} так и не пришёл")
+
+
+async def test_new_search_during_torrent_lookup_is_not_overwritten(make_bot_env):
+    """BUG-05: пока Lidarr ищет раздачи, пользователь начал другой поиск."""
+    env = await _music_library(make_bot_env)
+    lidarr = env.backends["lidarr"]
+    albums = await _open_albums(env, "Alpha", "Alpha One")
+    sources = await env.press(ADMIN, albums, "Alpha Album")
+    lidarr.route("GET", "/api/v1/release", [{"guid": "g", "title": "Alpha Album FLAC", "indexerId": 1,
+                                             "protocol": "torrent", "seeders": 3, "size": 10**8}], hang=True)
+    torrents = find_button(sources, "Торренты")
+
+    lookup = asyncio.create_task(env.tap(ADMIN, torrents.call, torrents.button))
+    await _wait_for_request(lidarr, "GET", "/api/v1/release")
+    stock_radarr_movie(env.radarr)
+    await env.say(ADMIN, "/movie Дюна")
+    session_before = await env.db.get_session(ADMIN)
+    lidarr.recover()
+    calls = await lookup
+
+    session_after = await env.db.get_session(ADMIN)
+    assert session_before is not None and session_after is not None
+    assert session_after.model_dump() == session_before.model_dump()
+    assert not any("Alpha Album FLAC" in text for text in texts(calls))
+
+
+async def test_cancel_during_torrent_lookup_does_not_resurrect_the_session(make_bot_env):
+    env = await _music_library(make_bot_env)
+    lidarr = env.backends["lidarr"]
+    albums = await _open_albums(env, "Alpha", "Alpha One")
+    sources = await env.press(ADMIN, albums, "Alpha Album")
+    lidarr.route("GET", "/api/v1/release", [{"guid": "g", "title": "Alpha Album FLAC", "indexerId": 1,
+                                             "protocol": "torrent", "seeders": 3, "size": 10**8}], hang=True)
+    torrents = find_button(sources, "Торренты")
+    cancel = find_button(sources, "Отмена")
+
+    lookup = asyncio.create_task(env.tap(ADMIN, torrents.call, torrents.button))
+    await _wait_for_request(lidarr, "GET", "/api/v1/release")
+    await env.tap(ADMIN, cancel.call, cancel.button)
+    lidarr.recover()
+    calls = await lookup
+
+    assert await env.db.get_session(ADMIN) is None
+    assert [c for c in calls if c.name == "EditMessageText" and "Alpha Album FLAC" in (c.text or "")] == []
+
+
+async def test_cancel_during_artist_add_does_not_resurrect_the_session(make_bot_env):
+    """BUG-05, вторая точка: «Искать (добавит в Lidarr)» ждёт POST артиста."""
+    env = await _music_library(make_bot_env)
+    lidarr = env.backends["lidarr"]
+    lidarr.route("GET", "/api/v1/artist/lookup", [{"artistName": "Gamma", "foreignArtistId": "mb-g"}])
+    lidarr.route("GET", "/api/v1/artist", [])
+    lidarr.route("POST", "/api/v1/artist", {"artistName": "Gamma", "foreignArtistId": "mb-g", "id": 9}, hang=True)
+    lidarr.route("GET", "/api/v1/album", [_album(51, "Gamma Album", 9)])
+    card = await _open_artist(env, "Gamma", "Gamma")
+    add = find_button(card, "Искать")
+    cancel = find_button(card, "Отмена")
+
+    adding = asyncio.create_task(env.tap(ADMIN, add.call, add.button))
+    await _wait_for_request(lidarr, "POST", "/api/v1/artist")
+    await env.tap(ADMIN, cancel.call, cancel.button)
+    lidarr.recover()
+    calls = await adding
+
+    assert await env.db.get_session(ADMIN) is None
+    assert not [c for c in calls if c.name == "EditMessageText" and "Gamma Album" in " ".join(b.text for b in c.buttons)]
